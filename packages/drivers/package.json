@@ -1,0 +1,12 @@
+{
+  "name": "@harness/drivers",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Provider drivers. The only layer that knows which agent is behind a session.",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.141",
+    "@harness/contract": "workspace:*"
+  }
+}
