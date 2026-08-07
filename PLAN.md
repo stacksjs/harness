@@ -754,6 +754,38 @@ Two consequences:
 
 ---
 
+### 10.9 Framework bugs found while building M1
+
+Three, all hit within an hour of scaffolding, all fixed upstream in Stacks.
+
+**`--minimal` did not strip commerce.** Not a missing gate — the gate exists and works. `stripFeatures`
+ran *after* `install()`, which shells out to `./buddy migrate` and `./buddy seed`, so the config flip
+landed on a database that had already materialised and seeded every feature. A `--minimal` project
+came out claiming commerce was off with `orders`, `carts` and thirty-odd tables fully populated.
+Fixed by stripping before install.
+
+**A migrate failure recommended a command that could not help.** Any failure advised
+`./buddy migrate:fresh`; for a constraint violation that is the one thing that cannot work — it drops
+the database, replays the same DDL against the same rows, and fails identically. The only exit was
+deleting the SQLite file by hand.
+
+Worth recording, because the error itself misleads: `UNIQUE constraint failed: index 'x'` is **not**
+what a plain `CREATE UNIQUE INDEX` over duplicates produces. Verified against `bun:sqlite` —
+create-over-duplicates and duplicate-INSERT both report `table.column`. SQLite only names the *index*
+for an expression index or a 12-step table rebuild, so the conflict arises while rows are being
+copied. That note is now in the diagnostic.
+
+**The FK auditor claimed keys the generator would never emit.** The auditor inferred a foreign key
+from any `_id` column whose stem matched a model. bun-query-builder does not: its `declaresBelongsTo`
+rule applies convention only to models that declare no `belongsTo`, because once a model documents
+its relations, a `_id` column outside that list is a column that happens to end in `_id` — guessing
+anyway constrains against the wrong table. So every migrate warned about phantom foreign keys and
+then recommended a destructive command to reconcile a non-defect. The generator was right; the
+auditor now mirrors its rule.
+
+**Also worth knowing:** an app command does not override a framework command. Naming ours `serve`
+silently started the Stacks production server; it is `harness:serve`.
+
 ## 11. Performance budgets
 
 Enforced in CI. stx already has `scripts/performance-budgets.ts`; mirror the approach.
@@ -887,7 +919,28 @@ one, and fixed navigation dropping `window.craft` in the sidebar window type har
 NSEvents, settles at finger-up rather than end-of-momentum, does not jump at the native handoff, and
 survives a page navigation; stx's spaces suite green; `bun --version` is 1.3.14 in all four repos.
 
-### M1 — Skeleton
+### M1 — Skeleton ✅ complete
+
+| Piece | Status |
+|---|---|
+| Data model — 9 models, migrated | ✅ |
+| `@harness/contract` — commands, events, CBOR codec | ✅ 20 tests |
+| `@harness/engine` — ordered queue, receipts, projections | ✅ 18 tests |
+| `@harness/server` — `harness:serve`, HTTP + CBOR websocket | ✅ 18 tests |
+| `@harness/client` — supervisor, backoff, resume-from-cursor | ✅ 14 tests |
+
+**70 tests.** Exit criterion met: `./buddy profiles:create` writes through the engine and
+`profiles:list` rebuilds from the log in a cold process; a server restart with a second client
+writing into the gap resumes losslessly.
+
+Two bugs the tests could not have found, both surfaced by exercising the real thing:
+- prompt and response were accumulating into one string (a turn is an *exchange*)
+- `at` derived from second-resolution `created_at`, so one event had two timestamps depending on
+  whether you were connected when it happened
+
+Framework bugs fixed upstream along the way — see [§10.9](#109-framework-bugs-found-while-building-m1).
+
+### M1 — Skeleton *(original scope)*
 `buddy new` in place. Models + migrations (§5). The event-sourced engine: ordered command queue,
 durable receipts, projections. Contract package with CBOR codec. `harness serve` boots.
 **Exit:** `harness profiles:create` writes a profile; a projection reads it back; the engine replays
