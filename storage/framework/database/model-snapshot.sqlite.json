@@ -214,6 +214,85 @@
         ]
       },
       {
+        "table": "command_receipts",
+        "columns": [
+          {
+            "name": "id",
+            "type": "bigint",
+            "isPrimaryKey": true,
+            "isUnique": false,
+            "isNullable": false,
+            "hasDefault": false
+          },
+          {
+            "name": "command_id",
+            "type": "string",
+            "isPrimaryKey": false,
+            "isUnique": true,
+            "isNullable": false,
+            "hasDefault": false,
+            "maxLength": 200
+          },
+          {
+            "name": "seqs",
+            "type": "string",
+            "isPrimaryKey": false,
+            "isUnique": false,
+            "isNullable": true,
+            "hasDefault": false
+          },
+          {
+            "name": "at",
+            "type": "integer",
+            "isPrimaryKey": false,
+            "isUnique": false,
+            "isNullable": true,
+            "hasDefault": false
+          },
+          {
+            "name": "created_at",
+            "type": "datetime",
+            "isPrimaryKey": false,
+            "isUnique": false,
+            "isNullable": false,
+            "hasDefault": true,
+            "defaultValue": "CURRENT_TIMESTAMP"
+          },
+          {
+            "name": "updated_at",
+            "type": "datetime",
+            "isPrimaryKey": false,
+            "isUnique": false,
+            "isNullable": true,
+            "hasDefault": false
+          },
+          {
+            "name": "uuid",
+            "type": "string",
+            "isPrimaryKey": false,
+            "isUnique": true,
+            "isNullable": true,
+            "hasDefault": false
+          }
+        ],
+        "indexes": [
+          {
+            "name": "command_receipts_command_id_unique",
+            "columns": [
+              "command_id"
+            ],
+            "type": "unique"
+          },
+          {
+            "name": "command_receipts_uuid_unique",
+            "columns": [
+              "uuid"
+            ],
+            "type": "unique"
+          }
+        ]
+      },
+      {
         "table": "events",
         "columns": [
           {
@@ -304,6 +383,14 @@
             "type": "string",
             "isPrimaryKey": false,
             "isUnique": true,
+            "isNullable": true,
+            "hasDefault": false
+          },
+          {
+            "name": "at",
+            "type": "integer",
+            "isPrimaryKey": false,
+            "isUnique": false,
             "isNullable": true,
             "hasDefault": false
           }
@@ -911,89 +998,10 @@
             "type": "unique"
           }
         ]
-      },
-      {
-        "table": "command_receipts",
-        "columns": [
-          {
-            "name": "id",
-            "type": "bigint",
-            "isPrimaryKey": true,
-            "isUnique": false,
-            "isNullable": false,
-            "hasDefault": false
-          },
-          {
-            "name": "command_id",
-            "type": "string",
-            "isPrimaryKey": false,
-            "isUnique": true,
-            "isNullable": false,
-            "hasDefault": false,
-            "maxLength": 200
-          },
-          {
-            "name": "seqs",
-            "type": "string",
-            "isPrimaryKey": false,
-            "isUnique": false,
-            "isNullable": true,
-            "hasDefault": false
-          },
-          {
-            "name": "at",
-            "type": "integer",
-            "isPrimaryKey": false,
-            "isUnique": false,
-            "isNullable": true,
-            "hasDefault": false
-          },
-          {
-            "name": "created_at",
-            "type": "datetime",
-            "isPrimaryKey": false,
-            "isUnique": false,
-            "isNullable": false,
-            "hasDefault": true,
-            "defaultValue": "CURRENT_TIMESTAMP"
-          },
-          {
-            "name": "updated_at",
-            "type": "datetime",
-            "isPrimaryKey": false,
-            "isUnique": false,
-            "isNullable": true,
-            "hasDefault": false
-          },
-          {
-            "name": "uuid",
-            "type": "string",
-            "isPrimaryKey": false,
-            "isUnique": true,
-            "isNullable": true,
-            "hasDefault": false
-          }
-        ],
-        "indexes": [
-          {
-            "name": "command_receipts_command_id_unique",
-            "columns": [
-              "command_id"
-            ],
-            "type": "unique"
-          },
-          {
-            "name": "command_receipts_uuid_unique",
-            "columns": [
-              "uuid"
-            ],
-            "type": "unique"
-          }
-        ]
       }
     ]
   },
-  "hash": "c21c348c93c5bd468d985f10cfe6db55fd6993bfb7969980b736874812403dfb",
+  "hash": "867e8a8fdf158f468b0b96bdd3eb7b6b2b5e17f7b5981b39a4e9b496f6f215d7",
   "dialect": "sqlite",
-  "updatedAt": "2026-08-07T22:03:21.929Z"
+  "updatedAt": "2026-08-07T22:24:40.333Z"
 }

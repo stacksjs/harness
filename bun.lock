@@ -22,6 +22,14 @@
         "@harness/contract": "workspace:*",
       },
     },
+    "packages/server": {
+      "name": "@harness/server",
+      "version": "0.0.0",
+      "dependencies": {
+        "@harness/contract": "workspace:*",
+        "@harness/engine": "workspace:*",
+      },
+    },
     "storage/framework": {
       "name": "stacks-framework",
       "version": "0.70.304",
@@ -40,6 +48,8 @@
     "@harness/contract": ["@harness/contract@workspace:packages/contract"],
 
     "@harness/engine": ["@harness/engine@workspace:packages/engine"],
+
+    "@harness/server": ["@harness/server@workspace:packages/server"],
 
     "@iconify-json/f7": ["@iconify-json/f7@1.2.2", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-7+RhvnncD+LRu0smuHOun4emOUu48XUGG6G0tYYbrXS7n4Io2xntx6nxa09/iI41t9hnH2oHHU3Dg7Ee60Ovow=="],
 

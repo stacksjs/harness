@@ -19,7 +19,7 @@ interface EventRow {
   type: string
   payload: string
   command_id: string
-  created_at: string | null
+  at: number | null
 }
 
 /**
@@ -62,8 +62,8 @@ export class SqliteStore implements EngineStore {
       'SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM events WHERE session_id IS ?',
     )
     const insert = this.db.prepare(
-      `INSERT INTO events (session_id, turn_id, seq, type, payload, command_id, created_at, updated_at, uuid)
-       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
+      `INSERT INTO events (session_id, turn_id, seq, type, payload, command_id, at, created_at, updated_at, uuid)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
     )
 
     const out: HarnessEvent[] = []
@@ -84,6 +84,7 @@ export class SqliteStore implements EngineStore {
           event.payload.type,
           JSON.stringify(event.payload),
           event.commandId,
+          event.at,
         )
         out.push({
           seq,
@@ -101,7 +102,7 @@ export class SqliteStore implements EngineStore {
   async read(sessionId: number, sinceSeq = 0): Promise<HarnessEvent[]> {
     const rows = this.db
       .prepare<EventRow, [number | null, number]>(
-        'SELECT session_id, seq, type, payload, command_id, created_at FROM events WHERE session_id IS ? AND seq > ? ORDER BY seq ASC',
+        'SELECT session_id, seq, type, payload, command_id, at FROM events WHERE session_id IS ? AND seq > ? ORDER BY seq ASC',
       )
       .all(toColumn(sessionId), sinceSeq)
 
@@ -109,7 +110,7 @@ export class SqliteStore implements EngineStore {
       seq: row.seq,
       sessionId: fromColumn(row.session_id),
       commandId: row.command_id,
-      at: row.created_at ? Date.parse(`${row.created_at}Z`) : 0,
+      at: row.at ?? 0,
       payload: JSON.parse(row.payload) as EventPayload,
     }))
   }

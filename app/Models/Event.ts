@@ -85,8 +85,20 @@ export default defineModel({
       factory: () => '{}',
     },
 
-    commandId: {
+    at: {
       order: 6,
+      fillable: true,
+      // Milliseconds, stored explicitly rather than derived from `created_at`.
+      // SQLite's `datetime('now')` is second-resolution, so a replayed event
+      // came back with its milliseconds truncated while the live broadcast of
+      // the *same* event carried them — two different timestamps for one fact,
+      // depending only on how you received it.
+      validation: { rule: schema.number().min(0) },
+      factory: () => 0,
+    },
+
+    commandId: {
+      order: 7,
       fillable: true,
       // The command that produced this event. Paired with the receipt table,
       // this is what makes a retried command idempotent instead of duplicating
