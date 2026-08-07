@@ -11,6 +11,17 @@
         "better-dx": "^0.2.17",
       },
     },
+    "packages/contract": {
+      "name": "@harness/contract",
+      "version": "0.0.0",
+    },
+    "packages/engine": {
+      "name": "@harness/engine",
+      "version": "0.0.0",
+      "dependencies": {
+        "@harness/contract": "workspace:*",
+      },
+    },
     "storage/framework": {
       "name": "stacks-framework",
       "version": "0.70.304",
@@ -25,6 +36,10 @@
   },
   "packages": {
     "@cwcss/crosswind": ["@cwcss/crosswind@0.2.16", "", { "dependencies": { "@stacksjs/clapp": "^0.2.0", "bunfig": "^0.15.17" }, "bin": { "crosswind": "./dist/cli.js" } }, "sha512-QgSTpcnt1seUQF2++taD5wk/H1lE3wSaybd+i9iP/syQTB2w/v2aM2U9SzYYe2ZcHA3Uxa1Sn/YvhcmHeFfuCA=="],
+
+    "@harness/contract": ["@harness/contract@workspace:packages/contract"],
+
+    "@harness/engine": ["@harness/engine@workspace:packages/engine"],
 
     "@iconify-json/f7": ["@iconify-json/f7@1.2.2", "", { "dependencies": { "@iconify/types": "*" } }, "sha512-7+RhvnncD+LRu0smuHOun4emOUu48XUGG6G0tYYbrXS7n4Io2xntx6nxa09/iI41t9hnH2oHHU3Dg7Ee60Ovow=="],
 

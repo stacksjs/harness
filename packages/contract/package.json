@@ -1,0 +1,10 @@
+{
+  "name": "@harness/contract",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Commands, events and the wire codec shared by the harness server and its clients.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

@@ -79,6 +79,7 @@
     "stacks": "^0.70.304"
   },
   "workspaces": [
+    "packages/*",
     "storage/framework",
     "storage/framework/libs/*",
     "storage/framework/views/*"

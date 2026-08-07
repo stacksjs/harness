@@ -1,0 +1,13 @@
+{
+  "name": "@harness/engine",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Event-sourced session engine: ordered command queue, durable receipts, derived projections.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@harness/contract": "workspace:*"
+  }
+}
