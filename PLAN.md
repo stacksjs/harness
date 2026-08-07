@@ -869,7 +869,14 @@ Each ends with something runnable.
 | §10.3 | Unify the duplicate `SidebarItem` | ✅ `craft@0c57dcd` |
 | §10.4 | stx: bugs A–D + test suite | ✅ `stx@a7f20de` |
 | §10.6 | Stacks desktop launcher path resolution | ✅ `stacks@679fe12` |
-| §10.2 | `nativeUI.createSpacesSidebar` | ⬜ **next** |
+| §10.2 | `nativeUI.createSpacesSidebar` | ✅ `craft@v0.0.60` |
+
+Released: `craft@v0.0.60`, `stx@v0.2.156`. **M0 complete.**
+
+§10.2 landed as a native *switcher* rather than a native sidebar, which is what
+`stx/docs/features/sidebar-spaces.md` describes: the spaces, rows and swipe stay in the webview and
+only the chrome control is native. That also sidesteps `createSidebar`'s one-sidebar-per-window
+restriction entirely, so a window can have both.
 
 §10.8 deliberately went before §10.1: it turned adding the gesture script from five edits into
 one, and fixed navigation dropping `window.craft` in the sidebar window type harness ships.
