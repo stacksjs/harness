@@ -177,6 +177,91 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         payload: { type: 'assistant.delta', turnId: command.turnId, text: command.text },
       }]
 
+    case 'thread.tool.call.begin':
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'tool.call.began',
+          turnId: command.turnId,
+          callId: command.callId,
+          toolName: command.toolName,
+        },
+      }]
+
+    case 'thread.tool.call.end':
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'tool.call.ended',
+          turnId: command.turnId,
+          callId: command.callId,
+          ok: command.ok,
+        },
+      }]
+
+    case 'thread.approval.request': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session)
+        throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'approval.requested',
+          // Derived from the command id, so a replayed provider event cannot
+          // mint a second approval row for the same request.
+          approvalId: derivedId(commandId),
+          requestId: command.requestId,
+          toolName: command.toolName,
+        },
+      }]
+    }
+
+    case 'thread.turn.complete': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session)
+        throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      // A turn that already settled (interrupted, failed) stays settled — a
+      // late completion from a provider we already stopped listening to must
+      // not resurrect it as complete.
+      const turn = session.turns.find(t => t.id === command.turnId)
+      if (!turn || turn.status !== 'running') return []
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'turn.completed',
+          turnId: command.turnId,
+          tokensIn: command.tokensIn,
+          tokensOut: command.tokensOut,
+          cost: command.cost,
+        },
+      }]
+    }
+
+    case 'session.approval.respond': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session)
+        throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'approval.resolved',
+          approvalId: command.approvalId,
+          decision: command.decision,
+          scope: command.scope,
+        },
+      }]
+    }
+
     case 'thread.session.set':
       return [{
         sessionId: command.sessionId,

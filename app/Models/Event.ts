@@ -41,11 +41,18 @@ export default defineModel({
     sessionId: {
       order: 1,
       fillable: true,
-      // Nullable, because some facts belong to no session — creating a
-      // profile, adding a workspace. They still live in this log and still get
-      // a sequence number; NULL is simply how "no session" is spelled in a
-      // table with a foreign key. The engine uses the sentinel 0 in memory,
-      // and the store translates at the boundary.
+      // Deliberately **not** a foreign key.
+      //
+      // `sessions` is a projection derived from this table; the log is
+      // upstream of it. A constraint pointing log → projection inverts that:
+      // an event could not be appended until the projection it produces had
+      // already been written, which is impossible by construction. The engine
+      // is what guarantees a session id is real, before the append.
+      //
+      // Still nullable, because some facts belong to no session at all —
+      // creating a profile, adding a workspace. The engine uses the sentinel 0
+      // in memory and the store translates it to NULL at the boundary.
+      foreignKey: false,
       validation: { rule: schema.number() },
       factory: () => 1,
     },
@@ -53,7 +60,10 @@ export default defineModel({
     turnId: {
       order: 2,
       fillable: true,
-      // Null for session-level events that belong to no particular turn.
+      // Same reasoning as `sessionId`: `turns` is a projection of this log, so
+      // a constraint pointing at it would make the log depend on its own
+      // output. Null for session-level events that belong to no turn.
+      foreignKey: false,
       validation: { rule: schema.number() },
       factory: () => 0,
     },

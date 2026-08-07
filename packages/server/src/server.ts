@@ -9,18 +9,30 @@
 
 import type { CommandEnvelope } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
+import type { Driver, DriverKind } from '@harness/drivers'
 import { CborError, decode, encode } from '@harness/contract'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
+import { ProviderRuntime } from './runtime'
 
 export interface ServeOptions {
   port?: number
   hostname?: string
   databasePath?: string
+  /** Injectable so tests bind a fake driver instead of spawning a real agent. */
+  resolveDriver?: (kind: DriverKind) => Driver | null
+  /** Auto-approve tool calls. Off by default; see PLAN.md §12. */
+  autoApprove?: boolean
 }
 
 interface SocketData {
   /** Sessions this socket has subscribed to. Empty means "not subscribed". */
   subscriptions: Set<number>
+  /**
+   * Highest sequence delivered per session. Provider events arrive outside the
+   * request path, so the drain pass needs to know what each socket already has
+   * rather than re-sending a session's whole log.
+   */
+  cursors: Map<number, number>
 }
 
 type HarnessSocket = ServerWebSocket<SocketData>
@@ -35,6 +47,7 @@ type ClientFrame =
 export interface HarnessServer {
   server: Server
   engine: Engine
+  runtime: ProviderRuntime
   stop: () => void
 }
 
@@ -44,6 +57,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const store = new SqliteStore(options.databasePath ?? 'database/stacks.sqlite')
 
   const engine = new Engine({ store, reducer: reduce })
+  const runtime = new ProviderRuntime({
+    engine,
+    resolve: options.resolveDriver,
+    autoApprove: options.autoApprove,
+    // Push provider output the moment it lands, so a transcript streams rather
+    // than appearing all at once when the turn ends.
+    onEvents: events => broadcast(events),
+  })
   // Hydrate before listening, not after. A socket that connects into a
   // half-built read model would be served a projection missing everything the
   // log has not replayed yet, and it has no way to tell.
@@ -70,10 +91,49 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
     for (const event of events) {
       for (const socket of sockets) {
-        if (event.sessionId === 0 || socket.data.subscriptions.has(event.sessionId))
-          send(socket, { t: 'event', event })
+        if (event.sessionId !== 0 && !socket.data.subscriptions.has(event.sessionId)) continue
+        send(socket, { t: 'event', event })
+        const seen = socket.data.cursors.get(event.sessionId) ?? 0
+        if (event.seq > seen) socket.data.cursors.set(event.sessionId, event.seq)
       }
     }
+  }
+
+  /**
+   * Drive the provider in response to a command the engine accepted.
+   *
+   * Deliberately fire-and-forget for a turn: an agent run takes minutes, and
+   * awaiting it here would block the socket handler and every command queued
+   * behind it. Its output reaches clients through the same broadcast path as
+   * everything else, so nothing is lost by not waiting.
+   */
+  async function react(envelope: CommandEnvelope, result: Awaited<ReturnType<Engine['dispatch']>>): Promise<void> {
+    const command = envelope.command
+
+    if (command.type === 'session.turn.start') {
+      const started = result.events.find(event => event.payload.type === 'turn.started')
+      if (!started) return
+      const turnId = (started.payload as { turnId: number }).turnId
+      void runtime.runTurn(command.sessionId, turnId, command.text)
+      return
+    }
+
+    if (command.type === 'session.turn.interrupt') {
+      await runtime.interrupt(command.sessionId)
+      return
+    }
+
+    if (command.type === 'session.approval.respond') {
+      await runtime.respondApproval(
+        command.sessionId,
+        command.approvalId,
+        command.decision === 'allowed',
+      )
+      return
+    }
+
+    if (command.type === 'session.stop')
+      await runtime.stopSession(command.sessionId)
   }
 
   async function onFrame(socket: HarnessSocket, raw: Uint8Array): Promise<void> {
@@ -103,6 +163,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         // and gets everything after it, in order, before any live event.
         const missed = await store.read(frame.sessionId, frame.sinceSeq ?? 0)
         for (const event of missed) send(socket, { t: 'event', event })
+        socket.data.cursors.set(
+          frame.sessionId,
+          missed.at(-1)?.seq ?? frame.sinceSeq ?? 0,
+        )
         send(socket, { t: 'subscribed', sessionId: frame.sessionId, caughtUpTo: missed.at(-1)?.seq ?? frame.sinceSeq ?? 0 })
         return
       }
@@ -128,6 +192,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // Broadcast after acking, so the dispatcher's own ack cannot arrive
           // after the events it caused.
           broadcast(result.events)
+          // Then act on it. A retry (`replayed`) must not start a second agent
+          // run — the receipt already accounted for the first.
+          if (!result.replayed) await react(envelope, result)
         }
         catch (error) {
           send(socket, {
@@ -152,7 +219,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       const url = new URL(request.url)
 
       if (url.pathname === '/ws') {
-        const upgraded = srv.upgrade(request, { data: { subscriptions: new Set<number>() } })
+        const upgraded = srv.upgrade(request, {
+          data: { subscriptions: new Set<number>(), cursors: new Map<number, number>() },
+        })
         return upgraded ? undefined : new Response('expected a websocket upgrade', { status: 426 })
       }
 
@@ -191,7 +260,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   return {
     server,
     engine,
+    runtime,
     stop: () => {
+      void runtime.stopAll()
       server.stop(true)
       store.close()
     },

@@ -30,4 +30,5 @@ export default {
   'inspire': 'Inspire',
   'profiles': 'Profiles',
   'serve': 'Serve',
+  'run': 'Run',
 } satisfies CommandRegistry

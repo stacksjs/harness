@@ -305,27 +305,19 @@
           },
           {
             "name": "session_id",
-            "type": "bigint",
+            "type": "integer",
             "isPrimaryKey": false,
             "isUnique": false,
             "isNullable": true,
-            "hasDefault": false,
-            "references": {
-              "table": "sessions",
-              "column": "id"
-            }
+            "hasDefault": false
           },
           {
             "name": "turn_id",
-            "type": "bigint",
+            "type": "integer",
             "isPrimaryKey": false,
             "isUnique": false,
             "isNullable": true,
-            "hasDefault": false,
-            "references": {
-              "table": "turns",
-              "column": "id"
-            }
+            "hasDefault": false
           },
           {
             "name": "seq",
@@ -1001,7 +993,7 @@
       }
     ]
   },
-  "hash": "867e8a8fdf158f468b0b96bdd3eb7b6b2b5e17f7b5981b39a4e9b496f6f215d7",
+  "hash": "a10110b0d2f96580ce4920bb6cdf20cd12ceb711e35a7068e652567fadcc6be4",
   "dialect": "sqlite",
-  "updatedAt": "2026-08-07T22:24:40.333Z"
+  "updatedAt": "2026-08-07T23:28:50.067Z"
 }

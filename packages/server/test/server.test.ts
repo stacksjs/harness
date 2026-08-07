@@ -20,6 +20,12 @@ let port: number
  */
 function prepareDatabase(path: string): void {
   const db = new Database(path)
+  // Mirrors the migrated schema, including `PRAGMA foreign_keys = ON` — the
+  // store enables it, and a test schema without the pragma silently tolerates
+  // constraint violations that production rejects.
+  db.exec('PRAGMA foreign_keys = ON')
+  db.exec(`CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT)`)
+  db.exec(`CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT)`)
   db.exec(`CREATE TABLE events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER, turn_id INTEGER, seq INTEGER NOT NULL,
