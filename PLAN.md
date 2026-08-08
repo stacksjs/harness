@@ -1013,7 +1013,7 @@ client.
 **Exit:** `harness run "list the files"` streams a real Claude Code turn; killing the server
 mid-turn and restarting resumes without losing events.
 
-### M3 — Web surface *(live half verified late)*
+### M3 — Web surface *(complete)*
 
 The views, the sidebar and the transcript shipped in M3. The **live** half did not work in a browser
 until the M4/M5 pass, and nothing caught it because the page renders correctly either way — the server
