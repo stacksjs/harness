@@ -1054,8 +1054,46 @@ to SSR) took the page from **392,733 to 213,141 bytes — 46% smaller**. Cold st
 | externalized | 661ms | 662, 712, 658, 661, 774, 653 |
 
 Six interleaved pairs, to cancel drift. The difference is noise. Halving the document changes cold start
-by nothing, so the remaining ~665ms is not payload — it is window and WebView startup, inside Craft.
-Going further needs Craft instrumented, not more guessing from this side.
+by nothing — so the cost is *work*, not payload.
+
+### Where the 665ms actually goes
+
+Decomposed by measurement, not inspection. The control is an **88-byte page** served from a throwaway
+server and pointed at by the same Craft flags: it reports when its own JS runs, and it pays everything
+except our rendering.
+
+| Phase | ms | how it was measured |
+|---|---:|---|
+| Craft process start → window created | **165** | `craft --benchmark` prints `ready` at window creation and exits |
+| WKWebView cold init + trivial navigation | **~290** | 88-byte control page: 455ms total, minus the 165ms above |
+| **harness SSR render of `/`** | **166** | `curl` against a warm server; confirmed against `renderHarnessView` directly |
+| harness page parse / execute / layout | **~45** | remainder |
+| **total** | **~665** | matches the in-process measurement |
+
+Two conclusions, both actionable:
+
+**The Craft floor alone is ~455ms — over 1.5× the entire 300ms budget.** An 88-byte page cannot beat it.
+No amount of work on the harness page can meet the budget while that floor stands, so the budget is a
+Craft problem first and a harness problem second.
+
+**The SSR render is the largest harness-controlled slice, and it scales with the number of projects** —
+which is exactly the axis a control surface grows along:
+
+| profiles | render | page |
+|---:|---:|---:|
+| 0 (no sidebar at all) | 21ms | 20KB |
+| 1 | 51ms | 268KB |
+| 3 | 77ms | 292KB |
+| 14 | 175ms | 424KB |
+| 14, sessions stripped | 150ms | 375KB |
+
+Each additional profile costs ~9.5ms and ~12KB, and sessions are almost free by comparison (25ms across
+all 14) — so the cost is **per-space panel chrome**, not session lists. `<Sidebar>` renders every space's
+panel eagerly, even though the Arc design shows one at a time.
+
+The lever is to render only the active space and its immediate neighbours — all a single swipe can
+reveal — and fill the rest on demand. At 14 profiles that is ~70ms instead of 175ms. It needs an upstream
+change to `SidebarSpaces`, whose track geometry currently assumes every panel is present.
 
 The externalization stays regardless: on localhost bytes are free, but the web surface is not localhost,
 and ~190KB per request that no browser could cache was waste whatever the cold-start number says.
