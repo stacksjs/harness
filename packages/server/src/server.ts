@@ -256,6 +256,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           : undefined
         return renderHarnessView(viewProps(engine.current, {
           sessionId,
+          // `?profile=` opens the sidebar on a given space. Swiping past the
+          // active space's neighbours lands here, so the server renders that
+          // space's rows rather than the client rebuilding them.
+          profileId: Number(url.searchParams.get('profile')) || undefined,
           serverUrl: `ws://${url.host}/ws`,
           codecUrl,
         })).then(async (rendered) => {

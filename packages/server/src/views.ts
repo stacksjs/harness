@@ -45,6 +45,15 @@ export interface ViewProps {
  */
 export function viewProps(state: HarnessState, options: {
   sessionId?: number
+  /**
+   * Profile to open the sidebar on.
+   *
+   * Addressable because spaces beyond the active one's neighbours render
+   * without their rows: swiping to a distant space navigates here so the
+   * server can render it in full, rather than the client rebuilding rows the
+   * server already knows how to render.
+   */
+  profileId?: number
   serverUrl: string
   codecUrl?: string
 }): ViewProps {
@@ -80,7 +89,13 @@ export function viewProps(state: HarnessState, options: {
 
   return {
     profiles,
-    activeProfile: profiles[0] ? String(profiles[0].id) : '',
+    activeProfile: String(
+      // The requested profile, the one owning the open session, then the first.
+      profiles.find(p => p.id === options.profileId)?.id
+      ?? (active ? profiles.find(p => p.sessions.some(session => session.id === active.id))?.id : undefined)
+      ?? profiles[0]?.id
+      ?? '',
+    ),
     activeSession: active
       ? {
           id: active.id,

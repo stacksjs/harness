@@ -1151,9 +1151,28 @@ Each additional profile costs ~9.5ms and ~12KB, and sessions are almost free by 
 all 14) — so the cost is **per-space panel chrome**, not session lists. `<Sidebar>` renders every space's
 panel eagerly, even though the Arc design shows one at a time.
 
-The lever is to render only the active space and its immediate neighbours — all a single swipe can
-reveal — and fill the rest on demand. At 14 profiles that is ~70ms instead of 175ms. It needs an upstream
-change to `SidebarSpaces`, whose track geometry currently assumes every panel is present.
+**Done, and it landed short of the estimate.** `deferred` shipped in stx 0.2.166: a space keeps its
+panel — the track geometry, the tab role, `inert` handling and the swipe all depend on it existing — and
+its title, which is what identifies it mid-swipe, and drops the pinned grid, the rows and the actions.
+Harness defers everything beyond the active space's immediate neighbours, since those are what a single
+swipe can reveal, and `?profile=` makes a space addressable so arriving at a deferred one navigates and
+lets the server render it in full. Navigating rather than rebuilding rows in JS keeps a single renderer.
+
+| | before | after |
+|---|---:|---:|
+| page | 233KB | 167KB |
+| SSR render | 166ms | 129ms |
+| per deferred panel | 8.8KB | 2.4KB |
+
+A deferred panel is 73% smaller, but the total only fell 22% — because the cost was never the rows. The
+earlier measurement said so and I read it too optimistically: stripping every row from all fourteen
+spaces saved 25ms, so the ~9.5ms per space is the **panel shell**, not its contents. Deferral removes
+what it can; the remaining 2.4KB is the section, the scroll container and the title. Getting to the
+predicted ~70ms would mean not emitting the shells at all, which the track geometry currently needs.
+
+Verified in a browser: 12 of 14 panels deferred, every deferred panel keeps its label and has no rows,
+clicking a deferred space navigates and comes back with that space rendered in full, and clicking a
+neighbour switches instantly with no round trip.
 
 The externalization stays regardless: on localhost bytes are free, but the web surface is not localhost,
 and ~190KB per request that no browser could cache was waste whatever the cold-start number says.

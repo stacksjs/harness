@@ -25,8 +25,17 @@ export const sinceSeq = $props.sinceSeq || 0
 
 // One space per profile. `pinned` is the favourite-repos tile grid; the
 // sections are the profile's sessions, split by whether they are live.
-export const spaces = profiles.map(profile => ({
+//
+// Only the active space and its immediate neighbours render their rows. Every
+// space used to, which cost ~9.5ms of server render each — 175ms at fourteen
+// projects, on every page load, to display one. Neighbours are kept because
+// they are what a single swipe can reveal, so the common gesture never lands
+// on an empty panel; anything further away fills in on arrival.
+const activeSpaceIndex = Math.max(0, profiles.findIndex(profile => String(profile.id) === String(activeProfile)))
+
+export const spaces = profiles.map((profile, index) => ({
   id: String(profile.id),
+  deferred: Math.abs(index - activeSpaceIndex) > 1,
   label: profile.name,
   icon: profile.icon || 'i-hugeicons-folder-01',
   tint: profile.tint || 'blue',
@@ -214,6 +223,21 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // so reading `.dataset` off it threw and the socket was never opened. The
   // whole live half of this page was dead in a browser — invisible because the
   // server-rendered transcript still looked correct.
+  // Spaces beyond the active one's neighbours render without their rows, so
+  // arriving at one has to fetch it. Navigating rather than rebuilding rows in
+  // JS keeps a single renderer: the server already knows how to draw a space,
+  // and a second implementation here would be one more thing to keep in step.
+  // `spaceChange`, unprefixed: stx's defineEmits dispatches the bare event name
+  // on the component's scope element, and it bubbles to here.
+  document.addEventListener('spaceChange', (event) => {
+    const id = event.detail?.id
+    if (!id) return
+    const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(id)}"]`)
+    // Only a deferred panel needs the round trip; a neighbour is already drawn.
+    if (!panel || !panel.hasAttribute('data-space-deferred')) return
+    window.location.assign(`/?profile=${encodeURIComponent(id)}`)
+  })
+
   const root = document.querySelector('[data-harness-island]')
   const sessionId = Number(root?.dataset.session)
   const url = root?.dataset.url
