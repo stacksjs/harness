@@ -959,7 +959,24 @@ per §8's table. Connection supervisor with backoff.
 **Exit:** a full agent session driven from a browser, approvals included; the 10k-line transcript
 budget from §11 holds.
 
-### M4 — Desktop surface
+### M4 — Desktop surface *(measured)*
+
+| Budget | Target | Measured | |
+|---|---|---|---|
+| Installed size | < 15MB | **1.1MB** release binary | ✅ |
+| Cold start → interactive | < 300ms | **428ms** best, 447ms median (4 runs) | ❌ |
+
+The size budget is not close — Craft's whole thesis, confirmed. The startup budget is **missed by ~130ms**,
+measured window-launch to the page's own JS running. The likely lever is the page: 273KB with five inline
+`<style>` blocks, nearly all Crosswind CSS. That is a payload problem, not a Craft problem — the shell is
+already up long before the page finishes parsing. Extracting and caching the stylesheet is the first thing
+to try.
+
+Native surfaces verified in a live window rather than inferred: `window.craft`, `window.craft.gestures`,
+`nativeUI`, and `createSpacesSidebar` all present, with `<SidebarSpaces>` binding the native rail
+(`spacesBound: 1`, three profiles, an active space).
+
+### M4 — Desktop surface *(original scope)*
 Craft window over the server. Native chrome: per-profile titlebar tint, system tray, global
 shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
 **Exit:** a signed `.dmg` under 15MB that cold-starts under 300ms, both measured in CI.

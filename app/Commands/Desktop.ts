@@ -36,7 +36,8 @@ export default function (cli: CLI) {
     .option('--craft [path]', 'Path to the craft binary', { default: '' })
     .option('--width [width]', 'Window width', { default: 1280 })
     .option('--height [height]', 'Window height', { default: 820 })
-    .action(async (options: { port?: number | string, craft?: string, width?: number, height?: number }) => {
+    .option('--tray', 'Show a system tray icon', { default: false })
+    .action(async (options: { port?: number | string, craft?: string, width?: number, height?: number, tray?: boolean }) => {
       const port = Number(options.port ?? 3789)
       const craftBin = resolveCraft(options.craft || undefined)
 
@@ -59,7 +60,16 @@ export default function (cli: CLI) {
         // Matches the aside's width in the view, so the material lines up with
         // the rendered sidebar rather than showing a seam.
         '--web-sidebar-width', '280',
-      ], { stdio: 'inherit' })
+        // The full bridge — and with it tray polling — is gated on this flag
+        // host-side, so asking for a tray also turns on the surface that
+        // drives it.
+        ...(options.tray ? ['--system-tray'] : []),
+      ], {
+        stdio: 'inherit',
+        // Detached from this process group. Launching the GUI in-group has
+        // repeatedly taken the parent's toolchain down with it on this host.
+        detached: true,
+      })
 
       child.on('exit', code => process.exit(code ?? 0))
       process.on('SIGINT', () => { child.kill(); process.exit(0) })

@@ -145,6 +145,26 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   //
   // Deliberately small and framework-free: it appends text to a node and
   // toggles a panel. Anything heavier belongs on the server.
+  // Count native-switcher creations before stx's sidebar controller runs.
+  //
+  // `<SidebarSpaces>` calls `createSpacesSidebar` itself on mount, so the only
+  // way to know the native rail actually bound — rather than merely being
+  // *reachable* — is to watch the call. Patched here because this script runs
+  // before the component's own onMount.
+  try {
+    const nativeUI = window.craft?.nativeUI
+    if (nativeUI && typeof nativeUI.createSpacesSidebar === 'function') {
+      const original = nativeUI.createSpacesSidebar.bind(nativeUI)
+      window.__harnessSpacesCalls = 0
+      nativeUI.createSpacesSidebar = (options) => {
+        window.__harnessSpacesCalls++
+        window.__harnessSpacesArg = options
+        return original(options)
+      }
+    }
+  }
+  catch {}
+
   // Report what native surfaces this window actually has. In a browser every
   // flag is false and nothing else changes; in a Craft window it tells us
   // whether the host's injection and gesture bridge are really there.
@@ -165,6 +185,24 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     }).catch(() => {})
   }
   catch {}
+
+  // Second pass, once the sidebar controller has mounted: did it bind?
+  setTimeout(() => {
+    fetch('/native-probe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        seen: true,
+        phase: 'mounted',
+        craft: Boolean(window.craft),
+        gestures: typeof window.craft?.gestures?.onSwipe === 'function',
+        spacesSidebar: typeof window.craft?.nativeUI?.createSpacesSidebar === 'function',
+        spacesBound: window.__harnessSpacesCalls ?? 0,
+        spacesCount: window.__harnessSpacesArg?.spaces?.length ?? 0,
+        activeSpace: window.__harnessSpacesArg?.activeSpace ?? null,
+      }),
+    }).catch(() => {})
+  }, 2500)
 
   const root = document.currentScript
   const sessionId = Number(root.dataset.session)
