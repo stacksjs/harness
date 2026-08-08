@@ -32,4 +32,5 @@ export default {
   'serve': 'Serve',
   'run': 'Run',
   'desktop': 'Desktop',
+  'doctor': 'Doctor',
 } satisfies CommandRegistry

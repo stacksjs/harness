@@ -1,7 +1,8 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { DriverKind } from '@harness/contract'
 import { describe, expect, it } from 'bun:test'
 import { translate } from '../src/claude'
-import { resolveDriver } from '../src/registry'
+import { driverKinds, resolveDriver } from '../src/registry'
 
 /**
  * Every driver ships a recorded-transcript fake so its bugs are reproducible
@@ -174,9 +175,17 @@ describe('Driver registry', () => {
     expect(resolveDriver('claude')?.kind).toBe('claude')
   })
 
-  it('returns null for a provider this build does not ship', () => {
+  it('resolves every kind the contract declares', () => {
+    // A registered driver can say "codex is not installed". An unregistered one
+    // produces "no driver for codex", which the user cannot act on.
+    for (const kind of driverKinds())
+      expect(resolveDriver(kind)?.kind).toBe(kind)
+    expect(driverKinds().sort()).toEqual(['claude', 'codex', 'cursor', 'grok', 'opencode'])
+  })
+
+  it('returns null for a kind this build does not ship', () => {
     // Null rather than throwing: a session recorded against a driver we do not
     // have must surface as unavailable, not crash the server at hydrate.
-    expect(resolveDriver('grok')).toBeNull()
+    expect(resolveDriver('nonesuch' as DriverKind)).toBeNull()
   })
 })
