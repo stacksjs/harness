@@ -279,6 +279,64 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       transcript.scrollTop = transcript.scrollHeight
     }
 
+    // A command id the server can deduplicate on. Every dispatch carries one,
+    // so a retry after a dropped ack replays the receipt rather than starting a
+    // second agent run.
+    let commandCounter = 0
+    function dispatch(command) {
+      socket.send(encode({
+        t: 'dispatch',
+        envelope: {
+          id: `web_${sessionId}_${Date.now().toString(36)}_${++commandCounter}`,
+          at: Date.now(),
+          command,
+        },
+      }))
+    }
+
+    // The composer. Without this the page could watch a session but not drive
+    // one, which is most of the point of a control surface.
+    const composer = document.querySelector('[data-composer]')
+    const prompt = composer?.querySelector('[data-prompt]')
+    composer?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const text = prompt.value.trim()
+      if (!text) return
+      // Cleared optimistically: the turn appears when `turn.started` comes back
+      // from the server, so the transcript still only ever shows what the log
+      // actually contains.
+      prompt.value = ''
+      dispatch({ type: 'session.turn.start', sessionId, text })
+    })
+
+    // Enter sends, Shift+Enter makes a newline — the convention every chat
+    // surface uses, and the textarea would otherwise only ever insert newlines.
+    prompt?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault()
+        composer.requestSubmit()
+      }
+    })
+
+    function respondToApproval(allow) {
+      const approvalId = Number(approval.dataset.approvalId)
+      if (!approvalId) return
+      // Hidden immediately: the decision is made, and leaving the panel up
+      // invites a second click that answers an id the server has retired.
+      approval.hidden = true
+      approval.removeAttribute('data-approval-id')
+      dispatch({
+        type: 'session.approval.respond',
+        sessionId,
+        approvalId,
+        decision: allow ? 'allowed' : 'denied',
+        scope: 'once',
+      })
+    }
+
+    approval?.querySelector('[data-approve]')?.addEventListener('click', () => respondToApproval(true))
+    approval?.querySelector('[data-deny]')?.addEventListener('click', () => respondToApproval(false))
+
     socket.addEventListener('open', () => {
       // Resume from the last sequence the server rendered into this page, so a
       // reload replays the gap rather than the whole session.

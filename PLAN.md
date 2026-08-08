@@ -985,8 +985,22 @@ live, no duplication, and text arriving over the socket with no reload.
 The lesson is worth keeping: a server-rendered surface hides a broken client. Every island needs a
 browser check, not a template review.
 
-**Still open:** approvals driven from the browser (the panel renders and the events exist; the buttons
-are not wired), session-list click-through, diff view, and the 10k-line transcript budget from §11.
+The composer and the approval buttons were rendered but unwired — the page could watch a session and not
+drive one, which is most of the point of a control surface. Both dispatch over the same socket now, with
+a deduplicable command id so a retry after a dropped ack replays the receipt rather than starting a
+second agent run. Enter sends, Shift+Enter newlines.
+
+**Exit criterion met, verified in a browser end to end:**
+
+| Step | Result |
+|---|---|
+| Prompt typed into the composer | dispatched; textarea cleared, turn appears only on `turn.started` from the log |
+| Agent replied | streamed in as deltas, new turn article, state → idle |
+| Tool call raised an approval | panel showed `Read`, with the approval id |
+| **Allow** clicked | tool ran; `note.txt`'s contents came back in the reply |
+| **Deny** clicked on a `Write` | file never created on disk; agent reported the denial; session returned to idle, not wedged |
+
+**Still open:** session-list click-through, diff view, and the 10k-line transcript budget from §11.
 
 ### M3 — Web surface *(original scope)*
 stx views: profile sidebar (§9), session list, transcript, composer, approvals, diff view. Hydration
