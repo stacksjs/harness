@@ -11,6 +11,7 @@ import type { CommandEnvelope } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver, DriverKind } from '@harness/drivers'
 import { CborError, decode, encode } from '@harness/contract'
+import type { HarnessState } from '@harness/engine'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
 import { ASSET_PREFIX, AssetCache } from './assets'
 import { buildClientCodec } from './client-bundle'
@@ -23,6 +24,13 @@ export interface ServeOptions {
   databasePath?: string
   /** Injectable so tests bind a fake driver instead of spawning a real agent. */
   resolveDriver?: (kind: DriverKind) => Driver | null
+  /**
+   * Resolve a session's workspace path. Defaults to the projection.
+   *
+   * The runtime has always accepted this and `serve` never passed it on, so
+   * the option existed and did nothing.
+   */
+  workspacePath?: (state: HarnessState, sessionId: number) => string | null
   /** Auto-approve tool calls. Off by default; see PLAN.md §12. */
   autoApprove?: boolean
 }
@@ -68,6 +76,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const runtime = new ProviderRuntime({
     engine,
     resolve: options.resolveDriver,
+    workspacePath: options.workspacePath,
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
     // than appearing all at once when the turn ends.

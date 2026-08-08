@@ -117,6 +117,19 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}">
           <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
           <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ turn.prompt }}</div>
+          <!--
+            What the agent ran, before what it said. These were in the log from
+            the start and rendered nowhere, so the transcript showed a reply
+            with no evidence behind it.
+          -->
+          <div data-tools>
+          @foreach(turn.toolCalls as call)
+            <div class="mb-1 flex items-center gap-[6px] text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}">
+              <span class="tool-dot" aria-hidden="true"></span>
+              <span class="font-mono opacity-70">{{ call.name }}</span>
+            </div>
+          @endforeach
+          </div>
           <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
           <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response>{{ turn.response }}</div>
         </article>
@@ -126,6 +139,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <article class="mb-5" data-turn="{{ liveTurn.id }}" data-live>
           <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
           <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ liveTurn.prompt }}</div>
+          <div data-tools>
+          @foreach(liveTurn.toolCalls as call)
+            <div class="mb-1 flex items-center gap-[6px] text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}">
+              <span class="tool-dot" aria-hidden="true"></span>
+              <span class="font-mono opacity-70">{{ call.name }}</span>
+            </div>
+          @endforeach
+          </div>
           <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
           <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response data-live-response>{{ liveTurn.response }}</div>
         </article>
@@ -153,6 +174,45 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     </form>
   </main>
 </div>
+
+<style>
+  /* Three states, three colours: running, succeeded, failed. A tool that is
+     still going must not look like one that finished, or a hung command reads
+     as a completed one. */
+  .tool-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background: currentColor;
+    opacity: 0.35;
+  }
+  [data-tool-state="running"] .tool-dot {
+    background: rgb(245 158 11);
+    opacity: 1;
+    animation: tool-pulse 1.1s ease-in-out infinite;
+  }
+  [data-tool-state="ok"] .tool-dot {
+    background: rgb(34 197 94);
+    opacity: 0.9;
+  }
+  [data-tool-state="failed"] .tool-dot {
+    background: rgb(239 68 68);
+    opacity: 1;
+  }
+  /* A failed tool is the one row worth reading twice. */
+  [data-tool-state="failed"] .font-mono { opacity: 1; }
+
+  @keyframes tool-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  /* Respect the setting rather than animating regardless — this dot sits in a
+     transcript people watch for minutes at a time. */
+  @media (prefers-reduced-motion: reduce) {
+    [data-tool-state="running"] .tool-dot { animation: none; }
+  }
+</style>
 
 <script type="module" data-harness-island data-session="{{ activeSessionId }}" data-url="{{ serverUrl }}" data-codec="{{ codecUrl }}" data-since-seq="{{ sinceSeq }}">
   // The live island. Everything above this is static HTML; this wires the
@@ -287,6 +347,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       // parsed as markup.
       ask.textContent = prompt ?? ''
 
+      const tools = document.createElement('div')
+      tools.dataset.tools = ''
+
       const who = document.createElement('div')
       who.className = 'mb-1 text-[12px] font-medium opacity-50'
       who.textContent = 'Agent'
@@ -296,7 +359,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       answer.dataset.response = ''
       answer.dataset.liveResponse = ''
 
-      article.append(you, ask, who, answer)
+      article.append(you, ask, tools, who, answer)
       // Before the approval panel, which is the last child and must stay there.
       transcript.insertBefore(article, approval)
       // Follow the tail, the way a terminal does.
@@ -383,6 +446,35 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           beginTurn(payload.turnId, payload.text)
           if (stateNode) stateNode.textContent = 'running'
         }
+      }
+      else if (payload.type === 'tool.call.began') {
+        const tools = document.querySelector('[data-turn][data-live] [data-tools]')
+        if (tools && !tools.querySelector(`[data-tool-call="${CSS.escape(payload.callId)}"]`)) {
+          const row = document.createElement('div')
+          row.className = 'mb-1 flex items-center gap-[6px] text-[12px]'
+          row.dataset.toolCall = payload.callId
+          row.dataset.toolState = 'running'
+
+          const dot = document.createElement('span')
+          dot.className = 'tool-dot'
+          dot.setAttribute('aria-hidden', 'true')
+
+          const name = document.createElement('span')
+          name.className = 'font-mono opacity-70'
+          // textContent: a tool name comes from the provider, and an MCP server
+          // can name a tool anything at all.
+          name.textContent = payload.toolName
+
+          row.append(dot, name)
+          tools.append(row)
+          transcript.scrollTop = transcript.scrollHeight
+        }
+      }
+      else if (payload.type === 'tool.call.ended') {
+        // Found by id: tools run in parallel and finish out of order, so
+        // resolving the last row would mark the wrong one failed.
+        const row = document.querySelector(`[data-tool-call="${CSS.escape(payload.callId)}"]`)
+        if (row) row.dataset.toolState = payload.ok ? 'ok' : 'failed'
       }
       else if (payload.type === 'assistant.delta') {
         const node = responseNode()

@@ -1,7 +1,30 @@
-import type { HarnessState } from '@harness/engine'
+import type { HarnessState, TurnState } from '@harness/engine'
 import { describe, expect, it } from 'bun:test'
 import { emptyState } from '@harness/engine'
 import { viewProps } from '../src/views'
+
+/**
+ * A turn with every field the projection sets.
+ *
+ * Built through one helper rather than as literals: a hand-written fixture
+ * drifts the moment `TurnState` gains a field, and it fails as a crash inside
+ * `viewProps` rather than as a message about the fixture. `toolCalls` is
+ * exactly how that happened.
+ */
+function turn(overrides: Partial<TurnState> = {}): TurnState {
+  return {
+    id: 1,
+    role: 'user',
+    status: 'running',
+    prompt: 'refactor the parser',
+    response: 'working',
+    toolCalls: [],
+    tokensIn: 0,
+    tokensOut: 0,
+    cost: 0,
+    ...overrides,
+  }
+}
 
 function stateWith(): HarnessState {
   const state = emptyState()
@@ -18,7 +41,7 @@ function stateWith(): HarnessState {
     providerSessionId: '',
     state: 'running',
     lastSeq: 3,
-    turns: [{ id: 1, role: 'user', status: 'running', prompt: 'refactor the parser', response: 'working', tokensIn: 0, tokensOut: 0, cost: 0 }],
+    turns: [turn()],
   })
   state.sessions.set(200, {
     id: 200,
@@ -87,5 +110,35 @@ describe('viewProps — shaping the read model for the page', () => {
     const props = viewProps(emptyState(), { serverUrl: 'ws://x/ws' })
     expect(props.profiles).toEqual([])
     expect(props.activeProfile).toBe('')
+  })
+})
+
+describe('tool calls reach the page', () => {
+  function propsWithTools(calls: Array<{ callId: string, name: string, ok: boolean | null }>) {
+    const state = stateWith()
+    state.sessions.get(100)!.turns = [turn({ toolCalls: calls })]
+    const props = viewProps(state, { sessionId: 100, serverUrl: 'ws://x/ws' })
+    return (props.activeSession as { turns: Array<{ toolCalls: Array<{ state: string, name: string }> }> }).turns[0].toolCalls
+  }
+
+  it('renders three states, not two', () => {
+    // A tool still running must not look like one that finished. Collapsing
+    // this to a boolean makes a hung command read as a completed one.
+    expect(propsWithTools([
+      { callId: 'a', name: 'Read', ok: null },
+      { callId: 'b', name: 'Bash', ok: true },
+      { callId: 'c', name: 'Edit', ok: false },
+    ]).map(c => c.state)).toEqual(['running', 'ok', 'failed'])
+  })
+
+  it('keeps the order the agent ran them in', () => {
+    expect(propsWithTools([
+      { callId: 'a', name: 'Glob', ok: true },
+      { callId: 'b', name: 'Read', ok: true },
+    ]).map(c => c.name)).toEqual(['Glob', 'Read'])
+  })
+
+  it('is an empty list for a turn that ran none', () => {
+    expect(propsWithTools([])).toEqual([])
   })
 })

@@ -110,12 +110,12 @@ class Client {
   close(): void { this.socket.close() }
 }
 
-async function bootstrap(client: Client): Promise<{ sessionId: number }> {
+async function bootstrap(client: Client, workspace: string = dir): Promise<{ sessionId: number }> {
   client.send({ t: 'dispatch', envelope: { id: 'c_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
   const profileId = derivedId('c_p')
   client.send({
     t: 'dispatch',
-    envelope: { id: 'c_w', at: 2, command: { type: 'workspace.add', profileId, path: dir } },
+    envelope: { id: 'c_w', at: 2, command: { type: 'workspace.add', profileId, path: workspace } },
   })
   const workspaceId = derivedId('c_w')
   client.send({
@@ -225,6 +225,31 @@ describe('a turn drives the provider', () => {
 
     // An unavailable provider is a reported failure, not a crash.
     expect(await client.waitFor('session.failed')).toBeTruthy()
+    client.close()
+  })
+
+  it('names a workspace that has gone missing', async () => {
+    // Agents run with the workspace as their cwd, and a missing cwd surfaces
+    // from deep inside the provider as something unrelated — the Claude SDK
+    // calls it "native binary exists but failed to launch", which sends you to
+    // inspect a binary that is fine. Caught here, it names the actual problem.
+    let created = false
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() { created = true; throw new Error('should never be created') },
+    }
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    // Registered at a path that does not exist, which is what a workspace looks
+    // like after a rename, an unmounted volume, or /tmp being swept.
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client, join(dir, 'gone-away'))
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'hi' } } })
+
+    const failed = await client.waitFor('session.failed')
+    expect(failed.message).toContain('no longer exists')
+    expect(created).toBe(false)
     client.close()
   })
 

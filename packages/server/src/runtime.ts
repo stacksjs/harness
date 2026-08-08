@@ -14,6 +14,7 @@
 import type { CommandEnvelope, DriverKind, HarnessEvent } from '@harness/contract'
 import type { Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
+import { existsSync } from 'node:fs'
 import { resolveDriver } from '@harness/drivers'
 
 export interface RuntimeOptions {
@@ -94,6 +95,20 @@ export class ProviderRuntime {
 
     if (!workspacePath) {
       await this.emit({ type: 'thread.error', sessionId, message: 'session has no workspace path' })
+      return null
+    }
+
+    // A workspace can be renamed, unmounted, or cleaned up by the OS between
+    // sessions. Agents are spawned with it as their cwd, and a missing cwd
+    // surfaces from deep inside the provider as something else entirely — the
+    // Claude SDK reports "native binary exists but failed to launch", which
+    // sends you to inspect a binary that is perfectly fine.
+    if (!existsSync(workspacePath)) {
+      await this.emit({
+        type: 'thread.error',
+        sessionId,
+        message: `workspace path no longer exists: ${workspacePath}`,
+      })
       return null
     }
 

@@ -20,6 +20,22 @@ export interface SessionState {
   turns: TurnState[]
 }
 
+/**
+ * One tool the agent ran during a turn.
+ *
+ * Projected from the log rather than derived at render time, because a turn's
+ * tool calls are what the transcript is *for* — an agent harness that shows the
+ * reply but not the six commands behind it is hiding the part you actually need
+ * to review.
+ */
+export interface ToolCallState {
+  /** The provider's own id, which is what pairs a result with its call. */
+  callId: string
+  name: string
+  /** `null` until the call ends — that is what "still running" looks like. */
+  ok: boolean | null
+}
+
 export interface TurnState {
   id: number
   role: 'user' | 'assistant'
@@ -34,6 +50,8 @@ export interface TurnState {
    * question ends) and makes "resend this prompt" impossible.
    */
   response: string
+  /** In the order the agent ran them. */
+  toolCalls: ToolCallState[]
   tokensIn: number
   tokensOut: number
   cost: number
@@ -147,6 +165,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         status: 'running',
         prompt: p.text ?? '',
         response: '',
+        toolCalls: [],
         tokensIn: 0,
         tokensOut: 0,
         cost: 0,
@@ -160,6 +179,28 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       // Append rather than replace: a transcript is built from deltas, and the
       // order is guaranteed by the sequence, not by arrival.
       if (t) t.response += p.text
+      break
+    }
+
+    case 'tool.call.began': {
+      const session = state.sessions.get(event.sessionId)
+      const t = session && turn(session, p.turnId)
+      if (!t) break
+      // Ignore a duplicate id rather than showing the same call twice: a
+      // reconnect can replay, and the log is the same either way.
+      if (t.toolCalls.some(call => call.callId === p.callId)) break
+      t.toolCalls.push({ callId: p.callId, name: p.toolName, ok: null })
+      break
+    }
+
+    case 'tool.call.ended': {
+      const session = state.sessions.get(event.sessionId)
+      const t = session && turn(session, p.turnId)
+      const call = t?.toolCalls.find(c => c.callId === p.callId)
+      // A result whose call was never seen is dropped, not invented: the driver
+      // conformance suite refuses that ordering, so its appearance here would
+      // mean the log itself is wrong and a fabricated row would hide it.
+      if (call) call.ok = p.ok
       break
     }
 

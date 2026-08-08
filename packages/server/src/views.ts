@@ -107,6 +107,14 @@ export function viewProps(state: HarnessState, options: {
             prompt: turn.prompt,
             response: turn.response,
             status: turn.status,
+            // What the agent actually did. A reply without these is a summary
+            // of work you cannot review.
+            toolCalls: turn.toolCalls.map(call => ({
+              callId: call.callId,
+              name: call.name,
+              // Three states, not two: running, succeeded, failed.
+              state: call.ok === null ? 'running' : call.ok ? 'ok' : 'failed',
+            })),
           })),
         }
       : null,

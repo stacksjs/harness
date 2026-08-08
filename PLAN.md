@@ -1080,6 +1080,33 @@ Under the 4ms frame budget at p95. The p99 spikes past it on occasional layout/G
 grows without bound is still worth watching — but the architecture is not the problem, and mobile (M7)
 can safely commit to the same views.
 
+### Tool calls were logged and never shown
+
+The transcript rendered the agent's reply and nothing else. `tool.call.began` /
+`tool.call.ended` had been in the log since M2, the runtime emitted both, and the **projection dropped
+them** — so an agent harness showed you the answer but not the six commands behind it, which is the part
+you actually review.
+
+Nothing was lost, which is the point of keeping a log: projecting them retroactively made every session
+ever recorded show its tools on the next render, including the `Write` denied during the approval test.
+
+Three states, not two: running, succeeded, failed. Collapsing that to a boolean makes a hung command read
+as a completed one. Verified live in a browser — a `Read:running` row appeared 5.4s into a turn and
+resolved to `Read:ok, Bash:ok` a second later, so the pending state is visible in flight rather than only
+in hindsight.
+
+Two defects fell out of building it. A hand-written `TurnState` fixture in the view tests drifted the
+moment the type gained a field, and failed as a crash inside `viewProps` rather than as a message about
+the fixture — it now goes through one builder. And `serve()` never forwarded its `workspacePath` option
+to the runtime, so the option existed and did nothing.
+
+### A missing workspace now says so
+
+An agent runs with its workspace as cwd, and a workspace can be renamed, unmounted, or swept by the OS
+between sessions. When `/tmp/codex-probe` disappeared mid-session, the Claude SDK reported **"native
+binary exists but failed to launch"** — sending me to inspect a 207MB binary that ran perfectly well
+standalone. The runtime checks the path before creating a driver and names the actual problem.
+
 **Still open:** diff view.
 
 ### M3 — Web surface *(original scope)*
