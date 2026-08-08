@@ -103,10 +103,16 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
   // template and CSS toolchain; loading it eagerly made every socket test pay
   // for a renderer it never calls, to the point of being OOM-killed.
   const { renderView } = await import('@stacksjs/stx')
-  // `renderView` searches the app's own component directories and stx's
-  // built-ins, but not the published component library — so `<Sidebar>`
-  // resolves to a "component not found" block unless it is pointed here.
+  // `renderView` resolves components by filename, and searches only the app's
+  // own directories plus stx's built-ins — so `<Sidebar>` renders as a
+  // "component not found" block unless it is pointed at the library.
+  //
+  // It must point at `src/`, not `dist/`: the published dist ships hashed
+  // filenames (`Sidebar-56px4jha.stx`) that plain-name lookup cannot find,
+  // while `src/ui/<name>/<Name>.stx` keeps the tag name. That is also what the
+  // package's own stx plugin registers, so this matches how a configured stx
+  // build resolves them.
   return renderView(path, props as unknown as Record<string, unknown>, {
-    componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/dist'),
+    componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
   })
 }
