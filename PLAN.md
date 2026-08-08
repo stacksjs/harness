@@ -317,7 +317,7 @@ parse. pi's `packages/protocol/cbor` is the right instinct; we take the idea, no
 ### Client-dispatchable commands
 
 ```
-session.create            { workspaceId, driverKind, providerInstanceId }
+session.create            { workspaceId, driverKind, model?, providerInstanceId }
 session.turn.start        { sessionId, text, attachments? }
 session.turn.interrupt    { sessionId }
 session.approval.respond  { sessionId, approvalId, decision, scope }
@@ -981,7 +981,44 @@ Craft window over the server. Native chrome: per-profile titlebar tint, system t
 shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
 **Exit:** a signed `.dmg` under 15MB that cold-starts under 300ms, both measured in CI.
 
-### M5 — The rest of the drivers
+### M5 — The rest of the drivers *(partial)*
+
+| Driver | Transport | State on this machine |
+|---|---|---|
+| claude | Agent SDK | ready — turns verified live |
+| codex | `app-server`, JSON-RPC/stdio | implemented; handshake, thread, turn and error paths verified live. **No successful completion yet** — the account's quota is exhausted, so deltas, tool calls, approvals and usage are covered only by recorded/schema-derived tests. |
+| cursor | ACP + extension | registered, unimplemented |
+| grok | ACP + extension | registered, unimplemented |
+| opencode | own CLI/HTTP runtime | registered, unimplemented |
+
+**The conformance suite is the deliverable**, not the driver count. It states the ordering invariants
+the engine silently assumes — exactly one terminal event per turn, no tool result without its call, at
+most one session binding per turn, non-negative integer usage, idempotent interrupt and approval, clean
+teardown — and each case carries *why* it matters, so a failure reads as a diagnosis. Its own tests use
+fakes that each break exactly one invariant, so the suite is proven to fail as well as to pass.
+
+Codex was written against the protocol the CLI generates for itself
+(`codex app-server generate-json-schema`), not against guesswork. Two findings that only a live run
+produced:
+
+- Codex emits an `error` notification **and then** a failed `turn/completed`. Emitting on arrival would
+  end every failed turn twice. Holding the error until completion is verified live: a usage-limited turn
+  produces two events and exactly one terminal.
+- The `thread/start` enums are kebab-case; `onRequest` was rejected only *after* a thread had started.
+  Pinned by test. The policy is `untrusted`, not `on-request` — on-request lets the model decide when to
+  ask, and harness's contract is that the user owns that decision.
+
+The four unimplemented drivers are **registered, not absent**. A registered driver reports "not
+installed" or "installed but the driver is not implemented yet"; an absent one reports "no driver for
+cursor", which the user cannot act on. `startTurn` throws rather than returning an empty stream, because
+a silent turn is indistinguishable from an agent with nothing to say.
+
+`./buddy harness:doctor [--conformance]` probes every driver and runs the spec against them.
+
+**Still open:** the ACP client (cursor and grok both speak it, so it unlocks the most and should come
+first), the OpenCode runtime, and a live green codex completion once quota returns.
+
+### M5 — The rest of the drivers *(original scope)*
 ACP client, then Cursor and Grok as extensions over it. Codex app-server. OpenCode runtime.
 Conformance suite green for all five.
 **Exit:** every provider passes the same spec; adding a sixth is a weekend.
