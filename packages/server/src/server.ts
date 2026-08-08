@@ -51,6 +51,11 @@ export interface HarnessServer {
   server: Server
   engine: Engine
   runtime: ProviderRuntime
+  /**
+   * Tell the server a native window has just been launched, so it can report
+   * cold start when that window's page checks in.
+   */
+  markWindowSpawned: () => void
   stop: () => void
 }
 
@@ -80,6 +85,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const codec = await buildClientCodec()
   if (codec) assetCache.remember([codec])
   const codecUrl = codec ? `${ASSET_PREFIX}/${codec.filename}` : ''
+  // Set by a host that launches a native window, so cold start can be reported
+  // against the budget in PLAN.md §11 rather than estimated from outside.
+  let windowSpawnedAt: number | null = null
   let nativeProbe: Record<string, unknown> | null = null
 
   function send(socket: HarnessSocket, payload: unknown): void {
@@ -280,6 +288,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (url.pathname === '/native-probe' && request.method === 'POST') {
         return request.json().then((body) => {
           nativeProbe = body as Record<string, unknown>
+          // Cold start, measured in one process so the two clocks are the same
+          // one: from the moment the window was spawned to the moment its page
+          // ran its own JS. Timing it from the outside would fold in the CLI's
+          // own boot and the server's hydrate, which the user pays once and
+          // which have nothing to do with the page.
+          if (windowSpawnedAt !== null && nativeProbe.phase === undefined) {
+            nativeProbe.coldStartMs = Date.now() - windowSpawnedAt
+            console.warn(`[native] cold start: ${nativeProbe.coldStartMs}ms (window spawn → page JS)`)
+          }
           console.warn('[native] probe:', JSON.stringify(nativeProbe))
           return new Response('ok')
         }).catch(() => new Response('bad probe', { status: 400 }))
@@ -324,6 +341,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     server,
     engine,
     runtime,
+    markWindowSpawned: () => { windowSpawnedAt = Date.now() },
     stop: () => {
       void runtime.stopAll()
       server.stop(true)

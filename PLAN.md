@@ -953,7 +953,42 @@ client.
 **Exit:** `harness run "list the files"` streams a real Claude Code turn; killing the server
 mid-turn and restarting resumes without losing events.
 
-### M3 — Web surface
+### M3 — Web surface *(live half verified late)*
+
+The views, the sidebar and the transcript shipped in M3. The **live** half did not work in a browser
+until the M4/M5 pass, and nothing caught it because the page renders correctly either way — the server
+sends a complete transcript, so a dead socket looks exactly like a quiet session. It took opening the
+page in a real browser; reading the template would not have found any of it.
+
+Four bugs, each hidden by the one above it:
+
+1. The island read `document.currentScript`, which is **always null inside a module**, per spec. It threw
+   on its first line, so the socket was never opened.
+2. With that fixed, `data-session="{{ activeSessionId }}"` arrived as literal mustache text — stx did not
+   interpolate script-tag attributes, which for a module island is the only channel for server data.
+   Fixed upstream (§10) and released as stx 0.2.161.
+3. With data flowing, the island called `window.__harnessEncode` — a global nothing defined. The page
+   speaks CBOR and had no codec. `@harness/contract` is pure, so it now bundles to a 3.3KB browser
+   module the island imports: the same implementation the server uses, not a second one.
+4. The subscribe frame sent `sinceSeq: window.__harnessSinceSeq ?? 0` — another global with one reader
+   and no writer. Every load resubscribed from zero, the server replayed the whole session on top of the
+   already-rendered transcript, and every response appeared twice. The projection had tracked `lastSeq`
+   all along.
+
+And one the fixes exposed: the island knew only the single live-response node present at page load, so a
+turn started afterwards appended its reply to the *previous* turn's answer. It now opens a turn on
+`turn.started`.
+
+**Verified live in a browser:** three turns, each with its own prompt and answer, exactly one marked
+live, no duplication, and text arriving over the socket with no reload.
+
+The lesson is worth keeping: a server-rendered surface hides a broken client. Every island needs a
+browser check, not a template review.
+
+**Still open:** approvals driven from the browser (the panel renders and the events exist; the buttons
+are not wired), session-list click-through, diff view, and the 10k-line transcript budget from §11.
+
+### M3 — Web surface *(original scope)*
 stx views: profile sidebar (§9), session list, transcript, composer, approvals, diff view. Hydration
 per §8's table. Connection supervisor with backoff.
 **Exit:** a full agent session driven from a browser, approvals included; the 10k-line transcript
@@ -964,17 +999,37 @@ budget from §11 holds.
 | Budget | Target | Measured | |
 |---|---|---|---|
 | Installed size | < 15MB | **1.1MB** release binary | ✅ |
-| Cold start → interactive | < 300ms | **428ms** best, 447ms median (4 runs) | ❌ |
+| Cold start → interactive | < 300ms | **~665ms** median | ❌ |
 
-The size budget is not close — Craft's whole thesis, confirmed. The startup budget is **missed by ~130ms**,
-measured window-launch to the page's own JS running. The likely lever is the page: 273KB with five inline
-`<style>` blocks, nearly all Crosswind CSS. That is a payload problem, not a Craft problem — the shell is
-already up long before the page finishes parsing. Extracting and caching the stylesheet is the first thing
-to try.
+The size budget is not close — Craft's whole thesis, confirmed.
+
+Cold start is now measured **inside the server process**: `markWindowSpawned()` is called immediately
+before spawning the window, and the page's own probe POST stamps the arrival. One process, one clock,
+covering exactly the window and its page — not the CLI's boot or the SQLite hydrate, which the user pays
+once and which say nothing about the page. The earlier 428ms figure came from timing the whole command
+from outside and is not comparable; this number replaces it.
+
+**The page-weight hypothesis was wrong, and the experiment says so.** The earlier note blamed the
+stylesheet. Measured: the CSS is 31KB, while the *stx runtime* is 159KB, inlined byte-identically on
+every request. Lifting the runtime and stylesheet into cacheable assets (see stx #1865/#1878, extended
+to SSR) took the page from **392,733 to 213,141 bytes — 46% smaller**. Cold start did not move:
+
+| | median | runs |
+|---|---|---|
+| inline | 671ms | 667, 693, 676, 667, 722, 667 |
+| externalized | 661ms | 662, 712, 658, 661, 774, 653 |
+
+Six interleaved pairs, to cancel drift. The difference is noise. Halving the document changes cold start
+by nothing, so the remaining ~665ms is not payload — it is window and WebView startup, inside Craft.
+Going further needs Craft instrumented, not more guessing from this side.
+
+The externalization stays regardless: on localhost bytes are free, but the web surface is not localhost,
+and ~190KB per request that no browser could cache was waste whatever the cold-start number says.
 
 Native surfaces verified in a live window rather than inferred: `window.craft`, `window.craft.gestures`,
 `nativeUI`, and `createSpacesSidebar` all present, with `<SidebarSpaces>` binding the native rail
 (`spacesBound: 1`, three profiles, an active space).
+
 
 ### M4 — Desktop surface *(original scope)*
 Craft window over the server. Native chrome: per-profile titlebar tint, system tray, global

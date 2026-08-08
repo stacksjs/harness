@@ -47,9 +47,13 @@ export default function (cli: CLI) {
         process.exit(ExitCode.FatalError)
       }
 
-      const { engine } = await serve({ port })
+      const { engine, markWindowSpawned } = await serve({ port })
       console.log(`harness server on http://127.0.0.1:${port} — ${engine.current.profiles.size} profile(s)`)
 
+      // Marked immediately before the spawn, so the reported cold start covers
+      // the window and its page — not this command's own startup, which the
+      // user pays once and which tells us nothing about page weight.
+      markWindowSpawned()
       const child = spawn(craftBin, [
         '--url', `http://127.0.0.1:${port}/`,
         '--title', 'harness',
