@@ -227,6 +227,31 @@ describe('a turn drives the provider', () => {
     expect(await client.waitFor('session.failed')).toBeTruthy()
     client.close()
   })
+
+  it('reports the remedy when the CLI is present but signed out', async () => {
+    // The gate is a probe before create. Without it the session would open,
+    // the user would send a prompt, and the failure would arrive mid-turn with
+    // no indication that the fix is one command.
+    let created = false
+    const driver: Driver = {
+      kind: 'codex',
+      async probe() { return { status: 'unauthenticated', message: 'run `codex login`' } },
+      async create() {
+        created = true
+        throw new Error('should never be created')
+      },
+    }
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'hi' } } })
+
+    const failed = await client.waitFor('session.failed')
+    expect(failed.message).toContain('codex login')
+    expect(created).toBe(false)
+    client.close()
+  })
 })
 
 describe('approvals round-trip through the socket', () => {

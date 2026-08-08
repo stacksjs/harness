@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { approvalLabel, createLineReader, translateNotification, usageOf } from '../src/codex'
+import { approvalLabel, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from '../src/codex'
 
 /**
  * Frames below are either verbatim from a live `codex app-server` run
@@ -195,5 +195,62 @@ describe('codex approval labels', () => {
     // An unlabelled prompt is still better than an empty one — the user has to
     // decide something, and needs to know what kind of thing it is.
     expect(approvalLabel('item/permissions/requestApproval', {})).toBe('permissions')
+  })
+})
+
+describe('codex thread parameters', () => {
+  const WORKSPACE = '/tmp/w'
+
+  it('spells the approval policy the way the wire does', () => {
+    // These are kebab-case on the wire. `onRequest` was rejected live with
+    // "unknown variant `onRequest`, expected one of untrusted, on-failure,
+    // on-request, granular, never" — after a thread had already been started,
+    // which is far too late for a typo to show up.
+    expect(threadStartParams({ workspacePath: WORKSPACE }).approvalPolicy).toBe('untrusted')
+    expect(threadStartParams({ workspacePath: WORKSPACE, autoApprove: true }).approvalPolicy).toBe('never')
+  })
+
+  it('does not delegate the ask-or-not decision to the model', () => {
+    // `on-request` would let Codex run whatever it considers safe without
+    // asking. Harness's contract is that the user owns that call, so an
+    // unattended session must never silently land on it.
+    expect(threadStartParams({ workspacePath: WORKSPACE }).approvalPolicy).not.toBe('on-request')
+  })
+
+  it('keeps the sandbox read-only until tool calls are approved', () => {
+    expect(threadStartParams({ workspacePath: WORKSPACE }).sandbox).toBe('read-only')
+    expect(threadStartParams({ workspacePath: WORKSPACE, autoApprove: true }).sandbox).toBe('workspace-write')
+  })
+
+  it('omits the model rather than sending null, letting codex pick its default', () => {
+    expect('model' in threadStartParams({ workspacePath: WORKSPACE })).toBe(false)
+    expect(threadStartParams({ workspacePath: WORKSPACE, model: 'gpt-5.4-mini' }).model).toBe('gpt-5.4-mini')
+  })
+})
+
+describe('codex error messages', () => {
+  it('unwraps the provider error codex nests inside its own', () => {
+    // Verbatim from a live run. Raw, the user reads a JSON blob; unwrapped,
+    // they read the one sentence that says what to do.
+    expect(readableError('{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'gpt-5.6-sol\' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}'))
+      .toBe("The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.")
+  })
+
+  it('leaves a plain message alone', () => {
+    // Also verbatim: Codex's own errors are already readable and must not be
+    // mangled by a parser looking for a wrapper that is not there.
+    const plain = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits."
+    expect(readableError(plain)).toBe(plain)
+  })
+
+  it('keeps text that only looks like json', () => {
+    expect(readableError('{not json after all')).toBe('{not json after all')
+    expect(readableError('{"status":500}')).toBe('{"status":500}')
+  })
+
+  it('never returns empty for a missing message', () => {
+    // An empty error renders as a session that failed for no stated reason.
+    expect(readableError(undefined)).toBe('codex reported an error')
+    expect(readableError(null)).toBe('codex reported an error')
   })
 })

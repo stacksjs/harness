@@ -177,6 +177,50 @@ function isOk(item: any): boolean {
   return item?.status !== 'failed'
 }
 
+/**
+ * Unwrap the upstream error Codex nests inside its own.
+ *
+ * When the model provider rejects a request, Codex puts the provider's entire
+ * JSON body into `error.message` as a string. Surfaced raw, the user reads
+ * `{"type":"error","status":400,...}` instead of "upgrade Codex" — the one
+ * sentence that tells them what to do.
+ */
+export function readableError(message: unknown): string {
+  const text = typeof message === 'string' ? message : String(message ?? 'codex reported an error')
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{')) return text
+  try {
+    const parsed = JSON.parse(trimmed)
+    const inner = parsed?.error?.message ?? parsed?.message
+    return typeof inner === 'string' && inner.length > 0 ? inner : text
+  }
+  catch {
+    // Not JSON after all — a message that merely begins with a brace.
+    return text
+  }
+}
+
+/**
+ * Parameters for `thread/start`.
+ *
+ * Extracted and exported because these are wire enums, spelled exactly as
+ * Codex's schema spells them — `on-request`, not `onRequest`. A typo here is
+ * rejected with "unknown variant" only once a real thread is started, which is
+ * far too late to find out; a test pins the strings instead.
+ */
+export function threadStartParams(config: DriverConfig): Record<string, unknown> {
+  return {
+    cwd: config.workspacePath,
+    // `untrusted`, not `on-request`: on-request lets the *model* decide when
+    // to ask, so anything it deems safe runs unapproved. Harness's contract is
+    // that the user owns that decision, and untrusted is the policy that asks
+    // for everything not already known-safe.
+    approvalPolicy: config.autoApprove ? 'never' : 'untrusted',
+    sandbox: config.autoApprove ? 'workspace-write' : 'read-only',
+    ...(config.model ? { model: config.model } : {}),
+  }
+}
+
 /** Codex reports tokens but never cost, so cost is 0 rather than an invention. */
 export function usageOf(tokenUsage: any): { tokensIn: number, tokensOut: number } {
   const last = tokenUsage?.last
@@ -299,7 +343,7 @@ class CodexInstance implements ProviderInstance {
         return
 
       case 'error':
-        this.turnError = String(frame.params?.error?.message ?? 'codex reported an error')
+        this.turnError = readableError(frame.params?.error?.message)
         return
 
       case 'turn/completed': {
@@ -307,7 +351,7 @@ class CodexInstance implements ProviderInstance {
         this.turnError = null
         this.turnId = null
         this.queue?.finish(error
-          ? { type: 'error', message: String(error) }
+          ? { type: 'error', message: readableError(error) }
           : { type: 'turn-complete', ...this.usage, costMicros: 0 })
         return
       }
@@ -364,14 +408,7 @@ class CodexInstance implements ProviderInstance {
     }
 
     if (!this.threadId) {
-      const started = await this.request('thread/start', {
-        cwd: this.config.workspacePath,
-        // Codex enforces its own approval policy; `onRequest` is what makes it
-        // ask rather than decide, which is the behaviour harness owns.
-        approvalPolicy: this.config.autoApprove ? 'never' : 'onRequest',
-        sandbox: this.config.autoApprove ? 'workspace-write' : 'read-only',
-        ...(this.config.model ? { model: this.config.model } : {}),
-      })
+      const started = await this.request('thread/start', threadStartParams(this.config))
       if (started.error) {
         queue.finish({ type: 'error', message: started.error.message ?? 'thread/start failed' })
         return

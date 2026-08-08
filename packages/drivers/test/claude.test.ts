@@ -189,3 +189,71 @@ describe('Driver registry', () => {
     expect(resolveDriver('nonesuch' as DriverKind)).toBeNull()
   })
 })
+
+describe('a failed result is not a completion', () => {
+  /** The result message Claude Code actually returns for a model that does not exist. */
+  function errorResult(): SDKMessage {
+    return {
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      api_error_status: 404,
+      duration_ms: 1020,
+      duration_api_ms: 0,
+      num_turns: 1,
+      result: "There's an issue with the selected model (not-a-real-model). It may not exist or you may not have access to it.",
+      session_id: 's',
+      total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+      modelUsage: {},
+      permission_denials: [],
+      uuid: 'u',
+    } as unknown as SDKMessage
+  }
+
+  it('treats is_error as the verdict, not the subtype', () => {
+    // Verbatim from a live run: subtype is `success` and is_error is true.
+    // Reading only the subtype recorded a 404 as a finished turn with zero
+    // tokens — a transcript entry that completed and said nothing.
+    expect(translate(errorResult())).toEqual([{
+      type: 'error',
+      message: "There's an issue with the selected model (not-a-real-model). It may not exist or you may not have access to it.",
+    }])
+  })
+
+  it('carries the sentence the user can act on', () => {
+    const [event] = translate(errorResult())
+    expect(event.type).toBe('error')
+    // `turn failed: success` is what the subtype alone would have produced.
+    expect(event.type === 'error' && event.message).not.toContain('turn failed')
+  })
+
+  it('still completes a genuinely successful turn', () => {
+    const ok = {
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      session_id: 's',
+      total_cost_usd: 0.0153,
+      usage: { input_tokens: 10, output_tokens: 45 },
+      uuid: 'u',
+    } as unknown as SDKMessage
+    expect(translate(ok)).toEqual([{
+      type: 'turn-complete',
+      tokensIn: 10,
+      tokensOut: 45,
+      costMicros: 15300,
+    }])
+  })
+
+  it('falls back to the subtype when there is no message', () => {
+    const aborted = {
+      type: 'result',
+      subtype: 'error_during_execution',
+      session_id: 's',
+      usage: { input_tokens: 0, output_tokens: 0 },
+      uuid: 'u',
+    } as unknown as SDKMessage
+    expect(translate(aborted)).toEqual([{ type: 'error', message: 'turn failed: error_during_execution' }])
+  })
+})

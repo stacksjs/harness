@@ -1,6 +1,6 @@
 export { ClaudeDriver, translate } from './claude'
 export { CursorDriver, DriverNotImplemented, GrokDriver, OpenCodeDriver, probeBinary } from './cli-driver'
-export { approvalLabel, CodexDriver, createLineReader, translateNotification, usageOf } from './codex'
+export { approvalLabel, CodexDriver, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from './codex'
 export { formatConformance, runConformance } from './conformance'
 export type { ConformanceCase, ConformanceReport } from './conformance'
 export { driverKinds, registry, resolveDriver } from './registry'

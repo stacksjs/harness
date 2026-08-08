@@ -87,6 +87,7 @@ export class ProviderRuntime {
     }
 
     const state = this.options.engine.current
+    const session = state.sessions.get(sessionId)
     const workspacePath = this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
       : defaultWorkspacePath(state, sessionId)
@@ -96,7 +97,26 @@ export class ProviderRuntime {
       return null
     }
 
-    const instance = await driver.create({ workspacePath, autoApprove: this.options.autoApprove })
+    // Probe before creating, so a missing or signed-out CLI surfaces as the fix
+    // ("run `codex login`") rather than as an opaque failure part-way through
+    // the user's first turn. Probes run once per session, not once per turn.
+    const probe = await driver.probe({ workspacePath, autoApprove: this.options.autoApprove })
+    if (probe.status !== 'ready') {
+      await this.emit({
+        type: 'thread.error',
+        sessionId,
+        message: probe.message ?? `${driverKind} is ${probe.status}`,
+      })
+      return null
+    }
+
+    const instance = await driver.create({
+      workspacePath,
+      autoApprove: this.options.autoApprove,
+      // Empty means "no preference" — the driver must omit it so the provider
+      // picks its own default, rather than being asked for a model named ''.
+      model: session?.model || undefined,
+    })
     const running: Running = { instance, approvals: new Map(), abandoned: false }
     this.sessions.set(sessionId, running)
     return running

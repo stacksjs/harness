@@ -1,3 +1,4 @@
+import type { DriverKind } from '@harness/contract'
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
 import { HarnessClient } from '@harness/client'
@@ -24,7 +25,9 @@ export default function (cli: CLI) {
     .option('--profile [name]', 'Profile to create the workspace under', { default: 'CLI' })
     .option('--path [path]', 'Workspace path', { default: process.cwd() })
     .option('--yes', 'Approve tool calls automatically', { default: false })
-    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean }) => {
+    .option('--driver [kind]', 'Agent to run the turn (claude, codex, ...)', { default: 'claude' })
+    .option('--model [model]', "Model override; omit to use the provider's default")
+    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string }) => {
       const client = new HarnessClient({ url: options.url })
 
       try {
@@ -64,11 +67,17 @@ export default function (cli: CLI) {
       }
 
       const sessionCmd = commandId('session')
-      await client.dispatch(sessionCmd, { type: 'session.create', workspaceId, driverKind: 'claude' })
+      await client.dispatch(sessionCmd, {
+        type: 'session.create',
+        workspaceId,
+        driverKind: options.driver as DriverKind,
+        ...(options.model ? { model: options.model } : {}),
+      })
       const sessionId = derivedId(sessionCmd)
       client.subscribe(sessionId)
 
       let done = false
+      let failure: string | null = null
       client.onEvent((event) => {
         const payload = event.payload
         switch (payload.type) {
@@ -93,7 +102,17 @@ export default function (cli: CLI) {
             done = true
             break
           case 'turn.interrupted':
+            process.stdout.write('\n  interrupted\n')
+            done = true
+            break
+          // A failed turn used to end this command silently with status 0 —
+          // indistinguishable from an agent that had nothing to say. The
+          // provider's own message is the useful part ("run `codex login`",
+          // "you've hit your usage limit"), so print it and fail the exit code
+          // so a script notices.
           case 'session.failed':
+            process.stderr.write(`\n  ${payload.message}\n`)
+            failure = payload.message
             done = true
             break
         }
@@ -107,6 +126,12 @@ export default function (cli: CLI) {
         await new Promise(resolve => setTimeout(resolve, 50))
 
       client.close()
-      process.exit(ExitCode.Success)
+
+      // A turn that never reached a terminal event is not a success either —
+      // the deadline expiring means the server or the agent stopped talking.
+      if (!done && !failure)
+        process.stderr.write('\n  the turn produced no terminal event before the deadline\n')
+
+      process.exit(failure || !done ? ExitCode.FatalError : ExitCode.Success)
     })
 }

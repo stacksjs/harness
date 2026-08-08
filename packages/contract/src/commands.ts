@@ -15,7 +15,7 @@ export type ApprovalScope = 'once' | 'session' | 'workspace' | 'always'
 
 /** Commands a client is allowed to dispatch. */
 export type ClientCommand =
-  | { type: 'session.create', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number }
+  | { type: 'session.create', workspaceId: number, driverKind: DriverKind, model?: string, providerInstanceId?: number }
   | { type: 'session.turn.start', sessionId: number, text: string }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }

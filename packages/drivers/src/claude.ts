@@ -77,6 +77,11 @@ class ClaudeInstance implements ProviderInstance {
 
     // Bound to the session, so the next turn can resume rather than restart.
     let bound = input.providerSessionId ?? null
+    // Whether this turn has already reported how it ended. The SDK reports a
+    // failed turn twice — once as a `result` message, then again by throwing
+    // as the iterator finishes — and two terminal events would settle the
+    // turn twice.
+    let terminal = false
 
     try {
       for await (const message of run as AsyncIterable<SDKMessage>) {
@@ -89,9 +94,19 @@ class ClaudeInstance implements ProviderInstance {
           yield { type: 'session-bound', providerSessionId: message.session_id }
         }
 
-        for (const event of translate(message))
+        for (const event of translate(message)) {
+          if (event.type === 'turn-complete' || event.type === 'error') terminal = true
           yield event
+        }
       }
+    }
+    catch (error) {
+      // Only report a throw we have not already described. Rethrowing a
+      // failure the `result` message just delivered would surface the same
+      // problem to the user twice.
+      if (terminal) return
+      yield { type: 'error', message: error instanceof Error ? error.message : String(error) }
+      terminal = true
     }
     finally {
       // Clear the queue so a cancelled turn's approvals do not surface on the
@@ -189,7 +204,12 @@ export function translate(message: SDKMessage): ProviderEvent[] {
     }
 
     case 'result': {
-      if (message.subtype === 'success') {
+      // `subtype` is not the verdict. A model that does not exist returns
+      // `subtype: 'success'` with `is_error: true` and a 404 — reading only the
+      // subtype recorded that turn as a completion with zero tokens, so the
+      // transcript showed a turn that finished and said nothing.
+      const failed = (message as { is_error?: boolean }).is_error === true
+      if (message.subtype === 'success' && !failed) {
         return [{
           type: 'turn-complete',
           tokensIn: message.usage.input_tokens ?? 0,
@@ -197,7 +217,12 @@ export function translate(message: SDKMessage): ProviderEvent[] {
           costMicros: toMicros(message.total_cost_usd ?? 0),
         }]
       }
-      return [{ type: 'error', message: `turn failed: ${message.subtype}` }]
+      // `result` carries the sentence a user can act on ("it may not exist or
+      // you may not have access to it"); the subtype is only a category.
+      const detail = typeof (message as { result?: unknown }).result === 'string'
+        ? (message as { result: string }).result
+        : `turn failed: ${message.subtype}`
+      return [{ type: 'error', message: detail }]
     }
 
     default:

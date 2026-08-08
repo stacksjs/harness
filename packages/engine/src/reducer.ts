@@ -112,6 +112,9 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           type: 'session.created',
           workspaceId: command.workspaceId,
           driverKind: command.driverKind,
+          // Omitted rather than sent empty, so "no preference" and "the empty
+          // model" cannot be confused on replay.
+          ...(command.model ? { model: command.model } : {}),
         },
       }]
     }

@@ -18,7 +18,7 @@ export interface EventBase {
 }
 
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, model?: string }
   | { type: 'session.stopped' }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
