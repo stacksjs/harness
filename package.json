@@ -6,7 +6,7 @@
   "engines": {
     "bun": "1.3.14"
   },
-  "description": "An agent harness control surface \u2014 drive Claude Code, Codex, Cursor and friends from a native app.",
+  "description": "An agent harness control surface — drive Claude Code, Codex, Cursor and friends from a native app.",
   "author": "Chris Breuer <chris@stacksjs.org>",
   "contributors": [
     "Chris Breuer <chris@stacksjs.org>"
@@ -76,6 +76,7 @@
     "stx": "./buddy"
   },
   "dependencies": {
+    "@stacksjs/stx": "^0.2.161",
     "stacks": "^0.70.304"
   },
   "workspaces": [

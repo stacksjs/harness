@@ -23,6 +23,17 @@ export interface ViewProps {
   activeProfile: string
   activeSession: unknown
   serverUrl: string
+  /** URL of the browser CBOR bundle, or '' when it could not be built. */
+  codecUrl: string
+  /**
+   * The last sequence this render already contains.
+   *
+   * The socket resumes from here, so a page load replays only the gap. Without
+   * it the client subscribes from 0 and the server replays the whole session on
+   * top of a transcript the server already rendered — every delta appended
+   * twice.
+   */
+  sinceSeq: number
 }
 
 /**
@@ -35,6 +46,7 @@ export interface ViewProps {
 export function viewProps(state: HarnessState, options: {
   sessionId?: number
   serverUrl: string
+  codecUrl?: string
 }): ViewProps {
   const profiles = [...state.profiles.values()].map((profile) => {
     const workspaces = profile.workspaceIds
@@ -74,6 +86,7 @@ export function viewProps(state: HarnessState, options: {
           id: active.id,
           title: active.turns[0]?.prompt?.slice(0, 60) ?? `Session ${active.id}`,
           state: active.state,
+          lastSeq: active.lastSeq,
           turns: active.turns.map(turn => ({
             id: turn.id,
             prompt: turn.prompt,
@@ -83,6 +96,8 @@ export function viewProps(state: HarnessState, options: {
         }
       : null,
     serverUrl: options.serverUrl,
+    codecUrl: options.codecUrl ?? '',
+    sinceSeq: active?.lastSeq ?? 0,
   }
 }
 

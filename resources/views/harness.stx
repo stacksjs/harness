@@ -16,6 +16,12 @@ export const sessions = $props.sessions || []
 export const activeProfile = $props.activeProfile || (profiles[0] && profiles[0].id) || ''
 export const activeSession = $props.activeSession || null
 export const serverUrl = $props.serverUrl || ''
+// The browser CBOR bundle. Empty when the server could not build one, which
+// costs the page its live updates but not its rendered transcript.
+export const codecUrl = $props.codecUrl || ''
+// The sequence this render already contains. The socket resumes from here so a
+// load replays only what is missing.
+export const sinceSeq = $props.sinceSeq || 0
 
 // One space per profile. `pinned` is the favourite-repos tile grid; the
 // sections are the profile's sessions, split by whether they are live.
@@ -139,7 +145,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   </main>
 </div>
 
-<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-url="{{ serverUrl }}">
+<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-url="{{ serverUrl }}" data-codec="{{ codecUrl }}" data-since-seq="{{ sinceSeq }}">
   // The live island. Everything above this is static HTML; this wires the
   // socket to the one turn that can still change.
   //
@@ -204,30 +210,104 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     }).catch(() => {})
   }, 2500)
 
-  const root = document.currentScript
-  const sessionId = Number(root.dataset.session)
-  const url = root.dataset.url
-  if (sessionId && url) {
+  // Not `document.currentScript`: it is always null inside a module, per spec,
+  // so reading `.dataset` off it threw and the socket was never opened. The
+  // whole live half of this page was dead in a browser — invisible because the
+  // server-rendered transcript still looked correct.
+  const root = document.querySelector('[data-harness-island]')
+  const sessionId = Number(root?.dataset.session)
+  const url = root?.dataset.url
+  const codecUrl = root?.dataset.codec
+
+  // The page speaks CBOR to the socket, so it needs the same codec the server
+  // uses. It arrives as a module rather than as assumed globals — the island
+  // used to call `window.__harnessEncode`, which nothing ever defined, so the
+  // socket connected and then threw on its first frame.
+  if (sessionId && url && codecUrl) {
+    const { encode, decode } = await import(codecUrl)
+
     const socket = new WebSocket(url)
     socket.binaryType = 'arraybuffer'
 
+    const transcript = document.querySelector('[data-transcript]')
     const responseNode = () => document.querySelector('[data-live-response]')
     const stateNode = document.querySelector('[data-session-state]')
     const approval = document.querySelector('[data-approval]')
 
+    // Start a fresh turn in the transcript.
+    //
+    // Without this the island only ever knew the one `[data-live-response]`
+    // node the server rendered, so a turn started after page load appended its
+    // reply to the *previous* turn's answer — two exchanges run together in one
+    // paragraph, with the new prompt never shown at all.
+    function beginTurn(turnId, prompt) {
+      // The previous turn is settled now: it can no longer receive deltas, and
+      // `data-live` is what marks the one turn that still can.
+      const previous = responseNode()
+      if (previous) previous.removeAttribute('data-live-response')
+      const previousArticle = transcript.querySelector('[data-turn][data-live]')
+      if (previousArticle) previousArticle.removeAttribute('data-live')
+
+      const article = document.createElement('article')
+      article.className = 'mb-5'
+      article.dataset.turn = String(turnId)
+      article.dataset.live = ''
+
+      const you = document.createElement('div')
+      you.className = 'mb-1 text-[12px] font-medium opacity-50'
+      you.textContent = 'You'
+
+      const ask = document.createElement('div')
+      ask.className = 'mb-3 whitespace-pre-wrap text-[13px] leading-[20px]'
+      // textContent, never innerHTML: a prompt is user input and must never be
+      // parsed as markup.
+      ask.textContent = prompt ?? ''
+
+      const who = document.createElement('div')
+      who.className = 'mb-1 text-[12px] font-medium opacity-50'
+      who.textContent = 'Agent'
+
+      const answer = document.createElement('div')
+      answer.className = 'whitespace-pre-wrap text-[13px] leading-[20px]'
+      answer.dataset.response = ''
+      answer.dataset.liveResponse = ''
+
+      article.append(you, ask, who, answer)
+      // Before the approval panel, which is the last child and must stay there.
+      transcript.insertBefore(article, approval)
+      // Follow the tail, the way a terminal does.
+      transcript.scrollTop = transcript.scrollHeight
+    }
+
     socket.addEventListener('open', () => {
       // Resume from the last sequence the server rendered into this page, so a
       // reload replays the gap rather than the whole session.
-      socket.send(window.__harnessEncode({ t: 'subscribe', sessionId, sinceSeq: window.__harnessSinceSeq ?? 0 }))
+      // From the sequence the server already rendered, not from zero.
+      // `window.__harnessSinceSeq` was read here and never written anywhere, so
+      // every load resubscribed from the beginning and the server replayed the
+      // whole session on top of the transcript already on the page — the
+      // response appeared twice.
+      socket.send(encode({ t: 'subscribe', sessionId, sinceSeq: Number(root.dataset.sinceSeq) || 0 }))
     })
 
     socket.addEventListener('message', (event) => {
-      const frame = window.__harnessDecode(new Uint8Array(event.data))
+      const frame = decode(new Uint8Array(event.data))
       if (frame?.t !== 'event') return
       const payload = frame.event.payload
-      if (payload.type === 'assistant.delta') {
+      if (payload.type === 'turn.started') {
+        // Only the user's half opens a new exchange; the assistant's turn is
+        // the reply within it.
+        if (payload.role === 'user') {
+          beginTurn(payload.turnId, payload.text)
+          if (stateNode) stateNode.textContent = 'running'
+        }
+      }
+      else if (payload.type === 'assistant.delta') {
         const node = responseNode()
-        if (node) node.textContent += payload.text
+        if (node) {
+          node.textContent += payload.text
+          transcript.scrollTop = transcript.scrollHeight
+        }
       }
       else if (payload.type === 'turn.completed') {
         if (stateNode) stateNode.textContent = 'idle'

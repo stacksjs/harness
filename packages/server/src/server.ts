@@ -12,6 +12,8 @@ import type { Server, ServerWebSocket } from 'bun'
 import type { Driver, DriverKind } from '@harness/drivers'
 import { CborError, decode, encode } from '@harness/contract'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
+import { ASSET_PREFIX, AssetCache } from './assets'
+import { buildClientCodec } from './client-bundle'
 import { ProviderRuntime } from './runtime'
 import { renderHarnessView, viewProps } from './views'
 
@@ -72,6 +74,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   await engine.hydrate()
 
   const sockets = new Set<HarnessSocket>()
+  const assetCache = new AssetCache()
+  // Built once, before listening: the page references it by URL, so it must be
+  // servable by the time the first render can hand that URL out.
+  const codec = await buildClientCodec()
+  if (codec) assetCache.remember([codec])
+  const codecUrl = codec ? `${ASSET_PREFIX}/${codec.filename}` : ''
   let nativeProbe: Record<string, unknown> | null = null
 
   function send(socket: HarnessSocket, payload: unknown): void {
@@ -227,6 +235,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return upgraded ? undefined : new Response('expected a websocket upgrade', { status: 426 })
       }
 
+      // Shared page assets. Checked before the page routes because their
+      // paths are fixed and a render must never shadow them.
+      const asset = assetCache.respond(url.pathname)
+      if (asset) return asset
+
       // The web surface. Rendered per request from the in-memory projection —
       // no query runs, so the shell paints immediately.
       if (url.pathname === '/' || url.pathname.startsWith('/s/')) {
@@ -236,8 +249,19 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return renderHarnessView(viewProps(engine.current, {
           sessionId,
           serverUrl: `ws://${url.host}/ws`,
-        })).then((html) => {
-          if (html === null) return new Response('view not found', { status: 404 })
+          codecUrl,
+        })).then(async (rendered) => {
+          if (rendered === null) return new Response('view not found', { status: 404 })
+
+          // Lift the runtime, router and stylesheet out into cacheable assets.
+          // They are byte-identical on every request, so inlining them means
+          // re-sending ~190KB the browser already has.
+          const { externalizeHtml } = await import('@stacksjs/stx')
+          const { html, assets } = externalizeHtml(rendered, ASSET_PREFIX)
+          // Remembered before responding, or the page would reference an asset
+          // this process cannot yet serve.
+          assetCache.remember(assets)
+
           return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } })
         }).catch((error: unknown) => {
           // A template error must not take the socket down with it.
