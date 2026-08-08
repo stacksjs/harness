@@ -104,7 +104,23 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         data-session-state
         class="rounded-full px-2 py-[2px] text-[11px] leading-[14px] opacity-70"
       >{{ sessionState }}</span>
+      <!--
+        Changes sit behind a toggle rather than always-on. Reading a repository
+        costs a subprocess, and most page loads never look at the diff.
+      -->
+      <button
+        type="button"
+        data-diff-toggle
+        class="ml-auto rounded-[6px] border border-black/10 px-2 py-[3px] text-[12px] dark:border-white/15"
+        aria-expanded="false"
+      >Changes</button>
     </header>
+
+    <section data-diff hidden class="max-h-[45%] shrink-0 overflow-y-auto border-b border-black/5 px-4 py-3 dark:border-white/5">
+      <div data-diff-status class="text-[12px] opacity-60">Loading…</div>
+      <ul data-diff-files class="mb-2 list-none"></ul>
+      <pre data-diff-patch class="overflow-x-auto text-[12px] leading-[17px]"></pre>
+    </section>
 
     <!--
       The transcript. Settled turns are plain server-rendered HTML and hydrate
@@ -297,6 +313,74 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if (!panel || !panel.hasAttribute('data-space-deferred')) return
     window.location.assign(`/?profile=${encodeURIComponent(id)}`)
   })
+
+  // The diff panel: what the agent changed on disk, which is what a transcript
+  // cannot tell you. Fetched on open and on demand, never polled — a repository
+  // read is a subprocess, and a transcript nobody is reviewing should not pay
+  // for one every few seconds.
+  const diffToggle = document.querySelector('[data-diff-toggle]')
+  const diffPanel = document.querySelector('[data-diff]')
+  if (diffToggle && diffPanel) {
+    const status = diffPanel.querySelector('[data-diff-status]')
+    const fileList = diffPanel.querySelector('[data-diff-files]')
+    const patchNode = diffPanel.querySelector('[data-diff-patch]')
+
+    async function loadDiff(sessionId) {
+      status.textContent = 'Loading…'
+      fileList.replaceChildren()
+      patchNode.textContent = ''
+
+      let diff
+      try {
+        diff = await (await fetch(`/s/${sessionId}/diff`)).json()
+      }
+      catch {
+        status.textContent = 'Could not read the workspace.'
+        return
+      }
+
+      if (diff.error) { status.textContent = diff.error; return }
+      if (!diff.isRepository) { status.textContent = 'This workspace is not a git repository.'; return }
+      if (diff.files.length === 0) { status.textContent = 'No uncommitted changes.'; return }
+
+      // Said plainly, because the number is easy to over-trust: this is the
+      // working tree, not this session's changes. Attributing them needs a
+      // baseline commit per session (PLAN.md §M6).
+      status.textContent = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'} in the working tree`
+
+      for (const file of diff.files) {
+        const row = document.createElement('li')
+        row.className = 'flex items-center gap-[8px] py-[1px] text-[12px]'
+        row.dataset.diffFile = file.path
+
+        const badge = document.createElement('span')
+        badge.className = 'w-[64px] shrink-0 text-[11px] uppercase opacity-50'
+        badge.textContent = file.status
+
+        const name = document.createElement('span')
+        name.className = 'truncate font-mono'
+        // textContent: a path is data, and a repository can contain anything.
+        name.textContent = file.path
+
+        const counts = document.createElement('span')
+        counts.className = 'ml-auto shrink-0 font-mono text-[11px]'
+        // Untracked files have no counts; showing +0 -0 implies an empty file.
+        counts.textContent = file.status === 'untracked' ? '' : `+${file.insertions} −${file.deletions}`
+
+        row.append(badge, name, counts)
+        fileList.append(row)
+      }
+
+      patchNode.textContent = diff.patch
+    }
+
+    diffToggle.addEventListener('click', () => {
+      const opening = diffPanel.hidden
+      diffPanel.hidden = !opening
+      diffToggle.setAttribute('aria-expanded', String(opening))
+      if (opening && sessionId) loadDiff(sessionId)
+    })
+  }
 
   const root = document.querySelector('[data-harness-island]')
   const sessionId = Number(root?.dataset.session)

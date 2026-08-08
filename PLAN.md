@@ -1107,7 +1107,35 @@ between sessions. When `/tmp/codex-probe` disappeared mid-session, the Claude SD
 binary exists but failed to launch"** — sending me to inspect a 207MB binary that ran perfectly well
 standalone. The runtime checks the path before creating a driver and names the actual problem.
 
-**Still open:** diff view.
+### The diff view
+
+The last piece of M3's exit criterion. A transcript tells you what the agent
+*said* it did and which tools it ran; neither is the same as what is now in your
+working tree, and that gap is where the review step lives.
+
+`/s/:id/diff` shells out to git and returns the changed files with their line
+counts plus a unified patch. Fetched on open rather than rendered into the page
+or polled: reading a repository costs a subprocess and most page loads never
+open the diff.
+
+**Scope, stated in the UI as well as the code:** this is the workspace's
+*uncommitted* state, not per-session attribution. Edits you had in flight before
+the session started appear here too. Attributing changes to one session needs a
+baseline commit recorded when the session opens, which belongs with the
+branch-per-session work in §M6 — claiming it now would be worse than not
+offering it, because a wrong attribution is trusted.
+
+The parsers are tested directly because their awkward cases are the ones a
+hand-rolled porcelain parser gets wrong, and a wrong path is shown to the user
+as a file that does not exist: renames spend two NUL-separated fields, binary
+files report `-` rather than a count (`Number('-')` is `NaN`, which renders as
+"NaN"), and `-z` exists so a path containing a space or newline survives. A
+patch over 512KB is truncated *with a note*, since a diff that stops halfway
+reads as a complete one.
+
+Verified in a browser against this repository: five changed files listed with
+statuses and counts, untracked files correctly showing no counts rather than
+`+0 −0`, and a 7KB patch rendered.
 
 ### M3 — Web surface *(original scope)*
 stx views: profile sidebar (§9), session list, transcript, composer, approvals, diff view. Hydration

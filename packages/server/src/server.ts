@@ -14,8 +14,9 @@ import { CborError, decode, encode } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
 import { ASSET_PREFIX, AssetCache } from './assets'
+import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
-import { ProviderRuntime } from './runtime'
+import { defaultWorkspacePath, ProviderRuntime } from './runtime'
 import { renderHarnessView, viewProps } from './views'
 
 export interface ServeOptions {
@@ -250,6 +251,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           data: { subscriptions: new Set<number>(), cursors: new Map<number, number>() },
         })
         return upgraded ? undefined : new Response('expected a websocket upgrade', { status: 426 })
+      }
+
+      // What the agent changed on disk. Fetched on demand rather than rendered
+      // into the page: reading a repository costs a subprocess, and most page
+      // loads never open the diff.
+      if (url.pathname.startsWith('/s/') && url.pathname.endsWith('/diff')) {
+        const id = Number(url.pathname.slice(3, -'/diff'.length)) || 0
+        const path = options.workspacePath
+          ? options.workspacePath(engine.current, id)
+          : defaultWorkspacePath(engine.current, id)
+        if (!path) return Response.json({ isRepository: false, files: [], patch: '', error: 'session has no workspace' })
+        return workspaceDiff(path)
+          .then(diff => Response.json(diff))
+          // A diff that cannot be read must not take the page down with it.
+          .catch(() => Response.json({ isRepository: false, files: [], patch: '', error: 'could not read the workspace' }))
       }
 
       // Shared page assets. Checked before the page routes because their

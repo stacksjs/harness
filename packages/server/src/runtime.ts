@@ -286,7 +286,8 @@ export class ProviderRuntime {
   }
 }
 
-function defaultWorkspacePath(state: HarnessState, sessionId: number): string | null {
+/** A session's workspace path, or null when it has none. */
+export function defaultWorkspacePath(state: HarnessState, sessionId: number): string | null {
   const session = state.sessions.get(sessionId)
   if (!session) return null
   return state.workspaces.get(session.workspaceId)?.path ?? null
