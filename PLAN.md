@@ -796,7 +796,7 @@ Enforced in CI. stx already has `scripts/performance-budgets.ts`; mirror the app
 | Desktop installed size | ~150MB | **< 15MB** |
 | Idle RSS, one session open | ~250MB | **< 60MB** |
 | Session-list first paint, 500 sessions | — | **< 50ms** (SSR shell) |
-| Transcript append, 10k-line session | — | **< 4ms** frame budget |
+| Transcript append, 10k-line session | **1.6ms median, 2.0ms p95** (9,568 lines, 506 turns) | **< 4ms** frame budget |
 | Profile swipe | — | **120Hz, zero dropped frames** |
 | Server memory, 20 concurrent sessions | — | **< 300MB** |
 | Reconnect → caught up, 30s of missed deltas | — | **< 200ms** |
@@ -1000,7 +1000,27 @@ second agent run. Enter sends, Shift+Enter newlines.
 | **Allow** clicked | tool ran; `note.txt`'s contents came back in the reply |
 | **Deny** clicked on a `Write` | file never created on disk; agent reported the denial; session returned to idle, not wedged |
 
-**Still open:** session-list click-through, diff view, and the 10k-line transcript budget from §11.
+Session-list click-through already worked: the sidebar renders real `<a href="/s/:id">` links, and
+navigating rebinds the island to the new session (verified — clicking a sidebar entry moved the URL, the
+island's `data-session`, and the header together).
+
+**The 10k-line transcript budget from §11 holds**, which is what settles the SSR-first risk in §16.
+Measured in a browser against a real page carrying 506 turn nodes / 9,568 lines, appending exactly as the
+socket does — `textContent +=` plus the scroll-follow that forces layout, since timing the append alone
+would flatter it:
+
+| | ms |
+|---|---|
+| median | 1.6 |
+| p95 | 2.0 |
+| p99 | 8.3 |
+| max | 9.9 |
+
+Under the 4ms frame budget at p95. The p99 spikes past it on occasional layout/GC, so a transcript that
+grows without bound is still worth watching — but the architecture is not the problem, and mobile (M7)
+can safely commit to the same views.
+
+**Still open:** diff view.
 
 ### M3 — Web surface *(original scope)*
 stx views: profile sidebar (§9), session list, transcript, composer, approvals, diff view. Hydration
