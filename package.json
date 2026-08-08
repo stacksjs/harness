@@ -76,7 +76,8 @@
     "stx": "./buddy"
   },
   "dependencies": {
-    "@stacksjs/stx": "^0.2.161",
+    "@stacksjs/components": "^0.2.166",
+    "@stacksjs/stx": "^0.2.165",
     "stacks": "^0.70.304"
   },
   "workspaces": [
