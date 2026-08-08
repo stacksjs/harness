@@ -1,0 +1,186 @@
+<script server>
+/**
+ * The harness surface.
+ *
+ * SSR-first with islands, not an SPA. A session transcript is mostly-static,
+ * append-heavy text — the worst case for a component tree that re-reconciles
+ * and the best case for server rendering. The shell, the profile list and every
+ * settled turn come down as HTML; only the live tail and the composer hydrate.
+ *
+ * Profiles are the Arc "spaces": one profile per project, each with its own
+ * colour, swiped between. `<Sidebar :spaces>` is the whole integration — the
+ * mapping below is the only harness-specific part.
+ */
+export const profiles = $props.profiles || []
+export const sessions = $props.sessions || []
+export const activeProfile = $props.activeProfile || (profiles[0] && profiles[0].id) || ''
+export const activeSession = $props.activeSession || null
+export const serverUrl = $props.serverUrl || ''
+
+// One space per profile. `pinned` is the favourite-repos tile grid; the
+// sections are the profile's sessions, split by whether they are live.
+export const spaces = profiles.map(profile => ({
+  id: String(profile.id),
+  label: profile.name,
+  icon: profile.icon || 'i-hugeicons-folder-01',
+  tint: profile.tint || 'blue',
+  pinned: (profile.workspaces || []).map(workspace => ({
+    id: String(workspace.id),
+    label: workspace.name,
+    icon: 'i-hugeicons-folder-01',
+  })),
+  sections: [
+    {
+      id: `active-${profile.id}`,
+      label: 'Active',
+      items: (profile.sessions || []).filter(s => s.state === 'running').map(toItem),
+    },
+    {
+      id: `recent-${profile.id}`,
+      label: 'Recent',
+      items: (profile.sessions || []).filter(s => s.state !== 'running').map(toItem),
+    },
+  ],
+  clear: { id: 'clear', label: 'Clear' },
+  action: { id: 'new-session', label: 'New Session', icon: 'i-hugeicons-add-01' },
+}))
+
+function toItem(session) {
+  return {
+    id: String(session.id),
+    label: session.title || `Session ${session.id}`,
+    icon: 'i-hugeicons-message-01',
+    href: `/s/${session.id}`,
+  }
+}
+
+export const hasProfiles = profiles.length > 0
+export const turns = activeSession ? activeSession.turns : []
+export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : 'No session'
+export const sessionState = activeSession ? activeSession.state : 'idle'
+export const activeSessionId = activeSession ? activeSession.id : 0
+// The last turn is the only one that can still change, so it is the only one
+// that needs hydrating — everything above it is settled history.
+export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
+export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
+</script>
+
+<div class="flex h-screen w-screen overflow-hidden bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+  <aside class="w-[280px] shrink-0 border-r border-black/5 dark:border-white/5" data-stx-sidebar>
+    @if(hasProfiles)
+      <Sidebar
+        :spaces="spaces"
+        :space="activeProfile"
+        spacePersistKey="harness.profile"
+        :showSpaceAdd="true"
+      />
+    @else
+      <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+        <p class="text-[13px] opacity-60">No profiles yet.</p>
+        <p class="text-[12px] opacity-40">Create one with <code>./buddy profiles:create</code></p>
+      </div>
+    @endif
+  </aside>
+
+  <main class="flex min-w-0 flex-1 flex-col">
+    <header class="flex h-[44px] shrink-0 items-center gap-3 border-b border-black/5 px-4 dark:border-white/5">
+      <span class="truncate text-[13px] font-medium">{{ sessionTitle }}</span>
+      <span
+        data-session-state
+        class="rounded-full px-2 py-[2px] text-[11px] leading-[14px] opacity-70"
+      >{{ sessionState }}</span>
+    </header>
+
+    <!--
+      The transcript. Settled turns are plain server-rendered HTML and hydrate
+      on `visible`, so scrolling back through a long session costs nothing until
+      you actually scroll. The live tail hydrates eagerly — it is the only part
+      the socket writes to.
+    -->
+    <div data-transcript class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      @foreach(settledTurns as turn)
+        <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}">
+          <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
+          <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ turn.prompt }}</div>
+          <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
+          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response>{{ turn.response }}</div>
+        </article>
+      @endforeach
+
+      @if(liveTurn)
+        <article class="mb-5" data-turn="{{ liveTurn.id }}" data-live>
+          <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
+          <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ liveTurn.prompt }}</div>
+          <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
+          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response data-live-response>{{ liveTurn.response }}</div>
+        </article>
+      @endif
+
+      <div data-approval hidden class="mb-5 rounded-[10px] border border-amber-500/30 bg-amber-500/10 p-3">
+        <div class="mb-2 text-[12px] font-medium">
+          <span data-approval-tool></span> wants to run.
+        </div>
+        <div class="flex gap-2">
+          <button type="button" data-approve class="rounded-[6px] bg-neutral-900 px-3 py-1 text-[12px] text-white dark:bg-white dark:text-neutral-900">Allow</button>
+          <button type="button" data-deny class="rounded-[6px] border border-black/10 px-3 py-1 text-[12px] dark:border-white/15">Deny</button>
+        </div>
+      </div>
+    </div>
+
+    <form data-composer class="flex shrink-0 items-end gap-2 border-t border-black/5 p-3 dark:border-white/5">
+      <textarea
+        data-prompt
+        rows="2"
+        placeholder="Ask the agent…"
+        class="min-h-[40px] flex-1 resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-neutral-900"
+      ></textarea>
+      <button type="submit" class="h-[36px] rounded-[8px] bg-neutral-900 px-4 text-[13px] text-white dark:bg-white dark:text-neutral-900">Send</button>
+    </form>
+  </main>
+</div>
+
+<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-url="{{ serverUrl }}">
+  // The live island. Everything above this is static HTML; this wires the
+  // socket to the one turn that can still change.
+  //
+  // Deliberately small and framework-free: it appends text to a node and
+  // toggles a panel. Anything heavier belongs on the server.
+  const root = document.currentScript
+  const sessionId = Number(root.dataset.session)
+  const url = root.dataset.url
+  if (sessionId && url) {
+    const socket = new WebSocket(url)
+    socket.binaryType = 'arraybuffer'
+
+    const responseNode = () => document.querySelector('[data-live-response]')
+    const stateNode = document.querySelector('[data-session-state]')
+    const approval = document.querySelector('[data-approval]')
+
+    socket.addEventListener('open', () => {
+      // Resume from the last sequence the server rendered into this page, so a
+      // reload replays the gap rather than the whole session.
+      socket.send(window.__harnessEncode({ t: 'subscribe', sessionId, sinceSeq: window.__harnessSinceSeq ?? 0 }))
+    })
+
+    socket.addEventListener('message', (event) => {
+      const frame = window.__harnessDecode(new Uint8Array(event.data))
+      if (frame?.t !== 'event') return
+      const payload = frame.event.payload
+      if (payload.type === 'assistant.delta') {
+        const node = responseNode()
+        if (node) node.textContent += payload.text
+      }
+      else if (payload.type === 'turn.completed') {
+        if (stateNode) stateNode.textContent = 'idle'
+      }
+      else if (payload.type === 'approval.requested') {
+        approval.querySelector('[data-approval-tool]').textContent = payload.toolName
+        approval.hidden = false
+        approval.dataset.approvalId = String(payload.approvalId)
+      }
+      else if (payload.type === 'approval.resolved') {
+        approval.hidden = true
+      }
+    })
+  }
+</script>

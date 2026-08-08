@@ -16,6 +16,42 @@
         "sqlite.org": "^3.47.2"
       }
     },
+    "packages/client": {
+      "name": "@harness/client",
+      "version": "0.0.0",
+      "dependencies": {
+        "@harness/contract": "workspace:*",
+        "@harness/engine": "workspace:*"
+      }
+    },
+    "packages/contract": {
+      "name": "@harness/contract",
+      "version": "0.0.0"
+    },
+    "packages/drivers": {
+      "name": "@harness/drivers",
+      "version": "0.0.0",
+      "dependencies": {
+        "@anthropic-ai/claude-agent-sdk": "^0.2.141",
+        "@harness/contract": "workspace:*"
+      }
+    },
+    "packages/engine": {
+      "name": "@harness/engine",
+      "version": "0.0.0",
+      "dependencies": {
+        "@harness/contract": "workspace:*"
+      }
+    },
+    "packages/server": {
+      "name": "@harness/server",
+      "version": "0.0.0",
+      "dependencies": {
+        "@harness/contract": "workspace:*",
+        "@harness/engine": "workspace:*",
+        "@stacksjs/stx": "*"
+      }
+    },
     "storage/framework": {
       "name": "stacks-framework",
       "version": "0.70.304"
@@ -29,6 +65,43 @@
     }
   },
   "packages": {
+    "@anthropic-ai/claude-agent-sdk@0.2.141": {
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.2.141",
+      "source": "npm",
+      "resolved": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.2.141.tgz",
+      "integrity": "sha512-AIBacMWGcZIUcXlUoObqjwJ6pmJI3BayAqPAFXuvSq3DHJXdiuZVs7l/zTB5l3nRhRv5cqSrI2XbiDeHgZWizw==",
+      "dependencies": {
+        "@anthropic-ai/sdk": "^0.93.0",
+        "@modelcontextprotocol/sdk": "^1.29.0"
+      },
+      "peerDependencies": {
+        "zod": "^4.0.0"
+      }
+    },
+    "@stacksjs/stx@0.2.158": {
+      "name": "@stacksjs/stx",
+      "version": "0.2.158",
+      "source": "npm",
+      "resolved": "https://registry.npmjs.org/@stacksjs/stx/-/stx-0.2.158.tgz",
+      "integrity": "sha512-VgElIyXazPvtLTo4R6Tl8dApP655CPV8/KgDKLuQdKGlYcBAc7dfIRqA5Tjq7ppUdf9tXmezQBMofkwxSAWy/Q==",
+      "dependencies": {
+        "@cwcss/crosswind": "^0.2.14",
+        "@stacksjs/clapp": "^0.2.0",
+        "@stacksjs/desktop": "0.2.158",
+        "@stacksjs/sanitizer": "0.2.158",
+        "@stacksjs/ts-i18n": "^0.1.11",
+        "bun-plugin-stx": "0.2.158",
+        "bunfig": "^0.15.17",
+        "stx-router": "0.2.158",
+        "ts-broadcasting": "^0.0.9",
+        "ts-images": "^0.1.9",
+        "ts-syntax-highlighter": "^0.2.1"
+      },
+      "bin": {
+        "stx": "./dist/cli.js"
+      }
+    },
     "better-dx@0.2.19": {
       "name": "better-dx",
       "version": "0.2.19",

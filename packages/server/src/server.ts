@@ -13,6 +13,7 @@ import type { Driver, DriverKind } from '@harness/drivers'
 import { CborError, decode, encode } from '@harness/contract'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
 import { ProviderRuntime } from './runtime'
+import { renderHarnessView, viewProps } from './views'
 
 export interface ServeOptions {
   port?: number
@@ -223,6 +224,25 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           data: { subscriptions: new Set<number>(), cursors: new Map<number, number>() },
         })
         return upgraded ? undefined : new Response('expected a websocket upgrade', { status: 426 })
+      }
+
+      // The web surface. Rendered per request from the in-memory projection —
+      // no query runs, so the shell paints immediately.
+      if (url.pathname === '/' || url.pathname.startsWith('/s/')) {
+        const sessionId = url.pathname.startsWith('/s/')
+          ? Number(url.pathname.slice(3)) || undefined
+          : undefined
+        return renderHarnessView(viewProps(engine.current, {
+          sessionId,
+          serverUrl: `ws://${url.host}/ws`,
+        })).then((html) => {
+          if (html === null) return new Response('view not found', { status: 404 })
+          return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } })
+        }).catch((error: unknown) => {
+          // A template error must not take the socket down with it.
+          const message = error instanceof Error ? error.message : String(error)
+          return new Response(`view failed to render: ${message}`, { status: 500 })
+        })
       }
 
       if (url.pathname === '/health') {

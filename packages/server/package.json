@@ -4,9 +4,12 @@
   "version": "0.0.0",
   "private": true,
   "description": "HTTP + WebSocket surface over the harness engine.",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
     "@harness/contract": "workspace:*",
-    "@harness/engine": "workspace:*"
+    "@harness/engine": "workspace:*",
+    "@stacksjs/stx": "*"
   }
 }
