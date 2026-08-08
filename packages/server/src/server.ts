@@ -72,6 +72,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   await engine.hydrate()
 
   const sockets = new Set<HarnessSocket>()
+  let nativeProbe: Record<string, unknown> | null = null
 
   function send(socket: HarnessSocket, payload: unknown): void {
     try {
@@ -244,6 +245,24 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return new Response(`view failed to render: ${message}`, { status: 500 })
         })
       }
+
+      // What the page can actually see of the native host.
+      //
+      // Craft's JS is injected by the host, so whether `window.craft` and its
+      // gesture surface exist in a given window type is a property of the
+      // build, not of our code — and the only honest way to know is to ask the
+      // page. Reported here rather than console-logged so a headless check can
+      // read it.
+      if (url.pathname === '/native-probe' && request.method === 'POST') {
+        return request.json().then((body) => {
+          nativeProbe = body as Record<string, unknown>
+          console.warn('[native] probe:', JSON.stringify(nativeProbe))
+          return new Response('ok')
+        }).catch(() => new Response('bad probe', { status: 400 }))
+      }
+
+      if (url.pathname === '/native-probe')
+        return Response.json(nativeProbe ?? { seen: false })
 
       if (url.pathname === '/health') {
         return Response.json({

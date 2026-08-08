@@ -145,6 +145,27 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   //
   // Deliberately small and framework-free: it appends text to a node and
   // toggles a panel. Anything heavier belongs on the server.
+  // Report what native surfaces this window actually has. In a browser every
+  // flag is false and nothing else changes; in a Craft window it tells us
+  // whether the host's injection and gesture bridge are really there.
+  try {
+    const craft = window.craft
+    fetch('/native-probe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        seen: true,
+        craft: Boolean(craft),
+        gestures: typeof craft?.gestures?.onSwipe === 'function',
+        nativeUI: Boolean(craft?.nativeUI),
+        spacesSidebar: typeof craft?.nativeUI?.createSpacesSidebar === 'function',
+        nativeSidebarFlag: Boolean(window.__craftNativeSidebar),
+        userAgent: navigator.userAgent.slice(0, 60),
+      }),
+    }).catch(() => {})
+  }
+  catch {}
+
   const root = document.currentScript
   const sessionId = Number(root.dataset.session)
   const url = root.dataset.url

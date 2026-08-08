@@ -31,4 +31,5 @@ export default {
   'profiles': 'Profiles',
   'serve': 'Serve',
   'run': 'Run',
+  'desktop': 'Desktop',
 } satisfies CommandRegistry
