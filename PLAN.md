@@ -786,6 +786,66 @@ auditor now mirrors its rule.
 **Also worth knowing:** an app command does not override a framework command. Naming ours `serve`
 silently started the Stacks production server; it is `harness:serve`.
 
+### 10.10 Craft — every window action that takes an argument was broken
+
+Found by reading `--timing` output, not by looking for it: `setWebSidebarCollapsed: MISSING_DATA`
+appeared in the log of every single launch, and had done since M4.
+
+The bridge's message router extracts the payload correctly, then calls `handleMessage(action)` — the
+overload that exists for actions taking *no* data. So `setSize`, `setTitle`, `setPosition`,
+`setFullscreen`, `setOpacity`, `setWebSidebarCollapsed` and 13 more received null and answered
+MISSING_DATA no matter what the page sent. The app bridge had the same shape: `notify` and `setBadge`
+could never see their arguments. Both now route through `handleMessageWithData`, which already existed.
+Fixed with regression tests, released as **craft v0.0.62**.
+
+### 10.11 Craft — `zig build test` could not compile, so nothing ran it
+
+`std.crypto.random.bytes` is gone in the pinned Zig and is referenced from keychain, crypto, api_crypto
+and hotreload, so any test build reaching them died at compile time and took the whole suite with it.
+This was logged as a known blocker in M4 and left alone; it turns out to be the reason craft had no
+enforced test signal at all.
+
+`compat.randomBytes` follows the module's existing pattern for std gaps and goes to the platform CSPRNG
+— `arc4random_buf` on Apple/BSD/Linux, `RtlGenRandom` on Windows, its result checked rather than assumed,
+since silently zeroed "random" bytes is the worst possible failure for a key. Seeding a userspace PRNG
+from a clock would have compiled just as well and been wrong. **98/98 steps now pass.**
+
+The same class of break, one dependency further out: **zig-gc** compared `builtin.mode == .Debug`, the
+pre-rename capitalisation, in a branch only instantiated under test — so `zig build` was fine and
+`zig build test` could not compile. Fixed by comparing on the tag name, which works either side of the
+rename, matching the idiom zig-js already uses. 58/58 pass.
+
+### 10.12 Craft — `--timing`, and what it found
+
+`--benchmark` prints `ready` at window creation and exits, so the expensive part — WebKit coming up and
+the page arriving — was invisible to it. `--timing` records named marks against one monotonic clock and
+prints the gaps; it is a fixed-size array of integers on a path already doing Objective-C message sends,
+so it stays compiled in and prints nothing unless asked.
+
+It immediately showed 58ms between having a webview and telling it to load, spent on translucency, the
+file-drop hook and the UI delegate — none of which the network was waiting for. The load now goes first.
+**Honest result: end-to-end cold start did not measurably improve**, because WKWebView launches its
+WebContent process at *creation*, not at `loadRequest:`, so firing the load earlier shifts a wait rather
+than removing one. The ordering is still right, and the measurement is the durable part.
+
+### 10.13 zig-js — where it fits, and where it does not
+
+Craft does **not** use zig-js today; it has zero dependencies and drives WKWebView directly.
+
+It cannot replace the page's JavaScript. That runs in WebKit's own JSC inside the WebContent process,
+which craft does not control, so zig-js does nothing for the cold-start numbers above.
+
+Where it does fit is craft's *own* injected sources. Craft splices six JS files into every webview and
+none of them had a test — the only way to exercise `window.craft.gestures` was to launch an app and
+swipe a trackpad, which is how the gesture registry shipped. zig-js runs them headlessly: no WebKit, no
+window, no WebContent process, 627ms for the file. Wired as **opt-in** (`-Djs-tests`) with a lazy
+dependency, because it needs the sibling checkout that an npm consumer will not have; without the flag
+nothing changes. Released as **craft v0.0.63**.
+
+The next use, not yet built: craft can only evaluate JS today by having a WKWebView, so a tray-only app
+or a background task pays a whole WebContent process to run a callback. `craft.evalHeadless` over zig-js
+would make that free.
+
 ## 11. Performance budgets
 
 Enforced in CI. stx already has `scripts/performance-budgets.ts`; mirror the approach.
