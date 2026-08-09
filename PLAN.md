@@ -1386,10 +1386,58 @@ ACP client, then Cursor and Grok as extensions over it. Codex app-server. OpenCo
 Conformance suite green for all five.
 **Exit:** every provider passes the same spec; adding a sixth is a weekend.
 
-### M6 — Depth
-Checkpointing and revert. Git integration (branch/worktree per session). Terminals. Per-profile MCP
-server management. Remote access from a phone — auth and pairing, since the server is already the
-boundary.
+### M6 — Depth *(checkpoint and revert done)*
+
+**Undo a turn.** An agent that edits eleven files and gets the ninth wrong is the normal case. A diff
+tells you it happened; a checkpoint is what takes it back.
+
+The snapshot uses a **temporary index**, not the stash and not a commit on your branch:
+
+```
+GIT_INDEX_FILE=<temp> git read-tree HEAD
+GIT_INDEX_FILE=<temp> git add -A
+GIT_INDEX_FILE=<temp> git write-tree      -> tree
+git commit-tree <tree> -p HEAD            -> commit
+```
+
+Nothing the user owns moves: their index is untouched, the branch does not advance, the stash list does
+not grow, no file changes. The result is a dangling commit reachable by SHA. `git stash` was rejected
+precisely because it mutates — it reverts the working tree as a side effect of saving and pushes onto a
+list people use by hand, and a harness that quietly consumed someone's stash stack would be worse than
+one with no checkpoints.
+
+Restoring has **two halves**, and the second is the one that is easy to forget: files the checkpoint
+recorded are written back, *and* files created since are removed. Restoring only what was recorded
+leaves the agent's new files behind, producing a state that never existed — worse than not reverting,
+because it looks like it worked. Ignored files are never touched; `node_modules` is not in a checkpoint
+and must not be deleted by one.
+
+Captured **before** the agent runs and awaited, not fired off: a checkpoint taken after the first edit is
+worse than none, because it looks like a safe point and is not. Skipped silently for a workspace that is
+not a repository, since a turn must not fail for that.
+
+A revert is refused while a turn is running. Restoring files under a working agent leaves it editing a
+tree that changed for reasons it cannot see, and the resulting diff belongs to nobody.
+
+**Verified live:** an agent rewrote `README.md` to `AGENT WAS HERE`; clicking *Revert this turn* in the
+browser restored `the original line` and left `git status` empty.
+
+### Two defects this uncovered
+
+**Every manually-approved tool call was failing.** The SDK's permission callback returns
+`{ behavior: 'allow', updatedInput }`, and `respondApproval` omitted `updatedInput`. Auto-approve passed
+it and manual approval did not, so every tool a *human* allowed failed while every auto-approved one
+worked — the safety-critical path was the broken one. The agent diagnosed it better than the logs did:
+*"there's an internal problem with how the permission requests are being structured."*
+
+**A client that dies mid-approval wedges the turn.** The agent asks, nobody answers, and the session sits
+`running` forever — unable to revert, since a revert is refused mid-turn. Stop settles it, which is what
+that button is for, but a turn should not depend on a person noticing. Worth a timeout or a
+reconnect-aware default.
+
+### M6 — still open
+Git integration (branch/worktree per session). Terminals. Per-profile MCP server management. Remote
+access from a phone — auth and pairing, since the server is already the boundary.
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

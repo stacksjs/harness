@@ -42,6 +42,7 @@ export type InternalCommand =
   | { type: 'thread.approval.request', sessionId: number, requestId: string, toolName: string, args: unknown }
   | { type: 'thread.input.request', sessionId: number, requestId: string, prompt: string }
   | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number }
+  | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
   | { type: 'thread.session.set', sessionId: number, providerSessionId: string }
   | { type: 'thread.error', sessionId: number, message: string }
 

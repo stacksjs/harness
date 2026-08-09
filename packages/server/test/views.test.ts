@@ -1,4 +1,4 @@
-import type { HarnessState, TurnState } from '@harness/engine'
+import type { HarnessState, ProfileState, SessionState, TurnState } from '@harness/engine'
 import { describe, expect, it } from 'bun:test'
 import { emptyState } from '@harness/engine'
 import { viewProps } from '../src/views'
@@ -26,32 +26,44 @@ function turn(overrides: Partial<TurnState> = {}): TurnState {
   }
 }
 
-function stateWith(): HarnessState {
-  const state = emptyState()
-  state.profiles.set(1, { id: 1, name: 'Personal', workspaceIds: [10, 11] })
-  state.profiles.set(2, { id: 2, name: 'Stacks', workspaceIds: [20] })
-  state.workspaces.set(10, { id: 10, profileId: 1, path: '/Users/chris/Code/alpha', trusted: true })
-  state.workspaces.set(11, { id: 11, profileId: 1, path: '/Users/chris/Code/beta', trusted: false })
-  state.workspaces.set(20, { id: 20, profileId: 2, path: '/Users/chris/Code/stacks', trusted: true })
-
-  state.sessions.set(100, {
+/**
+ * A session with every field the projection sets.
+ *
+ * Same reasoning as `turn()`, and the same lesson learned twice: a literal here
+ * silently rots the moment `SessionState` gains a field, and it surfaces as a
+ * crash inside `viewProps` rather than as a message about the fixture.
+ * `checkpoints` is the second field to do that.
+ */
+function session(overrides: Partial<SessionState> = {}): SessionState {
+  return {
     id: 100,
     workspaceId: 10,
     driverKind: 'claude',
+    model: '',
     providerSessionId: '',
     state: 'running',
     lastSeq: 3,
     turns: [turn()],
-  })
-  state.sessions.set(200, {
-    id: 200,
-    workspaceId: 20,
-    driverKind: 'claude',
-    providerSessionId: '',
-    state: 'idle',
-    lastSeq: 1,
-    turns: [],
-  })
+    checkpoints: [],
+    ...overrides,
+  }
+}
+
+/** Likewise for profiles, whose icon/tint/position arrived the same way. */
+function profile(overrides: Partial<ProfileState> = {}): ProfileState {
+  return { id: 1, name: 'Personal', icon: '', tint: '', position: 0, workspaceIds: [10, 11], ...overrides }
+}
+
+function stateWith(): HarnessState {
+  const state = emptyState()
+  state.profiles.set(1, profile())
+  state.profiles.set(2, profile({ id: 2, name: 'Stacks', workspaceIds: [20] }))
+  state.workspaces.set(10, { id: 10, profileId: 1, path: '/Users/chris/Code/alpha', trusted: true })
+  state.workspaces.set(11, { id: 11, profileId: 1, path: '/Users/chris/Code/beta', trusted: false })
+  state.workspaces.set(20, { id: 20, profileId: 2, path: '/Users/chris/Code/stacks', trusted: true })
+
+  state.sessions.set(100, session())
+  state.sessions.set(200, session({ id: 200, workspaceId: 20, state: 'idle', lastSeq: 1, turns: [] }))
   return state
 }
 
@@ -140,5 +152,40 @@ describe('tool calls reach the page', () => {
 
   it('is an empty list for a turn that ran none', () => {
     expect(propsWithTools([])).toEqual([])
+  })
+})
+
+describe('the revert control', () => {
+  function turnsWith(checkpoints: Array<{ id: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual' }>) {
+    const state = stateWith()
+    state.sessions.set(100, session({
+      turns: [turn({ id: 1 }), turn({ id: 2 })],
+      checkpoints: checkpoints.map(c => ({ ...c, vcsRef: 'abc123', reverted: false })),
+    }))
+    const props = viewProps(state, { sessionId: 100, serverUrl: 'ws://x/ws' })
+    return (props.activeSession as { turns: Array<{ id: number, checkpointId: number }> }).turns
+  }
+
+  it('offers a turn the snapshot taken before it ran', () => {
+    // "Undo this turn" means going back to before it, so it is the turn-start
+    // checkpoint and never the turn-end one.
+    const turns = turnsWith([
+      { id: 900, turnId: 1, kind: 'turn-start' },
+      { id: 901, turnId: 2, kind: 'turn-start' },
+    ])
+    expect(turns.map(t => t.checkpointId)).toEqual([900, 901])
+  })
+
+  it('ignores an end-of-turn checkpoint', () => {
+    // Reverting to turn-end would undo nothing, which is the most confusing
+    // possible outcome for a button labelled "revert".
+    expect(turnsWith([{ id: 900, turnId: 1, kind: 'turn-end' }])[0].checkpointId).toBe(0)
+  })
+
+  it('offers nothing for a turn with no snapshot', () => {
+    // A workspace that is not a repository, or a turn from before
+    // checkpointing existed. The view hides the button rather than showing a
+    // disabled one that never explains itself.
+    expect(turnsWith([]).map(t => t.checkpointId)).toEqual([0, 0])
   })
 })

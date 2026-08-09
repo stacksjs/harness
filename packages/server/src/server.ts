@@ -146,6 +146,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return
     }
 
+    if (command.type === 'session.checkpoint.revert') {
+      await runtime.revert(command.sessionId, command.checkpointId)
+      return
+    }
+
     if (command.type === 'session.turn.interrupt') {
       await runtime.interrupt(command.sessionId)
       return

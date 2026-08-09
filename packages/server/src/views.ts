@@ -113,6 +113,10 @@ export function viewProps(state: HarnessState, options: {
             status: turn.status,
             // What the agent actually did. A reply without these is a summary
             // of work you cannot review.
+            // The snapshot taken before this turn ran, which is what "undo
+            // this turn" reverts to. 0 when there is none — a workspace that
+            // is not a repository, or a turn from before checkpointing.
+            checkpointId: active.checkpoints.find(c => c.turnId === turn.id && c.kind === 'turn-start')?.id ?? 0,
             toolCalls: turn.toolCalls.map(call => ({
               callId: call.callId,
               name: call.name,

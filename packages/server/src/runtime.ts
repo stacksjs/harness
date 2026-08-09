@@ -16,6 +16,7 @@ import type { Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { resolveDriver } from '@harness/drivers'
+import { capture, restore } from './checkpoint'
 
 export interface RuntimeOptions {
   engine: Engine
@@ -162,6 +163,14 @@ export class ProviderRuntime {
     running.abandoned = false
     running.interrupted = false
 
+    // Snapshot before the agent touches anything, so this turn can be undone.
+    //
+    // Awaited rather than fired off: a checkpoint taken *after* the first edit
+    // is worse than none, because it looks like a safe point and is not. It
+    // costs one `git add -A` against a temporary index, and it is skipped
+    // silently for a workspace that is not a repository.
+    await this.captureCheckpoint(sessionId, turnId, 'turn-start')
+
     try {
       for await (const event of running.instance.startTurn({
         text,
@@ -272,6 +281,65 @@ export class ProviderRuntime {
     }
     catch {
       return null
+    }
+  }
+
+  /**
+   * Snapshot the workspace and record it.
+   *
+   * Failures are silent by design: a workspace that is not a repository, or a
+   * repository with no commits, is an ordinary situation and must not stop a
+   * turn from running.
+   */
+  private async captureCheckpoint(
+    sessionId: number,
+    turnId: number,
+    kind: 'turn-start' | 'turn-end' | 'manual',
+  ): Promise<void> {
+    const state = this.options.engine.current
+    const workspacePath = this.options.workspacePath
+      ? this.options.workspacePath(state, sessionId)
+      : defaultWorkspacePath(state, sessionId)
+    if (!workspacePath || !existsSync(workspacePath)) return
+
+    const result = await capture(workspacePath, `harness checkpoint · session ${sessionId} · turn ${turnId}`)
+    if (!result.ref) return
+
+    await this.emit({ type: 'thread.checkpoint.capture', sessionId, turnId, kind, vcsRef: result.ref })
+  }
+
+  /**
+   * Put the workspace back to a checkpoint.
+   *
+   * The reducer has already accepted the revert and written `checkpoint.reverted`
+   * — the same shape as `turn.started`, where the log records the intent and
+   * then the outcome. A restore that fails reports through `thread.error`, so
+   * the log never implies a revert that did not reach the disk.
+   */
+  async revert(sessionId: number, checkpointId: number): Promise<void> {
+    const state = this.options.engine.current
+    const session = state.sessions.get(sessionId)
+    const checkpoint = session?.checkpoints.find(c => c.id === checkpointId)
+    if (!checkpoint) return
+
+    const workspacePath = this.options.workspacePath
+      ? this.options.workspacePath(state, sessionId)
+      : defaultWorkspacePath(state, sessionId)
+
+    if (!workspacePath || !existsSync(workspacePath)) {
+      await this.emit({ type: 'thread.error', sessionId, message: 'workspace is not available to revert' })
+      return
+    }
+
+    const result = await restore(workspacePath, checkpoint.vcsRef)
+    if (!result.ok) {
+      await this.emit({
+        type: 'thread.error',
+        sessionId,
+        // The ref is a dangling commit, so "unknown checkpoint" usually means
+        // `git gc` collected it rather than that anything is broken.
+        message: `could not revert: ${result.reason ?? 'unknown reason'}`,
+      })
     }
   }
 

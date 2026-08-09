@@ -154,6 +154,18 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           </div>
           <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
           <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response>{{ turn.response }}</div>
+          <!--
+            Undo this turn. Only offered where a snapshot exists: a workspace
+            that is not a repository has nothing to revert to, and a disabled
+            button that never explains itself is worse than no button.
+          -->
+          @if(turn.checkpointId)
+            <button
+              type="button"
+              data-revert="{{ turn.checkpointId }}"
+              class="mt-2 rounded-[6px] border border-black/10 px-2 py-[2px] text-[11px] opacity-60 hover:opacity-100 dark:border-white/15"
+            >Revert this turn</button>
+          @endif
         </article>
       @endforeach
 
@@ -171,6 +183,20 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           </div>
           <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
           <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response data-live-response>{{ liveTurn.response }}</div>
+          <!--
+            The newest turn is the one people most want to undo, and it was the
+            only one without the button because it is not in `settledTurns`.
+            Hidden while it is still running — the reducer refuses a revert
+            mid-turn anyway, since restoring files under a working agent leaves
+            it editing a tree that changed for reasons it cannot see.
+          -->
+          @if(liveTurn.checkpointId)
+            <button
+              type="button"
+              data-revert="{{ liveTurn.checkpointId }}"
+              class="mt-2 rounded-[6px] border border-black/10 px-2 py-[2px] text-[11px] opacity-60 hover:opacity-100 dark:border-white/15"
+            >Revert this turn</button>
+          @endif
         </article>
       @endif
 
@@ -368,6 +394,24 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // These dispatch over the socket like every other command, then reload —
   // the sidebar is server-rendered, and re-rendering it here would be a second
   // implementation of what the server already does.
+  // Reverting throws away work on disk, so it asks first. The confirmation
+  // names what will happen rather than saying "are you sure": the destructive
+  // part is the files created since, which is exactly what people forget.
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest?.('[data-revert]')
+    if (!button) return
+
+    const checkpointId = Number(button.dataset.revert)
+    if (!checkpointId) return
+    if (!window.confirm('Put the workspace back to before this turn? Files the agent created since will be deleted.')) return
+
+    button.disabled = true
+    await sendCommand({ type: 'session.checkpoint.revert', sessionId, checkpointId })
+    // Reloaded rather than patched: the diff, the turn list and the workspace
+    // have all moved, and re-deriving that here would be a second renderer.
+    window.location.reload()
+  })
+
   const island = document.querySelector('[data-harness-island]')
   // Set by the transcript's socket once it opens, so a sidebar command reuses
   // it rather than opening a second connection to the same server.
@@ -642,6 +686,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       if (stateNode) stateNode.textContent = running ? 'running' : 'idle'
       if (sendButton) sendButton.hidden = running
       if (stopButton) stopButton.hidden = !running
+      // A revert mid-turn is refused by the reducer; hiding the button says so
+      // before the click rather than after.
+      for (const button of document.querySelectorAll('[data-revert]')) button.hidden = running
     }
     setRunning(stateNode?.textContent.trim() === 'running')
 

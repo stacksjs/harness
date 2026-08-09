@@ -31,7 +31,14 @@ export type EventPayload =
   | { type: 'tool.call.ended', turnId: number, callId: string, ok: boolean }
   | { type: 'approval.requested', approvalId: number, requestId: string, toolName: string }
   | { type: 'approval.resolved', approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
-  | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual' }
+  /** `vcsRef` is the dangling commit holding the snapshot; see server/checkpoint.ts. */
+  | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
+  /**
+   * A revert was accepted, in the same sense `turn.started` means a turn was
+   * accepted: the checkpoint exists and the runtime has been told to put the
+   * workspace back. A restore that then fails emits `thread.error` after this,
+   * so the log carries both the intent and the outcome.
+   */
   | { type: 'checkpoint.reverted', checkpointId: number }
   | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
   /**

@@ -150,6 +150,48 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'thread.checkpoint.capture': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session)
+        throw new InvalidCommand(`no such session: ${command.sessionId}`)
+
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'checkpoint.captured',
+          checkpointId: derivedId(commandId),
+          turnId: command.turnId,
+          kind: command.kind,
+          vcsRef: command.vcsRef,
+        },
+      }]
+    }
+
+    case 'session.checkpoint.revert': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session)
+        throw new InvalidCommand(`no such session: ${command.sessionId}`)
+
+      const checkpoint = session.checkpoints.find(c => c.id === command.checkpointId)
+      if (!checkpoint)
+        throw new InvalidCommand(`no such checkpoint: ${command.checkpointId}`)
+
+      // Refused while a turn is running. Restoring files underneath a working
+      // agent would have it editing a tree that changed for reasons it cannot
+      // see, and the resulting diff would belong to nobody.
+      if (session.state === 'running')
+        throw new InvalidCommand('cannot revert while a turn is running')
+
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: { type: 'checkpoint.reverted', checkpointId: command.checkpointId },
+      }]
+    }
+
     case 'session.turn.start': {
       const session = state.sessions.get(command.sessionId)
       if (!session)

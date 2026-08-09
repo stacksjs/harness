@@ -18,6 +18,8 @@ export interface SessionState {
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastSeq: number
   turns: TurnState[]
+  /** Oldest first, so the newest revert target is the last one. */
+  checkpoints: CheckpointState[]
 }
 
 /**
@@ -34,6 +36,22 @@ export interface ToolCallState {
   name: string
   /** `null` until the call ends — that is what "still running" looks like. */
   ok: boolean | null
+}
+
+/**
+ * A workspace snapshot taken around a turn.
+ *
+ * `vcsRef` is a dangling commit, so it survives until `git gc` and depends on
+ * nothing. A checkpoint whose ref has been collected simply fails to restore,
+ * which is why the runtime reports rather than assumes.
+ */
+export interface CheckpointState {
+  id: number
+  turnId: number
+  kind: 'turn-start' | 'turn-end' | 'manual'
+  vcsRef: string
+  /** Set once this checkpoint has been reverted to at least once. */
+  reverted: boolean
 }
 
 export interface TurnState {
@@ -165,6 +183,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         state: 'idle',
         lastSeq: 0,
         turns: [],
+        checkpoints: [],
       })
       break
 
@@ -210,6 +229,28 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       // Append rather than replace: a transcript is built from deltas, and the
       // order is guaranteed by the sequence, not by arrival.
       if (t) t.response += p.text
+      break
+    }
+
+    case 'checkpoint.captured': {
+      const session = state.sessions.get(event.sessionId)
+      if (!session) break
+      // Ignore a duplicate id rather than listing the same snapshot twice.
+      if (session.checkpoints.some(c => c.id === p.checkpointId)) break
+      session.checkpoints.push({
+        id: p.checkpointId,
+        turnId: p.turnId,
+        kind: p.kind,
+        vcsRef: p.vcsRef,
+        reverted: false,
+      })
+      break
+    }
+
+    case 'checkpoint.reverted': {
+      const session = state.sessions.get(event.sessionId)
+      const checkpoint = session?.checkpoints.find(c => c.id === p.checkpointId)
+      if (checkpoint) checkpoint.reverted = true
       break
     }
 

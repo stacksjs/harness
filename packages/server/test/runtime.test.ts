@@ -1,7 +1,8 @@
 import type { Driver, ProviderEvent, ProviderInstance } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -275,6 +276,88 @@ describe('a turn drives the provider', () => {
     const failed = await client.waitFor('session.failed')
     expect(failed.message).toContain('codex login')
     expect(created).toBe(false)
+    client.close()
+  })
+})
+
+describe('checkpoint and revert', () => {
+  /** A workspace that is a real repository, since checkpoints are git. */
+  function repoWorkspace(): string {
+    const path = join(dir, 'work')
+    mkdirSync(path)
+    const run = (...args: string[]) => spawnSync('git', args, { cwd: path })
+    run('init', '-q')
+    run('config', 'user.email', 'test@example.com')
+    run('config', 'user.name', 'Test')
+    writeFileSync(join(path, 'tracked.txt'), 'original\n')
+    run('add', '.')
+    run('commit', '-qm', 'first')
+    return path
+  }
+
+  it('captures a checkpoint before the agent runs, and reverts to it', async () => {
+    // The point of the whole feature: an agent edits a file, and the edit can
+    // be taken back without hand-reverting anything.
+    const workspace = repoWorkspace()
+
+    const instance: ProviderInstance = {
+      async *startTurn() {
+        // Stand in for the agent's edits.
+        writeFileSync(join(workspace, 'tracked.txt'), 'the agent changed this\n')
+        writeFileSync(join(workspace, 'agent-made-this.ts'), 'export const x = 1\n')
+        yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      },
+      async interrupt() {},
+      async respondApproval() {},
+      async stop() {},
+    }
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() { return instance },
+    }
+    harness = await serve({
+      port,
+      databasePath: join(dir, 'test.sqlite'),
+      resolveDriver: () => driver,
+      workspacePath: () => workspace,
+    })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client, workspace)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'edit it' } } })
+    await client.waitFor('turn.completed')
+
+    // The snapshot was taken before the edits, not after.
+    const captured = await client.waitFor('checkpoint.captured')
+    expect(captured.kind).toBe('turn-start')
+    expect(captured.vcsRef).toMatch(/^[0-9a-f]{40}$/)
+    expect(readFileSync(join(workspace, 'tracked.txt'), 'utf8')).toBe('the agent changed this\n')
+
+    client.send({
+      t: 'dispatch',
+      envelope: { id: 'c_rev', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId: captured.checkpointId } },
+    })
+    expect(await client.waitFor('checkpoint.reverted')).toBeTruthy()
+    await new Promise(r => setTimeout(r, 400))
+
+    expect(readFileSync(join(workspace, 'tracked.txt'), 'utf8')).toBe('original\n')
+    // And the file the agent created is gone, not left behind.
+    expect(existsSync(join(workspace, 'agent-made-this.ts'))).toBe(false)
+    client.close()
+  })
+
+  it('runs a turn in a workspace that is not a repository', async () => {
+    // Checkpointing is best-effort. A plain directory must not stop a turn.
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'hi' } } })
+
+    expect(await client.waitFor('turn.completed')).toBeTruthy()
+    expect(client.payloads('checkpoint.captured')).toEqual([])
     client.close()
   })
 })

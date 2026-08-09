@@ -25,6 +25,16 @@ function toMicros(usd: number): number {
 
 interface PendingApproval {
   resolve: (result: PermissionResult) => void
+  /**
+   * The tool's own input, kept so an allow can hand it back.
+   *
+   * `{ behavior: 'allow' }` alone is rejected by the SDK — `updatedInput` is
+   * how a permission callback returns the arguments the tool should run with,
+   * and omitting it fails the call. Auto-approve passed it and manual approval
+   * did not, so *every* tool a human allowed failed while every
+   * auto-approved one worked.
+   */
+  input: Record<string, unknown>
 }
 
 class ClaudeInstance implements ProviderInstance {
@@ -49,7 +59,7 @@ class ClaudeInstance implements ProviderInstance {
     this.approvalQueue.push({ type: 'approval-request', requestId, toolName, args: input })
 
     return new Promise<PermissionResult>((resolve) => {
-      this.pending.set(requestId, { resolve })
+      this.pending.set(requestId, { resolve, input })
     })
   }
 
@@ -134,7 +144,9 @@ class ClaudeInstance implements ProviderInstance {
     if (!waiter) return
     this.pending.delete(requestId)
     waiter.resolve(allow
-      ? { behavior: 'allow' }
+      // Unmodified: the user approved *this* call, so the tool runs with the
+      // arguments they were shown, not with anything rewritten in between.
+      ? { behavior: 'allow', updatedInput: waiter.input }
       : { behavior: 'deny', message: reason ?? 'denied by the user' })
   }
 
