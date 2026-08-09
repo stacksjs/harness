@@ -1,8 +1,7 @@
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
-import type { HarnessClient } from '@harness/client'
 import { readLocalToken } from '@harness/server'
-import { connect } from '../Support/client'
+import { dispatch } from '../Support/dispatch'
 import { boot, commandId } from '../Support/engine'
 
 /**
@@ -79,34 +78,18 @@ export default function (cli: CLI) {
         process.exit(1)
       }
 
-      const envelope = {
+      // Through the running server when there is one, so it stops honouring
+      // the token immediately and drops the socket that device already holds.
+      // Writing straight to the log instead would leave that process with a
+      // projection where the device is still paired.
+      const result = await dispatch({
         id: commandId('revoke'),
         at: Date.now(),
-        command: { type: 'device.revoke' as const, deviceId },
-      }
+        command: { type: 'device.revoke', deviceId },
+      }, options.url)
 
-      // Through the running server when there is one. Writing straight to the
-      // log instead would leave that process holding a projection where the
-      // device is still paired — so it would keep honouring the token, which
-      // is the one thing a revoke must not do.
-      let client: HarnessClient | null = null
-      try {
-        client = await connect(options.url)
-        await client.dispatch(envelope.id, envelope.command)
-        client.close()
-        console.log(`revoked ${device.name} (${deviceId})`)
-        // The server drops the socket that device already holds as the revoked
-        // event broadcasts, so an open connection does not outlive its access.
-        return
-      }
-      catch {
-        client?.close()
-      }
-
-      // No server to tell. Recording it now means the revoke is already in the
-      // log when one next starts, rather than depending on someone to redo it.
-      await engine.dispatch(envelope)
       console.log(`revoked ${device.name} (${deviceId})`)
-      console.log('  (no server was running; this applies when one next starts)')
+      if (result.via === 'log')
+        console.log('  (no server was running; this applies when one next starts)')
     })
 }

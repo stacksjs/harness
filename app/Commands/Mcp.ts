@@ -1,6 +1,7 @@
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
 import { ExitCode } from '@stacksjs/types'
+import { dispatch } from '../Support/dispatch'
 import { boot, commandId } from '../Support/engine'
 
 /**
@@ -42,7 +43,7 @@ export default function (cli: CLI) {
       const transport = (options.transport ?? 'stdio') as 'stdio' | 'sse' | 'http'
 
       try {
-        await engine.dispatch({
+        await dispatch({
           id: commandId('mcp.add'),
           at: Date.now(),
           command: {
@@ -128,7 +129,7 @@ function pairs(raw: string): Record<string, string> {
 async function mutate(command: Parameters<Awaited<ReturnType<typeof boot>>['dispatch']>[0]['command'], done: string): Promise<void> {
   const engine = await boot()
   try {
-    await engine.dispatch({ id: commandId('mcp'), at: Date.now(), command })
+    await dispatch({ id: commandId('mcp'), at: Date.now(), command })
   }
   catch (error) {
     console.error(error instanceof Error ? error.message : String(error))

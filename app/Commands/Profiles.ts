@@ -3,6 +3,7 @@ import process from 'node:process'
 import { derivedId } from '@harness/engine'
 import { releaseWorktrees, worktreesOfProfile } from '@harness/server'
 import { ExitCode } from '@stacksjs/types'
+import { dispatch } from '../Support/dispatch'
 import { boot, commandId } from '../Support/engine'
 
 /**
@@ -24,7 +25,7 @@ export default function (cli: CLI) {
       const engine = await boot()
       const id = options.id || commandId('profile.create')
 
-      const result = await engine.dispatch({
+      const result = await dispatch({
         id,
         at: Date.now(),
         command: {
@@ -36,12 +37,14 @@ export default function (cli: CLI) {
       })
 
       const profileId = derivedId(id)
-      const profile = engine.current.profiles.get(profileId)
 
       if (result.replayed)
         console.log(`↻ already created (command ${id} had a receipt)`)
 
-      console.log(`${profile?.name} · id ${profileId} · seq ${result.events[0]?.seq ?? '-'}`)
+      // The name comes from the argument rather than the projection: dispatched
+      // through a running server, this process's read model is the one from
+      // before the command and would print `undefined`.
+      console.log(`${name} · id ${profileId} · seq ${result.seqs[0] ?? '-'}`)
       process.exit(ExitCode.Success)
     })
 
@@ -68,7 +71,7 @@ export default function (cli: CLI) {
       }
 
       try {
-        await engine.dispatch({
+        await dispatch({
           id: commandId('profile.update'),
           at: Date.now(),
           command: { type: 'profile.update', profileId, ...changes },
@@ -113,8 +116,9 @@ export default function (cli: CLI) {
       // from the projection immediately afterwards, and their paths with them.
       const doomed = worktreesOfProfile(engine.current, profileId)
 
+      let outcome
       try {
-        await engine.dispatch({
+        outcome = await dispatch({
           id: commandId('profile.delete'),
           at: Date.now(),
           command: { type: 'profile.delete', profileId },
@@ -129,10 +133,16 @@ export default function (cli: CLI) {
       // there is touched. A worktree is different: harness created it, and
       // leaving a full checkout per isolated session behind is how a large
       // repository quietly fills a disk.
-      for (const released of await releaseWorktrees(doomed)) {
-        if (released.committed)
-          console.log(`  committed what session ${released.sessionId} left behind as ${released.committed.slice(0, 8)}`)
-        console.log(`  released ${released.path} (its branch is kept)`)
+      //
+      // Only when there was no server to do it. The server releases them on the
+      // same event, and doing it here as well would have this command report a
+      // removal that the other process had already performed.
+      if (outcome.via === 'log') {
+        for (const released of await releaseWorktrees(doomed)) {
+          if (released.committed)
+            console.log(`  committed what session ${released.sessionId} left behind as ${released.committed.slice(0, 8)}`)
+          console.log(`  released ${released.path} (its branch is kept)`)
+        }
       }
 
       console.log(`deleted ${profile.name} · ${profile.workspaceIds.length} workspace(s) · ${sessions.length} session(s)`)

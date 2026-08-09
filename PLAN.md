@@ -1706,13 +1706,28 @@ Verified live: an isolated session's work committed per turn as `harness: turn
 came back as `harness: work left uncommitted when the session went away`; the
 directory was gone and the branch still there.
 
-**A wart this exposed.** The server-side hook did not fire for `profiles:delete`
-— because that command dispatches to *its own* engine over SQLite, so the
-running server never sees it. Several CLI commands do this, and the running
-server's projection goes stale for all of them. Deletion now cleans up wherever
-it runs, and `harness:revoke` routes through the server for the same reason, but
-the general inconsistency is still there and worth a decision: either every CLI
-command is a socket client, or the server watches the log.
+**A wart this exposed, now closed.** The server-side hook did not fire for
+`profiles:delete`, because that command dispatched to *its own* engine over
+SQLite — so a running server never saw it and went on serving a projection
+built before it happened. Every mutating CLI command did this.
+
+"A CLI command is a client like any other" was true of the log and false of the
+server. It is now true of both: `app/Support/dispatch.ts` sends through the
+socket when something is listening and writes to the log when nothing is, and
+every mutating command goes through it. Both paths append the same events in
+the same order; the difference is only whether the process holding the read
+model finds out.
+
+The alternative — having the server watch the log — would work and would be
+worse: it would have to reconcile events it did not cause against reactions it
+must not run twice, and "did I already act on this?" is the question command
+receipts exist to stop anyone asking.
+
+Verified both ways on the bug that exposed it. With a server running, deleting
+a profile releases its worktrees *in the server* (its own log says so) and the
+CLI stays quiet rather than reporting a removal another process performed; with
+no server, the CLI does it and says so. Directory gone, branch kept, either
+way.
 
 ### Scan-to-pair, and a bug found looking for it
 
