@@ -62,6 +62,16 @@ export type ClientCommand =
   | { type: 'mcp.setEnabled', profileId: number, name: string, enabled: boolean }
   | { type: 'workspace.add', profileId: number, path: string, name?: string }
   | { type: 'workspace.trust', workspaceId: number, trusted: boolean }
+  /**
+   * Withdraw a paired device's access.
+   *
+   * Client-dispatchable where `device.pair` is not, and the asymmetry is the
+   * point: pairing grants access and must prove possession of a code shown on
+   * the host, so only the server may raise it. Revoking only ever removes
+   * access, so anyone already holding a valid connection may do it — which is
+   * exactly the person whose phone was just lost.
+   */
+  | { type: 'device.revoke', deviceId: string }
 
 /**
  * Commands only the server raises, mostly from provider output.
@@ -82,6 +92,15 @@ export type InternalCommand =
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
   | { type: 'thread.session.set', sessionId: number, providerSessionId: string }
   | { type: 'thread.error', sessionId: number, message: string }
+  /**
+   * Record a device that completed pairing.
+   *
+   * Internal because the server raises it only after verifying a pairing code
+   * out of band. `tokenHash` is a SHA-256 of the bearer token: the log is
+   * plaintext and permanent, so it stores something that can *check* a token
+   * without being able to reproduce one.
+   */
+  | { type: 'device.pair', deviceId: string, name: string, tokenHash: string }
 
 export type Command = ClientCommand | InternalCommand
 
@@ -103,6 +122,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'profile.delete',
   'workspace.add',
   'workspace.trust',
+  'device.revoke',
 ])
 
 /**

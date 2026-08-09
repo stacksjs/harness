@@ -135,14 +135,28 @@ export interface WorkspaceState {
   trusted: boolean
 }
 
+/**
+ * A device allowed to reach this server from somewhere other than loopback.
+ *
+ * The token itself is never here: `tokenHash` is what the log holds, so a
+ * leaked database reveals who paired and when, not how to connect.
+ */
+export interface DeviceState {
+  id: string
+  name: string
+  tokenHash: string
+  pairedAt: number
+}
+
 export interface HarnessState {
   sessions: Map<number, SessionState>
   profiles: Map<number, ProfileState>
   workspaces: Map<number, WorkspaceState>
+  devices: Map<string, DeviceState>
 }
 
 export function emptyState(): HarnessState {
-  return { sessions: new Map(), profiles: new Map(), workspaces: new Map() }
+  return { sessions: new Map(), profiles: new Map(), workspaces: new Map(), devices: new Map() }
 }
 
 function turn(session: SessionState, turnId: number): TurnState | undefined {
@@ -241,6 +255,19 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         profile.workspaceIds.push(p.workspaceId)
       break
     }
+
+    case 'device.paired':
+      state.devices.set(p.deviceId, {
+        id: p.deviceId,
+        name: p.name,
+        tokenHash: p.tokenHash,
+        pairedAt: p.at,
+      })
+      break
+
+    case 'device.revoked':
+      state.devices.delete(p.deviceId)
+      break
 
     case 'workspace.trust-changed': {
       const workspace = state.workspaces.get(p.workspaceId)

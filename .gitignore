@@ -138,3 +138,7 @@ storage/framework/core/defaults/*
 !storage/framework/core/defaults/tests/
 !storage/framework/core/defaults/tests/**
 
+
+# The local access token, minted per boot when the server runs with --remote.
+# Anything holding this can dispatch commands, and a command starts an agent.
+storage/private/harness.token

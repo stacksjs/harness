@@ -193,6 +193,40 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'device.pair': {
+      if (!command.deviceId.trim() || !command.tokenHash.trim())
+        throw new InvalidCommand('a paired device needs an id and a token hash')
+      // Re-pairing under an existing id would leave two devices answering to
+      // one name with only the newer token working, and revoking the visible
+      // one would not close the older grant.
+      if (state.devices.has(command.deviceId))
+        throw new InvalidCommand(`device ${command.deviceId} is already paired`)
+
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: {
+          type: 'device.paired',
+          deviceId: command.deviceId,
+          name: command.name || 'a device',
+          tokenHash: command.tokenHash,
+          at,
+        },
+      }]
+    }
+
+    case 'device.revoke': {
+      if (!state.devices.has(command.deviceId))
+        throw new InvalidCommand(`no such device: ${command.deviceId}`)
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: { type: 'device.revoked', deviceId: command.deviceId },
+      }]
+    }
+
     case 'workspace.trust': {
       if (!state.workspaces.has(command.workspaceId))
         throw new InvalidCommand(`no such workspace: ${command.workspaceId}`)

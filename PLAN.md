@@ -1600,9 +1600,67 @@ server was attached to a different one than the run used. `connect()` now
 hydrates from the global session before returning. The feature was fine; the
 client had been quietly lying about what existed since the day it was written.
 
+### Remote access, and the check that quietly stopped being one
+
+The server is the only thing that executes anything, so driving harness from a
+phone was always meant to fall out of the architecture. What stood in the way
+was that it had **no authentication at all** — the protection was the bind
+address, `127.0.0.1`, and the reasoning was sound: anything already on this
+machine can run processes as you.
+
+That reasoning survives exactly until someone puts a tunnel in front of it.
+
+**A tunnel connects to localhost.** Every request it forwards arrives from
+`127.0.0.1`. So "this came from my machine" silently becomes "this came from my
+machine, or from anyone on the internet who found the URL", and nothing can tell
+the two apart. A peer-address check does not fail loudly here — it keeps
+returning `true` and stops being a check. Reaching this socket means starting an
+agent, and an agent runs tools, so that is remote code execution.
+
+So there are two modes and no gradient between them:
+
+| | bind | authentication |
+|---|---|---|
+| **local** (default) | loopback | none — the boundary *is* the bind address |
+| **remote** (`--remote`) | every interface | every connection, **loopback included** |
+
+Exempting loopback in remote mode would exempt the tunnel, which is the entire
+problem. Local clients keep working by reading a token from a `0600` file, the
+way docker and Jupyter do it; the desktop window gets a one-time `?token=` in
+its URL that the server swaps for a cookie and redirects away.
+
+Binding a public interface without `--remote` **refuses to start** rather than
+warning: by the time a warning is read, the port is open.
+
+**Pairing.** The host shows an eight-character code (no `0`/`O`/`1`/`I`), good
+for five minutes and one use, burned after five wrong guesses. The phone opens
+the URL, types it, and gets a cookie — `HttpOnly`, `SameSite=Strict`, and
+`Secure` only over https, because setting it on a plain-http LAN address means
+the cookie is silently never stored.
+
+**What the log stores is a SHA-256, never the token** — same reasoning as the
+MCP secrets above, and this time the property is total: verified zero rows
+containing an issued token, one row holding its hash.
+
+**Revocation had to reach the connection, not just the next handshake.** The
+first version authenticated at upgrade, which meant a revoked phone kept the
+socket it already held — free to keep dispatching, indefinitely. Sockets now
+carry their device id and are closed as the `device.revoked` event broadcasts.
+And `harness:revoke` dispatches *through* the running server rather than
+straight to the log: writing to the log directly would leave that process
+holding a projection where the device was still paired, so it would go on
+honouring the token — the one thing a revoke must not do.
+
+Verified live, end to end: a public bind refused; an unauthenticated browser got
+the pairing page and an unauthenticated API call got 401; `/health` answers
+everyone but discloses counts to no one; a wrong code decremented; the right one
+paired; `harness:run` kept working through the token file; and a revoked iPad
+watching a live socket saw `closed(4001) access revoked` with its cookie 401ing
+on the next request.
+
 ### M6 — still open
-Terminals. Remote access from a phone — auth and pairing, since the server is
-already the boundary. Worktrees are not cleaned up when a session is deleted
+Terminals. A tunnel for reaching it from outside the LAN — the auth boundary it
+needs now exists. Worktrees are not cleaned up when a session is deleted
 (harness/harness#10).
 
 ### M7 — Mobile

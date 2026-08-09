@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { serve } from '@harness/server'
+import { lanAddress } from '../Support/network'
 import { ExitCode } from '@stacksjs/types'
 
 /**
@@ -37,8 +38,10 @@ export default function (cli: CLI) {
     .option('--width [width]', 'Window width', { default: 1280 })
     .option('--height [height]', 'Window height', { default: 820 })
     .option('--tray', 'Show a system tray icon', { default: false })
-    .action(async (options: { port?: number | string, craft?: string, width?: number, height?: number, tray?: boolean }) => {
+    .option('--remote', 'Also accept paired devices, so a phone can drive this window', { default: false })
+    .action(async (options: { port?: number | string, craft?: string, width?: number, height?: number, tray?: boolean, remote?: boolean }) => {
       const port = Number(options.port ?? 3789)
+      const remote = options.remote === true
       const craftBin = resolveCraft(options.craft || undefined)
 
       if (!craftBin) {
@@ -47,15 +50,29 @@ export default function (cli: CLI) {
         process.exit(ExitCode.FatalError)
       }
 
-      const { engine, markWindowSpawned } = await serve({ port })
+      const { engine, access, markWindowSpawned } = await serve({
+        port,
+        remote,
+        // Bound to every interface only when there is something to let in.
+        ...(remote ? { hostname: '0.0.0.0' } : {}),
+      })
       console.log(`harness server on http://127.0.0.1:${port} — ${engine.current.profiles.size} profile(s)`)
+
+      if (access) {
+        const { code } = access.openPairing()
+        console.log('')
+        console.log(`  Pair a phone: open http://${lanAddress() ?? '127.0.0.1'}:${port}/ and enter  ${code}`)
+        console.log(`  Five minutes, once. Another: ./buddy harness:pair`)
+      }
 
       // Marked immediately before the spawn, so the reported cold start covers
       // the window and its page — not this command's own startup, which the
       // user pays once and which tells us nothing about page weight.
       markWindowSpawned()
       const child = spawn(craftBin, [
-        '--url', `http://127.0.0.1:${port}/`,
+        // The window authenticates through a one-time token in the URL; the
+        // server swaps it for a cookie and redirects, so it does not linger.
+        '--url', access ? `http://127.0.0.1:${port}/?token=${access.localToken}` : `http://127.0.0.1:${port}/`,
         '--title', 'harness',
         '--width', String(options.width ?? 1280),
         '--height', String(options.height ?? 820),

@@ -21,6 +21,13 @@ export interface ClientOptions {
   /** Backoff floor and ceiling, milliseconds. */
   minBackoffMs?: number
   maxBackoffMs?: number
+  /**
+   * Bearer token, for a server running with remote access on.
+   *
+   * Sent as a header, which Bun's WebSocket accepts and a browser's does not —
+   * a browser pairs instead and carries a cookie the upgrade sends for it.
+   */
+  token?: string
   /** Injectable for tests; defaults to the global WebSocket. */
   socketFactory?: (url: string) => WebSocket
   /** Injectable so tests do not wait in real time. */
@@ -132,7 +139,11 @@ export class HarnessClient {
     return new Promise<void>((resolve, reject) => {
       this.setStatus(this.attempt === 0 ? 'connecting' : 'reconnecting')
 
-      const factory = this.options.socketFactory ?? ((url: string) => new WebSocket(url))
+      const token = this.options.token
+      const factory = this.options.socketFactory
+        ?? ((url: string) => (token
+          ? new WebSocket(url, { headers: { authorization: `Bearer ${token}` } } as unknown as string[])
+          : new WebSocket(url)))
       const socket = factory(this.options.url)
       socket.binaryType = 'arraybuffer'
       this.socket = socket

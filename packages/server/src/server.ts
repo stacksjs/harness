@@ -13,6 +13,7 @@ import type { Driver, DriverKind } from '@harness/drivers'
 import { CborError, decode, encode } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
+import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache } from './assets'
 import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
@@ -34,9 +35,25 @@ export interface ServeOptions {
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
   /** Auto-approve tool calls. Off by default; see PLAN.md §12. */
   autoApprove?: boolean
+  /**
+   * Accept connections from devices that are not this machine.
+   *
+   * Turns on authentication for *every* connection, loopback included — see
+   * `access.ts` for why a tunnel makes the peer address meaningless.
+   */
+  remote?: boolean
 }
 
 interface SocketData {
+  /**
+   * The device that authenticated this socket, when remote access is on.
+   *
+   * Kept so a revoke can find the sockets it has to close. Authentication
+   * happens at upgrade, and a WebSocket then stays open for as long as it
+   * likes — so without this, revoking a lost phone would stop it reconnecting
+   * while leaving the connection it already had free to keep dispatching.
+   */
+  deviceId: string | null
   /** Sessions this socket has subscribed to. Empty means "not subscribed". */
   subscriptions: Set<number>
   /**
@@ -60,6 +77,8 @@ export interface HarnessServer {
   server: Server
   engine: Engine
   runtime: ProviderRuntime
+  /** Null unless remote access is on. */
+  access: AccessControl | null
   /**
    * Tell the server a native window has just been launched, so it can report
    * cold start when that window's page checks in.
@@ -71,8 +90,20 @@ export interface HarnessServer {
 export async function serve(options: ServeOptions = {}): Promise<HarnessServer> {
   const port = options.port ?? 3789
   const hostname = options.hostname ?? '127.0.0.1'
-  const store = new SqliteStore(options.databasePath ?? 'database/stacks.sqlite')
+  const remote = options.remote === true
 
+  // Fail closed. Binding a socket that starts agents to a public interface with
+  // no authentication is not a configuration to warn about and continue past —
+  // by the time a warning is read, the port is open.
+  if (!remote && !isLoopbackHost(hostname)) {
+    throw new Error(
+      `refusing to bind ${hostname} without authentication: pass remote: true (\`--remote\`) to accept devices, `
+      + 'or bind 127.0.0.1 to stay local',
+    )
+  }
+
+  // After the bind check, so a refused start leaves no database behind.
+  const store = new SqliteStore(options.databasePath ?? 'database/stacks.sqlite')
   const engine = new Engine({ store, reducer: reduce })
   const runtime = new ProviderRuntime({
     engine,
@@ -118,6 +149,25 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
   }
 
+  // Built after hydrate so the paired-device list it reads is the real one.
+  const access = remote
+    ? new AccessControl({
+        remote: true,
+        devices: () => engine.current.devices.values(),
+        onPair: async (device) => {
+          await engine.dispatchInternal({
+            id: `pair_${device.id}`,
+            at: Date.now(),
+            command: { type: 'device.pair', deviceId: device.id, name: device.name, tokenHash: device.tokenHash },
+          })
+        },
+      })
+    : null
+
+  // Written before listening: a desktop app that autostarts alongside the
+  // server would otherwise race the file and fail its first connection.
+  if (access) await writeLocalToken(access.localToken)
+
   const sockets = new Set<HarnessSocket>()
   const assetCache = new AssetCache()
   // Built once, before listening: the page references it by URL, so it must be
@@ -129,6 +179,82 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // against the budget in PLAN.md §11 rather than estimated from outside.
   let windowSpawnedAt: number | null = null
   let nativeProbe: Record<string, unknown> | null = null
+
+  /**
+   * The one page an unpaired device may see.
+   *
+   * Deliberately hand-written rather than rendered through stx: it has to work
+   * before the client bundle, the asset cache or the projection are reachable,
+   * and it is the only surface an unauthenticated caller can reach at all.
+   */
+  function pairingPage(error: string | null): string {
+    const message = error
+      ? `<p class="err">${error.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] ?? c))}</p>`
+      : '<p class="hint">Enter the code shown in the terminal running harness.</p>'
+    return `<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pair with harness</title>
+<style>
+  :root { color-scheme: light dark; font-family: ui-sans-serif, -apple-system, system-ui, sans-serif }
+  body { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px }
+  form { width: 100%; max-width: 320px; display: grid; gap: 12px }
+  h1 { font-size: 17px; margin: 0 0 4px; font-weight: 600 }
+  .hint, .err { font-size: 13px; margin: 0; opacity: .7 }
+  .err { color: #d1453b; opacity: 1 }
+  input { font: inherit; font-size: 17px; letter-spacing: .12em; text-align: center; text-transform: uppercase;
+    padding: 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+    background: transparent; color: inherit }
+  button { font: inherit; font-weight: 560; padding: 12px; border: 0; border-radius: 10px;
+    background: #3b6ef5; color: #fff }
+</style>
+<form method="post" action="/pair">
+  <h1>Pair with harness</h1>
+  ${message}
+  <input name="code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off"
+         spellcheck="false" placeholder="XXXX-XXXX" autofocus required>
+  <input type="hidden" name="name" value="">
+  <button type="submit">Pair this device</button>
+</form>
+<script>
+  // Named after the device rather than "a device", without asking: the phone
+  // already knows what it is, and one fewer field is one fewer reason to give up.
+  document.querySelector('input[name=name]').value =
+    (navigator.userAgentData?.platform || navigator.platform || 'a device') + ' browser'
+</script>`
+  }
+
+  async function pairingResponse(request: Request, url: URL): Promise<Response> {
+    if (!access) return new Response('not found', { status: 404 })
+
+    if (request.method !== 'POST') {
+      return new Response(pairingPage(null), {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      })
+    }
+
+    const form = await request.formData().catch(() => null)
+    if (!form) return new Response(pairingPage('that form did not arrive intact'), { status: 400, headers: { 'content-type': 'text/html; charset=utf-8' } })
+
+    const result = await access.redeem(String(form.get('code') ?? ''), String(form.get('name') ?? ''))
+    if (!result.ok) {
+      return new Response(pairingPage(result.reason), {
+        status: 401,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      })
+    }
+
+    console.warn(`[access] paired a new device from ${url.host}`)
+    // 303 so the browser follows with GET; the cookie rides along and the
+    // device lands on the app already authenticated.
+    return new Response(null, {
+      status: 303,
+      headers: {
+        'location': '/',
+        'set-cookie': sessionCookie(result.token, url.protocol === 'https:'),
+      },
+    })
+  }
 
   function send(socket: HarnessSocket, payload: unknown): void {
     try {
@@ -148,6 +274,24 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    */
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
     for (const event of events) {
+      // A revoke has to reach the connection, not just the next handshake.
+      // Closed before the event is delivered, so the socket being cut off does
+      // not first get told why in a frame it could act on.
+      if (event.payload.type === 'device.revoked') {
+        const revoked = event.payload.deviceId
+        for (const socket of sockets) {
+          if (socket.data.deviceId !== revoked) continue
+          // 4001: application-defined. The client treats it as terminal rather
+          // than reconnecting into a rejection loop.
+          try {
+            socket.close(4001, 'access revoked')
+          }
+          catch {
+            // Already gone, which is the outcome we wanted.
+          }
+        }
+      }
+
       for (const socket of sockets) {
         if (event.sessionId !== 0 && !socket.data.subscriptions.has(event.sessionId)) continue
         send(socket, { t: 'event', event })
@@ -281,9 +425,58 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     fetch(request, srv) {
       const url = new URL(request.url)
 
+      // Everything below this line assumes the caller is allowed to be here.
+      if (access) {
+        // Liveness without disclosure: a tunnel or uptime check may ask whether
+        // the process is up, but session and profile counts are not public.
+        if (url.pathname === '/health' && !access.authenticate(request).ok)
+          return Response.json({ ok: true })
+
+        // Mint a fresh code. Authenticated, because handing out pairing codes
+        // to anyone who asks would make the code itself pointless.
+        if (url.pathname === '/pair/new' && request.method === 'POST') {
+          if (!access.authenticate(request).ok)
+            return Response.json({ error: 'not authorised to open pairing' }, { status: 401 })
+          return Response.json(access.openPairing())
+        }
+
+        // A one-time handoff for a webview on this machine, which cannot set
+        // a header on its first navigation the way the CLI can. Restricted to
+        // *this host's* token, never a device's: a token in a URL ends up in
+        // history and in whatever logs sit in front of the server, and the
+        // local one is already readable by anything running as this user.
+        const handoff = url.searchParams.get('token')
+        if (handoff && access.authenticate(new Request(url, { headers: { authorization: `Bearer ${handoff}` } })).deviceId === 'local') {
+          const clean = new URL(url)
+          clean.searchParams.delete('token')
+          // Redirected rather than served in place, so the token does not stay
+          // in the address bar for the life of the window.
+          return new Response(null, {
+            status: 303,
+            headers: { 'location': `${clean.pathname}${clean.search}`, 'set-cookie': sessionCookie(handoff, url.protocol === 'https:') },
+          })
+        }
+
+        if (url.pathname === '/pair')
+          return pairingResponse(request, url)
+
+        const outcome = access.authenticate(request)
+        if (!outcome.ok) {
+          // A browser gets the pairing page rather than a bare 401, because the
+          // person holding the phone needs somewhere to type the code.
+          if (request.headers.get('accept')?.includes('text/html'))
+            return new Response(pairingPage(null), { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } })
+          return Response.json({ error: 'this harness requires pairing' }, { status: 401 })
+        }
+      }
+
       if (url.pathname === '/ws') {
         const upgraded = srv.upgrade(request, {
-          data: { subscriptions: new Set<number>(), cursors: new Map<number, number>() },
+          data: {
+            deviceId: access?.authenticate(request).deviceId ?? null,
+            subscriptions: new Set<number>(),
+            cursors: new Map<number, number>(),
+          },
         })
         return upgraded ? undefined : new Response('expected a websocket upgrade', { status: 426 })
       }
@@ -409,6 +602,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     server,
     engine,
     runtime,
+    access,
     markWindowSpawned: () => { windowSpawnedAt = Date.now() },
     stop: () => {
       void runtime.stopAll()

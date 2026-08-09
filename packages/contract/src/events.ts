@@ -82,6 +82,8 @@ export type EventPayload =
   | { type: 'mcp.enabledChanged', profileId: number, name: string, enabled: boolean }
   | { type: 'workspace.added', workspaceId: number, profileId: number, path: string }
   | { type: 'workspace.trust-changed', workspaceId: number, trusted: boolean }
+  | { type: 'device.paired', deviceId: string, name: string, tokenHash: string, at: number }
+  | { type: 'device.revoked', deviceId: string }
 
 export type HarnessEvent = EventBase & { payload: EventPayload }
 

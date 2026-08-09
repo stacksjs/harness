@@ -1,9 +1,10 @@
 import type { DriverKind } from '@harness/contract'
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
-import { HarnessClient } from '@harness/client'
+import type { HarnessClient } from '@harness/client'
 import { derivedId } from '@harness/engine'
 import { ExitCode } from '@stacksjs/types'
+import { connect } from '../Support/client'
 
 /**
  * Drive one agent turn from the terminal.
@@ -29,10 +30,9 @@ export default function (cli: CLI) {
     .option('--model [model]', "Model override; omit to use the provider's default")
     .option('--isolate', 'Run in a git worktree of its own, on its own branch', { default: false })
     .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string, isolate?: boolean }) => {
-      const client = new HarnessClient({ url: options.url })
-
+      let client: HarnessClient
       try {
-        await client.connect()
+        client = await connect(options.url)
       }
       catch {
         console.error(`Could not reach the harness server at ${options.url}.`)

@@ -34,4 +34,5 @@ export default {
   'desktop': 'Desktop',
   'doctor': 'Doctor',
   'mcp': 'Mcp',
+  'devices': 'Devices',
 } satisfies CommandRegistry
