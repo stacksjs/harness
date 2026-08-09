@@ -13,7 +13,7 @@
 
 import type { ClientCommand, HarnessEvent } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
-import { decode, encode } from '@harness/contract'
+import { decode, encode, GLOBAL_SESSION_ID } from '@harness/contract'
 import { apply, emptyState } from '@harness/engine'
 
 export interface ClientOptions {
@@ -52,6 +52,8 @@ export class HarnessClient {
   private statusListeners = new Set<(status: ConnectionStatus) => void>()
   private eventListeners = new Set<(event: HarnessEvent) => void>()
   private stateListeners = new Set<(state: HarnessState) => void>()
+  /** Resolved once the global log has been replayed into `state`. */
+  private globalReady: (() => void) | null = null
 
   status: ConnectionStatus = 'idle'
   state: HarnessState = emptyState()
@@ -99,6 +101,31 @@ export class HarnessClient {
   async connect(): Promise<void> {
     this.closed = false
     await this.openOnce()
+    // `state` is built by applying events, and events only arrive for sessions
+    // this client subscribed to — so a fresh client's projection was empty and
+    // stayed that way. Anything that read it to decide (`harness:run` looking
+    // for an existing workspace by path) always concluded "not there" and made
+    // a second one, which is where the duplicate profiles came from.
+    await this.hydrate()
+  }
+
+  /**
+   * Replay the global log, so `state` means what it says.
+   *
+   * The global session carries profiles, workspaces and MCP servers — the
+   * things a client reasons about before it has picked a session. Subscribing
+   * to it is the same gap-filling path a reconnect uses, so there is no second
+   * mechanism to keep correct.
+   */
+  private hydrate(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.globalReady = resolve
+      this.subscribe(GLOBAL_SESSION_ID)
+      // A server that never acknowledges must not hang a CLI command. The
+      // projection is then merely empty, which is the behaviour that existed
+      // before this.
+      setTimeout(resolve, 2000)
+    })
   }
 
   private openOnce(): Promise<void> {
@@ -182,6 +209,17 @@ export class HarnessClient {
         apply(this.state, event)
         for (const listener of this.eventListeners) listener(event)
         for (const listener of this.stateListeners) listener(this.state)
+        return
+      }
+
+      case 'subscribed': {
+        // The global replay has landed, so `state` now holds the profiles and
+        // workspaces the server knows about.
+        if (frame.sessionId === GLOBAL_SESSION_ID && this.globalReady) {
+          const done = this.globalReady
+          this.globalReady = null
+          done()
+        }
         return
       }
 

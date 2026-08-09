@@ -1,4 +1,8 @@
 export { serve } from './server'
 export type { HarnessServer, ServeOptions } from './server'
+export { interpolate, missingReferences, resolveForDriver } from './mcp'
+export type { McpServer, ResolvedMcpServer } from './mcp'
 export { renderHarnessView, viewProps } from './views'
+export { workspaceDiff } from './diff'
+export * as worktree from './worktree'
 export type { ViewProps } from './views'

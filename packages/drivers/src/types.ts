@@ -57,6 +57,17 @@ export interface ProviderInstance {
   stop: () => Promise<void>
 }
 
+/**
+ * An MCP server with its references already resolved.
+ *
+ * Structurally the union a provider expects, so a driver maps rather than
+ * translates. Declared here rather than imported from the server package
+ * because drivers must not depend on it.
+ */
+export type ResolvedMcpServer =
+  | { name: string, type: 'stdio', command: string, args: string[], env: Record<string, string> }
+  | { name: string, type: 'sse' | 'http', url: string, headers: Record<string, string> }
+
 export interface DriverConfig {
   /** Absolute path the agent runs against. */
   workspacePath: string
@@ -64,6 +75,13 @@ export interface DriverConfig {
   home?: string
   binaryPath?: string
   model?: string
+  /**
+   * MCP servers this session should have, already resolved.
+   *
+   * Every `${VAR}` reference is substituted before it gets here, so a driver
+   * never has to know that harness stores references rather than secrets.
+   */
+  mcpServers?: ResolvedMcpServer[]
   /**
    * When false, every tool call raises an approval request the client must
    * answer. Defaults to false — an agent harness is a code-execution surface,

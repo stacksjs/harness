@@ -106,6 +106,76 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'mcp.add': {
+      const profile = state.profiles.get(command.profileId)
+      if (!profile)
+        throw new InvalidCommand(`no such profile: ${command.profileId}`)
+      if (!command.name.trim())
+        throw new InvalidCommand('an MCP server needs a name')
+      // The name is the key the provider addresses tools by, so two servers
+      // sharing one would make which tools an agent gets depend on ordering.
+      if (profile.mcpServers.some(server => server.name === command.name))
+        throw new InvalidCommand(`${command.name} is already attached to this profile`)
+      if (command.transport === 'stdio' ? !command.command : !command.url)
+        throw new InvalidCommand(
+          command.transport === 'stdio'
+            ? 'a stdio server needs a command'
+            : `an ${command.transport} server needs a url`,
+        )
+
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: {
+          type: 'mcp.added',
+          profileId: command.profileId,
+          name: command.name,
+          transport: command.transport,
+          ...(command.command ? { command: command.command } : {}),
+          ...(command.args?.length ? { args: command.args } : {}),
+          ...(command.env && Object.keys(command.env).length ? { env: command.env } : {}),
+          ...(command.url ? { url: command.url } : {}),
+          ...(command.headers && Object.keys(command.headers).length ? { headers: command.headers } : {}),
+        },
+      }]
+    }
+
+    case 'mcp.remove': {
+      const profile = state.profiles.get(command.profileId)
+      if (!profile)
+        throw new InvalidCommand(`no such profile: ${command.profileId}`)
+      if (!profile.mcpServers.some(server => server.name === command.name))
+        throw new InvalidCommand(`no MCP server named ${command.name} on this profile`)
+
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: { type: 'mcp.removed', profileId: command.profileId, name: command.name },
+      }]
+    }
+
+    case 'mcp.setEnabled': {
+      const profile = state.profiles.get(command.profileId)
+      if (!profile)
+        throw new InvalidCommand(`no such profile: ${command.profileId}`)
+      if (!profile.mcpServers.some(server => server.name === command.name))
+        throw new InvalidCommand(`no MCP server named ${command.name} on this profile`)
+
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: {
+          type: 'mcp.enabledChanged',
+          profileId: command.profileId,
+          name: command.name,
+          enabled: command.enabled,
+        },
+      }]
+    }
+
     case 'workspace.add': {
       if (!state.profiles.has(command.profileId))
         throw new InvalidCommand(`no such profile: ${command.profileId}`)

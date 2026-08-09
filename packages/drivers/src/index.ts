@@ -7,6 +7,7 @@ export { driverKinds, registry, resolveDriver } from './registry'
 export type {
   Driver,
   DriverConfig,
+  ResolvedMcpServer,
   ProbeResult,
   ProviderEvent,
   ProviderInstance,

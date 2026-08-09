@@ -72,6 +72,15 @@ class ClaudeInstance implements ProviderInstance {
       // until the turn ends.
       includePartialMessages: true,
     }
+    // Keyed by name, which is how the provider addresses a server's tools.
+    if (this.config.mcpServers?.length) {
+      options.mcpServers = Object.fromEntries(this.config.mcpServers.map(server => [
+        server.name,
+        server.type === 'stdio'
+          ? { type: 'stdio' as const, command: server.command, args: server.args, env: server.env }
+          : { type: server.type, url: server.url, headers: server.headers },
+      ]))
+    }
     if (this.config.model) options.model = this.config.model
     if (this.config.binaryPath) options.pathToClaudeCodeExecutable = this.config.binaryPath
     // `resume` continues the provider's own conversation. Without it every turn

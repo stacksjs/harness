@@ -1568,10 +1568,42 @@ Everything downstream followed the worktree without knowing it existed: the
 agent's cwd, the checkpoints, the diff. `defaultWorkspacePath` returns the
 worktree when there is one, and that is the whole integration.
 
+### MCP servers, per profile
+
+A profile carries its own servers, because a work project wants its issue
+tracker and a personal one should not inherit its credentials. `mcp:add`,
+`mcp:list`, `mcp:remove`, `mcp:enable`, `mcp:disable`; the runtime resolves a
+profile's enabled servers and hands them to the driver, which maps them onto the
+SDK's own `mcpServers`.
+
+**A secret is referenced, not stored.** A value may be `${NAME}`, resolved from
+the server process's environment at spawn. The log — plaintext SQLite, designed
+never to forget — holds `${DEMO_WORD}`; the agent's process holds the value.
+
+Verified end to end rather than asserted: with `DEMO_WORD=pomegranate` in the
+server's environment and a demo server configured with
+`{"HARNESS_DEMO_WORD": "${DEMO_WORD}"}`, the agent called
+`mcp__demo__harness_secret_word` and answered *pomegranate*.
+
+The honest boundary, found by grepping the log afterwards: one row did contain
+the word — the assistant's own reply, because I had asked it to say it. The
+guarantee is about what harness writes, not about what an agent can be talked
+into saying. Written into the module doc so the next reader gets the true
+version.
+
+**The bug this surfaced.** Two live attempts failed with the tool missing, and
+the cause was not MCP at all: `HarnessClient.state` was only built from events
+for *subscribed* sessions, and nothing subscribed to the global one. So
+`harness:run`'s "reuse a workspace by path" check always found nothing and made
+a **new profile every run** — five `CLI` profiles had accumulated, and the
+server was attached to a different one than the run used. `connect()` now
+hydrates from the global session before returning. The feature was fine; the
+client had been quietly lying about what existed since the day it was written.
+
 ### M6 — still open
-Terminals. Per-profile MCP server management. Remote access from a phone — auth
-and pairing, since the server is already the boundary. Worktrees are not cleaned
-up when a session is deleted (harness/harness#10).
+Terminals. Remote access from a phone — auth and pairing, since the server is
+already the boundary. Worktrees are not cleaned up when a session is deleted
+(harness/harness#10).
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

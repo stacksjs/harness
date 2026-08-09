@@ -67,6 +67,19 @@ export type EventPayload =
    * removed also lets the log answer "where did that session go?".
    */
   | { type: 'profile.deleted', profileId: number, workspaceIds: number[], sessionIds: number[] }
+  | {
+      type: 'mcp.added'
+      profileId: number
+      name: string
+      transport: 'stdio' | 'sse' | 'http'
+      command?: string
+      args?: string[]
+      env?: Record<string, string>
+      url?: string
+      headers?: Record<string, string>
+    }
+  | { type: 'mcp.removed', profileId: number, name: string }
+  | { type: 'mcp.enabledChanged', profileId: number, name: string, enabled: boolean }
   | { type: 'workspace.added', workspaceId: number, profileId: number, path: string }
   | { type: 'workspace.trust-changed', workspaceId: number, trusted: boolean }
 

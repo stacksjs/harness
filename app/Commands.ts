@@ -33,4 +33,5 @@ export default {
   'run': 'Run',
   'desktop': 'Desktop',
   'doctor': 'Doctor',
+  'mcp': 'Mcp',
 } satisfies CommandRegistry

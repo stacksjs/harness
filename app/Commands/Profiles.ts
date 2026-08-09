@@ -1,7 +1,8 @@
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
-import { Engine, reduce, derivedId, SqliteStore } from '@harness/engine'
+import { derivedId } from '@harness/engine'
 import { ExitCode } from '@stacksjs/types'
+import { boot, commandId } from '../Support/engine'
 
 /**
  * Profile management through the engine, not around it.
@@ -11,23 +12,6 @@ import { ExitCode } from '@stacksjs/types'
  * created from the terminal identical to one created from the desktop app --
  * same log, same ordering, same audit trail.
  */
-
-const DB_PATH = 'database/stacks.sqlite'
-
-async function boot(): Promise<Engine> {
-  const engine = new Engine({ store: new SqliteStore(DB_PATH), reducer: reduce })
-  await engine.hydrate()
-  return engine
-}
-
-/**
- * Command ids are the idempotency key, so they must be unique per intent --
- * hence the random suffix. A caller that wants a retry to be recognised as a
- * retry passes its own id instead.
- */
-function commandId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
-}
 
 export default function (cli: CLI) {
   cli

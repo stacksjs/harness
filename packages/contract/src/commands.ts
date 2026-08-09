@@ -39,6 +39,27 @@ export type ClientCommand =
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
   | { type: 'profile.update', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
   | { type: 'profile.delete', profileId: number }
+  /**
+   * Attach an MCP server to a profile.
+   *
+   * Values in `env`, `headers`, `url` and `args` may be `${VAR}` references,
+   * resolved from the server's environment when an agent starts. The log keeps
+   * the reference; a literal secret written here would be recorded in plaintext
+   * in a file designed never to forget.
+   */
+  | {
+      type: 'mcp.add'
+      profileId: number
+      name: string
+      transport: 'stdio' | 'sse' | 'http'
+      command?: string
+      args?: string[]
+      env?: Record<string, string>
+      url?: string
+      headers?: Record<string, string>
+    }
+  | { type: 'mcp.remove', profileId: number, name: string }
+  | { type: 'mcp.setEnabled', profileId: number, name: string, enabled: boolean }
   | { type: 'workspace.add', profileId: number, path: string, name?: string }
   | { type: 'workspace.trust', workspaceId: number, trusted: boolean }
 
@@ -73,6 +94,9 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'session.approval.respond',
   'session.input.respond',
   'session.checkpoint.revert',
+  'mcp.add',
+  'mcp.remove',
+  'mcp.setEnabled',
   'session.stop',
   'profile.create',
   'profile.update',

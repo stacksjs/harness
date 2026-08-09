@@ -17,6 +17,7 @@ import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { resolveDriver } from '@harness/drivers'
 import { capture, restore } from './checkpoint'
+import { missingReferences, resolveForDriver } from './mcp'
 import * as worktree from './worktree'
 
 export interface RuntimeOptions {
@@ -140,9 +141,31 @@ export class ProviderRuntime {
       return null
     }
 
+    // The profile's servers, not the session's: a project's tools belong to the
+    // project, and every session in it should reach the same ones.
+    const workspace = session ? state.workspaces.get(session.workspaceId) : undefined
+    const profile = workspace ? state.profiles.get(workspace.profileId) : undefined
+    const mcpServers = resolveForDriver(profile?.mcpServers ?? [])
+
+    // Said once, before the turn, rather than left to surface as an
+    // authentication error from inside the server — which sends you to check a
+    // token that was never passed rather than a variable that is not set.
+    for (const server of profile?.mcpServers ?? []) {
+      if (!server.enabled) continue
+      const missing = missingReferences(server, process.env)
+      if (missing.length > 0) {
+        await this.emit({
+          type: 'thread.error',
+          sessionId,
+          message: `MCP server "${server.name}" needs ${missing.join(', ')} in the environment`,
+        })
+      }
+    }
+
     const instance = await driver.create({
       workspacePath,
       autoApprove: this.options.autoApprove,
+      mcpServers,
       // Empty means "no preference" — the driver must omit it so the provider
       // picks its own default, rather than being asked for a model named ''.
       model: session?.model || undefined,

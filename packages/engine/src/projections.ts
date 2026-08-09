@@ -96,6 +96,18 @@ export interface TurnState {
   cost: number
 }
 
+/** An MCP server attached to a profile. See server/mcp.ts for the value rules. */
+export interface McpServerState {
+  name: string
+  transport: 'stdio' | 'sse' | 'http'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  enabled: boolean
+}
+
 export interface ProfileState {
   id: number
   name: string
@@ -112,6 +124,8 @@ export interface ProfileState {
   /** Order in the switcher. Lower is further left. */
   position: number
   workspaceIds: number[]
+  /** In the order they were attached. */
+  mcpServers: McpServerState[]
 }
 
 export interface WorkspaceState {
@@ -154,6 +168,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         tint: p.tint ?? '',
         position: 0,
         workspaceIds: [],
+        mcpServers: [],
       })
       break
 
@@ -176,6 +191,41 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       for (const id of p.workspaceIds ?? []) state.workspaces.delete(id)
       for (const id of p.sessionIds ?? []) state.sessions.delete(id)
       break
+
+    case 'mcp.added': {
+      const profile = state.profiles.get(p.profileId)
+      if (!profile) break
+      // Ignore a duplicate name rather than shadowing: the reducer refuses one,
+      // so seeing it here means a replay of the same event.
+      if (profile.mcpServers.some(server => server.name === p.name)) break
+      profile.mcpServers.push({
+        name: p.name,
+        transport: p.transport,
+        ...(p.command ? { command: p.command } : {}),
+        ...(p.args ? { args: p.args } : {}),
+        ...(p.env ? { env: p.env } : {}),
+        ...(p.url ? { url: p.url } : {}),
+        ...(p.headers ? { headers: p.headers } : {}),
+        // Attached means wanted. Adding a server disabled would make the common
+        // case two commands.
+        enabled: true,
+      })
+      break
+    }
+
+    case 'mcp.removed': {
+      const profile = state.profiles.get(p.profileId)
+      if (!profile) break
+      profile.mcpServers = profile.mcpServers.filter(server => server.name !== p.name)
+      break
+    }
+
+    case 'mcp.enabledChanged': {
+      const profile = state.profiles.get(p.profileId)
+      const server = profile?.mcpServers.find(s => s.name === p.name)
+      if (server) server.enabled = p.enabled
+      break
+    }
 
     case 'workspace.added': {
       state.workspaces.set(p.workspaceId, {
