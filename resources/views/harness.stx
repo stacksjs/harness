@@ -560,10 +560,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       if (!diff.isRepository) { status.textContent = 'This workspace is not a git repository.'; return }
       if (diff.files.length === 0) { status.textContent = 'No uncommitted changes.'; return }
 
-      // Said plainly, because the number is easy to over-trust: this is the
-      // working tree, not this session's changes. Attributing them needs a
-      // baseline commit per session (PLAN.md §M6).
-      status.textContent = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'} in the working tree`
+      // Which comparison this is, said plainly: a count is easy to over-trust,
+      // and "what this session changed" and "what is uncommitted here" are
+      // different claims.
+      const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
+      status.textContent = diff.scope === 'session'
+        ? `${count} since this session started`
+        : `${count} in the working tree`
 
       for (const file of diff.files) {
         const row = document.createElement('li')

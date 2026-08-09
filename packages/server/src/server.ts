@@ -296,11 +296,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const path = options.workspacePath
           ? options.workspacePath(engine.current, id)
           : defaultWorkspacePath(engine.current, id)
-        if (!path) return Response.json({ isRepository: false, files: [], patch: '', error: 'session has no workspace' })
-        return workspaceDiff(path)
+        if (!path) return Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'session has no workspace' })
+        // The session's earliest checkpoint is its baseline: taken before the
+        // first turn ran, so diffing against it answers "what did this session
+        // change" rather than "what is uncommitted here".
+        const baseline = engine.current.sessions.get(id)?.checkpoints[0]?.vcsRef
+        return workspaceDiff(path, baseline)
           .then(diff => Response.json(diff))
           // A diff that cannot be read must not take the page down with it.
-          .catch(() => Response.json({ isRepository: false, files: [], patch: '', error: 'could not read the workspace' }))
+          .catch(() => Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'could not read the workspace' }))
       }
 
       // Shared page assets. Checked before the page routes because their

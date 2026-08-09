@@ -86,6 +86,27 @@ async function withTemporaryIndex<T>(run: (env: Record<string, string>) => Promi
 }
 
 /**
+ * A tree object for the working tree exactly as it stands.
+ *
+ * Shared with the diff, which needs the *same* notion of "now" the checkpoint
+ * uses. Comparing a checkpoint tree against the live index instead reports a
+ * file that is present but untracked as deleted — it is in the tree and not in
+ * the index, and git has no way to know you still have it.
+ *
+ * Built in a temporary index, so nothing the user owns moves.
+ */
+export async function snapshotTree(workspacePath: string): Promise<string | null> {
+  return withTemporaryIndex(async (env) => {
+    const read = await git(workspacePath, ['read-tree', 'HEAD'], env)
+    if (!read.ok) return null
+    const add = await git(workspacePath, ['add', '-A'], env)
+    if (!add.ok) return null
+    const tree = await git(workspacePath, ['write-tree'], env)
+    return tree.ok ? tree.out.trim() : null
+  })
+}
+
+/**
  * Snapshot the workspace, without disturbing it.
  *
  * Returns null rather than throwing when there is nothing to snapshot: a plain

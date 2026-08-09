@@ -163,3 +163,103 @@ describe('reading a real workspace', () => {
     finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })
+
+describe('measuring against a session baseline', () => {
+  function repo2(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'harness-base-'))
+    const run = (...args: string[]) => spawnSync('git', args, { cwd: dir })
+    run('init', '-q')
+    run('config', 'user.email', 'test@example.com')
+    run('config', 'user.name', 'Test')
+    writeFileSync(join(dir, 'tracked.txt'), 'one\n')
+    run('add', '.')
+    run('commit', '-qm', 'first')
+    return dir
+  }
+
+  /** The same snapshot the checkpoint reactor takes before a turn. */
+  async function baselineOf(dir: string): Promise<string> {
+    const { capture } = await import('../src/checkpoint')
+    return (await capture(dir)).ref!
+  }
+
+  it('says which comparison it made', () => {
+    // The reader needs to know whether a count means "this session" or "this
+    // working tree" — they are different claims.
+    const dir = repo2()
+    try {
+      return workspaceDiff(dir).then((d) => {
+        expect(d.scope).toBe('working-tree')
+        rmSync(dir, { recursive: true, force: true })
+      })
+    }
+    catch { rmSync(dir, { recursive: true, force: true }); throw new Error('failed') }
+  })
+
+  it('sees work the agent committed, which git diff HEAD cannot', async () => {
+    // The case that makes a baseline worth having. Once the agent commits,
+    // `git diff HEAD` is empty and the review panel says "no changes" about a
+    // session that rewrote a file.
+    const dir = repo2()
+    try {
+      const baseline = await baselineOf(dir)
+
+      writeFileSync(join(dir, 'tracked.txt'), 'agent rewrote this\n')
+      spawnSync('git', ['add', '.'], { cwd: dir })
+      spawnSync('git', ['commit', '-qm', 'agent work'], { cwd: dir })
+
+      expect((await workspaceDiff(dir)).files).toEqual([])
+
+      const scoped = await workspaceDiff(dir, baseline)
+      expect(scoped.scope).toBe('session')
+      expect(scoped.files.map(f => f.path)).toEqual(['tracked.txt'])
+      expect(scoped.patch).toContain('agent rewrote this')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('excludes edits that were already there before the session', async () => {
+    // The whole point of attribution: your work in flight is not the agent's.
+    const dir = repo2()
+    try {
+      writeFileSync(join(dir, 'mine.txt'), 'I was editing this\n')
+      const baseline = await baselineOf(dir)
+
+      writeFileSync(join(dir, 'theirs.txt'), 'the agent made this\n')
+
+      const scoped = await workspaceDiff(dir, baseline)
+      expect(scoped.files.map(f => f.path)).toEqual(['theirs.txt'])
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('reports a new file as added, with real line counts', async () => {
+    // Better than the working-tree view can manage. There, a new file is
+    // `untracked` with no counts, because `git diff` cannot see it. Between two
+    // trees it is simply an addition, and its lines are countable — so the
+    // reviewer learns how much was added rather than only that something was.
+    const dir = repo2()
+    try {
+      const baseline = await baselineOf(dir)
+      writeFileSync(join(dir, 'new.ts'), 'export const x = 1\n')
+
+      const scoped = await workspaceDiff(dir, baseline)
+      expect(scoped.files).toContainEqual({ path: 'new.ts', status: 'added', insertions: 1, deletions: 0 })
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('falls back to the working tree when the baseline has been collected', async () => {
+    // Checkpoints are dangling commits, so `git gc` can take one. A diff
+    // against HEAD is still useful; claiming session scope would not be.
+    const dir = repo2()
+    try {
+      writeFileSync(join(dir, 'tracked.txt'), 'changed\n')
+      const diff = await workspaceDiff(dir, '0000000000000000000000000000000000000000')
+
+      expect(diff.scope).toBe('working-tree')
+      expect(diff.files.map(f => f.path)).toEqual(['tracked.txt'])
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})

@@ -1494,8 +1494,38 @@ looked like one doing nothing, and it offered Send instead of Stop on a turn
 that had not finished. The state string is now authoritative rather than a
 boolean.
 
+### The diff now attributes to the session
+
+`/s/:id/diff` measured the working tree, so edits you had in flight before the
+session started appeared as the agent's, and work the agent *committed*
+disappeared entirely — `git diff HEAD` is empty once it commits, and the panel
+said "no changes" about a session that had rewritten a file.
+
+It measures against the session's **first checkpoint** now. No new bookkeeping
+was needed: checkpoints already exist so a turn can be undone, and the earliest
+one *is* the baseline. A second marker beside it would have been one more thing
+to keep in step.
+
+Both sides are trees. Comparing a baseline tree against the live *index* reports
+a file that is present but untracked as **deleted** — it is in the tree, absent
+from the index, and git cannot tell you still have it. Snapshotting the working
+tree the way the checkpoint does makes the comparison symmetric, and brings
+untracked files in on both sides for free. That also turns a new file from
+`untracked` with no counts into `added` with real ones, which the working-tree
+view cannot manage.
+
+The response says which comparison it made, and the UI says it too — "since this
+session started" or "in the working tree". A baseline that `git gc` has
+collected falls back to the working tree rather than claiming an attribution it
+no longer has.
+
+**Verified live:** an agent appended a line and committed twice. `git diff HEAD`
+was empty; the panel reported `scope: session`, one file, `+1 −0`, with the
+agent's line in the patch — and left the edit I had in flight before the session
+out of it.
+
 ### M6 — still open
-Git integration (branch/worktree per session). Terminals. Per-profile MCP server management. Remote
+Branch/worktree per session. Terminals. Per-profile MCP server management. Remote
 access from a phone — auth and pairing, since the server is already the boundary.
 
 ### M7 — Mobile
