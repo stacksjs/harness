@@ -1298,6 +1298,27 @@ Worth noting that this could not have worked at all before **craft v0.0.62** eit
 was one of the twenty window actions whose payload the bridge discarded (§10.10). Three independent
 defects stacked between "the model has a tint column" and "the window is violet".
 
+### Global shortcut
+
+`Cmd+Shift+H` focuses the window and puts the cursor in the composer. Registered from the page rather
+than from the Zig host, because the handler is page logic; the host owns the hotkey and delivers a
+`craft:shortcut` event carrying the id, so the page never holds a callback the OS knows nothing about.
+
+Verified as far as the boundary allows: the bridge receives
+`{"a":"register","t":"shortcuts","d":"{\"id\":\"harness.summon\",\"accelerator\":\"Cmd+Shift+H\"}"}`
+with no error. **Actually pressing the keys needs a person at the machine** — as with the trackpad swipe.
+
+A wrong turn worth recording: `craft-app.js` exposes `app.registerShortcut(accelerator, handler)` and is
+never injected. The live surface is `craft-bridge.js`, whose API is
+`shortcuts.register(id, accelerator)` plus a `shortcuts.on` event. Reading the file that looked right
+cost more than probing the running page would have.
+
+### Still open in M4
+
+**`.dmg` packaging and the Craft updater.** Craft has release workflows and an updater bridge already;
+wiring them for harness is real work, but a signed `.dmg` cannot be verified here without signing
+credentials, and shipping an unverifiable installer is worse than not claiming one. Left deliberately.
+
 
 ### M4 — Desktop surface *(original scope)*
 Craft window over the server. Native chrome: per-profile titlebar tint, system tray, global

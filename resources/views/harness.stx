@@ -311,6 +311,30 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // so reading `.dataset` off it threw and the socket was never opened. The
   // whole live half of this page was dead in a browser — invisible because the
   // server-rendered transcript still looked correct.
+  // A global shortcut, so harness is reachable without finding its window.
+  //
+  // Registered from the page rather than from the Zig host because the handler
+  // is page logic — focus, then put the cursor in the composer. In a browser
+  // `window.craft` is absent and this is skipped; a browser cannot claim a
+  // system-wide key anyway.
+  try {
+    const shortcuts = window.craft?.shortcuts
+    if (shortcuts) {
+      // Registration and the handler are separate: the host owns the hotkey and
+      // delivers a `craft:shortcut` event carrying the id it was registered
+      // under, so the page does not hold a callback the OS knows nothing about.
+      shortcuts.register('harness.summon', 'Cmd+Shift+H')
+      shortcuts.on?.((event) => {
+        if ((event?.id ?? event) !== 'harness.summon') return
+        window.craft?.window?.focus?.()
+        // Someone who summoned the window deliberately should land ready to
+        // type, not hunting for the input.
+        document.querySelector('[data-composer] [data-prompt]')?.focus()
+      })
+    }
+  }
+  catch { /* a host without the shortcuts bridge is not an error */ }
+
   // Paint the native window in the active profile's colour.
   //
   // This is the half of the Arc idea AppKit owns: the web sidebar takes its
