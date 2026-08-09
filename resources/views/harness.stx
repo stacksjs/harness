@@ -186,7 +186,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         placeholder="Ask the agent…"
         class="min-h-[40px] flex-1 resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-neutral-900"
       ></textarea>
-      <button type="submit" class="h-[36px] rounded-[8px] bg-neutral-900 px-4 text-[13px] text-white dark:bg-white dark:text-neutral-900">Send</button>
+      <button type="submit" data-send class="h-[36px] rounded-[8px] bg-neutral-900 px-4 text-[13px] text-white dark:bg-white dark:text-neutral-900">Send</button>
+      <!--
+        Stop is the one control a running agent must always offer. It replaces
+        Send rather than sitting beside it: while a turn runs there is nothing
+        to send, and two enabled buttons invite sending into a busy session.
+      -->
+      <button type="button" data-stop hidden class="h-[36px] rounded-[8px] border border-black/15 px-4 text-[13px] dark:border-white/20">Stop</button>
     </form>
   </main>
 </div>
@@ -299,6 +305,78 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // so reading `.dataset` off it threw and the socket was never opened. The
   // whole live half of this page was dead in a browser — invisible because the
   // server-rendered transcript still looked correct.
+  // The sidebar's own controls. `<Sidebar>` renders "New Session" and the
+  // space "+" and emits when they are pressed; nothing was listening, so both
+  // were buttons that did nothing.
+  //
+  // These dispatch over the socket like every other command, then reload —
+  // the sidebar is server-rendered, and re-rendering it here would be a second
+  // implementation of what the server already does.
+  const island = document.querySelector('[data-harness-island]')
+  // Set by the transcript's socket once it opens, so a sidebar command reuses
+  // it rather than opening a second connection to the same server.
+  let liveSocket = null
+
+  /**
+   * Dispatch a command that is not about the open session.
+   *
+   * Reuses the transcript's socket when there is one. On the index page there
+   * is no session and therefore no socket, so this opens a short-lived one —
+   * the alternative is keeping a connection open on a page that never streams.
+   *
+   * Resolves on the server's ack so a caller can reload without outrunning the
+   * write.
+   */
+  async function sendCommand(command) {
+    const { encode } = await import(island.dataset.codec)
+    const envelope = {
+      id: `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      at: Date.now(),
+      command,
+    }
+
+    if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+      liveSocket.send(encode({ t: 'dispatch', envelope }))
+      // The island's own handler will see the ack; a short settle is enough,
+      // and the command is idempotent by id if the reload races it.
+      return new Promise(resolve => setTimeout(() => resolve(true), 150))
+    }
+
+    return new Promise((resolve) => {
+      const socket = new WebSocket(island.dataset.url)
+      socket.binaryType = 'arraybuffer'
+      socket.addEventListener('open', () => socket.send(encode({ t: 'dispatch', envelope })))
+      socket.addEventListener('message', () => { socket.close(); resolve(true) })
+      // A dispatch that never acks must not leave the page waiting forever.
+      setTimeout(() => { try { socket.close() } catch {} ; resolve(false) }, 4000)
+    })
+  }
+
+  document.addEventListener('spaceAction', async (event) => {
+    const { spaceId, role } = event.detail || {}
+    if (role !== 'action' || !spaceId) return
+
+    // A session needs somewhere to run. The profile's first workspace is the
+    // obvious default; with none there is nothing to guess at, and saying so
+    // beats creating a session that fails on its first turn.
+    const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(spaceId)}"]`)
+    const workspaceId = Number(panel?.querySelector('[data-space-pinned-item]')?.dataset.pinnedId)
+    if (!workspaceId) {
+      window.alert('This profile has no workspace yet. Add one with `./buddy harness:run --path <dir>`.')
+      return
+    }
+
+    await sendCommand({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    window.location.assign(`/?profile=${encodeURIComponent(spaceId)}`)
+  })
+
+  document.addEventListener('spaceAdd', async () => {
+    const name = window.prompt('Name this profile')
+    if (!name || !name.trim()) return
+    await sendCommand({ type: 'profile.create', name: name.trim() })
+    window.location.reload()
+  })
+
   // Spaces beyond the active one's neighbours render without their rows, so
   // arriving at one has to fetch it. Navigating rather than rebuilding rows in
   // JS keeps a single renderer: the server already knows how to draw a space,
@@ -396,6 +474,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
     const socket = new WebSocket(url)
     socket.binaryType = 'arraybuffer'
+    liveSocket = socket
 
     const transcript = document.querySelector('[data-transcript]')
     const responseNode = () => document.querySelector('[data-live-response]')
@@ -489,6 +568,31 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       }
     })
 
+    const sendButton = composer?.querySelector('[data-send]')
+    const stopButton = composer?.querySelector('[data-stop]')
+
+    /**
+     * Show Stop while a turn runs, Send otherwise.
+     *
+     * Driven from the session state rather than from the click, so a turn
+     * started elsewhere — the CLI, the desktop window, another tab — puts this
+     * page into the same state. There is one execution boundary; the UI should
+     * reflect it rather than track its own idea of what is running.
+     */
+    function setRunning(running) {
+      if (stateNode) stateNode.textContent = running ? 'running' : 'idle'
+      if (sendButton) sendButton.hidden = running
+      if (stopButton) stopButton.hidden = !running
+    }
+    setRunning(stateNode?.textContent.trim() === 'running')
+
+    stopButton?.addEventListener('click', () => {
+      // Optimistic: the button goes away immediately, but the turn is not over
+      // until the log says so. `turn.interrupted` is what actually settles it.
+      stopButton.hidden = true
+      dispatch({ type: 'session.turn.interrupt', sessionId })
+    })
+
     function respondToApproval(allow) {
       const approvalId = Number(approval.dataset.approvalId)
       if (!approvalId) return
@@ -528,7 +632,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         // the reply within it.
         if (payload.role === 'user') {
           beginTurn(payload.turnId, payload.text)
-          if (stateNode) stateNode.textContent = 'running'
+          setRunning(true)
         }
       }
       else if (payload.type === 'tool.call.began') {
@@ -567,8 +671,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           transcript.scrollTop = transcript.scrollHeight
         }
       }
-      else if (payload.type === 'turn.completed') {
-        if (stateNode) stateNode.textContent = 'idle'
+      else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
+        setRunning(false)
+      }
+      else if (payload.type === 'session.failed') {
+        // A failed turn is over too. Leaving Stop up would offer to interrupt
+        // something that already stopped.
+        setRunning(false)
+        if (stateNode) stateNode.textContent = 'failed'
       }
       else if (payload.type === 'approval.requested') {
         approval.querySelector('[data-approval-tool]').textContent = payload.toolName

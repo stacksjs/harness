@@ -345,6 +345,45 @@ describe('interrupt reaches the provider', () => {
     client.close()
   })
 
+  it('does not report a stopped turn as a failure', async () => {
+    // Providers report an abort as an error — the Claude SDK ends an
+    // interrupted turn with `error_during_execution`. Passing that through
+    // would overwrite "you stopped this" with "this broke", and the session
+    // would read as failed when it did exactly what it was told.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+
+    const instance: ProviderInstance = {
+      async *startTurn() {
+        yield { type: 'assistant-delta', text: 'working' }
+        await gate
+        yield { type: 'error', message: 'turn failed: error_during_execution' }
+      },
+      async interrupt() { release() },
+      async respondApproval() {},
+      async stop() {},
+    }
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() { return instance },
+    }
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'hi' } } })
+    await client.waitFor('assistant.delta')
+
+    client.send({ t: 'dispatch', envelope: { id: 'c_int', at: 6, command: { type: 'session.turn.interrupt', sessionId } } })
+    expect(await client.waitFor('turn.interrupted')).toBeTruthy()
+
+    // Long enough for the provider's error to arrive and be dropped.
+    await new Promise(r => setTimeout(r, 300))
+    expect(client.payloads('session.failed')).toEqual([])
+    client.close()
+  })
+
   it('does not let a late completion resurrect an interrupted turn', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })

@@ -43,6 +43,15 @@ interface Running {
   /** Approval request id → the id the engine assigned, for routing responses. */
   approvals: Map<number, string>
   abandoned: boolean
+  /**
+   * The user asked to stop the turn that is running.
+   *
+   * A provider reports an abort as a failure — the Claude SDK ends an
+   * interrupted turn with `error_during_execution` — so without this a
+   * deliberate stop lands in the log as `session.failed`, and the session reads
+   * as broken when it did exactly what it was told.
+   */
+  interrupted: boolean
 }
 
 let counter = 0
@@ -132,7 +141,7 @@ export class ProviderRuntime {
       // picks its own default, rather than being asked for a model named ''.
       model: session?.model || undefined,
     })
-    const running: Running = { instance, approvals: new Map(), abandoned: false }
+    const running: Running = { instance, approvals: new Map(), abandoned: false, interrupted: false }
     this.sessions.set(sessionId, running)
     return running
   }
@@ -151,6 +160,7 @@ export class ProviderRuntime {
     if (!running) return
 
     running.abandoned = false
+    running.interrupted = false
 
     try {
       for await (const event of running.instance.startTurn({
@@ -225,12 +235,19 @@ export class ProviderRuntime {
             break
 
           case 'error':
+            // A provider error after an interrupt is the interrupt's own echo.
+            // The turn is already settled as interrupted; reporting it again as
+            // a failure would overwrite "you stopped this" with "this broke".
+            if (running.interrupted) break
             await this.emit({ type: 'thread.error', sessionId, message: event.message })
             break
         }
       }
     }
     catch (error) {
+      // Same reasoning as the `error` event: a stream that throws because it
+      // was aborted is not a failure the user needs told about.
+      if (running.interrupted) return
       await this.emit({
         type: 'thread.error',
         sessionId,
@@ -259,7 +276,12 @@ export class ProviderRuntime {
   }
 
   async interrupt(sessionId: number): Promise<void> {
-    await this.sessions.get(sessionId)?.instance.interrupt()
+    const running = this.sessions.get(sessionId)
+    if (!running) return
+    // Marked before asking the provider: the abort can surface as an error on
+    // the stream before `interrupt()` resolves.
+    running.interrupted = true
+    await running.instance.interrupt()
   }
 
   /** Route a client's decision back to the provider callback that is blocked. */

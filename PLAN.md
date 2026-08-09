@@ -1137,6 +1137,42 @@ Verified in a browser against this repository: five changed files listed with
 statuses and counts, untracked files correctly showing no counts rather than
 `+0 −0`, and a 7KB patch rendered.
 
+### The surface can now drive itself
+
+The contract allows twelve client commands; the page dispatched **two**. Most of
+what a control surface is for was reachable only from the CLI, and two sidebar
+buttons that `<Sidebar>` already rendered and emitted for — "New Session" and
+the space "+" — did nothing at all.
+
+**Stop** is the one that mattered. A running agent could not be stopped from the
+browser. It replaces Send rather than sitting beside it, because while a turn
+runs there is nothing to send and two live buttons invite sending into a busy
+session. Which button shows is driven by the session state from the log, not by
+the click, so a turn started from the CLI or the desktop window puts every open
+page into the same state — there is one execution boundary and the UI should
+reflect it rather than keep its own idea of what is running.
+
+Interrupting also exposed a real defect. Providers report an abort *as a
+failure* — the Claude SDK ends an interrupted turn with
+`error_during_execution` — so a deliberate stop landed in the log as
+`session.failed`, and the session read as broken when it had done exactly what
+it was told. The runtime now drops a provider error that arrives after an
+interrupt: the turn is already settled, and reporting it again overwrites "you
+stopped this" with "this broke".
+
+| Verified live | |
+|---|---|
+| Stop appears only while running | Send hidden, Stop shown, from `turn.started` |
+| Stop actually stops | deltas frozen at 336, zero after |
+| A stop is not a failure | `turn.interrupted` recorded, no new `session.failed` |
+| New Session | created in the profile's first workspace |
+| New space | profile created from the sidebar's `+` |
+
+One measurement worth recording as a method note: the first interrupt check
+*appeared* to fail because `HarnessClient.subscribe` replays from sequence 0, so
+the pre-fix `session.failed` still in the log looked like a fresh one. Counting
+in the log before and after is what settled it.
+
 ### M3 — Web surface *(original scope)*
 stx views: profile sidebar (§9), session list, transcript, composer, approvals, diff view. Hydration
 per §8's table. Connection supervisor with backoff.
