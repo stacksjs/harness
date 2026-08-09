@@ -18,6 +18,7 @@ import { ASSET_PREFIX, AssetCache } from './assets'
 import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
 import { defaultWorkspacePath, ProviderRuntime } from './runtime'
+import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
 
 export interface ServeOptions {
@@ -35,6 +36,14 @@ export interface ServeOptions {
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
   /** Auto-approve tool calls. Off by default; see PLAN.md §12. */
   autoApprove?: boolean
+  /**
+   * Expose this server through a public relay.
+   *
+   * Requires `remote`. A tunnel in front of an unauthenticated harness is a
+   * public shell, and the peer-address check cannot catch it because the tunnel
+   * forwards from loopback.
+   */
+  tunnel?: boolean | { server?: string, subdomain?: string }
   /**
    * Accept connections from devices that are not this machine.
    *
@@ -79,6 +88,8 @@ export interface HarnessServer {
   runtime: ProviderRuntime
   /** Null unless remote access is on. */
   access: AccessControl | null
+  /** The public URL, when a tunnel was opened. */
+  tunnelUrl: string | null
   /**
    * Tell the server a native window has just been launched, so it can report
    * cold start when that window's page checks in.
@@ -99,6 +110,16 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     throw new Error(
       `refusing to bind ${hostname} without authentication: pass remote: true (\`--remote\`) to accept devices, `
       + 'or bind 127.0.0.1 to stay local',
+    )
+  }
+
+  // Checked here rather than where the tunnel is opened, which happens after
+  // the socket is listening: refusing there would leave a bound port and an
+  // open database behind for a mistake we can see before binding anything.
+  if (options.tunnel && !remote) {
+    throw new Error(
+      'refusing to open a tunnel on a server without authentication: a public URL in front of '
+      + 'harness is a public shell. Pass remote: true (`--remote`) and pair your devices first.',
     )
   }
 
@@ -598,13 +619,38 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     },
   })
 
+  // Opened last: a relay that starts advertising a URL before the socket is
+  // listening would hand out an address that 502s for its first requests.
+  let tunnel: Awaited<ReturnType<typeof openTunnel>> | null = null
+  if (options.tunnel) {
+    const settings = typeof options.tunnel === 'object' ? options.tunnel : {}
+    try {
+      tunnel = await openTunnel({
+        port,
+        authenticated: access !== null,
+        ...(settings.server ? { server: settings.server } : {}),
+        ...(settings.subdomain ? { subdomain: settings.subdomain } : {}),
+      })
+    }
+    catch (error) {
+      // An unreachable relay must not leave the port bound and the database
+      // open. A caller that catches this and retries would otherwise find its
+      // own port in use, by itself.
+      server.stop(true)
+      store.close()
+      throw error
+    }
+  }
+
   return {
     server,
     engine,
     runtime,
     access,
+    tunnelUrl: tunnel?.url ?? null,
     markWindowSpawned: () => { windowSpawnedAt = Date.now() },
     stop: () => {
+      void tunnel?.close()
       void runtime.stopAll()
       server.stop(true)
       store.close()

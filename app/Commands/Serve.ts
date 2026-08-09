@@ -18,14 +18,21 @@ export default function (cli: CLI) {
     .option('-p, --port [port]', 'Port to listen on', { default: 3789 })
     .option('--host [host]', 'Hostname to bind', { default: '127.0.0.1' })
     .option('--remote', 'Accept paired devices (phones, other machines)', { default: false })
-    .action(async (options: { port?: number | string, host?: string, remote?: boolean }) => {
+    .option('--tunnel', 'Also reachable from outside this network, through a relay', { default: false })
+    .option('--relay [url]', 'Relay to tunnel through', { default: '' })
+    .action(async (options: { port?: number | string, host?: string, remote?: boolean, tunnel?: boolean, relay?: string }) => {
       const port = Number(options.port ?? 3789)
       const remote = options.remote === true
       // Binding loopback with --remote would authenticate connections that
       // cannot arrive, so opening the door means opening it.
       const hostname = options.host ?? (remote ? '0.0.0.0' : '127.0.0.1')
 
-      const { engine, access } = await serve({ port, hostname, remote }).catch((error: unknown) => {
+      const { engine, access, tunnelUrl } = await serve({
+        port,
+        hostname,
+        remote,
+        ...(options.tunnel ? { tunnel: options.relay ? { server: options.relay } : true } : {}),
+      }).catch((error: unknown) => {
         console.error(error instanceof Error ? error.message : String(error))
         return process.exit(1)
       })
@@ -48,6 +55,11 @@ export default function (cli: CLI) {
         console.log('')
         console.log(`  The code lasts 5 minutes and works once. For another: ./buddy harness:pair`)
         console.log(`  Paired devices: ./buddy harness:devices`)
+        if (tunnelUrl) {
+          console.log('')
+          console.log(`  Reachable from anywhere at ${tunnelUrl}`)
+          console.log(`  Anyone with that URL reaches the pairing page — and nothing else without a code.`)
+        }
       }
 
       // Bun keeps the process alive for the listening socket; nothing to await.

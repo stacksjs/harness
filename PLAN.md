@@ -1658,10 +1658,38 @@ paired; `harness:run` kept working through the token file; and a revoked iPad
 watching a live socket saw `closed(4001) access revoked` with its cookie 401ing
 on the next request.
 
+### Reaching it from outside the network
+
+Pairing solves the phone on your sofa; it does not solve the phone on a train,
+because a LAN address is not routable from anywhere else. `--tunnel` closes
+that, over first-party `localtunnels` (0.2.12, exact-pinned).
+
+**It refuses to run without authentication.** A public URL in front of harness
+is remote code execution with a link, and the check that would have caught it
+cannot — the tunnel forwards from loopback, so every relayed request looks
+local. That is a refusal rather than a warning, and it is checked *before the
+socket binds*: opening the tunnel is the last thing `serve` does, so refusing at
+that point would leave a bound port and an open database behind. Verified — the
+first version did exactly that, and the test caught it by finding its own port
+in use on the next case.
+
+**A plain-http relay is refused too**, because it would read every prompt and
+every file the agent touches. Loopback relays are exempt: `127.0.0.1` is not a
+third party and the bytes never reach a network. Encoding that distinction
+matters more than the convenience — a rule that obstructs the harmless case is
+how a security check earns a reputation for being in the way and gets switched
+off.
+
+Verified end to end against a relay **running on this machine**, so nothing was
+published to the internet to prove the path: a request arriving through the
+tunnel reached harness and got `401` with the pairing page — the tunnel
+forwards, and a stranger holding the URL gets nowhere without a code.
+
 ### M6 — still open
-Terminals. A tunnel for reaching it from outside the LAN — the auth boundary it
-needs now exists. Worktrees are not cleaned up when a session is deleted
-(harness/harness#10).
+Terminals — still blocked on there being no first-party terminal emulator;
+craft has `bridge_shell.zig` and nothing that renders ANSI, and the honest
+alternative (stream a command's stdout) is a command runner, not a terminal.
+Worktrees are not cleaned up when a session is deleted (harness/harness#10).
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

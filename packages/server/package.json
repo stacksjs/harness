@@ -10,6 +10,7 @@
   "dependencies": {
     "@harness/contract": "workspace:*",
     "@harness/engine": "workspace:*",
-    "@stacksjs/stx": "*"
+    "@stacksjs/stx": "*",
+    "localtunnels": "0.2.12"
   }
 }
