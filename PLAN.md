@@ -1714,6 +1714,30 @@ it runs, and `harness:revoke` routes through the server for the same reason, but
 the general inconsistency is still there and worth a decision: either every CLI
 command is a socket client, or the server watches the log.
 
+### Scan-to-pair, and a bug found looking for it
+
+Typing `KJ3E-EJ6Y` into a phone is fine; scanning a code that carries both the
+URL and the pairing code is better, and first-party `qrx` should have provided
+it. Two things were in the way, both now fixed upstream
+(stacksjs/ts-qr-codes `fee02e4`):
+
+1. **Every QR it generated was undecodable.** `setupPositionProbePattern`
+   assigned `true` in *both* branches of its if/else, so the 8×8 finder region
+   came out solid — no ring, no separator. A scanner that cannot find three
+   finder patterns cannot read the code at all, and every renderer in the
+   package drew that. Proven rather than argued, with the system's own
+   detector: `DECODE FAILED` before, decoded after.
+2. **It capped at version 5.** The capacity table was five rows followed by
+   `// ... truncated for brevity ...`, so anything over 106 characters threw.
+   The Reed-Solomon and alignment tables were complete all along.
+
+It also had no way to encode without a DOM, which is why a server could not use
+it; `toMatrix` and `toTerminal` fix that.
+
+Harness cannot adopt it yet — the package is unpublished, and `@stacksjs/qrx`
+on the registry predates the fix, so depending on it today would ship the
+broken encoder. Pairing stays type-a-code until there is a release.
+
 ### M6 — still open
 Terminals — still blocked on there being no first-party terminal emulator;
 craft has `bridge_shell.zig` and nothing that renders ANSI, and the honest
