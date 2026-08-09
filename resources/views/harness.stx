@@ -50,6 +50,9 @@ export const spaces = profiles.map((profile, index) => ({
     label: workspace.name,
     icon: 'i-hugeicons-folder-01',
   })),
+  // Only groups that have something in them. An empty "Active" heading with
+  // nothing under it is noise, and with most profiles idle it was showing on
+  // almost every space.
   sections: [
     {
       id: `active-${profile.id}`,
@@ -61,7 +64,7 @@ export const spaces = profiles.map((profile, index) => ({
       label: 'Recent',
       items: (profile.sessions || []).filter(s => s.state !== 'running').map(toItem),
     },
-  ],
+  ].filter(section => section.items.length > 0),
   clear: { id: 'clear', label: 'Clear' },
   action: { id: 'new-session', label: 'New Session', icon: 'i-hugeicons-add-01' },
 }))
@@ -87,7 +90,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 </script>
 
 <div class="flex h-screen w-screen overflow-hidden bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
-  <aside class="w-[280px] shrink-0 border-r border-black/5 dark:border-white/5" data-stx-sidebar>
+  <!--
+    `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
+    component's own marker, and putting it on a wrapper made two elements claim
+    it. `tintTarget()` resolves `closest('[data-stx-sidebar]')`, so the space
+    palette was being written to this wrapper instead of the pane — it reached
+    the pane by inheritance and worked by luck.
+  -->
+  <aside class="w-[280px] shrink-0 border-r border-black/5 dark:border-white/5" data-harness-sidebar>
     @if(hasProfiles)
       <Sidebar
         :spaces="spaces"

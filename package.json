@@ -76,7 +76,7 @@
     "stx": "./buddy"
   },
   "dependencies": {
-    "@stacksjs/components": "^0.2.166",
+    "@stacksjs/components": "^0.2.168",
     "@stacksjs/stx": "^0.2.165",
     "stacks": "^0.70.304"
   },
