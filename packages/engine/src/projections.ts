@@ -60,6 +60,18 @@ export interface TurnState {
 export interface ProfileState {
   id: number
   name: string
+  /** SF Symbol or iconify class for the switcher. Empty means the default. */
+  icon: string
+  /**
+   * The profile's colour — the thing that makes an Arc space a *space*.
+   *
+   * A seed (`blue`, `#5aa9ee`, an oklch string) or a full palette as JSON;
+   * `<Sidebar :spaces>` accepts both, so it is stored as given rather than
+   * flattened on the way in. Empty means the sidebar picks.
+   */
+  tint: string
+  /** Order in the switcher. Lower is further left. */
+  position: number
   workspaceIds: number[]
 }
 
@@ -96,8 +108,27 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
   switch (p.type) {
     case 'profile.created':
-      state.profiles.set(p.profileId, { id: p.profileId, name: p.name, workspaceIds: [] })
+      state.profiles.set(p.profileId, {
+        id: p.profileId,
+        name: p.name,
+        icon: p.icon ?? '',
+        tint: p.tint ?? '',
+        position: 0,
+        workspaceIds: [],
+      })
       break
+
+    case 'profile.updated': {
+      const profile = state.profiles.get(p.profileId)
+      if (!profile) break
+      // Absent means unchanged, which is what makes a recolour and a rename
+      // independent rather than one clobbering the other.
+      if (p.name !== undefined) profile.name = p.name
+      if (p.icon !== undefined) profile.icon = p.icon
+      if (p.tint !== undefined) profile.tint = p.tint
+      if (p.position !== undefined) profile.position = p.position
+      break
+    }
 
     case 'profile.deleted':
       state.profiles.delete(p.profileId)

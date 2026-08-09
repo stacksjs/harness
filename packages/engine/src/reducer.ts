@@ -47,7 +47,38 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         sessionId: GLOBAL_SESSION_ID,
         commandId,
         at,
-        payload: { type: 'profile.created', profileId, name: command.name },
+        payload: {
+          type: 'profile.created',
+          profileId,
+          name: command.name,
+          // Omitted rather than sent empty, so "no icon given" and "the empty
+          // icon" cannot be confused on replay.
+          ...(command.icon ? { icon: command.icon } : {}),
+          ...(command.tint ? { tint: command.tint } : {}),
+        },
+      }]
+    }
+
+    case 'profile.update': {
+      if (!state.profiles.has(command.profileId))
+        throw new InvalidCommand(`no such profile: ${command.profileId}`)
+
+      // Only what was actually asked for. Restating unchanged fields would make
+      // the log unable to answer "what did this change?".
+      const changed = {
+        ...(command.name !== undefined ? { name: command.name } : {}),
+        ...(command.icon !== undefined ? { icon: command.icon } : {}),
+        ...(command.tint !== undefined ? { tint: command.tint } : {}),
+        ...(command.position !== undefined ? { position: command.position } : {}),
+      }
+      if (Object.keys(changed).length === 0)
+        throw new InvalidCommand('profile.update changes nothing')
+
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: { type: 'profile.updated', profileId: command.profileId, ...changed },
       }]
     }
 

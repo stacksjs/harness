@@ -33,8 +33,13 @@ export type EventPayload =
   | { type: 'approval.resolved', approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
   | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual' }
   | { type: 'checkpoint.reverted', checkpointId: number }
-  | { type: 'profile.created', profileId: number, name: string }
-  | { type: 'profile.updated', profileId: number }
+  | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
+  /**
+   * Only the fields that changed. Absent means "leave it alone", which is what
+   * lets a rename and a recolour be separate intents rather than one command
+   * that has to restate everything.
+   */
+  | { type: 'profile.updated', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
   | { type: 'profile.deleted', profileId: number }
   | { type: 'workspace.added', workspaceId: number, profileId: number, path: string }
   | { type: 'workspace.trust-changed', workspaceId: number, trusted: boolean }

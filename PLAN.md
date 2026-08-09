@@ -1272,6 +1272,32 @@ Native surfaces verified in a live window rather than inferred: `window.craft`, 
 `nativeUI`, and `createSpacesSidebar` all present, with `<SidebarSpaces>` binding the native rail
 (`spacesBound: 1`, three profiles, an active space).
 
+### Per-profile tint — the Arc idea was never actually wired
+
+A space having a *feel* is the whole premise of §9, and every space rendered blue. The break ran through
+three layers, each of which looked fine on its own:
+
+| Layer | State |
+|---|---|
+| `profile.create` command | accepted `icon` and `tint` |
+| `profile.created` event | **dropped both** |
+| `profile.update` | in the client allowlist, **no reducer case at all** |
+| `ProfileState` | **had neither field** |
+| `ViewProps` | declared both, could never fill them |
+
+Fixed the length of the chain, with `profiles:set` to change a profile's name, colour or icon from the
+CLI. An update carries only the fields that changed, so recolouring a space cannot quietly rename it.
+
+The native half then failed differently. `setBackgroundColor("violet")` logged `r=1.00 g=1.00 b=1.00` —
+craft understood `#RRGGBB` and silently painted **white** for anything else, which to a caller is
+indistinguishable from a colour that worked. Fixed upstream with a real parser (`#RGB`, `#RGBA`,
+`#RRGGBB`, `#RRGGBBAA`, and all 148 CSS names) that refuses what it cannot read; released as
+**craft v0.0.64**. `violet` now lands as `r=0.93 g=0.51 b=0.93`.
+
+Worth noting that this could not have worked at all before **craft v0.0.62** either — `setBackgroundColor`
+was one of the twenty window actions whose payload the bridge discarded (§10.10). Three independent
+defects stacked between "the model has a tint column" and "the window is violet".
+
 
 ### M4 — Desktop surface *(original scope)*
 Craft window over the server. Native chrome: per-profile titlebar tint, system tray, global

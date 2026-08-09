@@ -33,6 +33,12 @@ export const sinceSeq = $props.sinceSeq || 0
 // on an empty panel; anything further away fills in on arrival.
 const activeSpaceIndex = Math.max(0, profiles.findIndex(profile => String(profile.id) === String(activeProfile)))
 
+// id -> tint, for the native titlebar. The web sidebar gets the tint through
+// `<Sidebar :spaces>`; the window chrome around it is ours to paint.
+export const spaceTints = JSON.stringify(Object.fromEntries(
+  profiles.map(profile => [String(profile.id), profile.tint || '']),
+))
+
 export const spaces = profiles.map((profile, index) => ({
   id: String(profile.id),
   deferred: Math.abs(index - activeSpaceIndex) > 1,
@@ -236,7 +242,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 </style>
 
-<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-url="{{ serverUrl }}" data-codec="{{ codecUrl }}" data-since-seq="{{ sinceSeq }}">
+<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-url="{{ serverUrl }}" data-codec="{{ codecUrl }}" data-since-seq="{{ sinceSeq }}" data-space-tints="{{ spaceTints }}">
   // The live island. Everything above this is static HTML; this wires the
   // socket to the one turn that can still change.
   //
@@ -305,6 +311,32 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // so reading `.dataset` off it threw and the socket was never opened. The
   // whole live half of this page was dead in a browser — invisible because the
   // server-rendered transcript still looked correct.
+  // Paint the native window in the active profile's colour.
+  //
+  // This is the half of the Arc idea AppKit owns: the web sidebar takes its
+  // tint through `<Sidebar :spaces>`, but the titlebar and the window behind it
+  // do not, so a tinted sidebar used to sit inside grey chrome. In a browser
+  // `window.craft` is absent and this is simply skipped.
+  //
+  // It could not have worked before craft v0.0.62 regardless —
+  // `setBackgroundColor` was one of the twenty window actions whose payload the
+  // bridge discarded.
+  const spaceTints = (() => {
+    try { return JSON.parse(document.querySelector('[data-harness-island]')?.dataset.spaceTints || '{}') }
+    catch { return {} }
+  })()
+
+  function paintWindow(spaceId) {
+    const tint = spaceTints[spaceId]
+    // No tint means the profile never chose one; leaving the window alone is
+    // better than inventing a colour it did not ask for.
+    if (!tint) return
+    try { window.craft?.window?.setBackgroundColor?.(tint) }
+    catch { /* a host without the window bridge is not an error */ }
+  }
+
+  paintWindow(document.querySelector('[data-space][data-space-active="true"]')?.dataset.spaceId)
+
   // The sidebar's own controls. `<Sidebar>` renders "New Session" and the
   // space "+" and emits when they are pressed; nothing was listening, so both
   // were buttons that did nothing.
@@ -386,6 +418,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   document.addEventListener('spaceChange', (event) => {
     const id = event.detail?.id
     if (!id) return
+    // Repaint first: a swipe should feel like the window changed colour with
+    // it, not after a round trip.
+    paintWindow(id)
     const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(id)}"]`)
     // Only a deferred panel needs the round trip; a neighbour is already drawn.
     if (!panel || !panel.hasAttribute('data-space-deferred')) return

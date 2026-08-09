@@ -76,6 +76,10 @@ export function viewProps(state: HarnessState, options: {
     return {
       id: profile.id,
       name: profile.name,
+      // Declared on this type since M1 and never populated, because the
+      // projection did not carry them — so every Arc space rendered blue.
+      icon: profile.icon || undefined,
+      tint: profile.tint || undefined,
       workspaces: workspaces.map(w => ({
         id: w.id,
         // The last path segment reads better in a tile than the absolute path.
