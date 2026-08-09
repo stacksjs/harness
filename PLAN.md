@@ -1325,12 +1325,12 @@ Craft window over the server. Native chrome: per-profile titlebar tint, system t
 shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
 **Exit:** a signed `.dmg` under 15MB that cold-starts under 300ms, both measured in CI.
 
-### M5 — The rest of the drivers *(partial)*
+### M5 — The rest of the drivers *(claude and codex done)*
 
 | Driver | Transport | State on this machine |
 |---|---|---|
 | claude | Agent SDK | ready — turns verified live |
-| codex | `app-server`, JSON-RPC/stdio | implemented; handshake, thread, turn and error paths verified live. **No successful completion yet** — the account's quota is exhausted, so deltas, tool calls, approvals and usage are covered only by recorded/schema-derived tests. |
+| codex | `app-server`, JSON-RPC/stdio | implemented and **verified live end to end** |
 | cursor | ACP + extension | registered, unimplemented |
 | grok | ACP + extension | registered, unimplemented |
 | opencode | own CLI/HTTP runtime | registered, unimplemented |
@@ -1359,8 +1359,27 @@ a silent turn is indistinguishable from an agent with nothing to say.
 
 `./buddy harness:doctor [--conformance]` probes every driver and runs the spec against them.
 
+**Codex, verified live** once the account's quota reset. A turn returning `ok` (12,506 in / 22 out), and
+a tool-using turn producing exactly the sequence the driver promises:
+
+```
+session.created
+turn.started
+session.provider-bound      ← the thread id, so the next turn resumes
+tool.call.began   | shell   ← Codex's commandExecution item, translated
+tool.call.ended   | ok
+turn.completed    | 12701 tokens
+```
+
+Cost reads `$0.0000` because Codex reports tokens and not cost; the driver returns 0 rather than
+inventing a number from a price table that would silently go stale.
+
+One environment note that is not a harness bug: the account's default model is `gpt-5.6-sol`, which this
+CLI build refuses with "requires a newer version of Codex". Passing `--model gpt-5.4-mini` works, and the
+error is now readable rather than a raw JSON blob (§10.13's `readableError`).
+
 **Still open:** the ACP client (cursor and grok both speak it, so it unlocks the most and should come
-first), the OpenCode runtime, and a live green codex completion once quota returns.
+first) and the OpenCode runtime. Neither CLI is installed, so both would be unverifiable code.
 
 ### M5 — The rest of the drivers *(original scope)*
 ACP client, then Cursor and Grok as extensions over it. Codex app-server. OpenCode runtime.
