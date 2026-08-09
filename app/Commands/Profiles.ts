@@ -100,6 +100,49 @@ export default function (cli: CLI) {
     })
 
   cli
+    .command('profiles:delete <id>', 'Delete a profile, with its workspaces and sessions')
+    .option('--yes', 'Skip the summary and delete', { default: false })
+    .action(async (id: string, options: { yes?: boolean }) => {
+      const engine = await boot()
+      const profileId = Number(id)
+      const profile = engine.current.profiles.get(profileId)
+
+      if (!profile) {
+        console.error(`No profile ${profileId}. List them with \`./buddy profiles:list\`.`)
+        process.exit(ExitCode.FatalError)
+      }
+
+      // Counted before the delete, because afterwards there is nothing to count.
+      const owned = new Set(profile.workspaceIds)
+      const sessions = [...engine.current.sessions.values()].filter(s => owned.has(s.workspaceId))
+
+      if (!options.yes) {
+        // Says what goes rather than asking "are you sure": the sessions are
+        // the part people forget a profile is holding.
+        console.log(`${profile.name} · ${profile.workspaceIds.length} workspace(s) · ${sessions.length} session(s)`)
+        console.log('Pass --yes to delete it and everything it owns.')
+        process.exit(ExitCode.Success)
+      }
+
+      try {
+        await engine.dispatch({
+          id: commandId('profile.delete'),
+          at: Date.now(),
+          command: { type: 'profile.delete', profileId },
+        })
+      }
+      catch (error) {
+        console.error(error instanceof Error ? error.message : String(error))
+        process.exit(ExitCode.FatalError)
+      }
+
+      // Nothing on disk is touched — a workspace is a path harness knows about,
+      // not one it owns.
+      console.log(`deleted ${profile.name} · ${profile.workspaceIds.length} workspace(s) · ${sessions.length} session(s)`)
+      process.exit(ExitCode.Success)
+    })
+
+  cli
     .command('profiles:list', 'List profiles, rebuilt from the event log')
     .action(async () => {
       const engine = await boot()

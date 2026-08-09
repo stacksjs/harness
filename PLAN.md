@@ -1435,6 +1435,37 @@ worked — the safety-critical path was the broken one. The agent diagnosed it b
 that button is for, but a turn should not depend on a person noticing. Worth a timeout or a
 reconnect-aware default.
 
+### Replay did not follow the log's order
+
+Found while tidying test profiles, and the most serious thing in this stretch.
+
+`hydrate()` replayed **session by session**, concatenating each session's events.
+But `seq` is *per session*, so that reconstructs a reordering of the log rather
+than the log. A `profile.deleted` written last was applied before the
+`session.created` events it was meant to remove — and recreated them. The
+projection came out as a state that never existed, which is the one thing an
+event log exists to make impossible.
+
+Measured on the real database: 18 sessions belonging to deleted profiles were
+still present after a restart, reachable from no view and impossible to delete,
+because the only handle on them was a profile that no longer existed.
+
+Replay now reads the whole log in append order (`readAll`, ordered by rowid —
+the only total order the log has). The 18 orphans disappeared on the next
+hydrate, with no manual surgery: the events were always right, only the reading
+of them was wrong.
+
+`profile.delete` also cascades now, recording the workspaces and sessions it
+removed on the event rather than re-deriving them at replay time.
+
+### Two halves of a revert
+
+`checkpoint.reverted` says a revert was *accepted*; the git work runs after it.
+The UI reloaded on that event and landed in a half-restored tree — files
+rewritten, files the agent added not yet removed. A test polling one file passed
+for the same reason. `checkpoint.restored` now reports the finished job with its
+counts, and both the UI and the test wait for it.
+
 ### M6 — still open
 Git integration (branch/worktree per session). Terminals. Per-profile MCP server management. Remote
 access from a phone — auth and pairing, since the server is already the boundary.

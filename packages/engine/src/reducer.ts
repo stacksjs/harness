@@ -83,13 +83,26 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
     }
 
     case 'profile.delete': {
-      if (!state.profiles.has(command.profileId))
+      const profile = state.profiles.get(command.profileId)
+      if (!profile)
         throw new InvalidCommand(`no such profile: ${command.profileId}`)
+
+      // Everything the profile owned goes with it. Removing only the profile
+      // left its workspaces pointing at an id that no longer existed and its
+      // sessions reachable by nothing — present in the state, absent from every
+      // view, and impossible to delete afterwards because the only handle on
+      // them was the profile.
+      const workspaceIds = [...profile.workspaceIds]
+      const owned = new Set(workspaceIds)
+      const sessionIds = [...state.sessions.values()]
+        .filter(session => owned.has(session.workspaceId))
+        .map(session => session.id)
+
       return [{
         sessionId: GLOBAL_SESSION_ID,
         commandId,
         at,
-        payload: { type: 'profile.deleted', profileId: command.profileId },
+        payload: { type: 'profile.deleted', profileId: command.profileId, workspaceIds, sessionIds },
       }]
     }
 
@@ -146,6 +159,23 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           // Omitted rather than sent empty, so "no preference" and "the empty
           // model" cannot be confused on replay.
           ...(command.model ? { model: command.model } : {}),
+        },
+      }]
+    }
+
+    case 'thread.checkpoint.restored': {
+      if (!state.sessions.has(command.sessionId))
+        throw new InvalidCommand(`no such session: ${command.sessionId}`)
+
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'checkpoint.restored',
+          checkpointId: command.checkpointId,
+          restored: command.restored,
+          removed: command.removed,
         },
       }]
     }

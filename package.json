@@ -78,6 +78,7 @@
   "dependencies": {
     "@stacksjs/components": "^0.2.168",
     "@stacksjs/stx": "^0.2.165",
+    "pickier": "^0.1.49",
     "stacks": "^0.70.304"
   },
   "workspaces": [

@@ -36,8 +36,19 @@ export interface EngineStore {
   /** All events for a session, ascending by seq. */
   read: (sessionId: number, sinceSeq?: number) => Promise<HarnessEvent[]>
 
-  /** Every session id that has at least one event. Used by replay. */
+  /** Every session id that has at least one event. */
   sessionIds: () => Promise<number[]>
+
+  /**
+   * Every event, in the order it was appended.
+   *
+   * `seq` is per session, so reading session by session and concatenating does
+   * not reconstruct the log — it reconstructs a *reordering* of it, in which a
+   * global event that removes a session can land before the `session.created`
+   * that brings it back. Replay needs the one true order, which is the order
+   * things were written.
+   */
+  readAll: () => Promise<HarnessEvent[]>
 
   receipt: (commandId: string) => Promise<CommandReceipt | null>
   putReceipt: (receipt: CommandReceipt) => Promise<void>
@@ -52,6 +63,8 @@ export interface EngineStore {
  */
 export class MemoryStore implements EngineStore {
   private events = new Map<number, HarnessEvent[]>()
+  /** Append order, which is the log's only total order. */
+  private appended: HarnessEvent[] = []
   private receipts = new Map<string, CommandReceipt>()
 
   async append(events: AppendableEvent[]): Promise<HarnessEvent[]> {
@@ -68,6 +81,7 @@ export class MemoryStore implements EngineStore {
       }
       log.push(stored)
       this.events.set(event.sessionId, log)
+      this.appended.push(stored)
       out.push(stored)
     }
     return out
@@ -79,6 +93,10 @@ export class MemoryStore implements EngineStore {
 
   async sessionIds(): Promise<number[]> {
     return [...this.events.keys()].sort((a, b) => a - b)
+  }
+
+  async readAll(): Promise<HarnessEvent[]> {
+    return [...this.appended]
   }
 
   async receipt(commandId: string): Promise<CommandReceipt | null> {

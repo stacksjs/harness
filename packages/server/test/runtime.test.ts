@@ -339,7 +339,13 @@ describe('checkpoint and revert', () => {
       envelope: { id: 'c_rev', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId: captured.checkpointId } },
     })
     expect(await client.waitFor('checkpoint.reverted')).toBeTruthy()
-    await new Promise(r => setTimeout(r, 400))
+
+    // `checkpoint.reverted` only means the revert was accepted; the git work
+    // happens after it. Waiting on the completion event rather than on a delay
+    // or on one file — polling `tracked.txt` passed as soon as the rewrite
+    // half finished, while the removal half was still running.
+    const restored = await client.waitFor('checkpoint.restored', 8000)
+    expect(restored).toBeTruthy()
 
     expect(readFileSync(join(workspace, 'tracked.txt'), 'utf8')).toBe('original\n')
     // And the file the agent created is gone, not left behind.

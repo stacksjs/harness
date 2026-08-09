@@ -40,6 +40,15 @@ export type EventPayload =
    * so the log carries both the intent and the outcome.
    */
   | { type: 'checkpoint.reverted', checkpointId: number }
+  /**
+   * The workspace is actually back.
+   *
+   * Separate from `checkpoint.reverted`, which only says the revert was
+   * accepted. The git work happens after that, and a client that acted on
+   * acceptance alone reloaded into a half-restored tree — files rewritten,
+   * files the agent added not yet removed.
+   */
+  | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number }
   | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
   /**
    * Only the fields that changed. Absent means "leave it alone", which is what
@@ -47,7 +56,15 @@ export type EventPayload =
    * that has to restate everything.
    */
   | { type: 'profile.updated', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
-  | { type: 'profile.deleted', profileId: number }
+  /**
+   * The workspaces and sessions removed along with it.
+   *
+   * Carried on the event rather than recomputed on replay, because the
+   * projection at replay time is the one *before* this event and would have to
+   * re-derive the cascade identically forever. Recording what was actually
+   * removed also lets the log answer "where did that session go?".
+   */
+  | { type: 'profile.deleted', profileId: number, workspaceIds: number[], sessionIds: number[] }
   | { type: 'workspace.added', workspaceId: number, profileId: number, path: string }
   | { type: 'workspace.trust-changed', workspaceId: number, trusted: boolean }
 

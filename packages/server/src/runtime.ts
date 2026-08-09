@@ -332,15 +332,26 @@ export class ProviderRuntime {
     }
 
     const result = await restore(workspacePath, checkpoint.vcsRef)
-    if (!result.ok) {
+    if (result.ok) {
+      // Only now is the tree actually back. Clients wait for this rather than
+      // for the acceptance event, which lands before any file has moved.
       await this.emit({
-        type: 'thread.error',
+        type: 'thread.checkpoint.restored',
         sessionId,
-        // The ref is a dangling commit, so "unknown checkpoint" usually means
-        // `git gc` collected it rather than that anything is broken.
-        message: `could not revert: ${result.reason ?? 'unknown reason'}`,
+        checkpointId,
+        restored: result.restored,
+        removed: result.removed,
       })
+      return
     }
+
+    await this.emit({
+      type: 'thread.error',
+      sessionId,
+      // The ref is a dangling commit, so "unknown checkpoint" usually means
+      // `git gc` collected it rather than that anything is broken.
+      message: `could not revert: ${result.reason ?? 'unknown reason'}`,
+    })
   }
 
   async interrupt(sessionId: number): Promise<void> {

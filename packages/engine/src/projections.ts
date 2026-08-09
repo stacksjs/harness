@@ -150,6 +150,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
     case 'profile.deleted':
       state.profiles.delete(p.profileId)
+      // `?? []` so a `profile.deleted` written before the cascade existed still
+      // replays — it removed nothing then and must remove nothing now.
+      for (const id of p.workspaceIds ?? []) state.workspaces.delete(id)
+      for (const id of p.sessionIds ?? []) state.sessions.delete(id)
       break
 
     case 'workspace.added': {

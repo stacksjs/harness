@@ -115,6 +115,29 @@ export class SqliteStore implements EngineStore {
     }))
   }
 
+  /**
+   * Every event in append order.
+   *
+   * Ordered by the rowid, not by `seq`: `seq` restarts per session, so it
+   * cannot order two events from different sessions against each other. The
+   * insertion id is the log's only total order.
+   */
+  async readAll(): Promise<HarnessEvent[]> {
+    const rows = this.db
+      .prepare<EventRow, []>(
+        'SELECT session_id, seq, type, payload, command_id, at FROM events ORDER BY id ASC',
+      )
+      .all()
+
+    return rows.map(row => ({
+      seq: row.seq,
+      sessionId: fromColumn(row.session_id),
+      commandId: row.command_id,
+      at: row.at ?? 0,
+      payload: JSON.parse(row.payload) as EventPayload,
+    }))
+  }
+
   async sessionIds(): Promise<number[]> {
     const rows = this.db
       .prepare<{ session_id: number | null }, []>(

@@ -404,6 +404,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // These dispatch over the socket like every other command, then reload —
   // the sidebar is server-rendered, and re-rendering it here would be a second
   // implementation of what the server already does.
+  // Resolved when the server reports a restore finished. A list because the
+  // socket handler is registered separately from the button that is waiting.
+  const revertWaiters = []
+
   // Reverting throws away work on disk, so it asks first. The confirmation
   // names what will happen rather than saying "are you sure": the destructive
   // part is the files created since, which is exactly what people forget.
@@ -416,7 +420,21 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if (!window.confirm('Put the workspace back to before this turn? Files the agent created since will be deleted.')) return
 
     button.disabled = true
+    button.textContent = 'Reverting…'
+
+    // Waits for `checkpoint.restored`, not for the dispatch ack.
+    // `checkpoint.reverted` only means the revert was accepted; the git work
+    // runs after it, so reloading on the ack showed a half-restored tree —
+    // files rewritten, files the agent added not yet removed.
+    const restored = new Promise((resolve) => {
+      revertWaiters.push(resolve)
+      // A revert that never reports back should still let go of the page.
+      setTimeout(resolve, 15000)
+    })
+
     await sendCommand({ type: 'session.checkpoint.revert', sessionId, checkpointId })
+    await restored
+
     // Reloaded rather than patched: the diff, the turn list and the workspace
     // have all moved, and re-deriving that here would be a second renderer.
     window.location.reload()
@@ -786,6 +804,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           node.textContent += payload.text
           transcript.scrollTop = transcript.scrollHeight
         }
+      }
+      else if (payload.type === 'checkpoint.restored') {
+        // The workspace is actually back now.
+        while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
         setRunning(false)

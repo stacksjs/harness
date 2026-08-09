@@ -30,10 +30,13 @@ interface Frame {
   error?: { code?: number, message?: string }
 }
 
+/** The consumer parked in `next()`, waiting for the producer to push. */
+type Waiter = (result: IteratorResult<ProviderEvent>) => void
+
 /** A queue an async generator drains, so producer and consumer can run apart. */
 class EventQueue {
   private readonly buffer: ProviderEvent[] = []
-  private waiting: ((value: IteratorResult<ProviderEvent>) => void) | null = null
+  private waiting: Waiter | null = null
   private done = false
 
   push(event: ProviderEvent): void {

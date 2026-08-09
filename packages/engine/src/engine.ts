@@ -74,8 +74,14 @@ export class Engine {
    */
   async hydrate(): Promise<void> {
     const state = emptyState()
-    for (const sessionId of await this.options.store.sessionIds())
-      replay(await this.options.store.read(sessionId), state)
+    // One pass in append order, not session by session.
+    //
+    // `seq` is per session, so concatenating per-session reads replays a
+    // *reordering* of the log. A `profile.deleted` written last landed before
+    // the `session.created` events it was meant to remove, which recreated
+    // them — the projection came out as a state that never existed, which is
+    // the one thing an event log is supposed to make impossible.
+    replay(await this.options.store.readAll(), state)
     this.state = state
     this.booted = true
   }
