@@ -1466,6 +1466,34 @@ rewritten, files the agent added not yet removed. A test polling one file passed
 for the same reason. `checkpoint.restored` now reports the finished job with its
 counts, and both the UI and the test wait for it.
 
+### A stuck approval no longer strands a turn
+
+Two separate failures wore the same face — a session sitting `running` that
+would accept neither a new turn ("a turn is already running") nor a revert
+(refused mid-turn), so the only recovery was for a person to notice and press
+stop. It cost me time three times before I fixed it.
+
+**The client died, the server lived.** An approval only ever reached whichever
+client was connected when it fired. Anyone arriving afterwards saw
+`awaiting-approval` and nothing to act on. The pending decision is now part of
+the session projection and rendered server-side, so *any* client can answer it —
+verified by loading a wedged session in a browser that had never been connected
+and seeing the panel with the tool and its id.
+
+**The server restarted.** A turn only runs because a provider instance is
+running it, and those die with the process. Replay faithfully restored the
+session as `running`, which is what the log says, but nothing was going to
+finish it. `serve()` now closes out turns left in flight, recorded as an
+interruption so the log says what happened rather than being quietly rewritten.
+Verified live: restarting a server with a wedged session appended
+`turn.interrupted`, and the session came back usable.
+
+A third bug fell out. The island collapsed every non-`running` state to `idle`,
+overwriting the server's `awaiting-approval` — so a session waiting on *you*
+looked like one doing nothing, and it offered Send instead of Stop on a turn
+that had not finished. The state string is now authoritative rather than a
+boolean.
+
 ### M6 — still open
 Git integration (branch/worktree per session). Terminals. Per-profile MCP server management. Remote
 access from a phone — auth and pairing, since the server is already the boundary.

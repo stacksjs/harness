@@ -22,6 +22,9 @@ export const codecUrl = $props.codecUrl || ''
 // The sequence this render already contains. The socket resumes from here so a
 // load replays only what is missing.
 export const sinceSeq = $props.sinceSeq || 0
+// A decision this session is blocked on, if any. Rendered rather than waited
+// for: the client that raised it may be long gone.
+export const pendingApproval = activeSession ? (activeSession.pendingApproval || null) : null
 
 // One space per profile. `pinned` is the favourite-repos tile grid; the
 // sections are the profile's sessions, split by whether they are live.
@@ -210,9 +213,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         </article>
       @endif
 
-      <div data-approval hidden class="mb-5 rounded-[10px] border border-amber-500/30 bg-amber-500/10 p-3">
+      <div
+        data-approval
+        @if(!pendingApproval)hidden@endif
+        @if(pendingApproval)data-approval-id="{{ pendingApproval.approvalId }}"@endif
+        class="mb-5 rounded-[10px] border border-amber-500/30 bg-amber-500/10 p-3"
+      >
         <div class="mb-2 text-[12px] font-medium">
-          <span data-approval-tool></span> wants to run.
+          <span data-approval-tool>{{ pendingApproval ? pendingApproval.toolName : '' }}</span> wants to run.
         </div>
         <div class="flex gap-2">
           <button type="button" data-approve class="rounded-[6px] bg-neutral-900 px-3 py-1 text-[12px] text-white dark:bg-white dark:text-neutral-900">Allow</button>
@@ -710,15 +718,29 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
      * page into the same state. There is one execution boundary; the UI should
      * reflect it rather than track its own idea of what is running.
      */
-    function setRunning(running) {
-      if (stateNode) stateNode.textContent = running ? 'running' : 'idle'
-      if (sendButton) sendButton.hidden = running
-      if (stopButton) stopButton.hidden = !running
+    /**
+     * `state` is the session's own state string, not a boolean.
+     *
+     * A turn blocked on an approval is still in flight, and collapsing that to
+     * "not running" was wrong twice over: it overwrote the server's
+     * `awaiting-approval` with `idle`, so a session waiting on *you* looked
+     * like a session doing nothing, and it offered Send instead of Stop on a
+     * turn that had not finished.
+     */
+    const IN_FLIGHT = new Set(['running', 'awaiting-approval'])
+
+    function setRunning(state) {
+      const busy = IN_FLIGHT.has(state)
+      if (stateNode) stateNode.textContent = state
+      if (sendButton) sendButton.hidden = busy
+      if (stopButton) stopButton.hidden = !busy
       // A revert mid-turn is refused by the reducer; hiding the button says so
       // before the click rather than after.
-      for (const button of document.querySelectorAll('[data-revert]')) button.hidden = running
+      for (const button of document.querySelectorAll('[data-revert]')) button.hidden = busy
     }
-    setRunning(stateNode?.textContent.trim() === 'running')
+    // Seeded from what the server rendered, which is the whole session state
+    // and not just whether a turn is running.
+    setRunning(stateNode?.textContent.trim() || 'idle')
 
     stopButton?.addEventListener('click', () => {
       // Optimistic: the button goes away immediately, but the turn is not over
@@ -766,7 +788,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         // the reply within it.
         if (payload.role === 'user') {
           beginTurn(payload.turnId, payload.text)
-          setRunning(true)
+          setRunning('running')
         }
       }
       else if (payload.type === 'tool.call.began') {
@@ -810,20 +832,23 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
-        setRunning(false)
+        setRunning('idle')
       }
       else if (payload.type === 'session.failed') {
         // A failed turn is over too. Leaving Stop up would offer to interrupt
         // something that already stopped.
-        setRunning(false)
+        setRunning('idle')
         if (stateNode) stateNode.textContent = 'failed'
       }
       else if (payload.type === 'approval.requested') {
+        setRunning('awaiting-approval')
         approval.querySelector('[data-approval-tool]').textContent = payload.toolName
         approval.hidden = false
         approval.dataset.approvalId = String(payload.approvalId)
       }
       else if (payload.type === 'approval.resolved') {
+        // The turn resumes; it did not end.
+        setRunning('running')
         approval.hidden = true
       }
     })

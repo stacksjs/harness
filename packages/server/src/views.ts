@@ -106,6 +106,11 @@ export function viewProps(state: HarnessState, options: {
           title: active.turns[0]?.prompt?.slice(0, 60) ?? `Session ${active.id}`,
           state: active.state,
           lastSeq: active.lastSeq,
+          // Rendered server-side so a decision survives the client that raised
+          // it. Previously an approval only reached whichever browser happened
+          // to be connected when it fired, and the turn waited forever if that
+          // one went away.
+          pendingApproval: active.pendingApproval,
           turns: active.turns.map(turn => ({
             id: turn.id,
             prompt: turn.prompt,

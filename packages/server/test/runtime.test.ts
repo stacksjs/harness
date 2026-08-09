@@ -368,6 +368,76 @@ describe('checkpoint and revert', () => {
   })
 })
 
+describe('a restart does not strand a turn', () => {
+  it('interrupts a turn that was running when the process stopped', async () => {
+    // A turn only runs because a provider instance is running it, and those die
+    // with the process. Replay faithfully restores the session as `running`,
+    // which is what the log says — but nothing is going to finish it. Left
+    // alone the session refuses a new turn ("a turn is already running") and
+    // refuses a revert, so the only recovery was for a person to press stop.
+    const database = join(dir, 'test.sqlite')
+
+    // A driver that parks forever, standing in for a process that then dies.
+    const wedged: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn() {
+            yield { type: 'approval-request', requestId: 'apr_1', toolName: 'Write', args: {} }
+            await new Promise(() => {})
+          },
+          async interrupt() {},
+          async respondApproval() {},
+          async stop() {},
+        }
+      },
+    }
+
+    harness = await serve({ port, databasePath: database, resolveDriver: () => wedged })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'hi' } } })
+    await client.waitFor('approval.requested')
+
+    // Stranded, exactly as it would be after a crash.
+    expect(harness.engine.current.sessions.get(sessionId)!.state).toBe('awaiting-approval')
+    client.close()
+    harness.stop()
+
+    // A fresh process over the same log.
+    port = ++portCounter
+    harness = await serve({ port, databasePath: database, resolveDriver: () => wedged })
+
+    const session = harness.engine.current.sessions.get(sessionId)!
+    expect(session.state).toBe('idle')
+    expect(session.turns.at(-1)!.status).toBe('interrupted')
+    // And nothing is still waiting on a decision that can never be answered.
+    expect(session.pendingApproval).toBeNull()
+  })
+
+  it('leaves a session that was already idle alone', async () => {
+    const database = join(dir, 'test.sqlite')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'hi' } } })
+    await client.waitFor('turn.completed')
+    client.close()
+    harness.stop()
+
+    port = ++portCounter
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+
+    // A completed turn must not be rewritten as interrupted on every boot.
+    const session = harness.engine.current.sessions.get(sessionId)!
+    expect(session.turns.at(-1)!.status).toBe('complete')
+    expect(session.state).toBe('idle')
+  })
+})
+
 describe('approvals round-trip through the socket', () => {
   it('raises an approval and routes the decision back to the provider', async () => {
     let release!: () => void

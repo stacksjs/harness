@@ -20,6 +20,15 @@ export interface SessionState {
   turns: TurnState[]
   /** Oldest first, so the newest revert target is the last one. */
   checkpoints: CheckpointState[]
+  /**
+   * The decision a turn is blocked on, if any.
+   *
+   * Projected rather than left to the socket, because the client that raised it
+   * may be gone. An approval only ever reached the browser that happened to be
+   * connected when it fired; anyone arriving afterwards saw a session marked
+   * `awaiting-approval` with nothing to act on, and the turn waited forever.
+   */
+  pendingApproval: { approvalId: number, toolName: string } | null
 }
 
 /**
@@ -188,6 +197,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         lastSeq: 0,
         turns: [],
         checkpoints: [],
+        pendingApproval: null,
       })
       break
 
@@ -205,7 +215,9 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
     case 'session.failed': {
       const session = state.sessions.get(event.sessionId)
-      if (session) session.state = 'failed'
+      if (!session) break
+      session.state = 'failed'
+      session.pendingApproval = null
       break
     }
 
@@ -283,6 +295,8 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
     case 'turn.completed': {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
+      // A finished turn cannot still be blocked on a decision.
+      session.pendingApproval = null
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'complete'
@@ -300,6 +314,8 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) t.status = 'interrupted'
       session.state = 'idle'
+      // Nothing is waiting on a decision once the turn is gone.
+      session.pendingApproval = null
       break
     }
 
@@ -314,15 +330,19 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
     case 'approval.requested': {
       const session = state.sessions.get(event.sessionId)
-      if (session) session.state = 'awaiting-approval'
+      if (!session) break
+      session.state = 'awaiting-approval'
+      session.pendingApproval = { approvalId: p.approvalId, toolName: p.toolName }
       break
     }
 
     case 'approval.resolved': {
       const session = state.sessions.get(event.sessionId)
+      if (!session) break
       // Back to running, not idle: the turn that raised the approval is still
       // in flight and the provider resumes it.
-      if (session) session.state = 'running'
+      session.state = 'running'
+      session.pendingApproval = null
       break
     }
 

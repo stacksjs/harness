@@ -100,3 +100,80 @@ describe('tool calls are projected onto their turn', () => {
     expect(transcript(...payloads)).toEqual(transcript(...payloads))
   })
 })
+
+describe('a pending approval is part of the session, not the socket', () => {
+  /**
+   * The wedge this fixes: an approval only ever reached whichever client was
+   * connected when it fired. If that client went away — killed, crashed, closed
+   * — the turn waited forever, and the session could not accept a new turn ("a
+   * turn is already running") or a revert (refused mid-turn). The only recovery
+   * was for a person to notice and press stop.
+   */
+  function sessionAfter(...payloads: HarnessEvent['payload'][]) {
+    seq = 0
+    const state = emptyState()
+    replay([
+      ev(1, { type: 'session.created', workspaceId: 1, driverKind: 'claude' }),
+      ev(1, { type: 'turn.started', turnId: 10, role: 'user', text: 'go' }),
+      ...payloads.map(p => ev(1, p)),
+    ], state)
+    return state.sessions.get(1)!
+  }
+
+  it('records which decision is outstanding', () => {
+    const session = sessionAfter({ type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Write' })
+
+    expect(session.state).toBe('awaiting-approval')
+    expect(session.pendingApproval).toEqual({ approvalId: 5, toolName: 'Write' })
+  })
+
+  it('clears it once answered', () => {
+    const session = sessionAfter(
+      { type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Write' },
+      { type: 'approval.resolved', approvalId: 5, decision: 'allowed', scope: 'once' },
+    )
+
+    expect(session.state).toBe('running')
+    expect(session.pendingApproval).toBeNull()
+  })
+
+  it('clears it when the turn is interrupted', () => {
+    // Stop is the escape hatch, and a stale approval must not outlive the turn
+    // that asked for it — the next render would offer a decision on a tool that
+    // is no longer running.
+    const session = sessionAfter(
+      { type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Bash' },
+      { type: 'turn.interrupted', turnId: 10 },
+    )
+
+    expect(session.pendingApproval).toBeNull()
+  })
+
+  it('clears it when the turn completes', () => {
+    const session = sessionAfter(
+      { type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Bash' },
+      { type: 'turn.completed', turnId: 10, tokensIn: 1, tokensOut: 1, cost: 0 },
+    )
+
+    expect(session.pendingApproval).toBeNull()
+  })
+
+  it('clears it when the session fails', () => {
+    const session = sessionAfter(
+      { type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Bash' },
+      { type: 'session.failed', message: 'provider died' },
+    )
+
+    expect(session.pendingApproval).toBeNull()
+  })
+
+  it('survives a replay, which is the point', () => {
+    // The whole fix: a client arriving *after* the approval fired must be able
+    // to see it. That only works if the projection carries it.
+    const payloads: HarnessEvent['payload'][] = [
+      { type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Write' },
+    ]
+
+    expect(sessionAfter(...payloads).pendingApproval).toEqual(sessionAfter(...payloads).pendingApproval)
+  })
+})

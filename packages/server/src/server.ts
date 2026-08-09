@@ -88,6 +88,36 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // log has not replayed yet, and it has no way to tell.
   await engine.hydrate()
 
+  // Close out turns that were in flight when the process last stopped.
+  //
+  // A turn only runs because a provider instance is running it, and those die
+  // with the process. Replay faithfully restores the session as `running` or
+  // `awaiting-approval`, which is what the log says — but nothing is going to
+  // finish it. Left alone the session waits forever: it will not accept a new
+  // turn ("a turn is already running") and it will not accept a revert, so the
+  // only recovery is for someone to notice and press stop.
+  //
+  // Recorded as an interruption rather than quietly rewritten, so the log says
+  // what happened.
+  for (const session of engine.current.sessions.values()) {
+    if (session.state !== 'running' && session.state !== 'awaiting-approval') continue
+    const turn = session.turns.at(-1)
+    if (!turn || turn.status !== 'running') continue
+    try {
+      // The same command a person's stop button sends. It finds the running
+      // turn itself and is a no-op when there is none.
+      await engine.dispatchInternal({
+        id: `boot_interrupt_${session.id}_${turn.id}`,
+        at: Date.now(),
+        command: { type: 'session.turn.interrupt', sessionId: session.id },
+      })
+    }
+    catch {
+      // A session the reducer refuses to interrupt is already in some terminal
+      // state; nothing to recover.
+    }
+  }
+
   const sockets = new Set<HarnessSocket>()
   const assetCache = new AssetCache()
   // Built once, before listening: the page references it by URL, so it must be
