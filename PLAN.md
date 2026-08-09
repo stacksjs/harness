@@ -1685,11 +1685,39 @@ published to the internet to prove the path: a request arriving through the
 tunnel reached harness and got `401` with the pairing page — the tunnel
 forwards, and a stranger holding the URL gets nowhere without a code.
 
+### Worktrees are given back now (harness/harness#10)
+
+`--isolate` created `.git/harness/worktrees/<session>` and nothing ever removed
+it, so a deleted profile left a full checkout per isolated session on disk.
+
+The rule that decided the design: **the branch is the deliverable, the directory
+is scratch — and uncommitted agent output is never discarded to tidy up.**
+`release` commits whatever the worktree still holds onto the session's own
+branch first, *then* removes the directory. Refusing to clean up while a stray
+file sits there is how the directories accumulate; deleting that file to get on
+with it is worse. Committing is the only option that loses nothing.
+
+`harness:worktrees` lists them with their branch and whether they are dirty,
+`:prune` clears registrations whose directories are gone, and `:remove` releases
+one by hand — visible before anything automatic starts deleting.
+
+Verified live: an isolated session's work committed per turn as `harness: turn
+1`; a file left uncommitted in the worktree, as a crashed turn would leave it,
+came back as `harness: work left uncommitted when the session went away`; the
+directory was gone and the branch still there.
+
+**A wart this exposed.** The server-side hook did not fire for `profiles:delete`
+— because that command dispatches to *its own* engine over SQLite, so the
+running server never sees it. Several CLI commands do this, and the running
+server's projection goes stale for all of them. Deletion now cleans up wherever
+it runs, and `harness:revoke` routes through the server for the same reason, but
+the general inconsistency is still there and worth a decision: either every CLI
+command is a socket client, or the server watches the log.
+
 ### M6 — still open
 Terminals — still blocked on there being no first-party terminal emulator;
 craft has `bridge_shell.zig` and nothing that renders ANSI, and the honest
 alternative (stream a command's stdout) is a command runner, not a terminal.
-Worktrees are not cleaned up when a session is deleted (harness/harness#10).
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

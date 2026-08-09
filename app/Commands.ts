@@ -35,4 +35,5 @@ export default {
   'doctor': 'Doctor',
   'mcp': 'Mcp',
   'devices': 'Devices',
+  'worktrees': 'Worktrees',
 } satisfies CommandRegistry

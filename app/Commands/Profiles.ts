@@ -1,6 +1,7 @@
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
 import { derivedId } from '@harness/engine'
+import { releaseWorktrees, worktreesOfProfile } from '@harness/server'
 import { ExitCode } from '@stacksjs/types'
 import { boot, commandId } from '../Support/engine'
 
@@ -108,6 +109,10 @@ export default function (cli: CLI) {
         process.exit(ExitCode.Success)
       }
 
+      // Read before dispatching: the sessions holding these worktrees are gone
+      // from the projection immediately afterwards, and their paths with them.
+      const doomed = worktreesOfProfile(engine.current, profileId)
+
       try {
         await engine.dispatch({
           id: commandId('profile.delete'),
@@ -120,8 +125,16 @@ export default function (cli: CLI) {
         process.exit(ExitCode.FatalError)
       }
 
-      // Nothing on disk is touched — a workspace is a path harness knows about,
-      // not one it owns.
+      // A workspace is a path harness knows about and does not own, so nothing
+      // there is touched. A worktree is different: harness created it, and
+      // leaving a full checkout per isolated session behind is how a large
+      // repository quietly fills a disk.
+      for (const released of await releaseWorktrees(doomed)) {
+        if (released.committed)
+          console.log(`  committed what session ${released.sessionId} left behind as ${released.committed.slice(0, 8)}`)
+        console.log(`  released ${released.path} (its branch is kept)`)
+      }
+
       console.log(`deleted ${profile.name} · ${profile.workspaceIds.length} workspace(s) · ${sessions.length} session(s)`)
       process.exit(ExitCode.Success)
     })

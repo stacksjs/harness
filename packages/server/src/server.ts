@@ -10,6 +10,7 @@
 import type { CommandEnvelope } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver, DriverKind } from '@harness/drivers'
+import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
@@ -17,7 +18,7 @@ import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from '.
 import { ASSET_PREFIX, AssetCache } from './assets'
 import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
-import { defaultWorkspacePath, ProviderRuntime } from './runtime'
+import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
 
@@ -330,8 +331,29 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    * behind it. Its output reaches clients through the same broadcast path as
    * everything else, so nothing is lost by not waiting.
    */
-  async function react(envelope: CommandEnvelope, result: Awaited<ReturnType<Engine['dispatch']>>): Promise<void> {
+  async function react(
+    envelope: CommandEnvelope,
+    result: Awaited<ReturnType<Engine['dispatch']>>,
+    doomed: DoomedWorktree[] = [],
+  ): Promise<void> {
     const command = envelope.command
+
+    // A worktree is a directory on disk and the log does not own it, so
+    // deleting a profile used to leave a full checkout behind per isolated
+    // session. The event carries the sessions it removed precisely so this can
+    // find them after they are gone from the projection.
+    if (command.type === 'profile.delete') {
+      const deleted = result.events.find(event => event.payload.type === 'profile.deleted')
+      if (!deleted) return
+      const released = await releaseWorktrees(doomed)
+      for (const entry of released) {
+        console.warn(
+          `[worktree] released ${entry.path}`
+          + (entry.committed ? ` (committed leftovers as ${entry.committed.slice(0, 8)})` : ''),
+        )
+      }
+      return
+    }
 
     if (command.type === 'session.turn.start') {
       const started = result.events.find(event => event.payload.type === 'turn.started')
@@ -409,6 +431,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           send(socket, { t: 'protocol-error', message: 'dispatch requires an envelope with id and command' })
           return
         }
+        // Read before dispatching: a deleted profile takes its sessions with
+        // it, and their worktree paths go with them.
+        const doomed = envelope.command.type === 'profile.delete'
+          ? worktreesOfProfile(engine.current, envelope.command.profileId)
+          : []
+
         try {
           const result = await engine.dispatch(envelope)
           send(socket, {
@@ -422,7 +450,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           broadcast(result.events)
           // Then act on it. A retry (`replayed`) must not start a second agent
           // run — the receipt already accounted for the first.
-          if (!result.replayed) await react(envelope, result)
+          if (!result.replayed) await react(envelope, result, doomed)
         }
         catch (error) {
           send(socket, {

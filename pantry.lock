@@ -5,6 +5,9 @@
     "": {
       "name": "harness",
       "dependencies": {
+        "@stacksjs/components": "^0.2.168",
+        "@stacksjs/stx": "^0.2.165",
+        "pickier": "^0.1.49",
         "stacks": "^0.70.304"
       },
       "devDependencies": {
@@ -49,7 +52,8 @@
       "dependencies": {
         "@harness/contract": "workspace:*",
         "@harness/engine": "workspace:*",
-        "@stacksjs/stx": "*"
+        "@stacksjs/stx": "*",
+        "localtunnels": "0.2.12"
       }
     },
     "storage/framework": {
@@ -79,21 +83,35 @@
         "zod": "^4.0.0"
       }
     },
-    "@stacksjs/stx@0.2.158": {
-      "name": "@stacksjs/stx",
-      "version": "0.2.158",
+    "@stacksjs/components@0.2.168": {
+      "name": "@stacksjs/components",
+      "version": "0.2.168",
       "source": "npm",
-      "resolved": "https://registry.npmjs.org/@stacksjs/stx/-/stx-0.2.158.tgz",
-      "integrity": "sha512-VgElIyXazPvtLTo4R6Tl8dApP655CPV8/KgDKLuQdKGlYcBAc7dfIRqA5Tjq7ppUdf9tXmezQBMofkwxSAWy/Q==",
+      "resolved": "https://registry.npmjs.org/@stacksjs/components/-/components-0.2.168.tgz",
+      "integrity": "sha512-Qg6ug6m6UC1DAxFcBrmandNIBF2qhVygr4kk2QCNS0Qs9Za2VGnzGsCBoDtzEYHD6D4ZlfyDLYKAC+TNsMy9Og==",
+      "dependencies": {
+        "@cwcss/crosswind": "^0.2.14",
+        "@iconify-json/f7": "^1.2.2",
+        "@stacksjs/stx": "0.2.168",
+        "bun-plugin-stx": "0.2.168",
+        "ts-syntax-highlighter": "^0.2.1"
+      }
+    },
+    "@stacksjs/stx@0.2.168": {
+      "name": "@stacksjs/stx",
+      "version": "0.2.168",
+      "source": "npm",
+      "resolved": "https://registry.npmjs.org/@stacksjs/stx/-/stx-0.2.168.tgz",
+      "integrity": "sha512-GWem3EABXP23ox7TP/lTCLADYyZvhdZVLwjdFNjuhY0uThOhk0SXEvXmp+Cf5mDdomRdvzAdBA93rZK0asuEoA==",
       "dependencies": {
         "@cwcss/crosswind": "^0.2.14",
         "@stacksjs/clapp": "^0.2.0",
-        "@stacksjs/desktop": "0.2.158",
-        "@stacksjs/sanitizer": "0.2.158",
+        "@stacksjs/desktop": "0.2.168",
+        "@stacksjs/sanitizer": "0.2.168",
         "@stacksjs/ts-i18n": "^0.1.11",
-        "bun-plugin-stx": "0.2.158",
+        "bun-plugin-stx": "0.2.168",
         "bunfig": "^0.15.17",
-        "stx-router": "0.2.158",
+        "stx-router": "0.2.168",
         "ts-broadcasting": "^0.0.9",
         "ts-images": "^0.1.9",
         "ts-syntax-highlighter": "^0.2.1"
@@ -167,6 +185,21 @@
       "source": "pantry",
       "resolved": "registry:libexpat.github.io@2.7.5"
     },
+    "localtunnels@0.2.12": {
+      "name": "localtunnels",
+      "version": "0.2.12",
+      "source": "npm",
+      "resolved": "https://registry.npmjs.org/localtunnels/-/localtunnels-0.2.12.tgz",
+      "integrity": "sha512-F6Xbdh1c0UnH1Kih45yUzLuIx8hD6uM/yop2T2W4SBtx1lFtz64JJajlzhf5rap1pMrcGhNYXnU6SPL8i0kpkQ==",
+      "dependencies": {
+        "@stacksjs/ts-analytics": "github:stacksjs/ts-analytics",
+        "bunfig": "^0.15.6"
+      },
+      "bin": {
+        "localtunnel": "./dist/bin/cli.js",
+        "lt": "./dist/bin/cli.js"
+      }
+    },
     "nghttp2.org@1.68.1": {
       "name": "nghttp2.org",
       "version": "1.68.1",
@@ -184,6 +217,20 @@
       "version": "5.42.1",
       "source": "pantry",
       "resolved": "registry:perl.org@5.42.1"
+    },
+    "pickier@0.1.49": {
+      "name": "pickier",
+      "version": "0.1.49",
+      "source": "npm",
+      "resolved": "https://registry.npmjs.org/pickier/-/pickier-0.1.49.tgz",
+      "integrity": "sha512-a64LaCOVH5q26NHqNSFR7oLTrZlKiamGIPjLc6zbHp6OzaJy6hcF+yZ2PdggHhJfGy3JaVOfyTS58D896SRKjQ==",
+      "dependencies": {
+        "@stacksjs/clapp": "^0.2.3",
+        "@stacksjs/clarity": "^0.3.24"
+      },
+      "bin": {
+        "pickier": "./dist/bin/cli.js"
+      }
     },
     "sqlite.org@3.53.4": {
       "name": "sqlite.org",

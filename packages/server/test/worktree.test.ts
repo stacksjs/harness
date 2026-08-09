@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { branchFor, commitTurn, create, exists, prune, remove } from '../src/worktree'
+import { branchFor, commitTurn, create, exists, list, prune, release, remove } from '../src/worktree'
 
 /**
  * The point of a worktree is that two sessions cannot see each other's files.
@@ -292,6 +292,57 @@ describe('recording a turn on the branch', () => {
       await commitTurn(result.path!, 'harness: turn 1')
 
       expect(g(dir, 'log', '-1', '--format=%an <%ae>', 'harness/session-42')).toBe('Test <test@example.com>')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+})
+
+describe('listing and releasing', () => {
+  it('reports harness worktrees, their branch, and whether they are dirty', async () => {
+    const dir = repo()
+    try {
+      const made = await create(dir, 4242)
+      expect(made.path).not.toBeNull()
+
+      let entries = await list(dir)
+      let mine = entries.find(entry => entry.sessionId === 4242)
+      expect(mine).toBeDefined()
+      expect(mine!.branch).toBe('harness/session-4242')
+      expect(mine!.dirty).toBe(false)
+
+      writeFileSync(join(made.path!, 'scratch.txt'), 'half a turn')
+      entries = await list(dir)
+      mine = entries.find(entry => entry.sessionId === 4242)
+      expect(mine!.dirty).toBe(true)
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+
+  it('keeps uncommitted work by committing it to the branch, then removes the directory', async () => {
+    const dir = repo()
+    try {
+      const made = await create(dir, 4343)
+      writeFileSync(join(made.path!, 'left-behind.txt'), 'do not lose me')
+
+      const released = await release(dir, made.path!)
+      expect(released.removed).toBe(true)
+      // The whole point: the work is on the branch, not in the bin.
+      expect(released.committed).not.toBeNull()
+      expect(await exists(dir, made.path!)).toBe(false)
+
+      expect(g(dir, 'show', 'harness/session-4343:left-behind.txt')).toContain('do not lose me')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+
+  it('releases a clean worktree without inventing a commit', async () => {
+    const dir = repo()
+    try {
+      const made = await create(dir, 4444)
+
+      const released = await release(dir, made.path!)
+      expect(released.removed).toBe(true)
+      expect(released.committed).toBeNull()
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   }, GIT_TIMEOUT)

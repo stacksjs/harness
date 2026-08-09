@@ -175,6 +175,79 @@ export async function prune(workspacePath: string): Promise<void> {
   await git(workspacePath, ['worktree', 'prune'])
 }
 
+export interface WorktreeEntry {
+  path: string
+  branch: string | null
+  /** The session it belongs to, when the path is one harness made. */
+  sessionId: number | null
+  /** Whether it holds changes no commit has recorded. */
+  dirty: boolean
+}
+
+/**
+ * Every worktree of this repository, with harness's own identified.
+ *
+ * Reported rather than filtered, because someone reading this list is usually
+ * trying to work out where their disk went, and a worktree they made by hand
+ * is part of that answer.
+ */
+export async function list(workspacePath: string): Promise<WorktreeEntry[]> {
+  const listed = await git(workspacePath, ['worktree', 'list', '--porcelain'])
+  if (!listed.ok) return []
+
+  const entries: WorktreeEntry[] = []
+  let current: { path: string, branch: string | null } | null = null
+
+  const flush = async (): Promise<void> => {
+    if (!current) return
+    const match = /\/harness\/worktrees\/(\d+)$/.exec(current.path)
+    const status = await git(current.path, ['status', '--porcelain'])
+    entries.push({
+      path: current.path,
+      branch: current.branch,
+      sessionId: match ? Number(match[1]) : null,
+      dirty: status.ok && status.out.trim().length > 0,
+    })
+    current = null
+  }
+
+  for (const line of listed.out.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      await flush()
+      current = { path: line.slice('worktree '.length), branch: null }
+    }
+    else if (line.startsWith('branch ') && current) {
+      current.branch = line.slice('branch '.length).replace('refs/heads/', '')
+    }
+  }
+  await flush()
+
+  return entries
+}
+
+/**
+ * Give back a session's worktree without losing anything it holds.
+ *
+ * Uncommitted work is committed to the session's own branch first, rather than
+ * discarded or left to block the removal. Deleting an agent's output because
+ * someone tidied up a profile would be the worst version of this feature, and
+ * refusing to clean up while a stray file sits there is how the directories
+ * accumulate in the first place.
+ *
+ * The branch always survives: it is the deliverable, the directory is scratch.
+ */
+export async function release(workspacePath: string, path: string): Promise<{ removed: boolean, committed: string | null, reason?: string }> {
+  const committed = await commitTurn(path, 'harness: work left uncommitted when the session went away')
+  const removed = await remove(workspacePath, path, false)
+  if (!removed.ok) {
+    // Forced only after the work is safely on the branch, so what this discards
+    // is the checkout and not the output.
+    const forced = await remove(workspacePath, path, true)
+    if (!forced.ok) return { removed: false, committed, reason: forced.reason }
+  }
+  return { removed: true, committed }
+}
+
 /** Whether a path is a live worktree of this repository. */
 export async function exists(workspacePath: string, path: string): Promise<boolean> {
   const listed = await git(workspacePath, ['worktree', 'list', '--porcelain'])

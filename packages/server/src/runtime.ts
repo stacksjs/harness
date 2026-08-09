@@ -472,6 +472,43 @@ export class ProviderRuntime {
   }
 }
 
+export interface DoomedWorktree {
+  sessionId: number
+  path: string
+  repository: string
+}
+
+/**
+ * The worktrees a profile's sessions are holding.
+ *
+ * Read *before* the profile is deleted, because afterwards the sessions are
+ * gone from the projection and their worktree paths with them. Collecting the
+ * three fields that matter is cheaper and less fragile than snapshotting the
+ * whole state to look at it later.
+ */
+export function worktreesOfProfile(state: HarnessState, profileId: number): DoomedWorktree[] {
+  const doomed: DoomedWorktree[] = []
+  for (const session of state.sessions.values()) {
+    if (!session.worktreePath) continue
+    const workspace = state.workspaces.get(session.workspaceId)
+    if (!workspace || workspace.profileId !== profileId) continue
+    doomed.push({ sessionId: session.id, path: session.worktreePath, repository: workspace.path })
+  }
+  return doomed
+}
+
+/** Hand those worktrees back, keeping whatever work they hold. */
+export async function releaseWorktrees(
+  doomed: DoomedWorktree[],
+): Promise<Array<{ sessionId: number, path: string, committed: string | null, removed: boolean }>> {
+  const released = []
+  for (const entry of doomed) {
+    const result = await worktree.release(entry.repository, entry.path)
+    released.push({ sessionId: entry.sessionId, path: entry.path, committed: result.committed, removed: result.removed })
+  }
+  return released
+}
+
 /** A session's workspace path, or null when it has none. */
 export function defaultWorkspacePath(state: HarnessState, sessionId: number): string | null {
   const session = state.sessions.get(sessionId)
