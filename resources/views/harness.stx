@@ -85,6 +85,8 @@ export const hasProfiles = profiles.length > 0
 export const turns = activeSession ? activeSession.turns : []
 export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : 'No session'
 export const sessionState = activeSession ? activeSession.state : 'idle'
+// Empty unless this session runs in a worktree of its own.
+export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const activeSessionId = activeSession ? activeSession.id : 0
 // The last turn is the only one that can still change, so it is the only one
 // that needs hydrating — everything above it is settled history.
@@ -123,6 +125,16 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         data-session-state
         class="rounded-full px-2 py-[2px] text-[11px] leading-[14px] opacity-70"
       >{{ sessionState }}</span>
+      <!--
+        An isolated session edits its own checkout, not the workspace. Saying
+        which branch makes that visible, and names the thing you merge.
+      -->
+      @if(sessionBranch)
+        <span
+          class="truncate rounded-[5px] border border-black/10 px-[6px] py-[1px] font-mono text-[11px] leading-[15px] opacity-70 dark:border-white/15"
+          title="This session runs in its own worktree on {{ sessionBranch }}"
+        >{{ sessionBranch }}</span>
+      @endif
       <!--
         Changes sit behind a toggle rather than always-on. Reading a repository
         costs a subprocess, and most page loads never look at the diff.

@@ -17,6 +17,7 @@ import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { resolveDriver } from '@harness/drivers'
 import { capture, restore } from './checkpoint'
+import * as worktree from './worktree'
 
 export interface RuntimeOptions {
   engine: Engine
@@ -96,6 +97,10 @@ export class ProviderRuntime {
       await this.emit({ type: 'thread.error', sessionId, message: `no driver for ${driverKind}` })
       return null
     }
+
+    // Made now rather than at session creation, so a session nobody runs does
+    // not leave a checkout behind.
+    await this.ensureWorktree(sessionId)
 
     const state = this.options.engine.current
     const session = state.sessions.get(sessionId)
@@ -233,6 +238,10 @@ export class ProviderRuntime {
           }
 
           case 'turn-complete':
+            // An isolated session records each turn as a commit on its branch,
+            // so the branch is something you can merge rather than an empty
+            // pointer beside a dirty worktree.
+            await this.commitIsolatedTurn(sessionId, turnId)
             await this.emit({
               type: 'thread.turn.complete',
               sessionId,
@@ -282,6 +291,59 @@ export class ProviderRuntime {
     catch {
       return null
     }
+  }
+
+  /**
+   * Give an isolated session its own checkout, once.
+   *
+   * Silent when it cannot: a workspace that is not a repository has nothing to
+   * branch from, and a session must still run there. The alternative — refusing
+   * the turn — would make `--isolate` a footgun on any directory that happens
+   * not to be under version control.
+   */
+  private async ensureWorktree(sessionId: number): Promise<void> {
+    const state = this.options.engine.current
+    const session = state.sessions.get(sessionId)
+    if (!session?.isolate || session.worktreePath) return
+
+    const repository = this.options.workspacePath
+      ? this.options.workspacePath(state, sessionId)
+      : repositoryPath(state, sessionId)
+    if (!repository || !existsSync(repository)) return
+
+    // Clears a registration left by a crash, which is otherwise enough to make
+    // `worktree add` refuse this session's name.
+    await worktree.prune(repository)
+
+    const created = await worktree.create(repository, sessionId)
+    if (!created.path || !created.branch) {
+      await this.emit({
+        type: 'thread.error',
+        sessionId,
+        message: `could not isolate this session: ${created.reason ?? 'unknown reason'}`,
+      })
+      return
+    }
+
+    await this.emit({
+      type: 'thread.worktree.set',
+      sessionId,
+      worktreePath: created.path,
+      branch: created.branch,
+    })
+  }
+
+  /**
+   * Commit an isolated turn's work onto its branch.
+   *
+   * Best effort and silent: a session that is not isolated has no branch, and a
+   * turn that changed nothing has nothing to record. Neither is a failure worth
+   * interrupting a completed turn over.
+   */
+  private async commitIsolatedTurn(sessionId: number, turnId: number): Promise<void> {
+    const session = this.options.engine.current.sessions.get(sessionId)
+    if (!session?.worktreePath) return
+    await worktree.commitTurn(session.worktreePath, `harness: turn ${turnId}`)
   }
 
   /**
@@ -389,6 +451,17 @@ export class ProviderRuntime {
 
 /** A session's workspace path, or null when it has none. */
 export function defaultWorkspacePath(state: HarnessState, sessionId: number): string | null {
+  const session = state.sessions.get(sessionId)
+  if (!session) return null
+  // An isolated session runs in its own checkout, and everything that follows
+  // the workspace path — the agent's cwd, checkpoints, the diff — follows it
+  // there without knowing the difference.
+  if (session.worktreePath) return session.worktreePath
+  return state.workspaces.get(session.workspaceId)?.path ?? null
+}
+
+/** The workspace a session belongs to, ignoring any worktree. */
+export function repositoryPath(state: HarnessState, sessionId: number): string | null {
   const session = state.sessions.get(sessionId)
   if (!session) return null
   return state.workspaces.get(session.workspaceId)?.path ?? null

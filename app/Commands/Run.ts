@@ -27,7 +27,8 @@ export default function (cli: CLI) {
     .option('--yes', 'Approve tool calls automatically', { default: false })
     .option('--driver [kind]', 'Agent to run the turn (claude, codex, ...)', { default: 'claude' })
     .option('--model [model]', "Model override; omit to use the provider's default")
-    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string }) => {
+    .option('--isolate', 'Run in a git worktree of its own, on its own branch', { default: false })
+    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string, isolate?: boolean }) => {
       const client = new HarnessClient({ url: options.url })
 
       try {
@@ -72,6 +73,7 @@ export default function (cli: CLI) {
         workspaceId,
         driverKind: options.driver as DriverKind,
         ...(options.model ? { model: options.model } : {}),
+        ...(options.isolate ? { isolate: true } : {}),
       })
       const sessionId = derivedId(sessionCmd)
       client.subscribe(sessionId)

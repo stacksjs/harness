@@ -133,6 +133,23 @@ async function bootstrap(client: Client, workspace: string = dir): Promise<{ ses
   return { sessionId }
 }
 
+/** Bootstrap, but asking for a checkout of its own. */
+async function bootstrapIsolated(client: Client, workspace: string): Promise<{ sessionId: number }> {
+  client.send({ t: 'dispatch', envelope: { id: 'c_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
+  const profileId = derivedId('c_p')
+  client.send({ t: 'dispatch', envelope: { id: 'c_w', at: 2, command: { type: 'workspace.add', profileId, path: workspace } } })
+  const workspaceId = derivedId('c_w')
+  client.send({ t: 'dispatch', envelope: { id: 'c_t', at: 3, command: { type: 'workspace.trust', workspaceId, trusted: true } } })
+  client.send({
+    t: 'dispatch',
+    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate: true } },
+  })
+  const sessionId = derivedId('c_s')
+  await client.waitFor('session.created')
+  client.send({ t: 'subscribe', sessionId })
+  return { sessionId }
+}
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'harness-runtime-'))
   prepareDatabase(join(dir, 'test.sqlite'))
@@ -278,6 +295,119 @@ describe('a turn drives the provider', () => {
     expect(created).toBe(false)
     client.close()
   })
+})
+
+describe('a session can have a checkout of its own', () => {
+  function repoWorkspace2(): string {
+    const path = join(dir, 'repo')
+    mkdirSync(path)
+    const run = (...args: string[]) => spawnSync('git', args, { cwd: path })
+    run('init', '-q')
+    run('config', 'user.email', 'test@example.com')
+    run('config', 'user.name', 'Test')
+    writeFileSync(join(path, 'app.txt'), 'original\n')
+    run('add', '.')
+    run('commit', '-qm', 'first')
+    return path
+  }
+
+  it('runs the agent in a worktree and leaves the workspace alone', async () => {
+    // What isolation buys: the agent edits its own checkout, so a second
+    // session — or the person at the keyboard — is not working in the same
+    // files.
+    const workspace = repoWorkspace2()
+    let ranIn = ''
+
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create(config) {
+        ranIn = config.workspacePath
+        return {
+          async *startTurn() {
+            writeFileSync(join(ranIn, 'app.txt'), 'agent edited this\n')
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+          async interrupt() {}, async respondApproval() {}, async stop() {},
+        }
+      },
+    }
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrapIsolated(client, workspace)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'edit' } } })
+    await client.waitFor('turn.completed')
+
+    const session = harness.engine.current.sessions.get(sessionId)!
+    expect(session.branch).toBe(`harness/session-${sessionId}`)
+    expect(session.worktreePath).toBeTruthy()
+
+    // The agent ran in the worktree, not the workspace.
+    expect(ranIn).toBe(session.worktreePath)
+    expect(readFileSync(join(session.worktreePath, 'app.txt'), 'utf8')).toBe('agent edited this\n')
+    expect(readFileSync(join(workspace, 'app.txt'), 'utf8')).toBe('original\n')
+    client.close()
+  }, 30_000)
+
+  it('runs in the workspace when not asked to isolate', async () => {
+    // Unchanged behaviour for every existing session.
+    const workspace = repoWorkspace2()
+    let ranIn = ''
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create(config) {
+        ranIn = config.workspacePath
+        return { async *startTurn() { yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 } }, async interrupt() {}, async respondApproval() {}, async stop() {} }
+      },
+    }
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client, workspace)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'x' } } })
+    await client.waitFor('turn.completed')
+
+    expect(ranIn).toBe(workspace)
+    expect(harness.engine.current.sessions.get(sessionId)!.worktreePath).toBe('')
+    client.close()
+  }, 30_000)
+
+  it('still runs when the workspace is not a repository', async () => {
+    // `--isolate` on a plain directory must not be a footgun: there is nothing
+    // to branch from, and the turn should simply run where it is.
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrapIsolated(client, dir)
+    client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'x' } } })
+
+    expect(await client.waitFor('turn.completed')).toBeTruthy()
+    expect(harness.engine.current.sessions.get(sessionId)!.worktreePath).toBe('')
+    client.close()
+  }, 30_000)
+
+  it('reuses the same worktree across turns', async () => {
+    // A second checkout per turn would be absurd, and the branch would fork.
+    const workspace = repoWorkspace2()
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrapIsolated(client, workspace)
+    client.send({ t: 'dispatch', envelope: { id: 'c_t1', at: 5, command: { type: 'session.turn.start', sessionId, text: 'one' } } })
+    await client.waitFor('turn.completed')
+    const first = harness.engine.current.sessions.get(sessionId)!.worktreePath
+
+    client.send({ t: 'dispatch', envelope: { id: 'c_t2', at: 6, command: { type: 'session.turn.start', sessionId, text: 'two' } } })
+    await new Promise(r => setTimeout(r, 500))
+
+    expect(harness.engine.current.sessions.get(sessionId)!.worktreePath).toBe(first)
+    expect(client.payloads('session.isolated')).toHaveLength(1)
+    client.close()
+  }, 30_000)
 })
 
 describe('checkpoint and revert', () => {

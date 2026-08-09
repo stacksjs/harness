@@ -1524,9 +1524,54 @@ was empty; the panel reported `scope: session`, one file, `+1 −0`, with the
 agent's line in the patch — and left the edit I had in flight before the session
 out of it.
 
+### A checkout per session
+
+Sessions share a workspace by design — `harness:run` reuses one by path, and a
+profile's project is one directory. That is fine until two run at once: they
+edit the same files, each sees the other's half-finished work, and a revert in
+one throws away the other's. The transcript then describes changes that are not
+the ones on disk.
+
+`--isolate` gives a session `git worktree add -b harness/session-<id>`. A branch
+alone would not do: `git switch -c` gives a session its own *branch* but not its
+own *files*, and switching the working tree under a running agent changes files
+out from under a process mid-edit.
+
+Worktrees live under `.git/harness/worktrees/<id>` — inside the git directory,
+so there is nothing to gitignore and nothing to commit by accident, while
+`git worktree list` still finds them. Created on the first turn rather than at
+session creation, so a session nobody runs leaves no checkout behind. A
+workspace that is not a repository runs where it is, because `--isolate` should
+not be a footgun on a plain directory.
+
+**Each turn is a commit.** A worktree alone leaves the work uncommitted, so the
+branch is an empty pointer beside a dirty checkout and `git merge` gets you
+nothing. Every turn that changed something commits onto the branch, so the
+history reads one commit per turn. The author comes from the repository's own
+config, falling back to a harness identity only where none is set — `-c`
+overrides rather than fills, so a blanket default would rewrite the author on
+every machine that had one.
+
+Nothing merges anything back. `harness/session-<id>` is a branch you merge,
+rebase or open a PR from with the tools you already have.
+
+**Verified live with two agents at once**, both told to rewrite the same file in
+the same repository:
+
+| branch | `shared.txt` |
+|---|---|
+| `harness/session-918007568` | `AGENT ONE` |
+| `harness/session-919239881` | `AGENT TWO` |
+| workspace, on `main` | `shared file` — untouched |
+
+Everything downstream followed the worktree without knowing it existed: the
+agent's cwd, the checkpoints, the diff. `defaultWorkspacePath` returns the
+worktree when there is one, and that is the whole integration.
+
 ### M6 — still open
-Branch/worktree per session. Terminals. Per-profile MCP server management. Remote
-access from a phone — auth and pairing, since the server is already the boundary.
+Terminals. Per-profile MCP server management. Remote access from a phone — auth
+and pairing, since the server is already the boundary. Worktrees are not cleaned
+up when a session is deleted (harness/harness#10).
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

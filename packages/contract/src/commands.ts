@@ -15,7 +15,21 @@ export type ApprovalScope = 'once' | 'session' | 'workspace' | 'always'
 
 /** Commands a client is allowed to dispatch. */
 export type ClientCommand =
-  | { type: 'session.create', workspaceId: number, driverKind: DriverKind, model?: string, providerInstanceId?: number }
+  | {
+      type: 'session.create'
+      workspaceId: number
+      driverKind: DriverKind
+      model?: string
+      /**
+       * Run this session in a git worktree of its own.
+       *
+       * Sessions otherwise share the workspace, which is fine until two run at
+       * once and edit the same files. Ignored for a workspace that is not a
+       * repository — there is nothing to branch from.
+       */
+      isolate?: boolean
+      providerInstanceId?: number
+    }
   | { type: 'session.turn.start', sessionId: number, text: string }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
@@ -42,6 +56,7 @@ export type InternalCommand =
   | { type: 'thread.approval.request', sessionId: number, requestId: string, toolName: string, args: unknown }
   | { type: 'thread.input.request', sessionId: number, requestId: string, prompt: string }
   | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number }
+  | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number }
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
   | { type: 'thread.session.set', sessionId: number, providerSessionId: string }

@@ -18,7 +18,7 @@ export interface EventBase {
 }
 
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, model?: string }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, model?: string, isolate?: boolean }
   | { type: 'session.stopped' }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
@@ -48,6 +48,8 @@ export type EventPayload =
    * acceptance alone reloaded into a half-restored tree — files rewritten,
    * files the agent added not yet removed.
    */
+  /** This session got its own checkout and branch. */
+  | { type: 'session.isolated', worktreePath: string, branch: string }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number }
   | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
   /**

@@ -29,6 +29,18 @@ export interface SessionState {
    * `awaiting-approval` with nothing to act on, and the turn waited forever.
    */
   pendingApproval: { approvalId: number, toolName: string } | null
+  /** Whether this session asked for a checkout of its own. */
+  isolate: boolean
+  /**
+   * Where the agent actually runs, once isolated.
+   *
+   * Empty until the worktree exists — it is made on the first turn rather than
+   * at session creation, so a session nobody ever runs does not leave a
+   * checkout behind.
+   */
+  worktreePath: string
+  /** The branch its work lands on. Empty until isolated. */
+  branch: string
 }
 
 /**
@@ -198,6 +210,9 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         turns: [],
         checkpoints: [],
         pendingApproval: null,
+        isolate: p.isolate === true,
+        worktreePath: '',
+        branch: '',
       })
       break
 
@@ -245,6 +260,14 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       // Append rather than replace: a transcript is built from deltas, and the
       // order is guaranteed by the sequence, not by arrival.
       if (t) t.response += p.text
+      break
+    }
+
+    case 'session.isolated': {
+      const session = state.sessions.get(event.sessionId)
+      if (!session) break
+      session.worktreePath = p.worktreePath
+      session.branch = p.branch
       break
     }
 

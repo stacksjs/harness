@@ -159,6 +159,23 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           // Omitted rather than sent empty, so "no preference" and "the empty
           // model" cannot be confused on replay.
           ...(command.model ? { model: command.model } : {}),
+          ...(command.isolate ? { isolate: true } : {}),
+        },
+      }]
+    }
+
+    case 'thread.worktree.set': {
+      if (!state.sessions.has(command.sessionId))
+        throw new InvalidCommand(`no such session: ${command.sessionId}`)
+
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'session.isolated',
+          worktreePath: command.worktreePath,
+          branch: command.branch,
         },
       }]
     }

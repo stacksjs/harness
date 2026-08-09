@@ -111,6 +111,9 @@ export function viewProps(state: HarnessState, options: {
           // to be connected when it fired, and the turn waited forever if that
           // one went away.
           pendingApproval: active.pendingApproval,
+          // Shown in the header when the session has a checkout of its own, so
+          // it is obvious the agent is not editing the workspace directly.
+          branch: active.branch,
           turns: active.turns.map(turn => ({
             id: turn.id,
             prompt: turn.prompt,
