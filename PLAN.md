@@ -374,12 +374,13 @@ CLIs actually want to be driven:
 | `codex` | Codex **app-server**, JSON-RPC over stdio | Launch args matter (`codexLaunchArgs`); has its own developer-instructions injection |
 | `cursor` | **ACP** (Agent Client Protocol, JSON-RPC) | plus a Cursor-specific extension layer |
 | `grok` | **ACP** | plus an xAI extension layer |
-| `opencode` | own CLI/HTTP runtime | needs CLI output parsing |
+| `opencode` | **ACP** (`opencode acp`, documented) | t3code's map said "own CLI/HTTP runtime, needs CLI output parsing" — stale by the time we got here; opencode 1.18 ships a native ACP server |
 
-**Design consequence: ACP is the priority abstraction.** Two of five providers speak it today and
-the direction of travel is toward more. `packages/drivers/acp` is a real ACP client — JSON-RPC
-framing, session lifecycle, tool-call and permission-request mapping — and Cursor and Grok are thin
-extensions over it. Claude, Codex and OpenCode are bespoke.
+**Design consequence: ACP is the priority abstraction.** Three of five providers speak it today and
+the direction of travel is toward more — opencode *became* one between this section being written
+and M5 reaching it. `packages/drivers/src/acp.ts` is a real ACP client — JSON-RPC framing, session
+lifecycle, tool-call and permission-request mapping — and Cursor, Grok and OpenCode are thin
+extensions over it. Claude and Codex are bespoke.
 
 ### Driver interface
 
@@ -1325,7 +1326,7 @@ Craft window over the server. Native chrome: per-profile titlebar tint, system t
 shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
 **Exit:** a signed `.dmg` under 15MB that cold-starts under 300ms, both measured in CI.
 
-### M5 — The rest of the drivers *(claude, codex and cursor done)*
+### M5 — The rest of the drivers *(grok is the only one left)*
 
 | Driver | Transport | State on this machine |
 |---|---|---|
@@ -1333,7 +1334,7 @@ shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
 | codex | `app-server`, JSON-RPC/stdio | implemented and **verified live end to end** |
 | cursor | ACP (`cursor-agent acp`) | implemented over the ACP client; live turn gated on `cursor-agent login` |
 | grok | ACP + extension | registered, unimplemented — the CLI is not installable here |
-| opencode | own CLI/HTTP runtime | registered, unimplemented |
+| opencode | ACP (`opencode acp`) | one `createAcpDriver` call, **conformance green against the live agent** |
 
 **The conformance suite is the deliverable**, not the driver count. It states the ordering invariants
 the engine silently assumes — exactly one terminal event per turn, no tool result without its call, at
@@ -1411,8 +1412,30 @@ auth message, and conformance passes by declining cleanly. **A logged-in turn is
 verification** — the login is a browser flow only a human can complete, and claiming the driver
 works end to end before one ran would be exactly the kind of claim this file exists to prevent.
 
-**Still open:** the grok extension (its CLI is not installable here, so it would be unverifiable
-code — but it should now be one `createAcpDriver` call) and the OpenCode runtime.
+### OpenCode — the ACP bet paying out
+
+The plan budgeted a bespoke runtime for opencode ("own CLI/HTTP runtime, needs CLI output
+parsing", per t3code's provider map). By the time M5 reached it, opencode 1.18 shipped a
+*documented* `opencode acp` server — so the driver is one `createAcpDriver` call naming the binary
+and the argv, and nothing else. This is exactly the payout §7 predicted when it made ACP the
+priority abstraction: the second ACP provider cost a config object, not a transport.
+
+Two findings only the live CLI produced:
+
+- **Credentials are optional, so the probe must not demand them.** A turn completes on the free
+  tier (`opencode/big-pickle`) with `opencode auth list` reporting 0 credentials — verified live —
+  so `createAcpDriver`'s auth check became optional, and opencode omits it. A probe that said
+  `unauthenticated` there would gate a provider that works out of the box.
+- **It is the first driver whose full conformance spec ran green against the live agent** — probe
+  ready, a real turn (3 events, exactly one terminal), idempotent interrupt/approval, clean
+  teardown. Claude and codex were verified by hand before the suite existed; cursor declines
+  cleanly until a login exists. Resume is verified live too: a second instance given the
+  `providerSessionId` answered with the word the first turn planted ("pineapple"), and the
+  `session/load` replay produced no duplicate history in the stream — the suppression works
+  against a real agent, not just in the unit test.
+
+**Still open:** the grok extension — its CLI is not installable here, so it would be unverifiable
+code, but it should now be one `createAcpDriver` call.
 
 ### M5 — The rest of the drivers *(original scope)*
 ACP client, then Cursor and Grok as extensions over it. Codex app-server. OpenCode runtime.

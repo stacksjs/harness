@@ -15,9 +15,9 @@
 
 import type { DriverKind } from '@harness/contract'
 import type { Driver } from './types'
-import { CursorDriver } from './acp'
+import { CursorDriver, OpenCodeDriver } from './acp'
 import { ClaudeDriver } from './claude'
-import { GrokDriver, OpenCodeDriver } from './cli-driver'
+import { GrokDriver } from './cli-driver'
 import { CodexDriver } from './codex'
 
 export const registry: Record<DriverKind, Driver> = {

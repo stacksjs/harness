@@ -435,23 +435,31 @@ export function createAcpDriver(options: {
   binary: string
   /** argv that puts the binary in ACP mode, given the session's config. */
   acpArgs: (config: DriverConfig) => string[]
-  /** argv whose output reveals auth state, tested against `loggedOutPattern`. */
-  authProbeArgs: string[]
-  loggedOutPattern: RegExp
-  loginHint: string
+  /**
+   * How the CLI reports auth, for providers where login is a precondition.
+   * Omitted entirely for one where it is not (opencode runs on free-tier
+   * models with zero credentials — verified live) — a probe must not claim a
+   * login is required when a turn would succeed without one.
+   */
+  auth?: {
+    /** argv whose output reveals auth state, tested against `loggedOutPattern`. */
+    probeArgs: string[]
+    loggedOutPattern: RegExp
+    loginHint: string
+  }
 }): Driver {
   return {
     kind: options.kind,
 
     async probe(config: DriverConfig): Promise<ProbeResult> {
       const result = await probeBinary(config.binaryPath ?? options.binary, config.home)
-      if (result.status !== 'ready') return result
+      if (result.status !== 'ready' || !options.auth) return result
 
       // Installed is not the same as usable. The status subcommand exits 0
       // either way (verified live), so the *text* is the signal.
-      const auth = await runQuiet(config.binaryPath ?? options.binary, options.authProbeArgs, config.home)
-      if (!auth.ok || options.loggedOutPattern.test(auth.output))
-        return { ...result, status: 'unauthenticated', message: options.loginHint }
+      const auth = await runQuiet(config.binaryPath ?? options.binary, options.auth.probeArgs, config.home)
+      if (!auth.ok || options.auth.loggedOutPattern.test(auth.output))
+        return { ...result, status: 'unauthenticated', message: options.auth.loginHint }
       return result
     },
 
@@ -467,7 +475,20 @@ export const CursorDriver: Driver = createAcpDriver({
   // `acp` is not in `--help`, but it is real: it answers the initialize
   // handshake (recorded in the module doc). `--model` is accepted alongside it.
   acpArgs: config => config.model ? ['acp', '--model', config.model] : ['acp'],
-  authProbeArgs: ['status'],
-  loggedOutPattern: /not logged in/i,
-  loginHint: 'run `cursor-agent login`',
+  auth: {
+    probeArgs: ['status'],
+    loggedOutPattern: /not logged in/i,
+    loginHint: 'run `cursor-agent login`',
+  },
+})
+
+export const OpenCodeDriver: Driver = createAcpDriver({
+  kind: 'opencode',
+  binary: 'opencode',
+  // `opencode acp` is documented and takes no model flag — the agent applies
+  // its own configured default, offered back as a `configOptions` entry on
+  // `session/new`. No auth check either: a turn completes on the free tier
+  // with `opencode auth list` reporting 0 credentials (verified live), so
+  // credentials are optional and the probe must not claim otherwise.
+  acpArgs: () => ['acp'],
 })

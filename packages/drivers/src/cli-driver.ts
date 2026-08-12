@@ -18,8 +18,7 @@
  *   grok      — ACP (the client exists in `./acp`; grok would be a thin
  *               extension over it, but the CLI is not installed here, so the
  *               extension would be unverifiable code)
- *   opencode  — its own CLI/HTTP runtime
- * Cursor graduated out of this file: `./acp` drives it live.
+ * Cursor and OpenCode graduated out of this file: `./acp` drives them live.
  */
 
 import type { DriverKind } from '@harness/contract'
@@ -115,7 +114,6 @@ function pendingDriver(kind: DriverKind, binary: string): Driver {
 }
 
 export const GrokDriver: Driver = pendingDriver('grok', 'grok')
-export const OpenCodeDriver: Driver = pendingDriver('opencode', 'opencode')
 
 /**
  * Run a CLI subcommand for its output, never for its side effects.

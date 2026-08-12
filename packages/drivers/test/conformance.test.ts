@@ -1,7 +1,7 @@
 import type { Driver, ProbeResult, ProviderEvent, ProviderInstance } from '../src/types'
 import { describe, expect, it } from 'bun:test'
 import { CursorDriver } from '../src/acp'
-import { DriverNotImplemented, GrokDriver, OpenCodeDriver } from '../src/cli-driver'
+import { DriverNotImplemented, GrokDriver } from '../src/cli-driver'
 import { CodexDriver } from '../src/codex'
 import { formatConformance, runConformance } from '../src/conformance'
 
@@ -202,7 +202,6 @@ describe('conformance suite', () => {
 describe('drivers awaiting a transport', () => {
   const pending = [
     ['grok', GrokDriver],
-    ['opencode', OpenCodeDriver],
   ] as const
 
   for (const [kind, driver] of pending) {
