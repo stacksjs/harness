@@ -8,17 +8,16 @@
  * requests arrive as agent→client requests that block the agent until answered,
  * which is the same shape harness's approval model already speaks.
  *
- * This is the priority abstraction of PLAN.md §7: two of five providers speak
- * ACP and the direction of travel is toward more, so the protocol lives here
- * once and a provider is a `createAcpDriver` call. Cursor's is real and
- * verified against `cursor-agent acp` (a hidden subcommand — absent from
- * `--help`, discovered by handshaking it directly). Grok stays in
- * `cli-driver.ts` until its CLI is installable here, because a driver that has
- * never spoken to its agent is unverifiable code.
+ * This is the priority abstraction of PLAN.md §7: three of five providers
+ * speak ACP, so the protocol lives here once and a provider is a
+ * `createAcpDriver` call — cursor (`cursor-agent acp`, a hidden subcommand
+ * found by handshaking it directly), opencode (`opencode acp`, documented),
+ * and grok (`grok agent stdio`, per Zed's ACP registry for the official
+ * Grok Build CLI).
  *
- * Wire facts below were recorded off the live binary (2026.08.11-e8db854), not
- * guessed: the initialize result, the unauthenticated `session/new` error, and
- * that `acp --model <m>` is accepted.
+ * Wire facts below were recorded off the live binaries, not guessed: each
+ * initialize result, each unauthenticated `session/new` error, and each
+ * CLI's model flag and auth-state reporting.
  */
 
 import type { DriverKind } from '@harness/contract'
@@ -491,4 +490,19 @@ export const OpenCodeDriver: Driver = createAcpDriver({
   // with `opencode auth list` reporting 0 credentials (verified live), so
   // credentials are optional and the probe must not claim otherwise.
   acpArgs: () => ['acp'],
+})
+
+export const GrokDriver: Driver = createAcpDriver({
+  kind: 'grok',
+  binary: 'grok',
+  // The official Grok Build CLI: ACP lives under `agent stdio` (the shape
+  // Zed's registry launches), with `-m` between them for the model.
+  acpArgs: config => config.model ? ['agent', '-m', config.model, 'stdio'] : ['agent', 'stdio'],
+  auth: {
+    // There is no `auth status` subcommand; `models` exits 0 either way and
+    // prints "You are not authenticated." when logged out (recorded live).
+    probeArgs: ['models'],
+    loggedOutPattern: /not authenticated/i,
+    loginHint: 'run `grok login`',
+  },
 })

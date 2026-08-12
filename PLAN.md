@@ -373,7 +373,7 @@ CLIs actually want to be driven:
 | `claude` | Claude Agent SDK, managed server process | Secondary capability probe reads account + slash-command metadata; keyed by binary + resolved `HOME` so two instances don't cross-contaminate |
 | `codex` | Codex **app-server**, JSON-RPC over stdio | Launch args matter (`codexLaunchArgs`); has its own developer-instructions injection |
 | `cursor` | **ACP** (Agent Client Protocol, JSON-RPC) | plus a Cursor-specific extension layer |
-| `grok` | **ACP** | plus an xAI extension layer |
+| `grok` | **ACP** (`grok agent stdio`) | the official Grok Build CLI (xai-org, beta since 2026-05); the subcommand shape is Zed's registry entry, not `acp` |
 | `opencode` | **ACP** (`opencode acp`, documented) | t3code's map said "own CLI/HTTP runtime, needs CLI output parsing" — stale by the time we got here; opencode 1.18 ships a native ACP server |
 
 **Design consequence: ACP is the priority abstraction.** Three of five providers speak it today and
@@ -1326,14 +1326,14 @@ Craft window over the server. Native chrome: per-profile titlebar tint, system t
 shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
 **Exit:** a signed `.dmg` under 15MB that cold-starts under 300ms, both measured in CI.
 
-### M5 — The rest of the drivers *(grok is the only one left)*
+### M5 — The rest of the drivers *(all five implemented)*
 
 | Driver | Transport | State on this machine |
 |---|---|---|
 | claude | Agent SDK | ready — turns verified live |
 | codex | `app-server`, JSON-RPC/stdio | implemented and **verified live end to end** |
 | cursor | ACP (`cursor-agent acp`) | implemented over the ACP client; live turn gated on `cursor-agent login` |
-| grok | ACP + extension | registered, unimplemented — the CLI is not installable here |
+| grok | ACP (`grok agent stdio`) | one `createAcpDriver` call; live turn gated on `grok login` |
 | opencode | ACP (`opencode acp`) | one `createAcpDriver` call, **conformance green against the live agent** |
 
 **The conformance suite is the deliverable**, not the driver count. It states the ordering invariants
@@ -1434,8 +1434,27 @@ Two findings only the live CLI produced:
   `session/load` replay produced no duplicate history in the stream — the suppression works
   against a real agent, not just in the unit test.
 
-**Still open:** the grok extension — its CLI is not installable here, so it would be unverifiable
-code, but it should now be one `createAcpDriver` call.
+### Grok — the claim "not installable" went stale too
+
+The section above once said the grok CLI was not installable here. Checked again a phase later:
+xAI's official **Grok Build** CLI (binary `grok`, `xai-org` on GitHub, beta since May 2026)
+installs from `x.ai/cli/install.sh` and speaks ACP — the invocation is `grok agent stdio` with
+`-m <model>` between `agent` and `stdio`, the shape Zed's ACP registry launches, not a `grok acp`
+subcommand. So the driver *was* one `createAcpDriver` call, as predicted. Wire facts recorded off
+grok 1.0.3: there is no `auth status` subcommand — `grok models` exits 0 either way and prints
+"You are not authenticated." when logged out, so the probe reads that; the unauthenticated
+`session/new` error carries `data` as a plain *string* ("no auth method id provided"), which
+`readableAcpError` already skips in favour of the message. Verified live while logged out: probe
+`unauthenticated` with "run `grok login`", a real turn ends with exactly one readable terminal
+error, conformance declines cleanly.
+
+With that, **every provider in the contract has a real transport**, and the old stub file
+(`cli-driver.ts`) is reduced to the probing helpers the drivers share. The conformance suite's
+"awaiting a transport" section became "an absent CLI is a state, not a crash" — the one rule from
+the stub era that still binds every driver.
+
+**Still open in M5:** logged-in live turns for cursor and grok — both logins are browser flows
+only a human can complete. Claude, codex and opencode are verified live end to end.
 
 ### M5 — The rest of the drivers *(original scope)*
 ACP client, then Cursor and Grok as extensions over it. Codex app-server. OpenCode runtime.

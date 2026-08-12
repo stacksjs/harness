@@ -1,39 +1,17 @@
 /**
- * Drivers for the agent CLIs that are not yet implemented.
+ * Probing helpers shared by the drivers.
  *
- * Each one probes for its binary and reports honestly. That is not a stub for
- * its own sake — `unavailable` is a first-class state the whole stack already
- * handles: the registry keeps working, the reducer refuses the session with a
- * reason, and the UI can say which CLI to install. A driver that is *absent*
- * from the registry produces "no driver for codex", which tells the user
- * nothing actionable.
- *
- * `startTurn` throws rather than returning a plausible empty stream. A driver
- * that silently produces nothing looks to the runtime exactly like an agent
- * that had nothing to say, and that is the worse failure: the turn completes,
- * the transcript is empty, and nobody knows why.
- *
- * The transports themselves are M5's remaining work and each needs its CLI to
- * develop against:
- *   grok      — ACP (the client exists in `./acp`; grok would be a thin
- *               extension over it, but the CLI is not installed here, so the
- *               extension would be unverifiable code)
- * Cursor and OpenCode graduated out of this file: `./acp` drives them live.
+ * This file used to hold the "registered, not absent" stubs for the CLIs
+ * harness could not drive yet. All five providers have real transports now
+ * (M5), so what remains is the probing machinery they share: a driver's first
+ * question is always "is the binary here, and is it signed in?", and both
+ * checks must resolve rather than throw — the registry probes every driver at
+ * startup, and one that throws takes the server down instead of reporting
+ * itself unavailable.
  */
 
-import type { DriverKind } from '@harness/contract'
-import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance } from './types'
+import type { ProbeResult } from './types'
 import { spawn } from 'node:child_process'
-
-export class DriverNotImplemented extends Error {
-  constructor(kind: DriverKind, binary: string) {
-    super(
-      `the ${kind} driver is not implemented yet — the ${binary} CLI was found, `
-      + `but harness cannot drive it. Use claude for now.`,
-    )
-    this.name = 'DriverNotImplemented'
-  }
-}
 
 /** Run `<binary> --version` to decide installed-or-not, with a timeout. */
 async function probeBinary(binary: string, home?: string): Promise<ProbeResult> {
@@ -78,49 +56,13 @@ async function probeBinary(binary: string, home?: string): Promise<ProbeResult> 
   })
 }
 
-function notImplemented(kind: DriverKind, binary: string): ProviderInstance {
-  return {
-    startTurn(): AsyncIterable<ProviderEvent> {
-      throw new DriverNotImplemented(kind, binary)
-    },
-    async interrupt() {},
-    async respondApproval() {},
-    async stop() {},
-  }
-}
-
-function pendingDriver(kind: DriverKind, binary: string): Driver {
-  return {
-    kind,
-
-    async probe(config: DriverConfig): Promise<ProbeResult> {
-      const result = await probeBinary(config.binaryPath ?? binary, config.home)
-      if (result.status !== 'ready') return result
-      // The binary is here but we cannot speak its protocol yet. `failed` with
-      // a reason beats `ready`, which would let a session start and then die
-      // on the first turn.
-      return {
-        status: 'failed',
-        version: result.version,
-        binaryPath: result.binaryPath,
-        message: `${binary} is installed but the ${kind} driver is not implemented yet`,
-      }
-    },
-
-    async create(): Promise<ProviderInstance> {
-      return notImplemented(kind, binary)
-    },
-  }
-}
-
-export const GrokDriver: Driver = pendingDriver('grok', 'grok')
-
 /**
  * Run a CLI subcommand for its output, never for its side effects.
  *
  * Shared by the probes that have to ask a CLI about its own auth state
- * (`codex login status`, `cursor-agent status`) — a hung or missing binary
- * resolves `ok: false` rather than throwing, because probes must not crash.
+ * (`codex login status`, `cursor-agent status`, `grok models`) — a hung or
+ * missing binary resolves `ok: false` rather than throwing, because probes
+ * must not crash.
  */
 export function runQuiet(binary: string, args: string[], home?: string): Promise<{ ok: boolean, output: string }> {
   return new Promise((resolve) => {

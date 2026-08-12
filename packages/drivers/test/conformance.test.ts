@@ -1,7 +1,6 @@
 import type { Driver, ProbeResult, ProviderEvent, ProviderInstance } from '../src/types'
 import { describe, expect, it } from 'bun:test'
-import { CursorDriver } from '../src/acp'
-import { DriverNotImplemented, GrokDriver } from '../src/cli-driver'
+import { CursorDriver, GrokDriver, OpenCodeDriver } from '../src/acp'
 import { CodexDriver } from '../src/codex'
 import { formatConformance, runConformance } from '../src/conformance'
 
@@ -199,53 +198,26 @@ describe('conformance suite', () => {
   })
 })
 
-describe('drivers awaiting a transport', () => {
-  const pending = [
+describe('an absent CLI is a state, not a crash', () => {
+  // Every driver has a real transport now, but the first rule of the old
+  // stubs still binds them all: a machine without the CLI must produce an
+  // `unavailable` probe the UI can explain, never a throw that takes the
+  // startup sweep down with it.
+  const drivers = [
+    ['cursor', CursorDriver],
     ['grok', GrokDriver],
+    ['opencode', OpenCodeDriver],
+    ['codex', CodexDriver],
   ] as const
 
-  for (const [kind, driver] of pending) {
-    it(`${kind} probes without throwing and never claims ready`, async () => {
-      const probe = await driver.probe({ workspacePath: WORKSPACE })
+  for (const [kind, driver] of drivers) {
+    it(`${kind} reports a missing binary as unavailable`, async () => {
+      const probe = await driver.probe({
+        workspacePath: WORKSPACE,
+        binaryPath: '/nonexistent/definitely-not-a-cli',
+      })
       expect(driver.kind).toBe(kind)
-      // Whether or not the binary is on this machine, the answer must never be
-      // `ready` — harness cannot drive it yet, and `ready` would let a session
-      // start and then die on its first turn.
-      expect(probe.status).not.toBe('ready')
-      expect(['unavailable', 'failed']).toContain(probe.status)
-      expect(probe.message).toBeTruthy()
-    })
-
-    it(`${kind} refuses a turn loudly rather than returning nothing`, async () => {
-      const instance = await driver.create({ workspacePath: WORKSPACE })
-      expect(() => instance.startTurn({ text: 'hi' })).toThrow(DriverNotImplemented)
-      // Teardown still has to work — the runtime calls it on every path.
-      await instance.stop()
-    })
-
-    it(`${kind} passes conformance by declining`, async () => {
-      const report = await runConformance(driver, WORKSPACE)
-      expect(report.passed).toBe(true)
+      expect(probe.status).toBe('unavailable')
     })
   }
-
-  it('reports a missing binary as unavailable, not as a crash', async () => {
-    // Cursor has a real transport now (the ACP client), but the same rule
-    // applies to it as to the pending ones: an absent CLI is a state.
-    const probe = await CursorDriver.probe({
-      workspacePath: WORKSPACE,
-      binaryPath: '/nonexistent/definitely-not-a-cli',
-    })
-    expect(probe.status).toBe('unavailable')
-  })
-
-  it('the codex driver reports a missing binary as unavailable too', async () => {
-    // Codex has a real transport now, but the same rule applies: an absent CLI
-    // is a state, not a crash.
-    const probe = await CodexDriver.probe({
-      workspacePath: WORKSPACE,
-      binaryPath: '/nonexistent/definitely-not-a-cli',
-    })
-    expect(probe.status).toBe('unavailable')
-  })
 })
