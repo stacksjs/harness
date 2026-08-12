@@ -1325,14 +1325,14 @@ Craft window over the server. Native chrome: per-profile titlebar tint, system t
 shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
 **Exit:** a signed `.dmg` under 15MB that cold-starts under 300ms, both measured in CI.
 
-### M5 — The rest of the drivers *(claude and codex done)*
+### M5 — The rest of the drivers *(claude, codex and cursor done)*
 
 | Driver | Transport | State on this machine |
 |---|---|---|
 | claude | Agent SDK | ready — turns verified live |
 | codex | `app-server`, JSON-RPC/stdio | implemented and **verified live end to end** |
-| cursor | ACP + extension | registered, unimplemented |
-| grok | ACP + extension | registered, unimplemented |
+| cursor | ACP (`cursor-agent acp`) | implemented over the ACP client; live turn gated on `cursor-agent login` |
+| grok | ACP + extension | registered, unimplemented — the CLI is not installable here |
 | opencode | own CLI/HTTP runtime | registered, unimplemented |
 
 **The conformance suite is the deliverable**, not the driver count. It states the ordering invariants
@@ -1352,7 +1352,7 @@ produced:
   Pinned by test. The policy is `untrusted`, not `on-request` — on-request lets the model decide when to
   ask, and harness's contract is that the user owns that decision.
 
-The four unimplemented drivers are **registered, not absent**. A registered driver reports "not
+The unimplemented drivers are **registered, not absent**. A registered driver reports "not
 installed" or "installed but the driver is not implemented yet"; an absent one reports "no driver for
 cursor", which the user cannot act on. `startTurn` throws rather than returning an empty stream, because
 a silent turn is indistinguishable from an agent with nothing to say.
@@ -1378,8 +1378,41 @@ One environment note that is not a harness bug: the account's default model is `
 CLI build refuses with "requires a newer version of Codex". Passing `--model gpt-5.4-mini` works, and the
 error is now readable rather than a raw JSON blob (§10.13's `readableError`).
 
-**Still open:** the ACP client (cursor and grok both speak it, so it unlocks the most and should come
-first) and the OpenCode runtime. Neither CLI is installed, so both would be unverifiable code.
+### The ACP client, and cursor over it
+
+`packages/drivers/src/acp.ts` is the priority abstraction §7 called for: JSON-RPC v2 over stdio —
+`initialize` → `session/new` → `session/prompt`, with `session/update` notifications streaming while
+the prompt runs. The protocol lives there once; a provider is a `createAcpDriver` call naming its
+binary, its ACP argv, and how its CLI reports auth. Three shape differences from Codex worth writing
+down:
+
+- **The prompt's *response* ends the turn**, not a separate notification — the `stopReason` in the
+  `session/prompt` result is the terminal event. `cancelled` completes rather than errors: the user
+  asked for the stop, and an error would blame them for it.
+- **Permission answers name an option the agent offered**, not a bare boolean. An allow picks the
+  least-privileged allow on offer (`allow_once` before `allow_always` — the user approved *this*
+  call, not every future one), and a decision with no matching option answers `cancelled`.
+- **`session/load` replays the whole conversation** as `session/update` notifications before its
+  response arrives. The client drops them while the load is in flight — they are history the
+  transcript already has, and emitting them would duplicate every prior turn on resume.
+
+Three wire facts were recorded off the live binary rather than guessed, because none of them are in
+`cursor-agent --help`: the `acp` subcommand **exists but is hidden** (found by handshaking it
+directly; it answered `protocolVersion: 1`, `loadSession: true`); `acp --model <m>` is accepted;
+and `cursor-agent status` exits 0 *whether or not you are logged in* — printed text is the only
+auth signal, so the probe reads it, the same trick the codex probe uses. The unauthenticated
+`session/new` error carries the actionable sentence in `error.data.message`, not `error.message` —
+`readableAcpError` prefers the detail, pinned by a test against the recorded frame.
+
+**Verified live while logged out** (installed 2026.08.11-e8db854, no Cursor account on this
+machine): probe reports `unauthenticated` with "run `cursor-agent login`", a real turn spawns the
+process, handshakes, and ends with exactly one terminal event carrying the agent's own actionable
+auth message, and conformance passes by declining cleanly. **A logged-in turn is the remaining
+verification** — the login is a browser flow only a human can complete, and claiming the driver
+works end to end before one ran would be exactly the kind of claim this file exists to prevent.
+
+**Still open:** the grok extension (its CLI is not installable here, so it would be unverifiable
+code — but it should now be one `createAcpDriver` call) and the OpenCode runtime.
 
 ### M5 — The rest of the drivers *(original scope)*
 ACP client, then Cursor and Grok as extensions over it. Codex app-server. OpenCode runtime.

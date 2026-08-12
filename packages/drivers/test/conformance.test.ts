@@ -1,6 +1,7 @@
 import type { Driver, ProbeResult, ProviderEvent, ProviderInstance } from '../src/types'
 import { describe, expect, it } from 'bun:test'
-import { CursorDriver, DriverNotImplemented, GrokDriver, OpenCodeDriver } from '../src/cli-driver'
+import { CursorDriver } from '../src/acp'
+import { DriverNotImplemented, GrokDriver, OpenCodeDriver } from '../src/cli-driver'
 import { CodexDriver } from '../src/codex'
 import { formatConformance, runConformance } from '../src/conformance'
 
@@ -200,7 +201,6 @@ describe('conformance suite', () => {
 
 describe('drivers awaiting a transport', () => {
   const pending = [
-    ['cursor', CursorDriver],
     ['grok', GrokDriver],
     ['opencode', OpenCodeDriver],
   ] as const
@@ -231,6 +231,8 @@ describe('drivers awaiting a transport', () => {
   }
 
   it('reports a missing binary as unavailable, not as a crash', async () => {
+    // Cursor has a real transport now (the ACP client), but the same rule
+    // applies to it as to the pending ones: an absent CLI is a state.
     const probe = await CursorDriver.probe({
       workspacePath: WORKSPACE,
       binaryPath: '/nonexistent/definitely-not-a-cli',

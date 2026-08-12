@@ -19,7 +19,8 @@
 import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
-import { probeBinary } from './cli-driver'
+import { probeBinary, runQuiet } from './cli-driver'
+import { EventQueue } from './event-queue'
 
 /** JSON-RPC frames, only as much of them as this driver reads. */
 interface Frame {
@@ -28,54 +29,6 @@ interface Frame {
   params?: any
   result?: any
   error?: { code?: number, message?: string }
-}
-
-/** The consumer parked in `next()`, waiting for the producer to push. */
-type Waiter = (result: IteratorResult<ProviderEvent>) => void
-
-/** A queue an async generator drains, so producer and consumer can run apart. */
-class EventQueue {
-  private readonly buffer: ProviderEvent[] = []
-  private waiting: Waiter | null = null
-  private done = false
-
-  push(event: ProviderEvent): void {
-    if (this.done) return
-    if (this.waiting) {
-      const resolve = this.waiting
-      this.waiting = null
-      resolve({ value: event, done: false })
-      return
-    }
-    this.buffer.push(event)
-  }
-
-  /** Emit a final event and close, in one step, so no terminal can race a second. */
-  finish(event?: ProviderEvent): void {
-    if (this.done) return
-    if (event) this.push(event)
-    this.done = true
-    if (this.waiting) {
-      const resolve = this.waiting
-      this.waiting = null
-      resolve({ value: undefined as never, done: true })
-    }
-  }
-
-  get closed(): boolean {
-    return this.done
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<ProviderEvent> {
-    return {
-      next: (): Promise<IteratorResult<ProviderEvent>> => {
-        const next = this.buffer.shift()
-        if (next) return Promise.resolve({ value: next, done: false })
-        if (this.done) return Promise.resolve({ value: undefined as never, done: true })
-        return new Promise((resolve) => { this.waiting = resolve })
-      },
-    }
-  }
 }
 
 /**
@@ -485,18 +438,4 @@ export const CodexDriver: Driver = {
   async create(config: DriverConfig): Promise<ProviderInstance> {
     return new CodexInstance(config)
   },
-}
-
-function runQuiet(binary: string, args: string[], home?: string): Promise<{ ok: boolean, output: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(binary, args, {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      env: home ? { ...process.env, HOME: home } : process.env,
-    })
-    let output = ''
-    const timer = setTimeout(() => { child.kill(); resolve({ ok: false, output }) }, 5000)
-    child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString() })
-    child.on('error', () => { clearTimeout(timer); resolve({ ok: false, output }) })
-    child.on('exit', code => { clearTimeout(timer); resolve({ ok: code === 0, output }) })
-  })
 }

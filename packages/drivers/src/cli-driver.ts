@@ -15,11 +15,11 @@
  *
  * The transports themselves are M5's remaining work and each needs its CLI to
  * develop against:
- *   cursor    — ACP, plus a Cursor-specific extension
- *   grok      — ACP, plus an xAI extension
+ *   grok      — ACP (the client exists in `./acp`; grok would be a thin
+ *               extension over it, but the CLI is not installed here, so the
+ *               extension would be unverifiable code)
  *   opencode  — its own CLI/HTTP runtime
- * Two of the four speak ACP, so `packages/drivers/acp` is the piece that
- * unlocks the most, and should come first.
+ * Cursor graduated out of this file: `./acp` drives it live.
  */
 
 import type { DriverKind } from '@harness/contract'
@@ -114,8 +114,28 @@ function pendingDriver(kind: DriverKind, binary: string): Driver {
   }
 }
 
-export const CursorDriver: Driver = pendingDriver('cursor', 'cursor-agent')
 export const GrokDriver: Driver = pendingDriver('grok', 'grok')
 export const OpenCodeDriver: Driver = pendingDriver('opencode', 'opencode')
+
+/**
+ * Run a CLI subcommand for its output, never for its side effects.
+ *
+ * Shared by the probes that have to ask a CLI about its own auth state
+ * (`codex login status`, `cursor-agent status`) — a hung or missing binary
+ * resolves `ok: false` rather than throwing, because probes must not crash.
+ */
+export function runQuiet(binary: string, args: string[], home?: string): Promise<{ ok: boolean, output: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(binary, args, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: home ? { ...process.env, HOME: home } : process.env,
+    })
+    let output = ''
+    const timer = setTimeout(() => { child.kill(); resolve({ ok: false, output }) }, 5000)
+    child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString() })
+    child.on('error', () => { clearTimeout(timer); resolve({ ok: false, output }) })
+    child.on('exit', code => { clearTimeout(timer); resolve({ ok: code === 0, output }) })
+  })
+}
 
 export { probeBinary }
