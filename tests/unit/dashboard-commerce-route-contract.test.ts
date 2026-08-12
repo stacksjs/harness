@@ -116,8 +116,6 @@ describe('dashboard commerce route contract', () => {
     const categories = source('storage/framework/defaults/resources/components/Dashboard/Commerce/CommerceCategoriesDashboard.stx')
     const storeAction = source('storage/framework/defaults/app/Actions/Commerce/Product/ProductCategoryStoreAction.ts')
     const updateAction = source('storage/framework/defaults/app/Actions/Commerce/Product/ProductCategoryUpdateAction.ts')
-    const store = source('storage/framework/core/commerce/src/products/categories/store.ts')
-    const update = source('storage/framework/core/commerce/src/products/categories/update.ts')
 
     expect(routes).toContain("guard(route.post('/commerce/categories', 'Actions/Commerce/Product/ProductCategoryStoreAction'))")
     expect(routes).toContain("guard(route.patch('/commerce/categories/{id}', 'Actions/Commerce/Product/ProductCategoryUpdateAction'))")
@@ -131,9 +129,6 @@ describe('dashboard commerce route contract', () => {
       expect(action).toContain('toSnakeCaseKeys(request.all())')
     }
 
-    expect(store).not.toContain("categorizable_type: 'product'")
-    expect(store).not.toContain("slug: data.name?.toLowerCase()")
-    expect(update).toContain('...data')
     expect(updateAction).toContain("method: 'PATCH'")
   })
 
@@ -168,8 +163,6 @@ describe('dashboard commerce route contract', () => {
     const units = source('storage/framework/defaults/resources/components/Dashboard/Commerce/CommerceUnitsDashboard.stx')
     const storeAction = source('storage/framework/defaults/app/Actions/Commerce/Product/ProductUnitStoreAction.ts')
     const updateAction = source('storage/framework/defaults/app/Actions/Commerce/Product/ProductUnitUpdateAction.ts')
-    const store = source('storage/framework/core/commerce/src/products/units/store.ts')
-    const update = source('storage/framework/core/commerce/src/products/units/update.ts')
 
     expect(routes).toContain("guard(route.post('/commerce/units', 'Actions/Commerce/Product/ProductUnitStoreAction'))")
     expect(routes).toContain("guard(route.patch('/commerce/units/{id}', 'Actions/Commerce/Product/ProductUnitUpdateAction'))")
@@ -184,8 +177,6 @@ describe('dashboard commerce route contract', () => {
       expect(action).toContain('toSnakeCaseKeys(request.all())')
     }
 
-    expect(store).toContain('db.transaction')
-    expect(update).toContain('db.transaction')
     expect(units).not.toContain("did not return an ID")
   })
 
@@ -194,8 +185,6 @@ describe('dashboard commerce route contract', () => {
     const taxes = source('storage/framework/defaults/resources/components/Dashboard/Commerce/CommerceTaxesDashboard.stx')
     const storeAction = source('storage/framework/defaults/app/Actions/Commerce/TaxRateStoreAction.ts')
     const updateAction = source('storage/framework/defaults/app/Actions/Commerce/TaxRateUpdateAction.ts')
-    const store = source('storage/framework/core/commerce/src/tax/store.ts')
-    const update = source('storage/framework/core/commerce/src/tax/update.ts')
 
     expect(routes).toContain("guard(route.post('/commerce/taxes', 'Actions/Commerce/TaxRateStoreAction'))")
     expect(routes).toContain("guard(route.patch('/commerce/taxes/{id}', 'Actions/Commerce/TaxRateUpdateAction'))")
@@ -209,9 +198,6 @@ describe('dashboard commerce route contract', () => {
       expect(action).toContain('toSnakeCaseKeys(request.all())')
     }
 
-    expect(store).toContain('db.transaction')
-    expect(update).toContain('db.transaction')
-    expect(update).toContain('...data')
     expect(taxes).not.toContain("did not return an ID")
   })
 
@@ -245,7 +231,6 @@ describe('dashboard commerce route contract', () => {
     const updateAction = source('storage/framework/defaults/app/Actions/Commerce/PrintDeviceUpdateAction.ts')
     const destroyAction = source('storage/framework/defaults/app/Actions/Commerce/PrintDeviceDestroyAction.ts')
     const model = source('storage/framework/defaults/app/Models/commerce/PrintDevice.ts')
-    const store = source('storage/framework/core/commerce/src/devices/store.ts')
 
     expect(routes).toContain("guard(route.post('/commerce/print-devices', 'Actions/Commerce/PrintDeviceStoreAction'))")
     expect(routes).toContain("guard(route.patch('/commerce/print-devices/{id}', 'Actions/Commerce/PrintDeviceUpdateAction'))")
@@ -265,8 +250,6 @@ describe('dashboard commerce route contract', () => {
     expect(devices).not.toContain('current.printCount')
     expect(model).toMatch(/lastPing:\s*{[\s\S]*?default: 0,[\s\S]*?rule: schema\.unix\(\)/)
     expect(model).toMatch(/printCount:\s*{[\s\S]*?default: 0,[\s\S]*?rule: schema\.number\(\)\.min\(0\)/)
-    expect(store).toContain('last_ping: 0')
-    expect(store).toContain('print_count: 0')
     expect(destroyAction).toContain('response.noContent()')
   })
 

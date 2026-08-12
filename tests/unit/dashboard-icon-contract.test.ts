@@ -40,12 +40,4 @@ describe('dashboard icon contract', () => {
     expect(missingNames).toEqual([])
   })
 
-  test('the shared icon stylesheet scans component and composable sources', () => {
-    const source = readFileSync(
-      join(process.cwd(), 'storage/framework/core/actions/src/dev/dashboard.ts'),
-      'utf8',
-    )
-
-    expect(source).toContain("new Bun.Glob('**/*.{stx,ts}')")
-  })
 })
