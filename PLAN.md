@@ -913,7 +913,7 @@ shell layer), and it is drawn now so that stays possible.
 |---|---|
 | Engine | Command → event → projection, in-memory SQLite. Determinism via `drain()` on each worker. |
 | Contract | Round-trip every command and event through the CBOR codec; schema-compatibility test against the previous release. |
-| Drivers | The conformance suite (§7) against fakes in PR CI, against real CLIs nightly. |
+| Drivers | The conformance suite (§7) against fakes in PR CI, against real CLIs nightly (`conformance.yml`: `harness:doctor --conformance`, with opencode installed — the one provider that runs a real turn without secrets; the rest decline cleanly until CLIs/credentials are added). |
 | Views | stx component tests, following the existing `packages/components/test/` pattern. |
 | Sidebar | §10.4's suite lives upstream in stx, where the code is. harness adds only the data-mapping test. |
 | Perf | Budgets from §11 as CI assertions, not aspirations. |

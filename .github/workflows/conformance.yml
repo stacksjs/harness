@@ -1,0 +1,55 @@
+# The nightly half of the driver testing strategy (PLAN.md §13): PR CI proves
+# the *shape* against recorded frames; this job proves the recording is still
+# true against a real agent. It runs the same conformance spec the unit tests
+# run, but through a live CLI — the failure it exists to catch is a provider
+# shipping a new message shape while the driver keeps compiling.
+#
+# OpenCode is the one provider that can run a real turn here without secrets:
+# a turn completes on its free tier with zero credentials (verified live,
+# PLAN.md §15 M5). It is deliberately installed at latest, not pinned — the
+# job's whole purpose is to hear about upstream changes before a user does.
+# Every other driver probes as unavailable on a bare runner and declines
+# cleanly, which is itself part of the spec; their live coverage grows as
+# CLIs and credentials are added.
+name: Conformance
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Pantry
+        uses: pantry-pm/pantry/packages/action@485c7b102fe14f8af00b57441a13dc3daa1505e7 # v0.10.39
+        with:
+          install: 'false'
+
+      - name: Use cached node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ hashFiles('**/bun.lock') }}
+          restore-keys: |
+            node-modules-
+
+      - name: Install Dependencies
+        run: bun install
+
+      - name: Set Application Key
+        run: bun buddy key:generate
+
+      - name: Install OpenCode
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Conformance
+        run: bun buddy harness:doctor --conformance
