@@ -72,6 +72,7 @@
     "docs:links": "./buddy docs:links",
     "docs:links:check": "./buddy docs:links:check",
     "deps:lockfile:check": "bun .github/scripts/check-lockfile-version.ts",
+    "test:packages": "bun .github/scripts/test-packages.ts",
     "bud": "./buddy",
     "stx": "./buddy"
   },

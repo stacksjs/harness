@@ -112,3 +112,9 @@ jobs:
 
       - name: Test Suite
         run: bun run test
+
+      # The root suite cannot see these (bunfig [test] root confines discovery
+      # to tests/ — the pantry symlink story is documented there), so they run
+      # from inside each package.
+      - name: Package Test Suites
+        run: bun run test:packages
