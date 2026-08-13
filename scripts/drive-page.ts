@@ -108,7 +108,9 @@ check('approval names the tool', (tool ?? '').includes('Bash'))
 
 // 2. Approve: the gated turn resumes, streams, and completes.
 await page.click('[data-approve]')
-await page.waitForFunction(() => (document.querySelector('[data-live-response]')?.textContent ?? '').includes('done.'), undefined, { timeout: 8000 })
+// The turn's article is client-rendered by the `:for` binding, so the check
+// reads the turn row rather than a marker attribute the old DOM builder set.
+await page.waitForFunction(() => (document.querySelector('[data-turn] [data-response]')?.textContent ?? '').includes('done.'), undefined, { timeout: 8000 })
 check('approved turn streams deltas to the live response', true)
 await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle', undefined, { timeout: 8000 })
 check('turn completes back to idle', true)

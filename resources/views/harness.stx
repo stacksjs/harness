@@ -151,9 +151,19 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     </header>
 
     <section data-diff hidden class="max-h-[45%] shrink-0 overflow-y-auto border-b border-black/5 px-4 py-3 dark:border-white/5">
-      <div data-diff-status class="text-[12px] opacity-60">Loading…</div>
-      <ul data-diff-files class="mb-2 list-none"></ul>
-      <pre data-diff-patch class="overflow-x-auto text-[12px] leading-[17px]"></pre>
+      <div data-diff-status class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
+      <ul data-diff-files class="mb-2 list-none">
+        <template :for="file in diffFiles" :key="file.path">
+          <li class="flex items-center gap-[8px] py-[1px] text-[12px]" :data-diff-file="file.path">
+            <span class="w-[64px] shrink-0 text-[11px] uppercase opacity-50" :text="file.status"></span>
+            {{-- :text assigns text, never markup — a path is data, and a repository can contain anything. --}}
+            <span class="truncate font-mono" :text="file.path"></span>
+            {{-- Untracked files have no counts; showing +0 -0 implies an empty file. --}}
+            <span class="ml-auto shrink-0 font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
+          </li>
+        </template>
+      </ul>
+      <pre data-diff-patch class="overflow-x-auto text-[12px] leading-[17px]" :text="diffPatch()"></pre>
     </section>
 
     {{--
@@ -202,15 +212,32 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
           <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ liveTurn.prompt }}</div>
           <div data-tools>
+          {{--
+            The static state is the SSR truth; the binding overlays what
+            finished after this page rendered. Tools finish out of order, so
+            every row reads the result map by its own id.
+          --}}
           @foreach(liveTurn.toolCalls as call)
-            <div class="mb-1 flex items-center gap-[6px] text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}">
+            <div class="mb-1 flex items-center gap-[6px] text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}" :data-tool-state="toolResults()['{{ call.callId }}'] || '{{ call.state }}'">
               <span class="tool-dot" aria-hidden="true"></span>
               <span class="font-mono opacity-70">{{ call.name }}</span>
             </div>
           @endforeach
+          {{-- Tools this turn starts after page load render here, after the server-drawn rows. --}}
+          <template :for="call in ssrTools" :key="call.callId">
+            <div class="mb-1 flex items-center gap-[6px] text-[12px]" :data-tool-call="call.callId" :data-tool-state="toolResults()[call.callId] || 'running'">
+              <span class="tool-dot" aria-hidden="true"></span>
+              <span class="font-mono opacity-70" :text="call.name"></span>
+            </div>
+          </template>
           </div>
           <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
-          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response data-live-response>{{ liveTurn.response }}</div>
+          {{--
+            The server-rendered response plus the part that streams in after
+            load. Its own span, because :text owns an element's whole content
+            and must not overwrite the SSR text beside it.
+          --}}
+          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response data-live-response>{{ liveTurn.response }}<span :text="ssrTail()"></span></div>
           {{--
             The newest turn is the one people most want to undo, and it was the
             only one without the button because it is not in `settledTurns`.
@@ -227,6 +254,29 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           @endif
         </article>
       @endif
+
+      {{--
+        Turns started on this page. The island pushes into `liveTurns` and the
+        runtime renders the rows — the keyed reuse means a streaming response
+        updates its own article in place. Prompts, tool names and responses all
+        arrive through :text, which assigns text and never parses markup.
+      --}}
+      <template :for="turn in liveTurns" :key="turn.id">
+        <article class="mb-5" :data-turn="turn.id">
+          <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
+          <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]" :text="turn.prompt"></div>
+          <div data-tools>
+            <template :for="call in turn.tools" :key="call.callId">
+              <div class="mb-1 flex items-center gap-[6px] text-[12px]" :data-tool-call="call.callId" :data-tool-state="toolResults()[call.callId] || 'running'">
+                <span class="tool-dot" aria-hidden="true"></span>
+                <span class="font-mono opacity-70" :text="call.name"></span>
+              </div>
+            </template>
+          </div>
+          <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
+          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response :text="turn.response"></div>
+        </article>
+      </template>
 
       <div
         data-approval
@@ -292,8 +342,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
   /* The terminal panel. One dark scheme regardless of page theme — a terminal
      is its own surface, and shells assume a dark ground. The 16-color palette
-     is the app's token set for @harness/ansi's t-fg-*/t-bg-* classes, whose
-     rules arrive via the terminalCss prop below. */
+     is the app's token set for the t-fg-N and t-bg-N classes from
+     @harness/ansi, whose rules arrive via the terminalCss prop below.
+     (Never write the glob form of those class names here: the star-slash in
+     it terminates this comment early and the parser then eats the rule.) */
   .terminal-panel {
     position: fixed;
     right: 16px;
@@ -382,19 +434,15 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 </style>
 
 <script client>
-  // The live island. Everything above this is static HTML; this wires the
-  // socket to the one turn that can still change.
+  // Native diagnostics, in a script of their own. The main island below uses
+  // signals, which makes stx defer it to the mount queue — after the Sidebar
+  // component's own mount. This block must run before that, so it stays
+  // signal-free and executes at document position.
   //
-  // A `client` script, not a raw module: server exports arrive through the
-  // server -> client bridge (activeSessionId, serverUrl, codecUrl, sinceSeq,
-  // spaceTints, activeWorkspaceId are seeded as locals — no data-* plumbing),
-  // and stx's signals/refs/composables are auto-imported when used.
   // Count native-switcher creations before stx's sidebar controller runs.
-  //
   // `<SidebarSpaces>` calls `createSpacesSidebar` itself on mount, so the only
   // way to know the native rail actually bound — rather than merely being
-  // *reachable* — is to watch the call. Patched here because this script runs
-  // before the component's own onMount.
+  // *reachable* — is to watch the call.
   try {
     const nativeUI = window.craft?.nativeUI
     if (nativeUI && typeof nativeUI.createSpacesSidebar === 'function') {
@@ -447,6 +495,35 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       }),
     }).catch(() => {})
   }, 2500)
+</script>
+
+<script client>
+  // The live island. Everything above this is static HTML; this wires the
+  // socket to the one turn that can still change.
+  //
+  // A `client` script, not a raw module: server exports arrive through the
+  // server -> client bridge (activeSessionId, serverUrl, codecUrl, sinceSeq,
+  // spaceTints, activeWorkspaceId, sessionState are seeded as locals — no
+  // data-* plumbing), and stx's signals and composables are auto-imported.
+  // Because it declares signals, stx wraps it in `window.stx.mount(...)` and
+  // returns its top-level declarations as the scope the template bindings
+  // (`:for`, `:text`, `:data-*` in the markup above) resolve against.
+
+  // What can change after load, as signals; the template renders them.
+  // Turns started on this page. The server-rendered live turn is not here —
+  // its tail streams into `ssrTail`, its new tool calls into `ssrTools`, so
+  // the HTML the server already painted is never rebuilt.
+  const liveTurns = state([])
+  const ssrTail = state('')
+  const ssrTools = state([])
+  // callId -> 'ok' | 'failed'. One map for every row — server-rendered rows
+  // read it through their own `:data-tool-state` binding, loop rows through
+  // theirs — because tools finish out of order and a row is found by id.
+  const toolResults = state({})
+  // The diff panel's three regions. Filled by loadDiff, rendered by bindings.
+  const diffStatus = state('Loading…')
+  const diffFiles = state([])
+  const diffPatch = state('')
 
   // A global shortcut, so harness is reachable without finding its window.
   //
@@ -625,60 +702,37 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const diffToggle = document.querySelector('[data-diff-toggle]')
   const diffPanel = document.querySelector('[data-diff]')
   if (diffToggle && diffPanel) {
-    const status = diffPanel.querySelector('[data-diff-status]')
-    const fileList = diffPanel.querySelector('[data-diff-files]')
-    const patchNode = diffPanel.querySelector('[data-diff-patch]')
-
     async function loadDiff(sessionId) {
-      status.textContent = 'Loading…'
-      fileList.replaceChildren()
-      patchNode.textContent = ''
+      batch(() => {
+        diffStatus.set('Loading…')
+        diffFiles.set([])
+        diffPatch.set('')
+      })
 
       let diff
       try {
         diff = await (await fetch(`/s/${sessionId}/diff`)).json()
       }
       catch {
-        status.textContent = 'Could not read the workspace.'
+        diffStatus.set('Could not read the workspace.')
         return
       }
 
-      if (diff.error) { status.textContent = diff.error; return }
-      if (!diff.isRepository) { status.textContent = 'This workspace is not a git repository.'; return }
-      if (diff.files.length === 0) { status.textContent = 'No uncommitted changes.'; return }
+      if (diff.error) { diffStatus.set(diff.error); return }
+      if (!diff.isRepository) { diffStatus.set('This workspace is not a git repository.'); return }
+      if (diff.files.length === 0) { diffStatus.set('No uncommitted changes.'); return }
 
       // Which comparison this is, said plainly: a count is easy to over-trust,
       // and "what this session changed" and "what is uncommitted here" are
       // different claims.
       const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
-      status.textContent = diff.scope === 'session'
-        ? `${count} since this session started`
-        : `${count} in the working tree`
-
-      for (const file of diff.files) {
-        const row = document.createElement('li')
-        row.className = 'flex items-center gap-[8px] py-[1px] text-[12px]'
-        row.dataset.diffFile = file.path
-
-        const badge = document.createElement('span')
-        badge.className = 'w-[64px] shrink-0 text-[11px] uppercase opacity-50'
-        badge.textContent = file.status
-
-        const name = document.createElement('span')
-        name.className = 'truncate font-mono'
-        // textContent: a path is data, and a repository can contain anything.
-        name.textContent = file.path
-
-        const counts = document.createElement('span')
-        counts.className = 'ml-auto shrink-0 font-mono text-[11px]'
-        // Untracked files have no counts; showing +0 -0 implies an empty file.
-        counts.textContent = file.status === 'untracked' ? '' : `+${file.insertions} −${file.deletions}`
-
-        row.append(badge, name, counts)
-        fileList.append(row)
-      }
-
-      patchNode.textContent = diff.patch
+      batch(() => {
+        diffStatus.set(diff.scope === 'session'
+          ? `${count} since this session started`
+          : `${count} in the working tree`)
+        diffFiles.set(diff.files)
+        diffPatch.set(diff.patch)
+      })
     }
 
     diffToggle.addEventListener('click', () => {
@@ -705,56 +759,28 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     liveSocket = socket
 
     const transcript = document.querySelector('[data-transcript]')
-    const responseNode = () => document.querySelector('[data-live-response]')
     const stateNode = document.querySelector('[data-session-state]')
     const approval = document.querySelector('[data-approval]')
 
-    // Start a fresh turn in the transcript.
+    // A turn started on this page is a `liveTurns` entry; the `:for` template
+    // in the markup renders it. Deltas and tool rows are signal updates on the
+    // newest entry — no node building here, and the prompt/tool names go
+    // through `:text` bindings, which assign text, never markup.
     //
-    // Without this the island only ever knew the one `[data-live-response]`
-    // node the server rendered, so a turn started after page load appended its
-    // reply to the *previous* turn's answer — two exchanges run together in one
-    // paragraph, with the new prompt never shown at all.
-    function beginTurn(turnId, prompt) {
-      // The previous turn is settled now: it can no longer receive deltas, and
-      // `data-live` is what marks the one turn that still can.
-      const previous = responseNode()
-      if (previous) previous.removeAttribute('data-live-response')
-      const previousArticle = transcript.querySelector('[data-turn][data-live]')
-      if (previousArticle) previousArticle.removeAttribute('data-live')
+    // Follow the tail after the bindings have painted: their effects are
+    // registered before this script's updates run, but the DOM write lands in
+    // the same flush, so the scroll waits a frame.
+    function followTail() {
+      requestAnimationFrame(() => {
+        transcript.scrollTop = transcript.scrollHeight
+      })
+    }
 
-      const article = document.createElement('article')
-      article.className = 'mb-5'
-      article.dataset.turn = String(turnId)
-      article.dataset.live = ''
-
-      const you = document.createElement('div')
-      you.className = 'mb-1 text-[12px] font-medium opacity-50'
-      you.textContent = 'You'
-
-      const ask = document.createElement('div')
-      ask.className = 'mb-3 whitespace-pre-wrap text-[13px] leading-[20px]'
-      // textContent, never innerHTML: a prompt is user input and must never be
-      // parsed as markup.
-      ask.textContent = prompt ?? ''
-
-      const tools = document.createElement('div')
-      tools.dataset.tools = ''
-
-      const who = document.createElement('div')
-      who.className = 'mb-1 text-[12px] font-medium opacity-50'
-      who.textContent = 'Agent'
-
-      const answer = document.createElement('div')
-      answer.className = 'whitespace-pre-wrap text-[13px] leading-[20px]'
-      answer.dataset.response = ''
-      answer.dataset.liveResponse = ''
-
-      article.append(you, ask, tools, who, answer)
-      // Before the approval panel, which is the last child and must stay there.
-      transcript.insertBefore(article, approval)
-      // Follow the tail, the way a terminal does.
-      transcript.scrollTop = transcript.scrollHeight
+    // The newest client-started turn, or null while the server-rendered live
+    // turn is still the one streaming.
+    function updateNewestTurn(change) {
+      liveTurns.update(turns => turns.map((turn, index) =>
+        index === turns.length - 1 ? change(turn) : turn))
     }
 
     // A command id the server can deduplicate on. Every dispatch carries one,
@@ -993,45 +1019,46 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         // Only the user's half opens a new exchange; the assistant's turn is
         // the reply within it.
         if (payload.role === 'user') {
-          beginTurn(payload.turnId, payload.text)
+          liveTurns.update(turns => [...turns, {
+            id: payload.turnId,
+            prompt: payload.text ?? '',
+            tools: [],
+            response: '',
+          }])
           setRunning('running')
+          followTail()
         }
       }
       else if (payload.type === 'tool.call.began') {
-        const tools = document.querySelector('[data-turn][data-live] [data-tools]')
-        if (tools && !tools.querySelector(`[data-tool-call="${CSS.escape(payload.callId)}"]`)) {
-          const row = document.createElement('div')
-          row.className = 'mb-1 flex items-center gap-[6px] text-[12px]'
-          row.dataset.toolCall = payload.callId
-          row.dataset.toolState = 'running'
-
-          const dot = document.createElement('span')
-          dot.className = 'tool-dot'
-          dot.setAttribute('aria-hidden', 'true')
-
-          const name = document.createElement('span')
-          name.className = 'font-mono opacity-70'
-          // textContent: a tool name comes from the provider, and an MCP server
-          // can name a tool anything at all.
-          name.textContent = payload.toolName
-
-          row.append(dot, name)
-          tools.append(row)
-          transcript.scrollTop = transcript.scrollHeight
+        // Deduplicated by id: a replayed frame must not grow a second row.
+        const call = { callId: payload.callId, name: payload.toolName }
+        if (liveTurns().length > 0) {
+          updateNewestTurn(turn => turn.tools.some(t => t.callId === call.callId)
+            ? turn
+            : { ...turn, tools: [...turn.tools, call] })
         }
+        else {
+          ssrTools.update(tools => tools.some(t => t.callId === call.callId)
+            ? tools
+            : [...tools, call])
+        }
+        followTail()
       }
       else if (payload.type === 'tool.call.ended') {
-        // Found by id: tools run in parallel and finish out of order, so
-        // resolving the last row would mark the wrong one failed.
-        const row = document.querySelector(`[data-tool-call="${CSS.escape(payload.callId)}"]`)
-        if (row) row.dataset.toolState = payload.ok ? 'ok' : 'failed'
+        // Recorded by id: tools run in parallel and finish out of order, and
+        // every row's `:data-tool-state` binding reads this map, so resolving
+        // "the last row" could never mark the wrong one failed.
+        toolResults.update(results => ({
+          ...results,
+          [payload.callId]: payload.ok ? 'ok' : 'failed',
+        }))
       }
       else if (payload.type === 'assistant.delta') {
-        const node = responseNode()
-        if (node) {
-          node.textContent += payload.text
-          transcript.scrollTop = transcript.scrollHeight
-        }
+        if (liveTurns().length > 0)
+          updateNewestTurn(turn => ({ ...turn, response: turn.response + payload.text }))
+        else
+          ssrTail.update(tail => tail + payload.text)
+        followTail()
       }
       else if (payload.type === 'checkpoint.restored') {
         // The workspace is actually back now.
