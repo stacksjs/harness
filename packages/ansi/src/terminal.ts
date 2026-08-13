@@ -222,7 +222,7 @@ export class Terminal {
       this.x = 0
       this.lineFeed()
     }
-    this.grid[this.y][this.x] = { ch, style: this.style }
+    this.grid[this.y]![this.x] = { ch, style: this.style }
     if (this.x === this.cols - 1) this.pendingWrap = true
     else this.x += 1
   }
@@ -314,7 +314,7 @@ export class Terminal {
   }
 
   private eraseLine(mode: number): void {
-    const row = this.grid[this.y]
+    const row = this.grid[this.y]!
     const [from, to] = mode === 0 ? [this.x, this.cols] : mode === 1 ? [0, this.x + 1] : [0, this.cols]
     for (let col = from; col < to; col++) row[col] = { ch: ' ', style: DEFAULT_STYLE }
   }
@@ -341,7 +341,8 @@ export class Terminal {
 
     const next = { ...this.style }
     for (let i = 0; i < params.length; i++) {
-      const code = Number.isNaN(params[i]) ? 0 : params[i]
+      const raw = params[i]
+      const code = raw === undefined || Number.isNaN(raw) ? 0 : raw
       switch (code) {
         case 0: Object.assign(next, DEFAULT_STYLE); break
         case 1: next.bold = true; break
@@ -370,8 +371,8 @@ export class Terminal {
             i += 2
           }
           else if (kind === 2) {
-            const [r, g, b] = [params[i + 2] ?? 0, params[i + 3] ?? 0, params[i + 4] ?? 0]
-              .map(v => clamp(Number.isNaN(v) ? 0 : v, 0, 255))
+            const [r, g, b] = [params[i + 2], params[i + 3], params[i + 4]]
+              .map(v => clamp(v === undefined || Number.isNaN(v) ? 0 : v, 0, 255)) as [number, number, number]
             const hex = `#${[r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')}`
             if (isFg) next.fg = hex
             else next.bg = hex
@@ -399,7 +400,7 @@ export class Terminal {
   snapshot(): Cell[][] {
     const all = [...this.scrollback, ...this.grid]
     let end = all.length
-    while (end > 0 && all[end - 1].every(cell => cell.ch === ' ')) end -= 1
+    while (end > 0 && all[end - 1]!.every(cell => cell.ch === ' ')) end -= 1
     return all.slice(0, end)
   }
 

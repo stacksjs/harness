@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@harness/ansi": "workspace:*",
     "@harness/contract": "workspace:*",
     "@harness/engine": "workspace:*",
     "@stacksjs/stx": "*",

@@ -50,6 +50,7 @@
       "name": "@harness/server",
       "version": "0.0.0",
       "dependencies": {
+        "@harness/ansi": "workspace:*",
         "@harness/contract": "workspace:*",
         "@harness/engine": "workspace:*",
         "@stacksjs/stx": "*",

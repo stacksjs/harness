@@ -258,6 +258,21 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       <button type="button" data-stop hidden class="h-[36px] rounded-[8px] border border-black/15 px-4 text-[13px] dark:border-white/20">Stop</button>
     </form>
   </main>
+
+  {{--
+    The terminal (M6). Structure is server-rendered so the island only wires
+    bytes and keys — no createElement, no injected styles (stx-standards §8,
+    §11). Hidden until toggled; absent entirely when the session has no
+    workspace, because a shell needs somewhere to open.
+  --}}
+  @if(activeWorkspaceId)
+    <section data-terminal hidden aria-label="Terminal" class="terminal-panel">
+      <div data-terminal-host tabindex="0" class="terminal-host">
+        <div data-terminal-screen></div>
+      </div>
+    </section>
+    <button type="button" data-terminal-toggle aria-label="Toggle terminal" class="terminal-toggle">&gt;_</button>
+  @endif
 </div>
 
 <style>
@@ -272,6 +287,69 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     background: currentColor;
     opacity: 0.35;
   }
+
+  /* The terminal panel. One dark scheme regardless of page theme — a terminal
+     is its own surface, and shells assume a dark ground. The 16-color palette
+     is the app's token set for @harness/ansi's t-fg-*/t-bg-* classes, whose
+     rules arrive via the terminalCss prop below. */
+  .terminal-panel {
+    position: fixed;
+    right: 16px;
+    bottom: 64px;
+    width: min(720px, calc(100vw - 32px));
+    height: 340px;
+    z-index: 60;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #16181f;
+    border: 1px solid rgb(255 255 255 / 12%);
+    box-shadow: 0 12px 40px rgb(0 0 0 / 45%);
+    display: flex;
+    flex-direction: column;
+    --t-color-0: #1c1e26;
+    --t-color-1: #e05561;
+    --t-color-2: #8cc265;
+    --t-color-3: #d18f52;
+    --t-color-4: #4aa5f0;
+    --t-color-5: #c162de;
+    --t-color-6: #42b3c2;
+    --t-color-7: #d7dae0;
+    --t-color-8: #5f6672;
+    --t-color-9: #ff616e;
+    --t-color-10: #a5e075;
+    --t-color-11: #f0a45d;
+    --t-color-12: #4dc4ff;
+    --t-color-13: #de73ff;
+    --t-color-14: #4cd1e0;
+    --t-color-15: #ffffff;
+  }
+
+  .terminal-host {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 10px;
+    outline: none;
+    font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #d7dae0;
+    white-space: pre;
+  }
+
+  .terminal-toggle {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 61;
+    width: 38px;
+    height: 34px;
+    border-radius: 8px;
+    background: #16181f;
+    color: #d7dae0;
+    border: 1px solid rgb(255 255 255 / 14%);
+    font: 12px ui-monospace, monospace;
+    cursor: pointer;
+  }
+
+  {!! terminalCss !!}
   [data-tool-state="running"] .tool-dot {
     background: rgb(245 158 11);
     opacity: 1;
@@ -625,7 +703,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // used to call `window.__harnessEncode`, which nothing ever defined, so the
   // socket connected and then threw on its first frame.
   if (sessionId && url && codecUrl) {
-    const { encode, decode, Terminal, TERMINAL_CSS, toHtml } = await import(codecUrl)
+    const { encode, decode, Terminal, toHtml } = await import(codecUrl)
 
     const socket = new WebSocket(url)
     socket.binaryType = 'arraybuffer'
@@ -834,31 +912,22 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       if (termId !== null) socket.send(encode({ t: 'term-input', termId, data }))
     }
 
+    // The panel and toggle are server-rendered (see the markup above); the
+    // island only looks them up and wires bytes and keys.
+    termPanel = document.querySelector('[data-terminal]')
+    termScreen = document.querySelector('[data-terminal-screen]')
+    const termHost = document.querySelector('[data-terminal-host]')
+
     function toggleTerminal() {
-      if (termPanel) {
-        termPanel.hidden = !termPanel.hidden
-        if (!termPanel.hidden) termScreen.parentElement.focus()
-        return
-      }
+      termPanel.hidden = !termPanel.hidden
+      if (termPanel.hidden) return
+      if (termId === null && term === null)
+        socket.send(encode({ t: 'term-open', workspaceId: termWorkspaceId, cols: 100, rows: 24 }))
+      termHost.focus()
+    }
 
-      const style = document.createElement('style')
-      style.textContent = `${TERMINAL_CSS}\n[data-terminal]{--t-color-0:#1c1e26;--t-color-1:#e05561;--t-color-2:#8cc265;--t-color-3:#d18f52;--t-color-4:#4aa5f0;--t-color-5:#c162de;--t-color-6:#42b3c2;--t-color-7:#d7dae0;--t-color-8:#5f6672;--t-color-9:#ff616e;--t-color-10:#a5e075;--t-color-11:#f0a45d;--t-color-12:#4dc4ff;--t-color-13:#de73ff;--t-color-14:#4cd1e0;--t-color-15:#ffffff}`
-      document.head.append(style)
-
-      termPanel = document.createElement('section')
-      termPanel.dataset.terminal = ''
-      termPanel.setAttribute('aria-label', 'Terminal')
-      termPanel.style.cssText = 'position:fixed;right:16px;bottom:64px;width:min(720px,calc(100vw - 32px));height:340px;z-index:60;border-radius:10px;overflow:hidden;background:#16181f;border:1px solid rgba(255,255,255,0.12);box-shadow:0 12px 40px rgba(0,0,0,0.45);display:flex;flex-direction:column'
-
-      const host = document.createElement('div')
-      host.tabIndex = 0
-      host.style.cssText = 'flex:1;overflow-y:auto;padding:8px 10px;outline:none;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#d7dae0;white-space:pre'
-      termScreen = document.createElement('div')
-      host.append(termScreen)
-      termPanel.append(host)
-      document.body.append(termPanel)
-
-      host.addEventListener('keydown', (event) => {
+    if (termPanel && termHost) {
+      termHost.addEventListener('keydown', (event) => {
         if (event.metaKey) return
         let data = null
         if (event.ctrlKey && event.key.length === 1) {
@@ -875,24 +944,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         event.preventDefault()
         termSend(data)
       })
-      host.addEventListener('paste', (event) => {
+      termHost.addEventListener('paste', (event) => {
         event.preventDefault()
         termSend(event.clipboardData.getData('text'))
       })
-
-      socket.send(encode({ t: 'term-open', workspaceId: termWorkspaceId, cols: 100, rows: 24 }))
-      host.focus()
-    }
-
-    if (termWorkspaceId) {
-      const toggle = document.createElement('button')
-      toggle.type = 'button'
-      toggle.dataset.terminalToggle = ''
-      toggle.textContent = '>_'
-      toggle.setAttribute('aria-label', 'Toggle terminal')
-      toggle.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:61;width:38px;height:34px;border-radius:8px;background:#16181f;color:#d7dae0;border:1px solid rgba(255,255,255,0.14);font:12px ui-monospace,monospace;cursor:pointer'
-      toggle.addEventListener('click', toggleTerminal)
-      document.body.append(toggle)
+      document.querySelector('[data-terminal-toggle]')?.addEventListener('click', toggleTerminal)
     }
 
     socket.addEventListener('message', (event) => {

@@ -65,4 +65,10 @@ export default {
   // the sitemap.
   defaultViews: true,
 // `plugins` landed in stx after the pinned @stacksjs/stx types — widen until the dep updates.
-} satisfies UiOptions & { plugins?: string[], defaultViews?: boolean | string[] }
+} satisfies UiOptions & {
+  plugins?: string[]
+  defaultViews?: boolean | string[]
+  // `strict.enabled`/`failOnViolation` are what the runtime reads
+  // (script-validation.js); the pinned types only know `bundlerFallback`.
+  strict?: { enabled?: boolean, failOnViolation?: boolean }
+}

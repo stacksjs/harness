@@ -18,7 +18,7 @@ const ESCAPES: Record<string, string> = {
 }
 
 function escapeHtml(text: string): string {
-  return text.replace(/[&<>"]/g, ch => ESCAPES[ch])
+  return text.replace(/[&<>"]/g, ch => ESCAPES[ch] ?? ch)
 }
 
 /** The xterm 256-color cube, computed rather than tabled. */
@@ -30,13 +30,13 @@ export function indexedToHex(index: number): string {
       '#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5',
       '#7f7f7f', '#ff0000', '#00ff00', '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff',
     ]
-    return base[index]
+    return base[index] ?? '#000000'
   }
   if (index < 232) {
     const cube = index - 16
     const steps = [0, 95, 135, 175, 215, 255]
-    const [r, g, b] = [Math.floor(cube / 36) % 6, Math.floor(cube / 6) % 6, cube % 6].map(v => steps[v])
-    return `#${[r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')}`
+    const channels = [Math.floor(cube / 36) % 6, Math.floor(cube / 6) % 6, cube % 6]
+    return `#${channels.map(v => (steps[v] ?? 0).toString(16).padStart(2, '0')).join('')}`
   }
   const gray = 8 + (index - 232) * 10
   return `#${gray.toString(16).padStart(2, '0').repeat(3)}`
