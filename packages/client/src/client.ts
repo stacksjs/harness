@@ -257,7 +257,9 @@ export class HarnessClient {
   private send(frame: unknown): void {
     if (this.socket?.readyState !== WebSocket.OPEN)
       throw new Error('not connected')
-    this.socket.send(encode(frame))
+    // The codec allocates its own buffer, so the view is always over a plain
+    // ArrayBuffer — the cast states what the generic Uint8Array type cannot.
+    this.socket.send(encode(frame) as Uint8Array<ArrayBuffer>)
   }
 
   /**

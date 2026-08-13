@@ -88,8 +88,10 @@ jobs:
       - name: Set Application Key
         run: bun buddy key:generate
 
+      # tsc invoked directly: `buddy test:types` logs the failure and exits 0,
+      # so nine real errors rode a green job until one was caught locally.
       - name: Typecheck
-        run: bun buddy test:types
+        run: bun x --bun tsc --noEmit -p tsconfig.json --pretty false
 
   test:
     runs-on: ${{ matrix.os }}

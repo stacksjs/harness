@@ -63,9 +63,10 @@ export async function buildClientCodec(): Promise<ExternalizedAsset | null> {
     }],
   })
 
-  if (!built.success || built.outputs.length === 0) return null
+  const output = built.outputs[0]
+  if (!built.success || !output) return null
 
-  const contents = await built.outputs[0].text()
+  const contents = await output.text()
   cached = {
     filename: `codec.${Bun.hash(contents).toString(16).slice(0, 8)}.js`,
     contents,

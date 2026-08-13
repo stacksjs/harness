@@ -130,7 +130,7 @@ export function parseNumstat(raw: string): Map<string, { insertions: number, del
     const match = field.match(/^(\d+|-)\t(\d+|-)\t(.*)$/)
     if (!match) continue
 
-    let path = match[3]
+    let path = match[3] ?? ''
     // With -z, a rename leaves the path empty and puts old then new in the two
     // following fields. The new one is what the status list is keyed by.
     if (path === '') {

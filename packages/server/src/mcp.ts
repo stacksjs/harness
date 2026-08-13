@@ -62,7 +62,8 @@ export function missingReferences(server: McpServer, env: Record<string, string 
   const missing = new Set<string>()
   const scan = (value: string): void => {
     for (const match of value.matchAll(/\$\{([A-Z0-9_]+)\}/gi)) {
-      if (env[match[1]] === undefined) missing.add(match[1])
+      const name = match[1]
+      if (name !== undefined && env[name] === undefined) missing.add(name)
     }
   }
 

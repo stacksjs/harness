@@ -7,9 +7,9 @@
  * rather than being a feature bolted on later.
  */
 
-import type { CommandEnvelope } from '@harness/contract'
+import type { CommandEnvelope, DriverKind } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
-import type { Driver, DriverKind } from '@harness/drivers'
+import type { Driver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
@@ -84,7 +84,7 @@ type ClientFrame =
   | { t: 'ping' }
 
 export interface HarnessServer {
-  server: Server
+  server: Server<SocketData>
   engine: Engine
   runtime: ProviderRuntime
   /** Null unless remote access is on. */
@@ -467,7 +467,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
   }
 
-  const server = Bun.serve<SocketData, Record<string, never>>({
+  // The second parameter is the route-path string union; this server routes in
+  // `fetch`, so it has none.
+  const server = Bun.serve<SocketData, never>({
     port,
     hostname,
 

@@ -126,7 +126,10 @@ function pairs(raw: string): Record<string, string> {
   return out
 }
 
-async function mutate(command: Parameters<Awaited<ReturnType<typeof boot>>['dispatch']>[0]['command'], done: string): Promise<void> {
+// Typed from the Support dispatcher, not the engine's: the engine also accepts
+// server-internal commands (assistant deltas, receipts), and a CLI that could
+// pass one would be a client writing the server's private events.
+async function mutate(command: Parameters<typeof dispatch>[0]['command'], done: string): Promise<void> {
   const engine = await boot()
   try {
     await dispatch({ id: commandId('mcp'), at: Date.now(), command })
