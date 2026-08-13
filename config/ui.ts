@@ -31,6 +31,13 @@ export default {
 
   partialsDir: 'partials',
 
+  // Report prohibited DOM usage in client scripts (stx-standards §8). Warn
+  // only, deliberately: the harness island carries ~700 lines of vanilla DOM
+  // that predate this config reaching the renderer at all, and the honest
+  // sequence is measure → migrate → fail. Flip failOnViolation once the
+  // island is on refs/signals.
+  strict: { enabled: true, failOnViolation: false },
+
   // Every page gets a real document shell — doctype, <html>, <head>, <body>.
   // Without it the harness view shipped as a bare fragment: no charset, no
   // viewport, no title, and the browser rendering in quirks mode.
