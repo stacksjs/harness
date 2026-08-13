@@ -37,10 +37,12 @@ export const pendingApproval = activeSession ? (activeSession.pendingApproval ||
 const activeSpaceIndex = Math.max(0, profiles.findIndex(profile => String(profile.id) === String(activeProfile)))
 
 // id -> tint, for the native titlebar. The web sidebar gets the tint through
-// `<Sidebar :spaces>`; the window chrome around it is ours to paint.
-export const spaceTints = JSON.stringify(Object.fromEntries(
+// `<Sidebar :spaces>`; the window chrome around it is ours to paint. Reaches
+// the island through the server -> client bridge, like every other export the
+// island references.
+export const spaceTints = Object.fromEntries(
   profiles.map(profile => [String(profile.id), profile.tint || '']),
-))
+)
 
 export const spaces = profiles.map((profile, index) => ({
   id: String(profile.id),
@@ -379,12 +381,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 </style>
 
-<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-workspace="{{ activeWorkspaceId }}" data-url="{{ serverUrl }}" data-codec="{{ codecUrl }}" data-since-seq="{{ sinceSeq }}" data-space-tints="{{ spaceTints }}">
+<script client>
   // The live island. Everything above this is static HTML; this wires the
   // socket to the one turn that can still change.
   //
-  // Deliberately small and framework-free: it appends text to a node and
-  // toggles a panel. Anything heavier belongs on the server.
+  // A `client` script, not a raw module: server exports arrive through the
+  // server -> client bridge (activeSessionId, serverUrl, codecUrl, sinceSeq,
+  // spaceTints, activeWorkspaceId are seeded as locals — no data-* plumbing),
+  // and stx's signals/refs/composables are auto-imported when used.
   // Count native-switcher creations before stx's sidebar controller runs.
   //
   // `<SidebarSpaces>` calls `createSpacesSidebar` itself on mount, so the only
@@ -444,10 +448,6 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     }).catch(() => {})
   }, 2500)
 
-  // Not `document.currentScript`: it is always null inside a module, per spec,
-  // so reading `.dataset` off it threw and the socket was never opened. The
-  // whole live half of this page was dead in a browser — invisible because the
-  // server-rendered transcript still looked correct.
   // A global shortcut, so harness is reachable without finding its window.
   //
   // Registered from the page rather than from the Zig host because the handler
@@ -482,13 +482,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // It could not have worked before craft v0.0.62 regardless —
   // `setBackgroundColor` was one of the twenty window actions whose payload the
   // bridge discarded.
-  const spaceTints = (() => {
-    try { return JSON.parse(document.querySelector('[data-harness-island]')?.dataset.spaceTints || '{}') }
-    catch { return {} }
-  })()
-
   function paintWindow(spaceId) {
-    const tint = spaceTints[spaceId]
+    const tint = (spaceTints || {})[spaceId]
     // No tint means the profile never chose one; leaving the window alone is
     // better than inventing a colour it did not ask for.
     if (!tint) return
@@ -541,7 +536,6 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     window.location.reload()
   })
 
-  const island = document.querySelector('[data-harness-island]')
   // Set by the transcript's socket once it opens, so a sidebar command reuses
   // it rather than opening a second connection to the same server.
   let liveSocket = null
@@ -557,7 +551,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
    * write.
    */
   async function sendCommand(command) {
-    const { encode } = await import(island.dataset.codec)
+    const { encode } = await import(codecUrl)
     const envelope = {
       id: `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       at: Date.now(),
@@ -572,7 +566,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     }
 
     return new Promise((resolve) => {
-      const socket = new WebSocket(island.dataset.url)
+      const socket = new WebSocket(serverUrl)
       socket.binaryType = 'arraybuffer'
       socket.addEventListener('open', () => socket.send(encode({ t: 'dispatch', envelope })))
       socket.addEventListener('message', () => { socket.close(); resolve(true) })
@@ -695,19 +689,18 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     })
   }
 
-  const root = document.querySelector('[data-harness-island]')
-  const sessionId = Number(root?.dataset.session)
-  const url = root?.dataset.url
-  const codecUrl = root?.dataset.codec
+  const sessionId = Number(activeSessionId) || 0
 
   // The page speaks CBOR to the socket, so it needs the same codec the server
   // uses. It arrives as a module rather than as assumed globals — the island
   // used to call `window.__harnessEncode`, which nothing ever defined, so the
-  // socket connected and then threw on its first frame.
-  if (sessionId && url && codecUrl) {
+  // socket connected and then threw on its first frame. An async function
+  // rather than top-level await: a client script's body is emitted inside a
+  // plain function wrapper, where `await` only exists behind `async`.
+  async function connectLiveSession() {
     const { encode, decode, Terminal, toHtml } = await import(codecUrl)
 
-    const socket = new WebSocket(url)
+    const socket = new WebSocket(serverUrl)
     socket.binaryType = 'arraybuffer'
     liveSocket = socket
 
@@ -872,7 +865,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       // every load resubscribed from the beginning and the server replayed the
       // whole session on top of the transcript already on the page — the
       // response appeared twice.
-      socket.send(encode({ t: 'subscribe', sessionId, sinceSeq: Number(root.dataset.sinceSeq) || 0 }))
+      socket.send(encode({ t: 'subscribe', sessionId, sinceSeq: Number(sinceSeq) || 0 }))
     })
 
     // ── Terminal (M6): a shell in the session's workspace ────────────────
@@ -881,7 +874,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     // transcript would use — and sends keystrokes back whole. Local-only by
     // server policy, so a paired phone sees the button do nothing beyond the
     // refusal notice.
-    const termWorkspaceId = Number(root.dataset.workspace) || 0
+    const termWorkspaceId = Number(activeWorkspaceId) || 0
     let term = null
     let termId = null
     let termScreen = null
@@ -1066,4 +1059,6 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       }
     })
   }
+
+  if (sessionId && serverUrl && codecUrl) connectLiveSession()
 </script>
