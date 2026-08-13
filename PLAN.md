@@ -1869,10 +1869,17 @@ same content-addressed bundle as the CBOR codec (one module, ~10.6KB total),
 because the page importing a second bundle for a second concern is how
 bundles multiply. Verification, stated precisely: the transport is proven by
 the live socket test; the panel is SSR-rendered by the views tests and the
-bundle verifiably carries the core; a hands-on-keyboard browser run has not
-happened yet and the claim waits for one.
+bundle verifiably carries the core; and the browser run happened — headless
+Chromium (playwright-core over the cached build) drove the real page: toggle
+clicked, panel opened, `echo "b-$((40+3))"` typed through the page keyboard,
+`b-43` computed by the live shell and rendered through the grid with the
+prompt's colors as styled spans. The screenshot shows the panel over the
+session page. Two pre-existing page warnings surfaced on the way (an stx
+`retry` auto-import the client runtime does not provide, and a
+`section.collapsible` hydration invariant) — noted here, unrelated to the
+terminal.
 
-What remains: that browser run, the desktop reusing the same view, and live
+What remains: the desktop reusing the same view, and live
 resize, which `script` cannot do — that one genuinely waits on a native ioctl
 shim or craft's `bridge_shell.zig` growing one.
 
