@@ -1842,14 +1842,28 @@ default, because the near consumer is *piped* tool output where no PTY line
 discipline has done the translation — a strict emulator renders every such
 stream as a staircase; a future PTY transport passes `convertEol: false`.
 
-What remains for a real terminal, in order: a PTY transport in the server
-(Bun has no native PTY; the options are a small native shim or craft's
-`bridge_shell.zig` once it grows one), the session plumbing (a terminal is
-per-workspace state the contract does not model yet), and the surface — the
-web view can render `toHtml` output today, the desktop ideally gets the same
-view rather than a second renderer. Streaming a command's stdout through the
-grid is now honest *rendering*; what makes it a terminal rather than a
-command runner is the PTY and stdin, and that line is still real.
+The PTY transport exists too, and it took no native dependency: `script(1)`
+runs the shell under a real pseudo-terminal on every machine this server
+targets, with the BSD/util-linux spellings pinned in `packages/server/src/pty.ts`.
+The fact that cost the debugging session: both runtimes hand children
+*socketpairs* for piped stdio on macOS, and BSD `script` dies on a socket
+stdin ("tcgetattr/ioctl: Operation not supported on socket") while tolerating
+a real pipe — so a load-bearing `cat |` sits in front, converting one to the
+other. Terminal I/O rides the socket as ephemeral frames
+(`term-open/input/close` in, `term-opened/data/exit/error` out) — deliberately
+*not* events: bytes are a live stream, not history, and the append-only log
+must not become a keystroke recorder. Two boundaries hold: a terminal dies
+with the socket that owns it (a PTY with no reader is a shell running
+unwatched), and `term-open` is refused for paired devices — a terminal is
+arbitrary execution with no approval step in front of it, and until §12 has a
+story for that over remote access, terminals belong to this machine only.
+Verified by a live test: open over the socket, `echo "m-$((40+2))"` typed in,
+`m-42` streamed back — computed by the shell, so it proves execution, not echo.
+
+What remains: the surface (a terminal panel rendering `@harness/ansi`'s
+`toHtml` over `term-data`, web first, desktop reusing the same view) and live
+resize, which `script` cannot do — that one genuinely waits on a native ioctl
+shim or craft's `bridge_shell.zig` growing one.
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

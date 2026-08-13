@@ -36,6 +36,17 @@ export interface ClientOptions {
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'closed'
 
+/**
+ * Terminal frames, passed through raw. Terminals are ephemeral socket state,
+ * not events — nothing here touches the projection, so the client's only job
+ * is transport: open, write, close, and hand frames to whoever is rendering.
+ */
+export type TerminalFrame =
+  | { t: 'term-opened', termId: number, workspaceId: number, cols: number, rows: number }
+  | { t: 'term-data', termId: number, data: string }
+  | { t: 'term-exit', termId: number, code: number | null }
+  | { t: 'term-error', message: string }
+
 export interface DispatchAck {
   id: string
   replayed: boolean
@@ -58,6 +69,7 @@ export class HarnessClient {
 
   private statusListeners = new Set<(status: ConnectionStatus) => void>()
   private eventListeners = new Set<(event: HarnessEvent) => void>()
+  private terminalListeners = new Set<(frame: TerminalFrame) => void>()
   private stateListeners = new Set<(state: HarnessState) => void>()
   /** Resolved once the global log has been replayed into `state`. */
   private globalReady: (() => void) | null = null
@@ -74,6 +86,24 @@ export class HarnessClient {
   onStatus(listener: (status: ConnectionStatus) => void): () => void {
     this.statusListeners.add(listener)
     return () => this.statusListeners.delete(listener)
+  }
+
+  onTerminal(listener: (frame: TerminalFrame) => void): () => void {
+    this.terminalListeners.add(listener)
+    return () => this.terminalListeners.delete(listener)
+  }
+
+  /** Ask the server for a shell in the workspace. Answered by a `term-opened` (or `term-error`) frame. */
+  openTerminal(workspaceId: number, cols = 80, rows = 24): void {
+    this.send({ t: 'term-open', workspaceId, cols, rows })
+  }
+
+  terminalInput(termId: number, data: string): void {
+    this.send({ t: 'term-input', termId, data })
+  }
+
+  closeTerminal(termId: number): void {
+    this.send({ t: 'term-close', termId })
   }
 
   onEvent(listener: (event: HarnessEvent) => void): () => void {
@@ -247,6 +277,14 @@ export class HarnessClient {
         if (!waiter) return
         this.pending.delete(frame.id)
         waiter.reject(new Error(String(frame.message ?? 'command rejected')))
+        return
+      }
+
+      case 'term-opened':
+      case 'term-data':
+      case 'term-exit':
+      case 'term-error': {
+        for (const listener of this.terminalListeners) listener(frame as TerminalFrame)
         return
       }
 

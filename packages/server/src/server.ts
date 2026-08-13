@@ -12,6 +12,7 @@ import type { Server, ServerWebSocket } from 'bun'
 import type { Driver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
+import { Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
@@ -64,6 +65,12 @@ interface SocketData {
    * while leaving the connection it already had free to keep dispatching.
    */
   deviceId: string | null
+  /**
+   * Live terminals owned by this socket, killed with it. Owned per-socket
+   * rather than pooled because a PTY with no reader is a shell running
+   * unwatched — exactly what a disconnect must not leave behind.
+   */
+  terminals: Map<number, Pty>
   /** Sessions this socket has subscribed to. Empty means "not subscribed". */
   subscriptions: Set<number>
   /**
@@ -82,6 +89,9 @@ type ClientFrame =
   | { t: 'subscribe', sessionId: number, sinceSeq?: number }
   | { t: 'unsubscribe', sessionId: number }
   | { t: 'ping' }
+  | { t: 'term-open', workspaceId: number, cols?: number, rows?: number }
+  | { t: 'term-input', termId: number, data: string }
+  | { t: 'term-close', termId: number }
 
 export interface HarnessServer {
   server: Server<SocketData>
@@ -191,6 +201,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   if (access) await writeLocalToken(access.localToken)
 
   const sockets = new Set<HarnessSocket>()
+  let lastTermId = 0
   const assetCache = new AssetCache()
   // Built once, before listening: the page references it by URL, so it must be
   // servable by the time the first render can hand that URL out.
@@ -406,6 +417,47 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         send(socket, { t: 'pong' })
         return
 
+      case 'term-open': {
+        // A terminal is arbitrary execution with no approval step in front of
+        // it: the driver path asks before every tool call, a shell cannot
+        // (§12). Until the security model has a story for that, terminals
+        // belong to this machine only — the plain loopback case and the
+        // host's own token, never a paired device.
+        if (socket.data.deviceId !== null && socket.data.deviceId !== 'local') {
+          send(socket, { t: 'term-error', message: 'terminals are local-only' })
+          return
+        }
+        const workspace = engine.current.workspaces.get(frame.workspaceId)
+        if (!workspace) {
+          send(socket, { t: 'term-error', message: `no workspace ${frame.workspaceId}` })
+          return
+        }
+        const termId = ++lastTermId
+        const cols = frame.cols ?? 80
+        const rows = frame.rows ?? 24
+        const pty = new Pty({ cwd: workspace.path, cols, rows })
+        socket.data.terminals.set(termId, pty)
+        pty.onData(chunk => send(socket, { t: 'term-data', termId, data: chunk }))
+        pty.onExit((code) => {
+          socket.data.terminals.delete(termId)
+          send(socket, { t: 'term-exit', termId, code })
+        })
+        send(socket, { t: 'term-opened', termId, workspaceId: frame.workspaceId, cols, rows })
+        return
+      }
+
+      case 'term-input':
+        // An unknown id is a close racing input — dropped, like a late approval.
+        socket.data.terminals.get(frame.termId)?.write(frame.data)
+        return
+
+      case 'term-close': {
+        const pty = socket.data.terminals.get(frame.termId)
+        socket.data.terminals.delete(frame.termId)
+        pty?.kill()
+        return
+      }
+
       case 'subscribe': {
         socket.data.subscriptions.add(frame.sessionId)
         // Replay from where the client left off. This is what makes a dropped
@@ -525,6 +577,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const upgraded = srv.upgrade(request, {
           data: {
             deviceId: access?.authenticate(request).deviceId ?? null,
+            terminals: new Map<number, Pty>(),
             subscriptions: new Set<number>(),
             cursors: new Map<number, number>(),
           },
@@ -636,6 +689,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       },
       close(socket) {
         sockets.delete(socket)
+        // A PTY with no reader is a shell running unwatched.
+        for (const pty of socket.data.terminals.values()) pty.kill()
+        socket.data.terminals.clear()
       },
       message(socket, message) {
         // Text frames are not part of the protocol: the contract is CBOR, and

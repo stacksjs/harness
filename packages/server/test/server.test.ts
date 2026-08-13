@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { decode, encode } from '@harness/contract'
+import { derivedId } from '@harness/engine'
 import { serve } from '../src/server'
 
 let dir: string
@@ -351,5 +352,68 @@ describe('harness serve — durability', () => {
     expect(await resumed.until('dispatched')).toMatchObject({ replayed: true })
     expect(harness.engine.current.profiles.size).toBe(1)
     resumed.close()
+  })
+})
+
+describe('terminals over the socket', () => {
+  // The PTY is `script(1)` around a real shell (see src/pty.ts) — these run a
+  // live process, which is the point: the transport's job is to carry actual
+  // shell bytes, and a fake shell would prove the frames while missing the
+  // spawn spelling that differs per platform.
+
+  function url(): string {
+    return `ws://localhost:${port}/ws`
+  }
+
+  async function openWorkspace(client: TestClient): Promise<number> {
+    client.send({ t: 'dispatch', envelope: { id: 'c_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
+    await client.until('dispatched')
+    client.send({ t: 'dispatch', envelope: { id: 'c_w', at: 2, command: { type: 'workspace.add', profileId: derivedId('c_p'), path: dir } } })
+    await client.until('dispatched')
+    return derivedId('c_w')
+  }
+
+  it('refuses a workspace the engine does not know', async () => {
+    const client = await TestClient.connect(url())
+    await client.until('ready')
+    client.send({ t: 'term-open', workspaceId: 424242 })
+    const error = await client.until('term-error')
+    expect(error.message).toContain('no workspace')
+    client.close()
+  })
+
+  it('runs a real shell in the workspace and streams its bytes back', async () => {
+    const client = await TestClient.connect(url())
+    await client.until('ready')
+    const workspaceId = await openWorkspace(client)
+
+    client.send({ t: 'term-open', workspaceId, cols: 60, rows: 12 })
+    const opened = await client.until('term-opened')
+    expect(opened.termId).toBeGreaterThan(0)
+    expect(opened).toMatchObject({ workspaceId, cols: 60, rows: 12 })
+
+    // A marker computed by the shell, so matching it proves execution rather
+    // than the terminal echoing our own input back.
+    client.send({ t: 'term-input', termId: opened.termId, data: 'echo "m-$((40+2))"\n' })
+    let seen = ''
+    for (let i = 0; i < 60 && !seen.includes('m-42'); i++) {
+      const frame = await client.next()
+      if (frame?.t === 'term-data' && frame.termId === opened.termId) seen += frame.data
+      if (frame?.t === 'timeout') break
+    }
+    expect(seen).toContain('m-42')
+
+    client.send({ t: 'term-close', termId: opened.termId })
+    client.close()
+  })
+
+  it('drops input for a terminal that is already gone', async () => {
+    const client = await TestClient.connect(url())
+    await client.until('ready')
+    client.send({ t: 'term-input', termId: 999, data: 'echo boo\n' })
+    // Still a healthy protocol afterwards — the frame was dropped, not fatal.
+    client.send({ t: 'ping' })
+    expect((await client.until('pong')).t).toBe('pong')
+    client.close()
   })
 })
