@@ -24,7 +24,8 @@ import { join } from 'node:path'
  * so the codec is scoped to the code that uses it rather than being two more
  * names on `window` that anything could overwrite.
  */
-const ENTRY = `export { encode, decode } from '@harness/contract'`
+const ENTRY = `export { encode, decode } from '@harness/contract'
+export { Terminal, TERMINAL_CSS, toHtml } from '@harness/ansi'`
 
 let cached: ExternalizedAsset | null = null
 

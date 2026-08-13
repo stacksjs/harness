@@ -106,6 +106,9 @@ export function viewProps(state: HarnessState, options: {
           title: active.turns[0]?.prompt?.slice(0, 60) ?? `Session ${active.id}`,
           state: active.state,
           lastSeq: active.lastSeq,
+          // For the terminal: a shell opens in the session's workspace, and
+          // the island should not have to reverse-engineer it from the DOM.
+          workspaceId: active.workspaceId,
           // Rendered server-side so a decision survives the client that raised
           // it. Previously an approval only reached whichever browser happened
           // to be connected when it fired, and the turn waited forever if that

@@ -1860,8 +1860,19 @@ story for that over remote access, terminals belong to this machine only.
 Verified by a live test: open over the socket, `echo "m-$((40+2))"` typed in,
 `m-42` streamed back — computed by the shell, so it proves execution, not echo.
 
-What remains: the surface (a terminal panel rendering `@harness/ansi`'s
-`toHtml` over `term-data`, web first, desktop reusing the same view) and live
+The web surface has the panel: a `>_` toggle on any session page opens a
+fixed panel whose island opens `term-open` for the session's workspace,
+renders `term-data` through `@harness/ansi`'s grid (rAF-throttled
+`toHtml` into a `pre` host), and sends keystrokes back — printables as-is,
+named keys and Ctrl-chords mapped, paste whole. The terminal core rides the
+same content-addressed bundle as the CBOR codec (one module, ~10.6KB total),
+because the page importing a second bundle for a second concern is how
+bundles multiply. Verification, stated precisely: the transport is proven by
+the live socket test; the panel is SSR-rendered by the views tests and the
+bundle verifiably carries the core; a hands-on-keyboard browser run has not
+happened yet and the claim waits for one.
+
+What remains: that browser run, the desktop reusing the same view, and live
 resize, which `script` cannot do — that one genuinely waits on a native ioctl
 shim or craft's `bridge_shell.zig` growing one.
 

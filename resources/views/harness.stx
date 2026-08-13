@@ -88,6 +88,7 @@ export const sessionState = activeSession ? activeSession.state : 'idle'
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const activeSessionId = activeSession ? activeSession.id : 0
+export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
 // The last turn is the only one that can still change, so it is the only one
 // that needs hydrating — everything above it is settled history.
 export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
@@ -298,7 +299,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 </style>
 
-<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-url="{{ serverUrl }}" data-codec="{{ codecUrl }}" data-since-seq="{{ sinceSeq }}" data-space-tints="{{ spaceTints }}">
+<script type="module" data-harness-island data-session="{{ activeSessionId }}" data-workspace="{{ activeWorkspaceId }}" data-url="{{ serverUrl }}" data-codec="{{ codecUrl }}" data-since-seq="{{ sinceSeq }}" data-space-tints="{{ spaceTints }}">
   // The live island. Everything above this is static HTML; this wires the
   // socket to the one turn that can still change.
   //
@@ -624,7 +625,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // used to call `window.__harnessEncode`, which nothing ever defined, so the
   // socket connected and then threw on its first frame.
   if (sessionId && url && codecUrl) {
-    const { encode, decode } = await import(codecUrl)
+    const { encode, decode, Terminal, TERMINAL_CSS, toHtml } = await import(codecUrl)
 
     const socket = new WebSocket(url)
     socket.binaryType = 'arraybuffer'
@@ -794,8 +795,134 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       socket.send(encode({ t: 'subscribe', sessionId, sinceSeq: Number(root.dataset.sinceSeq) || 0 }))
     })
 
+    // ── Terminal (M6): a shell in the session's workspace ────────────────
+    // The server owns the PTY and streams bytes as term-data frames; the page
+    // renders them through @harness/ansi's grid — the same renderer a settled
+    // transcript would use — and sends keystrokes back whole. Local-only by
+    // server policy, so a paired phone sees the button do nothing beyond the
+    // refusal notice.
+    const termWorkspaceId = Number(root.dataset.workspace) || 0
+    let term = null
+    let termId = null
+    let termScreen = null
+    let termPanel = null
+    let termRenderQueued = false
+
+    function renderTerm() {
+      if (termRenderQueued || !term || !termScreen) return
+      termRenderQueued = true
+      requestAnimationFrame(() => {
+        termRenderQueued = false
+        termScreen.innerHTML = toHtml(term.snapshot())
+        termScreen.parentElement.scrollTop = termScreen.parentElement.scrollHeight
+      })
+    }
+
+    // Named keys → the bytes a terminal expects. Anything printable goes as-is.
+    const TERM_KEYS = {
+      'Enter': '\r',
+      'Backspace': '\x7F',
+      'Tab': '\t',
+      'Escape': '\x1B',
+      'ArrowUp': '\x1B[A',
+      'ArrowDown': '\x1B[B',
+      'ArrowRight': '\x1B[C',
+      'ArrowLeft': '\x1B[D',
+    }
+
+    function termSend(data) {
+      if (termId !== null) socket.send(encode({ t: 'term-input', termId, data }))
+    }
+
+    function toggleTerminal() {
+      if (termPanel) {
+        termPanel.hidden = !termPanel.hidden
+        if (!termPanel.hidden) termScreen.parentElement.focus()
+        return
+      }
+
+      const style = document.createElement('style')
+      style.textContent = `${TERMINAL_CSS}\n[data-terminal]{--t-color-0:#1c1e26;--t-color-1:#e05561;--t-color-2:#8cc265;--t-color-3:#d18f52;--t-color-4:#4aa5f0;--t-color-5:#c162de;--t-color-6:#42b3c2;--t-color-7:#d7dae0;--t-color-8:#5f6672;--t-color-9:#ff616e;--t-color-10:#a5e075;--t-color-11:#f0a45d;--t-color-12:#4dc4ff;--t-color-13:#de73ff;--t-color-14:#4cd1e0;--t-color-15:#ffffff}`
+      document.head.append(style)
+
+      termPanel = document.createElement('section')
+      termPanel.dataset.terminal = ''
+      termPanel.setAttribute('aria-label', 'Terminal')
+      termPanel.style.cssText = 'position:fixed;right:16px;bottom:64px;width:min(720px,calc(100vw - 32px));height:340px;z-index:60;border-radius:10px;overflow:hidden;background:#16181f;border:1px solid rgba(255,255,255,0.12);box-shadow:0 12px 40px rgba(0,0,0,0.45);display:flex;flex-direction:column'
+
+      const host = document.createElement('div')
+      host.tabIndex = 0
+      host.style.cssText = 'flex:1;overflow-y:auto;padding:8px 10px;outline:none;font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#d7dae0;white-space:pre'
+      termScreen = document.createElement('div')
+      host.append(termScreen)
+      termPanel.append(host)
+      document.body.append(termPanel)
+
+      host.addEventListener('keydown', (event) => {
+        if (event.metaKey) return
+        let data = null
+        if (event.ctrlKey && event.key.length === 1) {
+          const code = event.key.toLowerCase().charCodeAt(0)
+          if (code >= 97 && code <= 122) data = String.fromCharCode(code - 96)
+        }
+        else if (TERM_KEYS[event.key]) {
+          data = TERM_KEYS[event.key]
+        }
+        else if (event.key.length === 1) {
+          data = event.key
+        }
+        if (data === null) return
+        event.preventDefault()
+        termSend(data)
+      })
+      host.addEventListener('paste', (event) => {
+        event.preventDefault()
+        termSend(event.clipboardData.getData('text'))
+      })
+
+      socket.send(encode({ t: 'term-open', workspaceId: termWorkspaceId, cols: 100, rows: 24 }))
+      host.focus()
+    }
+
+    if (termWorkspaceId) {
+      const toggle = document.createElement('button')
+      toggle.type = 'button'
+      toggle.dataset.terminalToggle = ''
+      toggle.textContent = '>_'
+      toggle.setAttribute('aria-label', 'Toggle terminal')
+      toggle.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:61;width:38px;height:34px;border-radius:8px;background:#16181f;color:#d7dae0;border:1px solid rgba(255,255,255,0.14);font:12px ui-monospace,monospace;cursor:pointer'
+      toggle.addEventListener('click', toggleTerminal)
+      document.body.append(toggle)
+    }
+
     socket.addEventListener('message', (event) => {
       const frame = decode(new Uint8Array(event.data))
+      if (frame?.t === 'term-opened') {
+        termId = frame.termId
+        term = new Terminal({ cols: frame.cols, rows: frame.rows })
+        renderTerm()
+        return
+      }
+      if (frame?.t === 'term-data') {
+        if (frame.termId === termId && term) {
+          term.write(frame.data)
+          renderTerm()
+        }
+        return
+      }
+      if (frame?.t === 'term-exit') {
+        if (frame.termId === termId && term) {
+          term.write(`\r\n[exited${frame.code === null ? '' : ` (${frame.code})`}]`)
+          renderTerm()
+          termId = null
+        }
+        return
+      }
+      if (frame?.t === 'term-error') {
+        // The one the server sends a paired phone: terminals are local-only.
+        window.alert(frame.message)
+        return
+      }
       if (frame?.t !== 'event') return
       const payload = frame.event.payload
       if (payload.type === 'turn.started') {
