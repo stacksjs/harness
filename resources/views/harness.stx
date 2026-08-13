@@ -96,13 +96,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 </script>
 
 <div class="flex h-screen w-screen overflow-hidden bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
-  <!--
+  {{--
     `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
     component's own marker, and putting it on a wrapper made two elements claim
     it. `tintTarget()` resolves `closest('[data-stx-sidebar]')`, so the space
     palette was being written to this wrapper instead of the pane — it reached
     the pane by inheritance and worked by luck.
-  -->
+  --}}
   <aside class="w-[280px] shrink-0 border-r border-black/5 dark:border-white/5" data-harness-sidebar>
     @if(hasProfiles)
       <Sidebar
@@ -126,20 +126,20 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         data-session-state
         class="rounded-full px-2 py-[2px] text-[11px] leading-[14px] opacity-70"
       >{{ sessionState }}</span>
-      <!--
+      {{--
         An isolated session edits its own checkout, not the workspace. Saying
         which branch makes that visible, and names the thing you merge.
-      -->
+      --}}
       @if(sessionBranch)
         <span
           class="truncate rounded-[5px] border border-black/10 px-[6px] py-[1px] font-mono text-[11px] leading-[15px] opacity-70 dark:border-white/15"
           title="This session runs in its own worktree on {{ sessionBranch }}"
         >{{ sessionBranch }}</span>
       @endif
-      <!--
+      {{--
         Changes sit behind a toggle rather than always-on. Reading a repository
         costs a subprocess, and most page loads never look at the diff.
-      -->
+      --}}
       <button
         type="button"
         data-diff-toggle
@@ -154,22 +154,22 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       <pre data-diff-patch class="overflow-x-auto text-[12px] leading-[17px]"></pre>
     </section>
 
-    <!--
+    {{--
       The transcript. Settled turns are plain server-rendered HTML and hydrate
       on `visible`, so scrolling back through a long session costs nothing until
       you actually scroll. The live tail hydrates eagerly — it is the only part
       the socket writes to.
-    -->
+    --}}
     <div data-transcript class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
       @foreach(settledTurns as turn)
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}">
           <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
           <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ turn.prompt }}</div>
-          <!--
+          {{--
             What the agent ran, before what it said. These were in the log from
             the start and rendered nowhere, so the transcript showed a reply
             with no evidence behind it.
-          -->
+          --}}
           <div data-tools>
           @foreach(turn.toolCalls as call)
             <div class="mb-1 flex items-center gap-[6px] text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}">
@@ -180,11 +180,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           </div>
           <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
           <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response>{{ turn.response }}</div>
-          <!--
+          {{--
             Undo this turn. Only offered where a snapshot exists: a workspace
             that is not a repository has nothing to revert to, and a disabled
             button that never explains itself is worse than no button.
-          -->
+          --}}
           @if(turn.checkpointId)
             <button
               type="button"
@@ -209,13 +209,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           </div>
           <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
           <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response data-live-response>{{ liveTurn.response }}</div>
-          <!--
+          {{--
             The newest turn is the one people most want to undo, and it was the
             only one without the button because it is not in `settledTurns`.
             Hidden while it is still running — the reducer refuses a revert
             mid-turn anyway, since restoring files under a working agent leaves
             it editing a tree that changed for reasons it cannot see.
-          -->
+          --}}
           @if(liveTurn.checkpointId)
             <button
               type="button"
@@ -250,11 +250,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         class="min-h-[40px] flex-1 resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-neutral-900"
       ></textarea>
       <button type="submit" data-send class="h-[36px] rounded-[8px] bg-neutral-900 px-4 text-[13px] text-white dark:bg-white dark:text-neutral-900">Send</button>
-      <!--
+      {{--
         Stop is the one control a running agent must always offer. It replaces
         Send rather than sitting beside it: while a turn runs there is nothing
         to send, and two enabled buttons invite sending into a busy session.
-      -->
+      --}}
       <button type="button" data-stop hidden class="h-[36px] rounded-[8px] border border-black/15 px-4 text-[13px] dark:border-white/20">Stop</button>
     </form>
   </main>
