@@ -160,6 +160,13 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
   // template and CSS toolchain; loading it eagerly made every socket test pay
   // for a renderer it never calls, to the point of being OOM-killed.
   const { renderView } = await import('@stacksjs/stx')
+  // The app's stx config, loaded explicitly: `renderView` builds its options
+  // from `defaultConfig` alone and never reads `config/ui.ts`, so without
+  // this spread the config was decorative — `autoShell`, `app.head` and
+  // `stateDir` all unreachable, and the page shipped as a bare fragment with
+  // no doctype, no title and no charset (stx-standards §2, §4).
+  const uiPath = join(process.cwd(), 'config/ui.ts')
+  const ui = existsSync(uiPath) ? (await import(uiPath)).default : {}
   // `renderView` resolves components by filename, and searches only the app's
   // own directories plus stx's built-ins — so `<Sidebar>` renders as a
   // "component not found" block unless it is pointed at the library.
@@ -170,6 +177,7 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
   // package's own stx plugin registers, so this matches how a configured stx
   // build resolves them.
   return renderView(path, props as unknown as Record<string, unknown>, {
+    ...ui,
     componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
   })
 }

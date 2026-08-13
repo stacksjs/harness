@@ -31,6 +31,24 @@ export default {
 
   partialsDir: 'partials',
 
+  // Every page gets a real document shell — doctype, <html>, <head>, <body>.
+  // Without it the harness view shipped as a bare fragment: no charset, no
+  // viewport, no title, and the browser rendering in quirks mode.
+  autoShell: true,
+
+  // The one shared head (stx-standards §4.8): pages refine it, nothing
+  // hand-writes <title> or <meta> tags in markup.
+  app: {
+    head: {
+      title: 'harness',
+      meta: [
+        { charset: 'utf-8' },
+        { name: 'viewport', content: 'width=device-width, initial-scale=1' },
+        { name: 'description', content: 'An agent harness control surface — drive Claude Code, Codex, Cursor and friends.' },
+      ],
+    },
+  },
+
   // Whether this app serves the framework's default views, which include a
   // demo storefront (/cart, /checkout/*, /orders/:id) alongside the error
   // pages and mail previews. `true` serves all of them and is the historical
