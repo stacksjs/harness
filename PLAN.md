@@ -1829,9 +1829,27 @@ on the registry predates the fix, so depending on it today would ship the
 broken encoder. Pairing stays type-a-code until there is a release.
 
 ### M6 — still open
-Terminals — still blocked on there being no first-party terminal emulator;
-craft has `bridge_shell.zig` and nothing that renders ANSI, and the honest
-alternative (stream a command's stdout) is a command runner, not a terminal.
+Terminals. The blocker was "no first-party terminal emulator; nothing that
+renders ANSI" — that piece now exists. `packages/ansi` is the emulator *core*:
+a pure state machine from escape stream to cell grid (SGR in all three color
+widths, cursor addressing, erase, deferred wrap, scrollback, the alternate
+screen), with one HTML renderer both consumers share — a terminal surface
+paints a viewport, a transcript paints a snapshot. Tested against recorded
+output (a live `git -c color.diff=always diff`, which also pinned git's bare
+`\x1b[m` reset spelling), and honest about its punts: scroll regions, glyph
+width, tab stops. One decision worth its comment: `\n` converts to `\r\n` by
+default, because the near consumer is *piped* tool output where no PTY line
+discipline has done the translation — a strict emulator renders every such
+stream as a staircase; a future PTY transport passes `convertEol: false`.
+
+What remains for a real terminal, in order: a PTY transport in the server
+(Bun has no native PTY; the options are a small native shim or craft's
+`bridge_shell.zig` once it grows one), the session plumbing (a terminal is
+per-workspace state the contract does not model yet), and the surface — the
+web view can render `toHtml` output today, the desktop ideally gets the same
+view rather than a second renderer. Streaming a command's stdout through the
+grid is now honest *rendering*; what makes it a terminal rather than a
+command runner is the PTY and stdin, and that line is still real.
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

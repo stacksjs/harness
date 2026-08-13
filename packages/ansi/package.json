@@ -1,0 +1,8 @@
+{
+  "name": "@harness/ansi",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "description": "First-party ANSI/VT emulator core. A pure state machine from escape stream to cell grid — the piece M6's terminals were blocked on.",
+  "exports": { ".": "./src/index.ts" }
+}
