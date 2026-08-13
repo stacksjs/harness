@@ -127,6 +127,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       <span
         data-session-state
         class="rounded-full px-2 py-[2px] text-[11px] leading-[14px] opacity-70"
+        :text="uiState()"
       >{{ sessionState }}</span>
       {{--
         An isolated session edits its own checkout, not the workspace. Saying
@@ -147,10 +148,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         data-diff-toggle
         class="ml-auto rounded-[6px] border border-black/10 px-2 py-[3px] text-[12px] dark:border-white/15"
         aria-expanded="false"
+        :aria-expanded="diffOpen() ? 'true' : 'false'"
+        @click="toggleDiff"
       >Changes</button>
     </header>
 
-    <section data-diff hidden class="max-h-[45%] shrink-0 overflow-y-auto border-b border-black/5 px-4 py-3 dark:border-white/5">
+    <section data-diff hidden :hidden="!diffOpen()" class="max-h-[45%] shrink-0 overflow-y-auto border-b border-black/5 px-4 py-3 dark:border-white/5">
       <div data-diff-status class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
       <ul data-diff-files class="mb-2 list-none">
         <template :for="file in diffFiles" :key="file.path">
@@ -172,7 +175,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       you actually scroll. The live tail hydrates eagerly — it is the only part
       the socket writes to.
     --}}
-    <div data-transcript class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+    <div data-transcript ref="transcriptBox" class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
       @foreach(settledTurns as turn)
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}">
           <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
@@ -202,6 +205,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
               type="button"
               data-revert="{{ turn.checkpointId }}"
               class="mt-2 rounded-[6px] border border-black/10 px-2 py-[2px] text-[11px] opacity-60 hover:opacity-100 dark:border-white/15"
+              :hidden="uiBusy()"
+              :disabled="revertingId() === {{ turn.checkpointId }}"
+              :text="revertingId() === {{ turn.checkpointId }} ? 'Reverting…' : 'Revert this turn'"
+              @click="revertTurn({{ turn.checkpointId }})"
             >Revert this turn</button>
           @endif
         </article>
@@ -250,6 +257,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
               type="button"
               data-revert="{{ liveTurn.checkpointId }}"
               class="mt-2 rounded-[6px] border border-black/10 px-2 py-[2px] text-[11px] opacity-60 hover:opacity-100 dark:border-white/15"
+              :hidden="uiBusy()"
+              :disabled="revertingId() === {{ liveTurn.checkpointId }}"
+              :text="revertingId() === {{ liveTurn.checkpointId }} ? 'Reverting…' : 'Revert this turn'"
+              @click="revertTurn({{ liveTurn.checkpointId }})"
             >Revert this turn</button>
           @endif
         </article>
@@ -281,33 +292,41 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       <div
         data-approval
         @if(!pendingApproval)hidden@endif
-        @if(pendingApproval)data-approval-id="{{ pendingApproval.approvalId }}"@endif
+        :hidden="!approvalId()"
         class="mb-5 rounded-[10px] border border-amber-500/30 bg-amber-500/10 p-3"
       >
         <div class="mb-2 text-[12px] font-medium">
-          <span data-approval-tool>{{ pendingApproval ? pendingApproval.toolName : '' }}</span> wants to run.
+          <span data-approval-tool :text="approvalTool()">{{ pendingApproval ? pendingApproval.toolName : '' }}</span> wants to run.
         </div>
         <div class="flex gap-2">
-          <button type="button" data-approve class="rounded-[6px] bg-neutral-900 px-3 py-1 text-[12px] text-white dark:bg-white dark:text-neutral-900">Allow</button>
-          <button type="button" data-deny class="rounded-[6px] border border-black/10 px-3 py-1 text-[12px] dark:border-white/15">Deny</button>
+          <button type="button" data-approve @click="approveTool" class="rounded-[6px] bg-neutral-900 px-3 py-1 text-[12px] text-white dark:bg-white dark:text-neutral-900">Allow</button>
+          <button type="button" data-deny @click="denyTool" class="rounded-[6px] border border-black/10 px-3 py-1 text-[12px] dark:border-white/15">Deny</button>
         </div>
       </div>
     </div>
 
-    <form data-composer class="flex shrink-0 items-end gap-2 border-t border-black/5 p-3 dark:border-white/5">
+    <form data-composer @submit.prevent="sendPrompt" class="flex shrink-0 items-end gap-2 border-t border-black/5 p-3 dark:border-white/5">
+      {{--
+        Enter sends, Shift+Enter makes a newline — the convention every chat
+        surface uses; the textarea would otherwise only ever insert newlines.
+      --}}
       <textarea
         data-prompt
+        ref="promptBox"
+        @keydown="promptKeydown"
         rows="2"
         placeholder="Ask the agent…"
         class="min-h-[40px] flex-1 resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-neutral-900"
       ></textarea>
-      <button type="submit" data-send class="h-[36px] rounded-[8px] bg-neutral-900 px-4 text-[13px] text-white dark:bg-white dark:text-neutral-900">Send</button>
+      <button type="submit" data-send :hidden="uiBusy()" class="h-[36px] rounded-[8px] bg-neutral-900 px-4 text-[13px] text-white dark:bg-white dark:text-neutral-900">Send</button>
       {{--
         Stop is the one control a running agent must always offer. It replaces
         Send rather than sitting beside it: while a turn runs there is nothing
         to send, and two enabled buttons invite sending into a busy session.
+        `stopPressed` hides it the moment it is clicked — optimistic, but the
+        turn is only over when the log says so.
       --}}
-      <button type="button" data-stop hidden class="h-[36px] rounded-[8px] border border-black/15 px-4 text-[13px] dark:border-white/20">Stop</button>
+      <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" @click="stopTurn" class="h-[36px] rounded-[8px] border border-black/15 px-4 text-[13px] dark:border-white/20">Stop</button>
     </form>
   </main>
 
@@ -318,12 +337,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     workspace, because a shell needs somewhere to open.
   --}}
   @if(activeWorkspaceId)
-    <section data-terminal hidden aria-label="Terminal" class="terminal-panel">
-      <div data-terminal-host tabindex="0" class="terminal-host">
-        <div data-terminal-screen></div>
+    <section data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
+      <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
+        <div data-terminal-screen ref="termScreenBox"></div>
       </div>
     </section>
-    <button type="button" data-terminal-toggle aria-label="Toggle terminal" class="terminal-toggle">&gt;_</button>
+    <button type="button" data-terminal-toggle @click="toggleTerminal" aria-label="Toggle terminal" class="terminal-toggle">&gt;_</button>
   @endif
 </div>
 
@@ -525,6 +544,34 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const diffFiles = state([])
   const diffPatch = state('')
 
+  const sessionId = Number(activeSessionId) || 0
+
+  // The session's own state string, not a boolean: a turn blocked on an
+  // approval is still in flight, and collapsing that to "not running" once
+  // made a session waiting on *you* look idle. Seeded from the server render;
+  // the chip, Send/Stop and the revert buttons all bind to it.
+  const uiState = state(sessionState || 'idle')
+  const uiBusy = derived(() => uiState() === 'running' || uiState() === 'awaiting-approval')
+  // Stop hides the moment it is clicked, before the log settles the turn.
+  const stopPressed = state(false)
+  function setSessionState(next) {
+    batch(() => {
+      uiState.set(next)
+      stopPressed.set(false)
+    })
+  }
+
+  // The decision this session is blocked on. Zero means none; the panel's
+  // :hidden and the tool name track these two.
+  const approvalId = state(pendingApproval ? pendingApproval.approvalId : 0)
+  const approvalTool = state(pendingApproval ? pendingApproval.toolName : '')
+
+  const diffOpen = state(false)
+  const termOpen = state(false)
+  // The checkpoint currently being restored; its button reads this for its
+  // label and disabled state.
+  const revertingId = state(0)
+
   // A global shortcut, so harness is reachable without finding its window.
   //
   // Registered from the page rather than from the Zig host because the handler
@@ -543,7 +590,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         window.craft?.window?.focus?.()
         // Someone who summoned the window deliberately should land ready to
         // type, not hunting for the input.
-        document.querySelector('[data-composer] [data-prompt]')?.focus()
+        useRef('promptBox').current?.focus()
       })
     }
   }
@@ -584,16 +631,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // Reverting throws away work on disk, so it asks first. The confirmation
   // names what will happen rather than saying "are you sure": the destructive
   // part is the files created since, which is exactly what people forget.
-  document.addEventListener('click', async (event) => {
-    const button = event.target.closest?.('[data-revert]')
-    if (!button) return
-
-    const checkpointId = Number(button.dataset.revert)
-    if (!checkpointId) return
+  // Each revert button calls this through its own @click, with its checkpoint.
+  async function revertTurn(checkpointId) {
+    if (!checkpointId || !sessionId) return
     if (!window.confirm('Put the workspace back to before this turn? Files the agent created since will be deleted.')) return
 
-    button.disabled = true
-    button.textContent = 'Reverting…'
+    revertingId.set(checkpointId)
 
     // Waits for `checkpoint.restored`, not for the dispatch ack.
     // `checkpoint.reverted` only means the revert was accepted; the git work
@@ -611,7 +654,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     // Reloaded rather than patched: the diff, the turn list and the workspace
     // have all moved, and re-deriving that here would be a second renderer.
     window.location.reload()
-  })
+  }
 
   // Set by the transcript's socket once it opens, so a sidebar command reuses
   // it rather than opening a second connection to the same server.
@@ -652,7 +695,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     })
   }
 
-  document.addEventListener('spaceAction', async (event) => {
+  // The `[data-space]` lookups below reach into the Sidebar component's own
+  // rendering — panels this page did not draw, so refs cannot name them. A
+  // query scoped to the component's public data attributes is the boundary.
+  useEventListener('spaceAction', async (event) => {
     const { spaceId, role } = event.detail || {}
     if (role !== 'action' || !spaceId) return
 
@@ -668,14 +714,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
     await sendCommand({ type: 'session.create', workspaceId, driverKind: 'claude' })
     window.location.assign(`/?profile=${encodeURIComponent(spaceId)}`)
-  })
+  }, { target: document })
 
-  document.addEventListener('spaceAdd', async () => {
+  useEventListener('spaceAdd', async () => {
     const name = window.prompt('Name this profile')
     if (!name || !name.trim()) return
     await sendCommand({ type: 'profile.create', name: name.trim() })
     window.location.reload()
-  })
+  }, { target: document })
 
   // Spaces beyond the active one's neighbours render without their rows, so
   // arriving at one has to fetch it. Navigating rather than rebuilding rows in
@@ -683,7 +729,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // and a second implementation here would be one more thing to keep in step.
   // `spaceChange`, unprefixed: stx's defineEmits dispatches the bare event name
   // on the component's scope element, and it bubbles to here.
-  document.addEventListener('spaceChange', (event) => {
+  useEventListener('spaceChange', (event) => {
     const id = event.detail?.id
     if (!id) return
     // Repaint first: a swipe should feel like the window changed colour with
@@ -693,57 +739,214 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     // Only a deferred panel needs the round trip; a neighbour is already drawn.
     if (!panel || !panel.hasAttribute('data-space-deferred')) return
     window.location.assign(`/?profile=${encodeURIComponent(id)}`)
-  })
+  }, { target: document })
 
   // The diff panel: what the agent changed on disk, which is what a transcript
   // cannot tell you. Fetched on open and on demand, never polled — a repository
   // read is a subprocess, and a transcript nobody is reviewing should not pay
   // for one every few seconds.
-  const diffToggle = document.querySelector('[data-diff-toggle]')
-  const diffPanel = document.querySelector('[data-diff]')
-  if (diffToggle && diffPanel) {
-    async function loadDiff(sessionId) {
-      batch(() => {
-        diffStatus.set('Loading…')
-        diffFiles.set([])
-        diffPatch.set('')
-      })
+  async function loadDiff() {
+    batch(() => {
+      diffStatus.set('Loading…')
+      diffFiles.set([])
+      diffPatch.set('')
+    })
 
-      let diff
-      try {
-        diff = await (await fetch(`/s/${sessionId}/diff`)).json()
-      }
-      catch {
-        diffStatus.set('Could not read the workspace.')
-        return
-      }
-
-      if (diff.error) { diffStatus.set(diff.error); return }
-      if (!diff.isRepository) { diffStatus.set('This workspace is not a git repository.'); return }
-      if (diff.files.length === 0) { diffStatus.set('No uncommitted changes.'); return }
-
-      // Which comparison this is, said plainly: a count is easy to over-trust,
-      // and "what this session changed" and "what is uncommitted here" are
-      // different claims.
-      const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
-      batch(() => {
-        diffStatus.set(diff.scope === 'session'
-          ? `${count} since this session started`
-          : `${count} in the working tree`)
-        diffFiles.set(diff.files)
-        diffPatch.set(diff.patch)
-      })
+    let diff
+    try {
+      diff = await (await fetch(`/s/${sessionId}/diff`)).json()
+    }
+    catch {
+      diffStatus.set('Could not read the workspace.')
+      return
     }
 
-    diffToggle.addEventListener('click', () => {
-      const opening = diffPanel.hidden
-      diffPanel.hidden = !opening
-      diffToggle.setAttribute('aria-expanded', String(opening))
-      if (opening && sessionId) loadDiff(sessionId)
+    if (diff.error) { diffStatus.set(diff.error); return }
+    if (!diff.isRepository) { diffStatus.set('This workspace is not a git repository.'); return }
+    if (diff.files.length === 0) { diffStatus.set('No uncommitted changes.'); return }
+
+    // Which comparison this is, said plainly: a count is easy to over-trust,
+    // and "what this session changed" and "what is uncommitted here" are
+    // different claims.
+    const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
+    batch(() => {
+      diffStatus.set(diff.scope === 'session'
+        ? `${count} since this session started`
+        : `${count} in the working tree`)
+      diffFiles.set(diff.files)
+      diffPatch.set(diff.patch)
     })
   }
 
-  const sessionId = Number(activeSessionId) || 0
+  function toggleDiff() {
+    diffOpen.update(open => !open)
+    if (diffOpen() && sessionId) loadDiff()
+  }
+
+  // ── The live wire ─────────────────────────────────────────────────────
+  // Set by connectLiveSession once the socket and codec exist. Everything
+  // that talks to the server — command dispatch, terminal frames — goes
+  // through it, so the template handlers above can be plain top-level
+  // functions the binding scope can see.
+  let sendFrame = () => false
+
+  // A command id the server can deduplicate on. Every dispatch carries one,
+  // so a retry after a dropped ack replays the receipt rather than starting a
+  // second agent run.
+  let commandCounter = 0
+  function dispatch(command) {
+    sendFrame({
+      t: 'dispatch',
+      envelope: {
+        id: `web_${sessionId}_${Date.now().toString(36)}_${++commandCounter}`,
+        at: Date.now(),
+        command,
+      },
+    })
+  }
+
+  // A turn started on this page is a `liveTurns` entry; the `:for` template
+  // in the markup renders it. Deltas and tool rows are signal updates on the
+  // newest entry — no node building here, and the prompt/tool names go
+  // through `:text` bindings, which assign text, never markup.
+  //
+  // Follow the tail after the bindings have painted: their effects are
+  // registered before this script's updates run, but the DOM write lands in
+  // the same flush, so the scroll waits a frame.
+  function followTail() {
+    requestAnimationFrame(() => {
+      const transcript = useRef('transcriptBox').current
+      if (transcript) transcript.scrollTop = transcript.scrollHeight
+    })
+  }
+
+  // The newest client-started turn, or the server-rendered live turn's
+  // signals while none has begun yet.
+  function updateNewestTurn(change) {
+    liveTurns.update(turns => turns.map((turn, index) =>
+      index === turns.length - 1 ? change(turn) : turn))
+  }
+
+  // The composer. Without this the page could watch a session but not drive
+  // one, which is most of the point of a control surface. Cleared
+  // optimistically: the turn appears when `turn.started` comes back from the
+  // server, so the transcript still only ever shows what the log contains.
+  function sendPrompt() {
+    const box = useRef('promptBox').current
+    const text = (box?.value ?? '').trim()
+    if (!text || !sessionId) return
+    box.value = ''
+    dispatch({ type: 'session.turn.start', sessionId, text })
+  }
+
+  function promptKeydown(event) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault()
+      event.target.form?.requestSubmit()
+    }
+  }
+
+  // Optimistic: Stop hides immediately through `stopPressed`, but the turn is
+  // not over until the log says so — `turn.interrupted` is what settles it.
+  function stopTurn() {
+    if (!sessionId) return
+    stopPressed.set(true)
+    dispatch({ type: 'session.turn.interrupt', sessionId })
+  }
+
+  // Answered once: the panel hides the moment the decision is made, because
+  // leaving it up invites a second click answering an id the server retired.
+  function respondToApproval(allow) {
+    const id = approvalId()
+    if (!id || !sessionId) return
+    approvalId.set(0)
+    dispatch({
+      type: 'session.approval.respond',
+      sessionId,
+      approvalId: id,
+      decision: allow ? 'allowed' : 'denied',
+      scope: 'once',
+    })
+  }
+  function approveTool() { respondToApproval(true) }
+  function denyTool() { respondToApproval(false) }
+
+  // ── Terminal (M6): a shell in the session's workspace ─────────────────
+  // The server owns the PTY and streams bytes as term-data frames; the page
+  // renders them through @harness/ansi's grid and sends keystrokes back
+  // whole. Local-only by server policy, so a paired phone sees the button do
+  // nothing beyond the refusal notice.
+  let term = null
+  let termId = null
+  let termToHtml = null
+  let termRenderQueued = false
+
+  function renderTerm() {
+    const screen = useRef('termScreenBox').current
+    if (termRenderQueued || !term || !termToHtml || !screen) return
+    termRenderQueued = true
+    requestAnimationFrame(() => {
+      termRenderQueued = false
+      screen.innerHTML = termToHtml(term.snapshot())
+      screen.parentElement.scrollTop = screen.parentElement.scrollHeight
+    })
+  }
+
+  // Named keys → the bytes a terminal expects. Anything printable goes as-is.
+  const TERM_KEYS = {
+    'Enter': '\r',
+    'Backspace': '\x7F',
+    'Tab': '\t',
+    'Escape': '\x1B',
+    'ArrowUp': '\x1B[A',
+    'ArrowDown': '\x1B[B',
+    'ArrowRight': '\x1B[C',
+    'ArrowLeft': '\x1B[D',
+  }
+
+  // Typed-ahead keys arrive before term-opened does — the PTY takes a
+  // moment to spawn — and dropping them loses the first characters of the
+  // first command. Held here, flushed the moment the terminal binds.
+  let termPendingInput = ''
+
+  function termSend(data) {
+    if (termId === null) {
+      termPendingInput += data
+      return
+    }
+    sendFrame({ t: 'term-input', termId, data })
+  }
+
+  function toggleTerminal() {
+    termOpen.update(open => !open)
+    if (!termOpen()) return
+    if (termId === null && term === null)
+      sendFrame({ t: 'term-open', workspaceId: Number(activeWorkspaceId) || 0, cols: 100, rows: 24 })
+    useRef('termHostBox').current?.focus()
+  }
+
+  function termKeydown(event) {
+    if (event.metaKey) return
+    let data = null
+    if (event.ctrlKey && event.key.length === 1) {
+      const code = event.key.toLowerCase().charCodeAt(0)
+      if (code >= 97 && code <= 122) data = String.fromCharCode(code - 96)
+    }
+    else if (TERM_KEYS[event.key]) {
+      data = TERM_KEYS[event.key]
+    }
+    else if (event.key.length === 1) {
+      data = event.key
+    }
+    if (data === null) return
+    event.preventDefault()
+    termSend(data)
+  }
+
+  function termPaste(event) {
+    event.preventDefault()
+    termSend(event.clipboardData.getData('text'))
+  }
 
   // The page speaks CBOR to the socket, so it needs the same codec the server
   // uses. It arrives as a module rather than as assumed globals — the island
@@ -757,131 +960,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     const socket = new WebSocket(serverUrl)
     socket.binaryType = 'arraybuffer'
     liveSocket = socket
-
-    const transcript = document.querySelector('[data-transcript]')
-    const stateNode = document.querySelector('[data-session-state]')
-    const approval = document.querySelector('[data-approval]')
-
-    // A turn started on this page is a `liveTurns` entry; the `:for` template
-    // in the markup renders it. Deltas and tool rows are signal updates on the
-    // newest entry — no node building here, and the prompt/tool names go
-    // through `:text` bindings, which assign text, never markup.
-    //
-    // Follow the tail after the bindings have painted: their effects are
-    // registered before this script's updates run, but the DOM write lands in
-    // the same flush, so the scroll waits a frame.
-    function followTail() {
-      requestAnimationFrame(() => {
-        transcript.scrollTop = transcript.scrollHeight
-      })
+    termToHtml = toHtml
+    sendFrame = (frame) => {
+      socket.send(encode(frame))
+      return true
     }
-
-    // The newest client-started turn, or null while the server-rendered live
-    // turn is still the one streaming.
-    function updateNewestTurn(change) {
-      liveTurns.update(turns => turns.map((turn, index) =>
-        index === turns.length - 1 ? change(turn) : turn))
-    }
-
-    // A command id the server can deduplicate on. Every dispatch carries one,
-    // so a retry after a dropped ack replays the receipt rather than starting a
-    // second agent run.
-    let commandCounter = 0
-    function dispatch(command) {
-      socket.send(encode({
-        t: 'dispatch',
-        envelope: {
-          id: `web_${sessionId}_${Date.now().toString(36)}_${++commandCounter}`,
-          at: Date.now(),
-          command,
-        },
-      }))
-    }
-
-    // The composer. Without this the page could watch a session but not drive
-    // one, which is most of the point of a control surface.
-    const composer = document.querySelector('[data-composer]')
-    const prompt = composer?.querySelector('[data-prompt]')
-    composer?.addEventListener('submit', (event) => {
-      event.preventDefault()
-      const text = prompt.value.trim()
-      if (!text) return
-      // Cleared optimistically: the turn appears when `turn.started` comes back
-      // from the server, so the transcript still only ever shows what the log
-      // actually contains.
-      prompt.value = ''
-      dispatch({ type: 'session.turn.start', sessionId, text })
-    })
-
-    // Enter sends, Shift+Enter makes a newline — the convention every chat
-    // surface uses, and the textarea would otherwise only ever insert newlines.
-    prompt?.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-        event.preventDefault()
-        composer.requestSubmit()
-      }
-    })
-
-    const sendButton = composer?.querySelector('[data-send]')
-    const stopButton = composer?.querySelector('[data-stop]')
-
-    /**
-     * Show Stop while a turn runs, Send otherwise.
-     *
-     * Driven from the session state rather than from the click, so a turn
-     * started elsewhere — the CLI, the desktop window, another tab — puts this
-     * page into the same state. There is one execution boundary; the UI should
-     * reflect it rather than track its own idea of what is running.
-     */
-    /**
-     * `state` is the session's own state string, not a boolean.
-     *
-     * A turn blocked on an approval is still in flight, and collapsing that to
-     * "not running" was wrong twice over: it overwrote the server's
-     * `awaiting-approval` with `idle`, so a session waiting on *you* looked
-     * like a session doing nothing, and it offered Send instead of Stop on a
-     * turn that had not finished.
-     */
-    const IN_FLIGHT = new Set(['running', 'awaiting-approval'])
-
-    function setRunning(state) {
-      const busy = IN_FLIGHT.has(state)
-      if (stateNode) stateNode.textContent = state
-      if (sendButton) sendButton.hidden = busy
-      if (stopButton) stopButton.hidden = !busy
-      // A revert mid-turn is refused by the reducer; hiding the button says so
-      // before the click rather than after.
-      for (const button of document.querySelectorAll('[data-revert]')) button.hidden = busy
-    }
-    // Seeded from what the server rendered, which is the whole session state
-    // and not just whether a turn is running.
-    setRunning(stateNode?.textContent.trim() || 'idle')
-
-    stopButton?.addEventListener('click', () => {
-      // Optimistic: the button goes away immediately, but the turn is not over
-      // until the log says so. `turn.interrupted` is what actually settles it.
-      stopButton.hidden = true
-      dispatch({ type: 'session.turn.interrupt', sessionId })
-    })
-
-    function respondToApproval(allow) {
-      const approvalId = Number(approval.dataset.approvalId)
-      if (!approvalId) return
-      // Hidden immediately: the decision is made, and leaving the panel up
-      // invites a second click that answers an id the server has retired.
-      approval.hidden = true
-      approval.removeAttribute('data-approval-id')
-      dispatch({
-        type: 'session.approval.respond',
-        sessionId,
-        approvalId,
-        decision: allow ? 'allowed' : 'denied',
-        scope: 'once',
-      })
-    }
-
-    approval?.querySelector('[data-approve]')?.addEventListener('click', () => respondToApproval(true))
-    approval?.querySelector('[data-deny]')?.addEventListener('click', () => respondToApproval(false))
 
     socket.addEventListener('open', () => {
       // Resume from the last sequence the server rendered into this page, so a
@@ -894,100 +977,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       socket.send(encode({ t: 'subscribe', sessionId, sinceSeq: Number(sinceSeq) || 0 }))
     })
 
-    // ── Terminal (M6): a shell in the session's workspace ────────────────
-    // The server owns the PTY and streams bytes as term-data frames; the page
-    // renders them through @harness/ansi's grid — the same renderer a settled
-    // transcript would use — and sends keystrokes back whole. Local-only by
-    // server policy, so a paired phone sees the button do nothing beyond the
-    // refusal notice.
-    const termWorkspaceId = Number(activeWorkspaceId) || 0
-    let term = null
-    let termId = null
-    let termScreen = null
-    let termPanel = null
-    let termRenderQueued = false
-
-    function renderTerm() {
-      if (termRenderQueued || !term || !termScreen) return
-      termRenderQueued = true
-      requestAnimationFrame(() => {
-        termRenderQueued = false
-        termScreen.innerHTML = toHtml(term.snapshot())
-        termScreen.parentElement.scrollTop = termScreen.parentElement.scrollHeight
-      })
-    }
-
-    // Named keys → the bytes a terminal expects. Anything printable goes as-is.
-    const TERM_KEYS = {
-      'Enter': '\r',
-      'Backspace': '\x7F',
-      'Tab': '\t',
-      'Escape': '\x1B',
-      'ArrowUp': '\x1B[A',
-      'ArrowDown': '\x1B[B',
-      'ArrowRight': '\x1B[C',
-      'ArrowLeft': '\x1B[D',
-    }
-
-    // Typed-ahead keys arrive before term-opened does — the PTY takes a
-    // moment to spawn — and dropping them loses the first characters of the
-    // first command. Held here, flushed the moment the terminal binds.
-    let termPendingInput = ''
-
-    function termSend(data) {
-      if (termId === null) {
-        termPendingInput += data
-        return
-      }
-      socket.send(encode({ t: 'term-input', termId, data }))
-    }
-
-    // The panel and toggle are server-rendered (see the markup above); the
-    // island only looks them up and wires bytes and keys.
-    termPanel = document.querySelector('[data-terminal]')
-    termScreen = document.querySelector('[data-terminal-screen]')
-    const termHost = document.querySelector('[data-terminal-host]')
-
-    function toggleTerminal() {
-      termPanel.hidden = !termPanel.hidden
-      if (termPanel.hidden) return
-      if (termId === null && term === null)
-        socket.send(encode({ t: 'term-open', workspaceId: termWorkspaceId, cols: 100, rows: 24 }))
-      termHost.focus()
-    }
-
-    if (termPanel && termHost) {
-      termHost.addEventListener('keydown', (event) => {
-        if (event.metaKey) return
-        let data = null
-        if (event.ctrlKey && event.key.length === 1) {
-          const code = event.key.toLowerCase().charCodeAt(0)
-          if (code >= 97 && code <= 122) data = String.fromCharCode(code - 96)
-        }
-        else if (TERM_KEYS[event.key]) {
-          data = TERM_KEYS[event.key]
-        }
-        else if (event.key.length === 1) {
-          data = event.key
-        }
-        if (data === null) return
-        event.preventDefault()
-        termSend(data)
-      })
-      termHost.addEventListener('paste', (event) => {
-        event.preventDefault()
-        termSend(event.clipboardData.getData('text'))
-      })
-      document.querySelector('[data-terminal-toggle]')?.addEventListener('click', toggleTerminal)
-    }
-
     socket.addEventListener('message', (event) => {
       const frame = decode(new Uint8Array(event.data))
       if (frame?.t === 'term-opened') {
         termId = frame.termId
         term = new Terminal({ cols: frame.cols, rows: frame.rows })
         if (termPendingInput) {
-          socket.send(encode({ t: 'term-input', termId, data: termPendingInput }))
+          sendFrame({ t: 'term-input', termId, data: termPendingInput })
           termPendingInput = ''
         }
         renderTerm()
@@ -1025,7 +1021,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             tools: [],
             response: '',
           }])
-          setRunning('running')
+          setSessionState('running')
           followTail()
         }
       }
@@ -1065,24 +1061,27 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
-        setRunning('idle')
+        setSessionState('idle')
       }
       else if (payload.type === 'session.failed') {
         // A failed turn is over too. Leaving Stop up would offer to interrupt
-        // something that already stopped.
-        setRunning('idle')
-        if (stateNode) stateNode.textContent = 'failed'
+        // something that already stopped; 'failed' is not busy, so the
+        // bindings put Send back while the chip says what happened.
+        setSessionState('failed')
       }
       else if (payload.type === 'approval.requested') {
-        setRunning('awaiting-approval')
-        approval.querySelector('[data-approval-tool]').textContent = payload.toolName
-        approval.hidden = false
-        approval.dataset.approvalId = String(payload.approvalId)
+        batch(() => {
+          setSessionState('awaiting-approval')
+          approvalId.set(payload.approvalId)
+          approvalTool.set(payload.toolName)
+        })
       }
       else if (payload.type === 'approval.resolved') {
         // The turn resumes; it did not end.
-        setRunning('running')
-        approval.hidden = true
+        batch(() => {
+          setSessionState('running')
+          approvalId.set(0)
+        })
       }
     })
   }
