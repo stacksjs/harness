@@ -336,6 +336,28 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     §11). Hidden until toggled; absent entirely when the session has no
     workspace, because a shell needs somewhere to open.
   --}}
+  {{--
+    Naming a new profile. Replaces window.prompt: the name arrives through a
+    form the page owns, so it can be styled, cancelled and focused like
+    everything else. Opened by the sidebar's spaceAdd event.
+  --}}
+  <div data-profile-modal hidden :hidden="!profileModalOpen()" @click.self="closeProfileModal" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/40">
+    <form @submit.prevent="createProfile" class="w-[320px] rounded-[10px] bg-white p-4 shadow-xl dark:bg-neutral-900">
+      <label class="mb-2 block text-[13px] font-medium" for="profile-name">Name this profile</label>
+      <input
+        id="profile-name"
+        ref="profileNameBox"
+        type="text"
+        autocomplete="off"
+        class="mb-3 w-full rounded-[8px] border border-black/10 bg-white px-3 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-neutral-950"
+      />
+      <div class="flex justify-end gap-2">
+        <button type="button" @click="closeProfileModal" class="rounded-[6px] border border-black/10 px-3 py-1 text-[12px] dark:border-white/15">Cancel</button>
+        <button type="submit" class="rounded-[6px] bg-neutral-900 px-3 py-1 text-[12px] text-white dark:bg-white dark:text-neutral-900">Create</button>
+      </div>
+    </form>
+  </div>
+
   @if(activeWorkspaceId)
     <section data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
       <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
@@ -347,6 +369,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 </div>
 
 <style>
+  /* `hidden` must always mean hidden. A display utility on the same element
+     (the modal's `flex`) is an author rule and outranks the UA sheet's
+     [hidden] { display: none }, which left a "hidden" overlay covering the
+     page and swallowing every click — caught by the page drive. */
+  [hidden] { display: none !important; }
+
   /* Three states, three colours: running, succeeded, failed. A tool that is
      still going must not look like one that finished, or a hung command reads
      as a completed one. */
@@ -498,6 +526,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   catch {}
 
   // Second pass, once the sidebar controller has mounted: did it bind?
+  // A raw setTimeout on purpose: useTimeout would make this script
+  // signal-bearing, stx would defer it to the mount queue, and the patch
+  // above would install after the Sidebar's mount — too late to count.
   setTimeout(() => {
     fetch('/native-probe', {
       method: 'POST',
@@ -568,6 +599,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
   const diffOpen = state(false)
   const termOpen = state(false)
+  // The "name this profile" form. Replaces window.prompt: the name arrives
+  // through a small form the page owns, so it can be styled and cancelled
+  // like everything else.
+  const profileModalOpen = state(false)
   // The checkpoint currently being restored; its button reads this for its
   // label and disabled state.
   const revertingId = state(0)
@@ -634,7 +669,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // Each revert button calls this through its own @click, with its checkpoint.
   async function revertTurn(checkpointId) {
     if (!checkpointId || !sessionId) return
-    if (!window.confirm('Put the workspace back to before this turn? Files the agent created since will be deleted.')) return
+    const confirmed = await stxConfirm(
+      'Put the workspace back to before this turn? Files the agent created since will be deleted.',
+      { type: 'warning', confirmText: 'Revert', cancelText: 'Keep my files' },
+    )
+    if (!confirmed) return
 
     revertingId.set(checkpointId)
 
@@ -645,7 +684,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     const restored = new Promise((resolve) => {
       revertWaiters.push(resolve)
       // A revert that never reports back should still let go of the page.
-      setTimeout(resolve, 15000)
+      useTimeout(resolve, 15000)
     })
 
     await sendCommand({ type: 'session.checkpoint.revert', sessionId, checkpointId })
@@ -653,7 +692,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
     // Reloaded rather than patched: the diff, the turn list and the workspace
     // have all moved, and re-deriving that here would be a second renderer.
-    window.location.reload()
+    refresh()
   }
 
   // Set by the transcript's socket once it opens, so a sidebar command reuses
@@ -682,7 +721,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       liveSocket.send(encode({ t: 'dispatch', envelope }))
       // The island's own handler will see the ack; a short settle is enough,
       // and the command is idempotent by id if the reload races it.
-      return new Promise(resolve => setTimeout(() => resolve(true), 150))
+      return new Promise(resolve => useTimeout(() => resolve(true), 150))
     }
 
     return new Promise((resolve) => {
@@ -691,7 +730,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       socket.addEventListener('open', () => socket.send(encode({ t: 'dispatch', envelope })))
       socket.addEventListener('message', () => { socket.close(); resolve(true) })
       // A dispatch that never acks must not leave the page waiting forever.
-      setTimeout(() => { try { socket.close() } catch {} ; resolve(false) }, 4000)
+      useTimeout(() => { try { socket.close() } catch {} ; resolve(false) }, 4000)
     })
   }
 
@@ -708,20 +747,33 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(spaceId)}"]`)
     const workspaceId = Number(panel?.querySelector('[data-space-pinned-item]')?.dataset.pinnedId)
     if (!workspaceId) {
-      window.alert('This profile has no workspace yet. Add one with `./buddy harness:run --path <dir>`.')
+      stxAlert('This profile has no workspace yet. Add one with `./buddy harness:run --path <dir>`.')
       return
     }
 
     await sendCommand({ type: 'session.create', workspaceId, driverKind: 'claude' })
-    window.location.assign(`/?profile=${encodeURIComponent(spaceId)}`)
+    navigate(`/?profile=${encodeURIComponent(spaceId)}`)
   }, { target: document })
 
-  useEventListener('spaceAdd', async () => {
-    const name = window.prompt('Name this profile')
-    if (!name || !name.trim()) return
-    await sendCommand({ type: 'profile.create', name: name.trim() })
-    window.location.reload()
+  useEventListener('spaceAdd', () => {
+    profileModalOpen.set(true)
+    // Focus after the binding has shown the form.
+    requestAnimationFrame(() => useRef('profileNameBox').current?.focus())
   }, { target: document })
+
+  function closeProfileModal() {
+    profileModalOpen.set(false)
+  }
+
+  async function createProfile() {
+    const box = useRef('profileNameBox').current
+    const name = (box?.value ?? '').trim()
+    if (!name) return
+    profileModalOpen.set(false)
+    box.value = ''
+    await sendCommand({ type: 'profile.create', name })
+    refresh()
+  }
 
   // Spaces beyond the active one's neighbours render without their rows, so
   // arriving at one has to fetch it. Navigating rather than rebuilding rows in
@@ -738,7 +790,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(id)}"]`)
     // Only a deferred panel needs the round trip; a neighbour is already drawn.
     if (!panel || !panel.hasAttribute('data-space-deferred')) return
-    window.location.assign(`/?profile=${encodeURIComponent(id)}`)
+    navigate(`/?profile=${encodeURIComponent(id)}`)
   }, { target: document })
 
   // The diff panel: what the agent changed on disk, which is what a transcript
@@ -1006,7 +1058,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       }
       if (frame?.t === 'term-error') {
         // The one the server sends a paired phone: terminals are local-only.
-        window.alert(frame.message)
+        stxAlert(frame.message)
         return
       }
       if (frame?.t !== 'event') return
