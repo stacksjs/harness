@@ -14,6 +14,10 @@
         "pickier": "0.1.50",
       },
     },
+    "packages/ansi": {
+      "name": "@harness/ansi",
+      "version": "0.0.0",
+    },
     "packages/client": {
       "name": "@harness/client",
       "version": "0.0.0",
@@ -87,6 +91,8 @@
     "@babel/runtime": ["@babel/runtime@7.29.7", "", {}, "sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw=="],
 
     "@cwcss/crosswind": ["@cwcss/crosswind@0.2.16", "", { "dependencies": { "@stacksjs/clapp": "^0.2.0", "bunfig": "^0.15.17" }, "bin": { "crosswind": "./dist/cli.js" } }, "sha512-QgSTpcnt1seUQF2++taD5wk/H1lE3wSaybd+i9iP/syQTB2w/v2aM2U9SzYYe2ZcHA3Uxa1Sn/YvhcmHeFfuCA=="],
+
+    "@harness/ansi": ["@harness/ansi@workspace:packages/ansi"],
 
     "@harness/client": ["@harness/client@workspace:packages/client"],
 
