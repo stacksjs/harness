@@ -63,7 +63,7 @@ export class SqliteStore implements EngineStore {
     )
     const insert = this.db.prepare(
       `INSERT INTO events (session_id, turn_id, seq, type, payload, command_id, at, created_at, updated_at, uuid)
-       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
     )
 
     const out: HarnessEvent[] = []
@@ -165,7 +165,7 @@ export class SqliteStore implements EngineStore {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO command_receipts (command_id, seqs, at, created_at, updated_at, uuid)
-         VALUES (?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
+        VALUES (?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
       )
       .run(receipt.commandId, JSON.stringify(receipt.seqs), receipt.at)
   }

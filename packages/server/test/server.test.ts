@@ -451,6 +451,20 @@ describe('terminals over the socket', () => {
     await new Promise(resolve => setTimeout(resolve, 200))
     expect(await sttySize('sz2')).toBe('30x96')
 
+    // The slave must be the shell's *controlling* terminal, not merely its
+    // stdio — job control and ^C-to-the-foreground-group depend on it. A
+    // shell without one reports tpgid 0 (macOS) or -1 (Linux).
+    client.send({ t: 'term-input', termId: opened.termId, data: 'echo "jc-$(ps -o tpgid= -p $$ | tr -d \' \')"\n' })
+    let jc = ''
+    for (let i = 0; i < 60; i++) {
+      const frame = await client.next()
+      if (frame?.t === 'term-data' && frame.termId === opened.termId) jc += frame.data
+      if (frame?.t === 'timeout') break
+      if (/jc-\S+\r?\n/.test(jc.replace(/\x1B\[[0-9;?]*[a-z]/gi, ''))) break
+    }
+    const tpgid = Number(jc.replace(/\x1B\[[0-9;?]*[a-z]/gi, '').match(/jc-(-?\d+)/)?.[1] ?? 0)
+    expect(tpgid).toBeGreaterThan(0)
+
     client.send({ t: 'term-close', termId: opened.termId })
     client.close()
   })

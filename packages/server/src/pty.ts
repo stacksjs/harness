@@ -28,6 +28,7 @@
 
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import process from 'node:process'
 
@@ -71,33 +72,153 @@ interface NativeShim {
 }
 
 /**
- * Compiled once, the first time a terminal opens; null forever after the
- * first failure, so a machine where TinyCC cannot link just uses script(1)
- * without retrying per terminal.
+ * Resolved once, the first time a terminal opens; null forever after the
+ * first failure, so a machine where neither strategy works just uses
+ * script(1) without retrying per terminal.
  */
 let nativeShim: NativeShim | null | undefined
+
+/**
+ * macOS: the C shim, because Apple arm64 passes variadic args on the stack
+ * and fixed-signature FFI puts them in registers — ioctl/fcntl/open can only
+ * be called correctly from compiled C, and bun:ffi's bundled TinyCC makes
+ * that a runtime compile instead of a build step.
+ */
+async function loadDarwinShim(): Promise<NativeShim['shim']> {
+  const { cc } = await import('bun:ffi')
+  const { symbols } = cc({
+    source: join(import.meta.dir, 'pty-shim.c'),
+    symbols: {
+      harness_open_pty_master: { args: [], returns: 'int' },
+      harness_open_pty_slave: { args: ['int'], returns: 'int' },
+      harness_set_winsize: { args: ['int', 'int', 'int', 'u64'], returns: 'int' },
+      harness_set_nonblocking: { args: ['int', 'int'], returns: 'int' },
+      harness_spawn_on_pty: { args: ['int', 'ptr', 'ptr', 'ptr', 'int'], returns: 'int' },
+      harness_poll_exit: { args: ['int'], returns: 'int' },
+    },
+  })
+  return symbols as unknown as NativeShim['shim']
+}
+
+/**
+ * Linux: plain dlopen, no TinyCC. The variadic trap is Apple-specific — SysV
+ * x86_64 and standard AAPCS64 pass variadic args in registers like fixed
+ * ones, so ioctl/fcntl resolve correctly through FFI. (TinyCC was tried
+ * first: it wants the libc.so dev symlink runtime-only systems lack, and
+ * where the symlink existed its x86_64 codegen crashed the process — a
+ * segfault no try/catch sees.) The opaque posix_spawn structs are allocated
+ * as oversized buffers and initialised by libc itself, so their real layout
+ * never matters here.
+ */
+async function loadLinuxShim(): Promise<NativeShim['shim']> {
+  const { dlopen, FFIType, ptr, CString } = await import('bun:ffi')
+  const libc = dlopen(PLATFORM.libc, {
+    posix_openpt: { args: [FFIType.i32], returns: FFIType.i32 },
+    grantpt: { args: [FFIType.i32], returns: FFIType.i32 },
+    unlockpt: { args: [FFIType.i32], returns: FFIType.i32 },
+    ptsname: { args: [FFIType.i32], returns: FFIType.ptr },
+    open: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    close: { args: [FFIType.i32], returns: FFIType.i32 },
+    ioctl: { args: [FFIType.i32, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+    fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    posix_spawn_file_actions_init: { args: [FFIType.ptr], returns: FFIType.i32 },
+    posix_spawn_file_actions_addopen: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    posix_spawn_file_actions_adddup2: { args: [FFIType.ptr, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    posix_spawn_file_actions_addclose: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    posix_spawn_file_actions_addchdir_np: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+    posix_spawn_file_actions_destroy: { args: [FFIType.ptr], returns: FFIType.i32 },
+    posix_spawnattr_init: { args: [FFIType.ptr], returns: FFIType.i32 },
+    posix_spawnattr_setflags: { args: [FFIType.ptr, FFIType.i16], returns: FFIType.i32 },
+    posix_spawnattr_destroy: { args: [FFIType.ptr], returns: FFIType.i32 },
+    posix_spawn: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  }).symbols
+
+  const O_RDWR = 0x0002
+  const F_SETFL = 4
+  const WNOHANG = 1
+  const winsize = new Uint16Array(4)
+
+  return {
+    harness_open_pty_master: () => {
+      const fd = libc.posix_openpt(O_RDWR)
+      if (fd < 0) return -1
+      if (libc.grantpt(fd) !== 0 || libc.unlockpt(fd) !== 0) {
+        libc.close(fd)
+        return -1
+      }
+      return fd
+    },
+    harness_open_pty_slave: (master: number) => {
+      const path = libc.ptsname(master)
+      if (!path) return -1
+      return libc.open(ptr(cstr(new CString(path as never).toString())), O_RDWR)
+    },
+    harness_set_winsize: (fd: number, cols: number, rows: number, request: bigint) => {
+      winsize[0] = rows
+      winsize[1] = cols
+      winsize[2] = 0
+      winsize[3] = 0
+      return libc.ioctl(fd, request, ptr(winsize))
+    },
+    harness_set_nonblocking: (fd: number, flag: number) => libc.fcntl(fd, F_SETFL, flag),
+    harness_spawn_on_pty: (master: number, shell: unknown, cwd: unknown, envp: unknown, setsidFlag: number) => {
+      const slavePath = libc.ptsname(master)
+      if (!slavePath) return -1
+      const slaveBuf = cstr(new CString(slavePath as never).toString())
+      // Job control needs the slave as the child's *controlling* terminal,
+      // and glibc's spawn path never acquires one (verified: tpgid stayed 0).
+      // util-linux setsid(1) with -c is the exec wrapper that does it —
+      // setsid(), TIOCSCTTY on stdin (the slave, via the addopen below),
+      // then exec of the shell in the same pid, so waitpid still watches the
+      // right process. Without the binary, fall back to the SETSID attribute:
+      // a working shell, no job control.
+      const setsidBin = ['/usr/bin/setsid', '/bin/setsid'].find(p => existsSync(p))
+      const exePath = setsidBin ? cstr(setsidBin) : null
+      const dashC = cstr('-c')
+      // Oversized on purpose: glibc's real structs are smaller, and libc's
+      // own init/destroy are the only code that reads their layout.
+      const fa = new Uint8Array(512)
+      const attr = new Uint8Array(512)
+      if (libc.posix_spawn_file_actions_init(ptr(fa)) !== 0) return -1
+      libc.posix_spawn_file_actions_addopen(ptr(fa), 0, ptr(slaveBuf), O_RDWR, 0)
+      libc.posix_spawn_file_actions_adddup2(ptr(fa), 0, 1)
+      libc.posix_spawn_file_actions_adddup2(ptr(fa), 0, 2)
+      libc.posix_spawn_file_actions_addclose(ptr(fa), master)
+      libc.posix_spawn_file_actions_addchdir_np(ptr(fa), cwd as never)
+      libc.posix_spawnattr_init(ptr(attr))
+      libc.posix_spawnattr_setflags(ptr(attr), exePath ? 0 : setsidFlag)
+      const argvArr = exePath
+        ? new BigUint64Array([BigInt(ptr(exePath)), BigInt(ptr(dashC)), BigInt(shell as number), 0n])
+        : new BigUint64Array([BigInt(shell as number), 0n])
+      const pidOut = new Int32Array(1)
+      const rc = libc.posix_spawn(ptr(pidOut), exePath ? ptr(exePath) as never : shell as never, ptr(fa), ptr(attr), ptr(argvArr), envp as never)
+      libc.posix_spawn_file_actions_destroy(ptr(fa))
+      libc.posix_spawnattr_destroy(ptr(attr))
+      return rc === 0 ? (pidOut[0] ?? -1) : -1
+    },
+    harness_poll_exit: (pid: number) => {
+      const status = new Int32Array(1)
+      const rc = libc.waitpid(pid, ptr(status), WNOHANG)
+      if (rc !== pid) return -1
+      const raw = status[0] ?? 0
+      if ((raw & 0x7F) === 0) return (raw >> 8) & 0xFF
+      return 128 + (raw & 0x7F)
+    },
+  }
+}
 
 async function loadNativeShim(): Promise<NativeShim | null> {
   if (nativeShim !== undefined) return nativeShim
   try {
-    const { cc, dlopen, FFIType, ptr } = await import('bun:ffi')
-    const { symbols: shim } = cc({
-      source: join(import.meta.dir, 'pty-shim.c'),
-      symbols: {
-        harness_open_pty_master: { args: [], returns: 'int' },
-        harness_open_pty_slave: { args: ['int'], returns: 'int' },
-        harness_set_winsize: { args: ['int', 'int', 'int', 'u64'], returns: 'int' },
-        harness_set_nonblocking: { args: ['int', 'int'], returns: 'int' },
-        harness_spawn_on_pty: { args: ['int', 'ptr', 'ptr', 'ptr', 'int'], returns: 'int' },
-        harness_poll_exit: { args: ['int'], returns: 'int' },
-      },
-    })
+    const { dlopen, FFIType, ptr } = await import('bun:ffi')
+    const shim = process.platform === 'darwin' ? await loadDarwinShim() : await loadLinuxShim()
     const io = dlopen(PLATFORM.libc, {
       read: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i64 },
       write: { args: [FFIType.i32, FFIType.ptr, FFIType.u64], returns: FFIType.i64 },
       close: { args: [FFIType.i32], returns: FFIType.i32 },
     })
-    nativeShim = { shim: shim as unknown as NativeShim['shim'], io: io.symbols as unknown as NativeShim['io'], ptr: ptr as unknown as NativeShim['ptr'] }
+    nativeShim = { shim, io: io.symbols as unknown as NativeShim['io'], ptr: ptr as unknown as NativeShim['ptr'] }
   }
   catch {
     nativeShim = null

@@ -31,7 +31,7 @@ const TOOL_DOT = `
 [data-tool-state="failed"] .font-mono { opacity: 1; }
 @keyframes tool-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 /* Respect the setting rather than animating regardless - this dot sits in a
-   transcript people watch for minutes at a time. */
+  transcript people watch for minutes at a time. */
 @media (prefers-reduced-motion: reduce) { [data-tool-state="running"] .tool-dot { animation: none; } }
 `
 
@@ -71,7 +71,7 @@ const TERMINAL_PANEL = `
   font: 12px ui-monospace, monospace; cursor: pointer;
 }
 /* The measuring ruler: laid out in the host's font so its box is the truth
-   about cell size, but invisible and out of flow. */
+  about cell size, but invisible and out of flow. */
 .term-metric {
   position: absolute; visibility: hidden; white-space: pre;
 }

@@ -97,7 +97,7 @@ export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 </script>
 
-<div class="flex h-screen w-screen overflow-hidden bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+<div class="flex overflow-hidden h-screen w-screen text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-950">
   {{--
     `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
     component's own marker, and putting it on a wrapper made two elements claim
@@ -105,7 +105,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     palette was being written to this wrapper instead of the pane — it reached
     the pane by inheritance and worked by luck.
   --}}
-  <aside class="w-[280px] shrink-0 border-r border-black/5 dark:border-white/5" data-harness-sidebar>
+  <aside class="shrink-0 w-[280px] border-black/5 border-r dark:border-white/5" data-harness-sidebar>
     @if(hasProfiles)
       <Sidebar
         :spaces="spaces"
@@ -114,19 +114,19 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         :showSpaceAdd="true"
       />
     @else
-      <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+      <div class="flex flex-col gap-2 items-center justify-center px-6 h-full text-center">
         <p class="text-[13px] opacity-60">No profiles yet.</p>
         <p class="text-[12px] opacity-40">Create one with <code>./buddy profiles:create</code></p>
       </div>
     @endif
   </aside>
 
-  <main class="flex min-w-0 flex-1 flex-col">
-    <header class="flex h-[44px] shrink-0 items-center gap-3 border-b border-black/5 px-4 dark:border-white/5">
-      <span class="truncate text-[13px] font-medium">{{ sessionTitle }}</span>
+  <main class="flex flex-1 flex-col min-w-0">
+    <header class="flex gap-3 items-center shrink-0 px-4 h-[44px] border-b border-black/5 dark:border-white/5">
+      <span class="font-medium text-[13px] truncate">{{ sessionTitle }}</span>
       <span
         data-session-state
-        class="rounded-full px-2 py-[2px] text-[11px] leading-[14px] opacity-70"
+        class="px-2 py-[2px] leading-[14px] text-[11px] rounded-full opacity-70"
         :text="uiState()"
       >{{ sessionState }}</span>
       {{--
@@ -135,7 +135,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       --}}
       @if(sessionBranch)
         <span
-          class="truncate rounded-[5px] border border-black/10 px-[6px] py-[1px] font-mono text-[11px] leading-[15px] opacity-70 dark:border-white/15"
+          class="px-[6px] py-[1px] font-mono leading-[15px] text-[11px] truncate border border-black/10 rounded-[5px] dark:border-white/15 opacity-70"
           title="This session runs in its own worktree on {{ sessionBranch }}"
         >{{ sessionBranch }}</span>
       @endif
@@ -146,27 +146,27 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       <button
         type="button"
         data-diff-toggle
-        class="ml-auto rounded-[6px] border border-black/10 px-2 py-[3px] text-[12px] dark:border-white/15"
+        class="ml-auto px-2 py-[3px] text-[12px] border border-black/10 rounded-[6px] dark:border-white/15"
         aria-expanded="false"
         :aria-expanded="diffOpen() ? 'true' : 'false'"
         @click="toggleDiff"
       >Changes</button>
     </header>
 
-    <section data-diff hidden :hidden="!diffOpen()" class="max-h-[45%] shrink-0 overflow-y-auto border-b border-black/5 px-4 py-3 dark:border-white/5">
+    <section data-diff hidden :hidden="!diffOpen()" class="overflow-y-auto shrink-0 px-4 py-3 max-h-[45%] border-b border-black/5 dark:border-white/5">
       <div data-diff-status class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
       <ul data-diff-files class="mb-2 list-none">
         <template :for="file in diffFiles" :key="file.path">
-          <li class="flex items-center gap-[8px] py-[1px] text-[12px]" :data-diff-file="file.path">
-            <span class="w-[64px] shrink-0 text-[11px] uppercase opacity-50" :text="file.status"></span>
+          <li class="flex gap-[8px] items-center py-[1px] text-[12px]" :data-diff-file="file.path">
+            <span class="shrink-0 w-[64px] text-[11px] uppercase opacity-50" :text="file.status"></span>
             {{-- :text assigns text, never markup — a path is data, and a repository can contain anything. --}}
-            <span class="truncate font-mono" :text="file.path"></span>
+            <span class="font-mono truncate" :text="file.path"></span>
             {{-- Untracked files have no counts; showing +0 -0 implies an empty file. --}}
-            <span class="ml-auto shrink-0 font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
+            <span class="shrink-0 ml-auto font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
           </li>
         </template>
       </ul>
-      <pre data-diff-patch class="overflow-x-auto text-[12px] leading-[17px]" :text="diffPatch()"></pre>
+      <pre data-diff-patch class="overflow-x-auto leading-[17px] text-[12px]" :text="diffPatch()"></pre>
     </section>
 
     {{--
@@ -175,11 +175,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       you actually scroll. The live tail hydrates eagerly — it is the only part
       the socket writes to.
     --}}
-    <div data-transcript ref="transcriptBox" class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+    <div data-transcript ref="transcriptBox" class="overflow-y-auto flex-1 px-4 py-3 min-h-0">
       @foreach(settledTurns as turn)
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}">
-          <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
-          <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ turn.prompt }}</div>
+          <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
+          <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ turn.prompt }}</div>
           {{--
             What the agent ran, before what it said. These were in the log from
             the start and rendered nowhere, so the transcript showed a reply
@@ -187,14 +187,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           --}}
           <div data-tools>
           @foreach(turn.toolCalls as call)
-            <div class="mb-1 flex items-center gap-[6px] text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}">
+            <div class="flex gap-[6px] items-center mb-1 text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}">
               <span class="tool-dot" aria-hidden="true"></span>
               <span class="font-mono opacity-70">{{ call.name }}</span>
             </div>
           @endforeach
           </div>
-          <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
-          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response>{{ turn.response }}</div>
+          <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
+          <div class="leading-[20px] text-[13px] whitespace-pre-wrap" data-response>{{ turn.response }}</div>
           {{--
             Undo this turn. Only offered where a snapshot exists: a workspace
             that is not a repository has nothing to revert to, and a disabled
@@ -204,7 +204,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             <button
               type="button"
               data-revert="{{ turn.checkpointId }}"
-              class="mt-2 rounded-[6px] border border-black/10 px-2 py-[2px] text-[11px] opacity-60 hover:opacity-100 dark:border-white/15"
+              class="mt-2 px-2 py-[2px] text-[11px] border border-black/10 rounded-[6px] dark:border-white/15 opacity-60 hover:opacity-100"
               :hidden="uiBusy()"
               :disabled="revertingId() === {{ turn.checkpointId }}"
               :text="revertingId() === {{ turn.checkpointId }} ? 'Reverting…' : 'Revert this turn'"
@@ -216,8 +216,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
       @if(liveTurn)
         <article class="mb-5" data-turn="{{ liveTurn.id }}" data-live>
-          <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
-          <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]">{{ liveTurn.prompt }}</div>
+          <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
+          <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ liveTurn.prompt }}</div>
           <div data-tools>
           {{--
             The static state is the SSR truth; the binding overlays what
@@ -225,26 +225,26 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             every row reads the result map by its own id.
           --}}
           @foreach(liveTurn.toolCalls as call)
-            <div class="mb-1 flex items-center gap-[6px] text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}" :data-tool-state="toolResults()['{{ call.callId }}'] || '{{ call.state }}'">
+            <div class="flex gap-[6px] items-center mb-1 text-[12px]" data-tool-call="{{ call.callId }}" data-tool-state="{{ call.state }}" :data-tool-state="toolResults()['{{ call.callId }}'] || '{{ call.state }}'">
               <span class="tool-dot" aria-hidden="true"></span>
               <span class="font-mono opacity-70">{{ call.name }}</span>
             </div>
           @endforeach
           {{-- Tools this turn starts after page load render here, after the server-drawn rows. --}}
           <template :for="call in ssrTools" :key="call.callId">
-            <div class="mb-1 flex items-center gap-[6px] text-[12px]" :data-tool-call="call.callId" :data-tool-state="toolResults()[call.callId] || 'running'">
+            <div class="flex gap-[6px] items-center mb-1 text-[12px]" :data-tool-call="call.callId" :data-tool-state="toolResults()[call.callId] || 'running'">
               <span class="tool-dot" aria-hidden="true"></span>
               <span class="font-mono opacity-70" :text="call.name"></span>
             </div>
           </template>
           </div>
-          <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
+          <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
           {{--
             The server-rendered response plus the part that streams in after
             load. Its own span, because :text owns an element's whole content
             and must not overwrite the SSR text beside it.
           --}}
-          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response data-live-response>{{ liveTurn.response }}<span :text="ssrTail()"></span></div>
+          <div class="leading-[20px] text-[13px] whitespace-pre-wrap" data-response data-live-response>{{ liveTurn.response }}<span :text="ssrTail()"></span></div>
           {{--
             The newest turn is the one people most want to undo, and it was the
             only one without the button because it is not in `settledTurns`.
@@ -256,7 +256,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             <button
               type="button"
               data-revert="{{ liveTurn.checkpointId }}"
-              class="mt-2 rounded-[6px] border border-black/10 px-2 py-[2px] text-[11px] opacity-60 hover:opacity-100 dark:border-white/15"
+              class="mt-2 px-2 py-[2px] text-[11px] border border-black/10 rounded-[6px] dark:border-white/15 opacity-60 hover:opacity-100"
               :hidden="uiBusy()"
               :disabled="revertingId() === {{ liveTurn.checkpointId }}"
               :text="revertingId() === {{ liveTurn.checkpointId }} ? 'Reverting…' : 'Revert this turn'"
@@ -274,18 +274,18 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       --}}
       <template :for="turn in liveTurns" :key="turn.id">
         <article class="mb-5" :data-turn="turn.id">
-          <div class="mb-1 text-[12px] font-medium opacity-50">You</div>
-          <div class="mb-3 whitespace-pre-wrap text-[13px] leading-[20px]" :text="turn.prompt"></div>
+          <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
+          <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap" :text="turn.prompt"></div>
           <div data-tools>
             <template :for="call in turn.tools" :key="call.callId">
-              <div class="mb-1 flex items-center gap-[6px] text-[12px]" :data-tool-call="call.callId" :data-tool-state="toolResults()[call.callId] || 'running'">
+              <div class="flex gap-[6px] items-center mb-1 text-[12px]" :data-tool-call="call.callId" :data-tool-state="toolResults()[call.callId] || 'running'">
                 <span class="tool-dot" aria-hidden="true"></span>
                 <span class="font-mono opacity-70" :text="call.name"></span>
               </div>
             </template>
           </div>
-          <div class="mb-1 text-[12px] font-medium opacity-50">Agent</div>
-          <div class="whitespace-pre-wrap text-[13px] leading-[20px]" data-response :text="turn.response"></div>
+          <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
+          <div class="leading-[20px] text-[13px] whitespace-pre-wrap" data-response :text="turn.response"></div>
         </article>
       </template>
 
@@ -293,19 +293,19 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         data-approval
         @if(!pendingApproval)hidden@endif
         :hidden="!approvalId()"
-        class="mb-5 rounded-[10px] border border-amber-500/30 bg-amber-500/10 p-3"
+        class="mb-5 p-3 bg-amber-500/10 border border-amber-500/30 rounded-[10px]"
       >
-        <div class="mb-2 text-[12px] font-medium">
+        <div class="mb-2 font-medium text-[12px]">
           <span data-approval-tool :text="approvalTool()">{{ pendingApproval ? pendingApproval.toolName : '' }}</span> wants to run.
         </div>
         <div class="flex gap-2">
-          <button type="button" data-approve @click="approveTool" class="rounded-[6px] bg-neutral-900 px-3 py-1 text-[12px] text-white dark:bg-white dark:text-neutral-900">Allow</button>
-          <button type="button" data-deny @click="denyTool" class="rounded-[6px] border border-black/10 px-3 py-1 text-[12px] dark:border-white/15">Deny</button>
+          <button type="button" data-approve @click="approveTool" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Allow</button>
+          <button type="button" data-deny @click="denyTool" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Deny</button>
         </div>
       </div>
     </div>
 
-    <form data-composer @submit.prevent="sendPrompt" class="flex shrink-0 items-end gap-2 border-t border-black/5 p-3 dark:border-white/5">
+    <form data-composer @submit.prevent="sendPrompt" class="flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -316,9 +316,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         @keydown="promptKeydown"
         rows="2"
         placeholder="Ask the agent…"
-        class="min-h-[40px] flex-1 resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-neutral-900"
+        class="flex-1 px-3 py-2 min-h-[40px] text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
       ></textarea>
-      <button type="submit" data-send :hidden="uiBusy()" class="h-[36px] rounded-[8px] bg-neutral-900 px-4 text-[13px] text-white dark:bg-white dark:text-neutral-900">Send</button>
+      <button type="submit" data-send :hidden="uiBusy()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
       {{--
         Stop is the one control a running agent must always offer. It replaces
         Send rather than sitting beside it: while a turn runs there is nothing
@@ -326,7 +326,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         `stopPressed` hides it the moment it is clicked — optimistic, but the
         turn is only over when the log says so.
       --}}
-      <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" @click="stopTurn" class="h-[36px] rounded-[8px] border border-black/15 px-4 text-[13px] dark:border-white/20">Stop</button>
+      <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" @click="stopTurn" class="px-4 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Stop</button>
     </form>
   </main>
 
@@ -341,19 +341,19 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     form the page owns, so it can be styled, cancelled and focused like
     everything else. Opened by the sidebar's spaceAdd event.
   --}}
-  <div data-profile-modal hidden :hidden="!profileModalOpen()" @click.self="closeProfileModal" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/40">
-    <form @submit.prevent="createProfile" class="w-[320px] rounded-[10px] bg-white p-4 shadow-xl dark:bg-neutral-900">
-      <label class="mb-2 block text-[13px] font-medium" for="profile-name">Name this profile</label>
+  <div data-profile-modal hidden :hidden="!profileModalOpen()" @click.self="closeProfileModal" class="flex fixed inset-0 z-[70] items-center justify-center bg-black/40">
+    <form @submit.prevent="createProfile" class="p-4 w-[320px] bg-white dark:bg-neutral-900 rounded-[10px] shadow-xl">
+      <label class="block mb-2 font-medium text-[13px]" for="profile-name">Name this profile</label>
       <input
         id="profile-name"
         ref="profileNameBox"
         type="text"
         autocomplete="off"
-        class="mb-3 w-full rounded-[8px] border border-black/10 bg-white px-3 py-2 text-[13px] outline-none dark:border-white/10 dark:bg-neutral-950"
+        class="mb-3 px-3 py-2 w-full text-[13px] bg-white dark:bg-neutral-950 border border-black/10 outline-none rounded-[8px] dark:border-white/10"
       />
-      <div class="flex justify-end gap-2">
-        <button type="button" @click="closeProfileModal" class="rounded-[6px] border border-black/10 px-3 py-1 text-[12px] dark:border-white/15">Cancel</button>
-        <button type="submit" class="rounded-[6px] bg-neutral-900 px-3 py-1 text-[12px] text-white dark:bg-white dark:text-neutral-900">Create</button>
+      <div class="flex gap-2 justify-end">
+        <button type="button" @click="closeProfileModal" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Cancel</button>
+        <button type="submit" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Create</button>
       </div>
     </form>
   </div>

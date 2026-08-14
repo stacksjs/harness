@@ -1894,7 +1894,7 @@ land; the PTY spawn and the marker are the ground truth for delivery.
 Live resize landed too, and the "needs a native shim" assumption died on a
 better fact: bun:ffi ships TinyCC, so `pty-shim.c` compiles at runtime — no
 build step, no dependency to install. The native backend is a real
-posix_openpt pair with the shell posix_spawn'd under SETSID and an addopen of
+posix*openpt pair with the shell posix*spawn'd under SETSID and an addopen of
 the slave (its first tty open, which is what acquires a controlling terminal —
 real job control, the user's actual zsh with its prompt). `resize()` is
 TIOCSWINSZ on a retained slave fd; the shell sees SIGWINCH. `script(1)` stays

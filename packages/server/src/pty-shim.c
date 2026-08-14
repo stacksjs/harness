@@ -28,18 +28,11 @@ extern int fcntl(int fd, int cmd, ...);
 extern int waitpid(int pid, int *status, int options);
 extern char **environ;
 
-typedef void *spawn_actions_t;
-typedef void *spawn_attr_t;
-extern int posix_spawn_file_actions_init(spawn_actions_t *fa);
-extern int posix_spawn_file_actions_addopen(spawn_actions_t *fa, int fd, const char *path, int flags, int mode);
-extern int posix_spawn_file_actions_adddup2(spawn_actions_t *fa, int from, int to);
-extern int posix_spawn_file_actions_addclose(spawn_actions_t *fa, int fd);
-extern int posix_spawn_file_actions_addchdir_np(spawn_actions_t *fa, const char *path);
-extern int posix_spawn_file_actions_destroy(spawn_actions_t *fa);
-extern int posix_spawnattr_init(spawn_attr_t *attr);
-extern int posix_spawnattr_setflags(spawn_attr_t *attr, short flags);
-extern int posix_spawnattr_destroy(spawn_attr_t *attr);
-extern int posix_spawn(int *pid, const char *path, spawn_actions_t *fa, spawn_attr_t *attr, char *const argv[], char *const envp[]);
+extern int fork(void);
+extern int login_tty(int fd);
+extern int chdir(const char *path);
+extern int execve(const char *path, char *const argv[], char *const envp[]);
+extern void _exit(int code);
 
 #define O_RDWR_L 0x0002
 #define F_SETFL_L 4
@@ -72,32 +65,37 @@ int harness_set_nonblocking(int fd, int nonblock_flag) {
 }
 
 /*
- * Spawn `shell` on the pty's slave as its controlling terminal. SETSID
- * detaches the child from our session, and the addopen of the slave is then
- * its first tty open — which is what acquires a controlling terminal, so the
- * shell gets real job control and ^C reaches the foreground group.
+ * Spawn `shell` on the pty's slave as its controlling terminal — the classic
+ * forkpty shape: fork, then in the child login_tty(slave), which does
+ * setsid + TIOCSCTTY + the dup2s onto 0/1/2, then execve. The child never
+ * returns into the runtime: it either execs or _exits, and everything it
+ * calls between fork and exec is async-signal-safe. posix_spawn with a
+ * SETSID attribute was tried first and left tpgid at 0 on both platforms —
+ * the file-action open does not acquire a controlling terminal, so the shell
+ * ran without job control and ^C had no foreground group to reach.
+ *
+ * The unused `setsid_flag` parameter is kept so the TS caller has one
+ * signature across this shim and the Linux dlopen one.
  */
 int harness_spawn_on_pty(int master, const char *shell, const char *cwd, char *const envp[], int setsid_flag) {
-  char *slave = ptsname(master);
-  if (!slave) return -1;
-  spawn_actions_t fa;
-  spawn_attr_t attr;
-  if (posix_spawn_file_actions_init(&fa) != 0) return -1;
-  posix_spawn_file_actions_addopen(&fa, 0, slave, O_RDWR_L, 0);
-  posix_spawn_file_actions_adddup2(&fa, 0, 1);
-  posix_spawn_file_actions_adddup2(&fa, 0, 2);
-  posix_spawn_file_actions_addclose(&fa, master);
-  if (cwd && cwd[0]) posix_spawn_file_actions_addchdir_np(&fa, cwd);
-  posix_spawnattr_init(&attr);
-  posix_spawnattr_setflags(&attr, (short)setsid_flag);
-  char *argv[2];
-  argv[0] = (char *)shell;
-  argv[1] = 0;
-  int pid = -1;
-  int rc = posix_spawn(&pid, shell, &fa, &attr, argv, envp && envp[0] ? envp : environ);
-  posix_spawn_file_actions_destroy(&fa);
-  posix_spawnattr_destroy(&attr);
-  return rc == 0 ? pid : -1;
+  (void)setsid_flag;
+  char *slave_path = ptsname(master);
+  if (!slave_path) return -1;
+  int slave = open(slave_path, O_RDWR_L);
+  if (slave < 0) return -1;
+  int pid = fork();
+  if (pid == 0) {
+    login_tty(slave);
+    close(master);
+    if (cwd && cwd[0]) chdir(cwd);
+    char *argv[2];
+    argv[0] = (char *)shell;
+    argv[1] = 0;
+    execve(shell, argv, envp && envp[0] ? envp : environ);
+    _exit(127);
+  }
+  close(slave);
+  return pid;
 }
 
 /*

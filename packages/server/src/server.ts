@@ -245,7 +245,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   <h1>Pair with harness</h1>
   ${message}
   <input name="code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off"
-         spellcheck="false" placeholder="XXXX-XXXX" autofocus required>
+        spellcheck="false" placeholder="XXXX-XXXX" autofocus required>
   <input type="hidden" name="name" value="">
   <button type="submit">Pair this device</button>
 </form>
