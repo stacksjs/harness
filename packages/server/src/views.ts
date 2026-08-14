@@ -9,7 +9,6 @@
 
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
-import { TERMINAL_CSS } from '@harness/ansi'
 import { join } from 'node:path'
 
 export interface ViewProps {
@@ -26,8 +25,6 @@ export interface ViewProps {
   serverUrl: string
   /** URL of the browser CBOR bundle, or '' when it could not be built. */
   codecUrl: string
-  /** @harness/ansi's class rules, so the page never injects CSS from JS. */
-  terminalCss: string
   /**
    * The last sequence this render already contains.
    *
@@ -142,7 +139,6 @@ export function viewProps(state: HarnessState, options: {
       : null,
     serverUrl: options.serverUrl,
     codecUrl: options.codecUrl ?? '',
-    terminalCss: TERMINAL_CSS,
     sinceSeq: active?.lastSeq ?? 0,
   }
 }
