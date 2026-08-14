@@ -274,3 +274,46 @@ describe('stripAnsi', () => {
     expect(stripAnsi('a\tb\nc')).toBe('a\tb\nc')
   })
 })
+
+describe('resize', () => {
+  it('pads wider and taller without touching content', () => {
+    const term = new Terminal({ cols: 10, rows: 2 })
+    term.write('alpha\r\nbeta')
+    term.resize(20, 4)
+    expect(term.cols).toBe(20)
+    expect(term.rows).toBe(4)
+    expect(term.toText()).toBe('alpha\nbeta')
+  })
+
+  it('pushes rows off the top into scrollback when shrinking, keeping the cursor line', () => {
+    const term = new Terminal({ cols: 10, rows: 4 })
+    term.write('one\r\ntwo\r\nthree\r\nfour')
+    term.resize(10, 2)
+    expect(term.rows).toBe(2)
+    // The viewport keeps the bottom — where the cursor lives.
+    expect(term.toText()).toBe('one\ntwo\nthree\nfour')
+    expect(term.scrollback.length).toBe(2)
+    // The next write lands after "four", not on a mispositioned row.
+    term.write('!')
+    expect(term.toText()).toContain('four!')
+  })
+
+  it('truncates and clamps the cursor when narrowing', () => {
+    const term = new Terminal({ cols: 20, rows: 2 })
+    term.write('0123456789abcdefghij')
+    term.resize(8, 2)
+    expect(term.cols).toBe(8)
+    expect(term.toText()).toBe('01234567')
+    // Writing after the clamp must not throw or land off-grid.
+    term.write('X')
+    expect(term.toText().length).toBeGreaterThan(0)
+  })
+
+  it('is SIGWINCH-shaped: no reflow, scrollback keeps its historical width', () => {
+    const term = new Terminal({ cols: 12, rows: 2, scrollback: 10 })
+    term.write('wide-history\r\n\r\n\r\n')
+    term.resize(6, 2)
+    const historical = term.scrollback[0] ?? []
+    expect(historical.length).toBe(12)
+  })
+})

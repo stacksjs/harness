@@ -1891,8 +1891,26 @@ execution and not echo. One quirk recorded in the drive: System Events reads
 `frontmost of process "craft"` as false even while keystrokes demonstrably
 land; the PTY spawn and the marker are the ground truth for delivery.
 
-What remains: live resize, which `script` cannot do — that one genuinely
-waits on a native ioctl shim or craft's `bridge_shell.zig` growing one.
+Live resize landed too, and the "needs a native shim" assumption died on a
+better fact: bun:ffi ships TinyCC, so `pty-shim.c` compiles at runtime — no
+build step, no dependency to install. The native backend is a real
+posix_openpt pair with the shell posix_spawn'd under SETSID and an addopen of
+the slave (its first tty open, which is what acquires a controlling terminal —
+real job control, the user's actual zsh with its prompt). `resize()` is
+TIOCSWINSZ on a retained slave fd; the shell sees SIGWINCH. `script(1)` stays
+as the fallback for a machine where TinyCC cannot link. Two facts that cost
+the debugging: variadic libc functions (ioctl/fcntl/open) cannot be called
+through dlopen FFI on Apple arm64 — variadic args go on the stack there, fixed
+signatures put them in registers, so only C callers compile correctly; and on
+macOS/BSD the winsize ioctls live on the *slave* side — against the master
+they return ENOTTY. The emulator core grew a SIGWINCH-shaped `resize()` (no
+reflow, top rows into scrollback on shrink), the socket a `term-resize` frame,
+and the island a ruler span + ResizeObserver so the panel's pixels become the
+PTY's columns. Verified at every layer: emulator unit tests, a live socket
+test (`stty size` answers 12x60 then 30x96 across a resize — the kernel's
+number, not an echo), and the page drive shrinking the viewport and watching
+the shell's own `stty size` drop from 96 to 81 columns. M6 has nothing left
+open.
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural

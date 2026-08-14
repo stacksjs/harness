@@ -137,6 +137,26 @@ if (!termOk) {
 }
 check('terminal executes through the PTY', termOk)
 
+// 5. Live resize: shrink the viewport under the panel's 720px cap so the
+// panel narrows, the island's ResizeObserver reports the new geometry, and
+// the shell's own idea of its width — asked twice via `stty size`, whose
+// answer cannot come from the command echo — changes with it.
+await page.keyboard.type('echo "s1-$(stty size | tr \' \' x)"')
+await page.keyboard.press('Enter')
+await page.waitForFunction(() => /s1-\d+x\d+/.test(document.querySelector('[data-terminal]')?.textContent ?? ''), undefined, { timeout: 8000 })
+const sizeBefore = await page.evaluate(() => (document.querySelector('[data-terminal]')?.textContent ?? '').match(/s1-(\d+)x(\d+)/))
+await page.setViewportSize({ width: 640, height: 720 })
+await page.waitForTimeout(600)
+await page.keyboard.type('echo "s2-$(stty size | tr \' \' x)"')
+await page.keyboard.press('Enter')
+await page.waitForFunction(() => /s2-\d+x\d+/.test(document.querySelector('[data-terminal]')?.textContent ?? ''), undefined, { timeout: 8000 })
+const sizeAfter = await page.evaluate(() => (document.querySelector('[data-terminal]')?.textContent ?? '').match(/s2-(\d+)x(\d+)/))
+const colsBefore = Number(sizeBefore?.[2] ?? 0)
+const colsAfter = Number(sizeAfter?.[2] ?? 0)
+if (!(colsAfter > 0 && colsAfter < colsBefore)) console.log('resize readings:', sizeBefore?.[0], '->', sizeAfter?.[0])
+check('shrinking the window resizes the live PTY', colsAfter > 0 && colsAfter < colsBefore)
+await page.setViewportSize({ width: 1280, height: 720 })
+
 await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
 await browser.close()
 harness.stop()

@@ -361,6 +361,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   @if(activeWorkspaceId)
     <section data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
       <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
+        {{--
+          Ten glyphs in the host's own font, laid out but invisible: the ruler
+          the island measures to turn pixels into columns and rows.
+        --}}
+        <span data-term-metric ref="termMetricBox" aria-hidden="true" class="term-metric">0123456789</span>
         <div data-terminal-screen ref="termScreenBox"></div>
       </div>
     </section>
@@ -858,14 +863,63 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     sendFrame({ t: 'term-input', termId, data })
   }
 
+  // Pixels -> columns and rows, via the ruler span rendered in the host's own
+  // font. Falls back to the classic 100x24 until the panel has laid out.
+  let termMeasured = { cols: 100, rows: 24 }
+  function measureTerm() {
+    const host = useRef('termHostBox').current
+    const metric = useRef('termMetricBox').current
+    if (!host || !metric) return termMeasured
+    const cell = metric.getBoundingClientRect()
+    const box = host.getBoundingClientRect()
+    if (cell.width > 0 && cell.height > 0 && box.width > 0) {
+      termMeasured = {
+        // The host has 10px side and 8px top padding; the ruler is 10 glyphs.
+        cols: Math.max(20, Math.floor((box.width - 20) / (cell.width / 10))),
+        rows: Math.max(5, Math.floor((box.height - 16) / cell.height)),
+      }
+    }
+    return termMeasured
+  }
+
+  // Live resize: when the panel's box changes — a narrow window shrinks it —
+  // the PTY is told the new size (the shell sees SIGWINCH) and the local grid
+  // follows. Watching starts on first open, when the host exists to observe.
+  let termObserver = null
+  function watchTermSize() {
+    if (termObserver || typeof ResizeObserver === 'undefined') return
+    const host = useRef('termHostBox').current
+    if (!host) return
+    termObserver = new ResizeObserver(() => {
+      if (termId === null) return
+      const before = `${termMeasured.cols}x${termMeasured.rows}`
+      const { cols, rows } = measureTerm()
+      if (`${cols}x${rows}` === before) return
+      sendFrame({ t: 'term-resize', termId, cols, rows })
+      if (term) {
+        term.resize(cols, rows)
+        renderTerm()
+      }
+    })
+    termObserver.observe(host)
+  }
+
   function toggleTerminal() {
     // No workspace, no shell to open — the panel is not even rendered.
     if (!Number(activeWorkspaceId)) return
     termOpen.update(open => !open)
     if (!termOpen()) return
-    if (termId === null && term === null)
-      sendFrame({ t: 'term-open', workspaceId: Number(activeWorkspaceId) || 0, cols: 100, rows: 24 })
+    // Focused now, not in the frame callback: keys typed right after the
+    // click must land in the host (they buffer until the PTY binds).
     useRef('termHostBox').current?.focus()
+    // Measured after the binding has shown the panel — a display:none box
+    // measures zero — and the PTY opens at the size actually on screen.
+    requestAnimationFrame(() => {
+      const { cols, rows } = measureTerm()
+      if (termId === null && term === null)
+        sendFrame({ t: 'term-open', workspaceId: Number(activeWorkspaceId) || 0, cols, rows })
+      watchTermSize()
+    })
   }
 
   // Ctrl+` toggles the terminal — the shell-toggle convention every editor

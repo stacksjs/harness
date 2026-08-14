@@ -102,6 +102,11 @@ export class HarnessClient {
     this.send({ t: 'term-input', termId, data })
   }
 
+  /** Change the PTY's window size; the shell sees SIGWINCH. */
+  resizeTerminal(termId: number, cols: number, rows: number): void {
+    this.send({ t: 'term-resize', termId, cols, rows })
+  }
+
   closeTerminal(termId: number): void {
     this.send({ t: 'term-close', termId })
   }

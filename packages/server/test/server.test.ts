@@ -416,4 +416,42 @@ describe('terminals over the socket', () => {
     expect((await client.until('pong')).t).toBe('pong')
     client.close()
   })
+
+  it('resizes a live terminal, and the shell sees the new size', async () => {
+    // The native backend (pty-shim.c via TinyCC) is what makes this possible;
+    // asked via `stty size` so the answer comes from the kernel's winsize,
+    // not from anything this test wrote.
+    const client = await TestClient.connect(url())
+    await client.until('ready')
+    const workspaceId = await openWorkspace(client)
+
+    client.send({ t: 'term-open', workspaceId, cols: 60, rows: 12 })
+    const opened = await client.until('term-opened')
+
+    async function sttySize(marker: string): Promise<string> {
+      // The command echo shows the unexpanded substitution, so `marker-NxM`
+      // can only come from the shell's answer.
+      client.send({ t: 'term-input', termId: opened.termId, data: `echo "${marker}-$(stty size | tr ' ' 'x')"\n` })
+      let seen = ''
+      const want = new RegExp(`${marker}-(\\d+x\\d+)`)
+      for (let i = 0; i < 60; i++) {
+        const frame = await client.next()
+        if (frame?.t === 'term-data' && frame.termId === opened.termId) seen += frame.data
+        if (frame?.t === 'timeout') break
+        const match = seen.match(want)
+        if (match?.[1]) return match[1]
+      }
+      return ''
+    }
+
+    expect(await sttySize('sz1')).toBe('12x60')
+
+    client.send({ t: 'term-resize', termId: opened.termId, cols: 96, rows: 30 })
+    // The resize is an ioctl away, but give the event loop a beat.
+    await new Promise(resolve => setTimeout(resolve, 200))
+    expect(await sttySize('sz2')).toBe('30x96')
+
+    client.send({ t: 'term-close', termId: opened.termId })
+    client.close()
+  })
 })

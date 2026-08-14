@@ -70,6 +70,11 @@ const TERMINAL_PANEL = `
   border: 1px solid rgb(255 255 255 / 14%);
   font: 12px ui-monospace, monospace; cursor: pointer;
 }
+/* The measuring ruler: laid out in the host's font so its box is the truth
+   about cell size, but invisible and out of flow. */
+.term-metric {
+  position: absolute; visibility: hidden; white-space: pre;
+}
 `
 
 export default {

@@ -91,6 +91,7 @@ type ClientFrame =
   | { t: 'ping' }
   | { t: 'term-open', workspaceId: number, cols?: number, rows?: number }
   | { t: 'term-input', termId: number, data: string }
+  | { t: 'term-resize', termId: number, cols: number, rows: number }
   | { t: 'term-close', termId: number }
 
 export interface HarnessServer {
@@ -450,6 +451,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         // An unknown id is a close racing input — dropped, like a late approval.
         socket.data.terminals.get(frame.termId)?.write(frame.data)
         return
+
+      case 'term-resize': {
+        // Clamped: the client computes these from layout, and a garbage
+        // measurement must not become a 0-column or million-row winsize.
+        const cols = Math.min(500, Math.max(20, Math.floor(frame.cols)))
+        const rows = Math.min(200, Math.max(5, Math.floor(frame.rows)))
+        socket.data.terminals.get(frame.termId)?.resize(cols, rows)
+        return
+      }
 
       case 'term-close': {
         const pty = socket.data.terminals.get(frame.termId)

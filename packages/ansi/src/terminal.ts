@@ -76,8 +76,8 @@ export interface TerminalOptions {
 }
 
 export class Terminal {
-  readonly cols: number
-  readonly rows: number
+  private _cols: number
+  private _rows: number
   private readonly scrollbackLimit: number
   private readonly convertEol: boolean
 
@@ -103,15 +103,77 @@ export class Terminal {
   private savedCursor: { x: number, y: number } | null = null
 
   constructor(options: TerminalOptions = {}) {
-    this.cols = Math.max(2, options.cols ?? 80)
-    this.rows = Math.max(1, options.rows ?? 24)
+    this._cols = Math.max(2, options.cols ?? 80)
+    this._rows = Math.max(1, options.rows ?? 24)
     this.scrollbackLimit = options.scrollback ?? 1000
     this.convertEol = options.convertEol ?? true
     this.grid = Array.from({ length: this.rows }, () => blankRow(this.cols))
   }
 
+  get cols(): number {
+    return this._cols
+  }
+
+  get rows(): number {
+    return this._rows
+  }
+
   get onAltScreen(): boolean {
     return this.savedMain !== null
+  }
+
+  /**
+   * Change the grid's dimensions in place, the way a real terminal does on
+   * SIGWINCH: no reflow. Rows pad or truncate to the new width; growing adds
+   * blank rows at the bottom; shrinking pushes rows off the *top* into
+   * scrollback, so the cursor's neighbourhood — the part being looked at —
+   * survives. Scrollback keeps its historical widths, which the renderer
+   * already tolerates.
+   */
+  resize(cols: number, rows: number): void {
+    const nextCols = Math.max(2, Math.floor(cols))
+    const nextRows = Math.max(1, Math.floor(rows))
+    if (nextCols === this._cols && nextRows === this._rows) return
+
+    const fit = (grid: Cell[][]): Cell[][] => grid.map((row) => {
+      if (row.length > nextCols) return row.slice(0, nextCols)
+      if (row.length < nextCols) return [...row, ...blankRow(nextCols - row.length)]
+      return row
+    })
+
+    this.grid = fit(this.grid)
+    if (this.savedMain) this.savedMain.grid = fit(this.savedMain.grid)
+
+    const fitRows = (grid: Cell[][], intoScrollback: boolean): { grid: Cell[][], removed: number } => {
+      let removed = 0
+      while (grid.length > nextRows) {
+        const top = grid.shift()
+        removed++
+        if (intoScrollback && top) {
+          this.scrollback.push(top)
+          if (this.scrollback.length > this.scrollbackLimit) this.scrollback.shift()
+        }
+      }
+      while (grid.length < nextRows) grid.push(blankRow(nextCols))
+      return { grid, removed }
+    }
+
+    // The alternate screen has no scrollback by design; its rows just drop.
+    const main = fitRows(this.grid, !this.onAltScreen)
+    this.grid = main.grid
+    this.y = Math.max(0, this.y - main.removed)
+    if (this.savedMain) {
+      const saved = fitRows(this.savedMain.grid, this.onAltScreen === true)
+      this.savedMain.grid = saved.grid
+      this.savedMain.y = Math.min(Math.max(0, this.savedMain.y - saved.removed), nextRows - 1)
+      this.savedMain.x = Math.min(this.savedMain.x, nextCols - 1)
+    }
+
+    this._cols = nextCols
+    this._rows = nextRows
+    this.x = Math.min(this.x, nextCols - 1)
+    this.y = Math.min(this.y, nextRows - 1)
+    this.pendingWrap = false
   }
 
   write(text: string): void {
