@@ -6,6 +6,12 @@ import type { StxOptions as UiOptions } from '@stacksjs/stx'
  */
 
 export default {
+  // Pinned rather than inferred. Auto-detection keys on the directory that
+  // holds `views/` and `layouts/`, and this app deleted its scaffold
+  // layouts/ — leaving the inference resting on one directory and a boot
+  // warning asking for exactly this line.
+  root: 'resources',
+
   // Where stx keeps everything it generates: the compiled-template cache, the
   // Crosswind CSS cache, client-script bundles, the route manifest and route
   // types. Stacks keeps every runtime-owned directory under storage/ rather
@@ -32,10 +38,17 @@ export default {
   partialsDir: 'partials',
 
   // Report prohibited DOM usage in client scripts (stx-standards §8). Warn
-  // only, deliberately: the harness island carries ~700 lines of vanilla DOM
-  // that predate this config reaching the renderer at all, and the honest
-  // sequence is measure → migrate → fail. Flip failOnViolation once the
-  // island is on refs/signals.
+  // only, permanently — a considered decision, not a pending flip:
+  //
+  // - The island is on refs/signals now, and precisely because it declares
+  //   signals the pipeline wraps it as a __stx_setup_ script BEFORE this
+  //   validator runs — the validator cannot see the page it was meant to
+  //   guard. The real regression guards are scripts/drive-page.ts and
+  //   source greps, both in CI.
+  // - failOnViolation throws during render, so on pages only rendered in
+  //   production (index.stx, coming-soon.stx — both documented §11.1
+  //   exceptions with a handful of vanilla-DOM lines) it would turn a lint
+  //   warning into a 500.
   strict: { enabled: true, failOnViolation: false },
 
   // Every page gets a real document shell — doctype, <html>, <head>, <body>.

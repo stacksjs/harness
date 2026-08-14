@@ -29,6 +29,14 @@ const siteDescription = 'Stacks is a full-stack TypeScript framework for web app
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap">
 
+    {{--
+      A deliberate exception to stx-standards §11.1 — same reasoning as
+      index.stx: a self-contained full-document holding page whose :root
+      tokens collide with index.stx's under different values, so neither
+      sheet can move into global crosswind preflights without breaking the
+      other. Always a full document load; the section's SPA-router and
+      purge rationales do not apply.
+    --}}
     <style>
       :root {
         --font-body: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;

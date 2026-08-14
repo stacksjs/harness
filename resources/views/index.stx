@@ -197,6 +197,17 @@ const deployRoutes = [
         }
       })()
     </script>
+    {{--
+      A deliberate exception to stx-standards §11.1 (no <style> in .stx).
+      This is a self-contained full-document landing page with its own
+      palette: it and coming-soon.stx declare the same :root custom
+      properties with different values, plus * / html / body resets, so
+      moving either sheet into crosswind preflights would cross-contaminate
+      the pages and leak resets into the app surface. The section's failure
+      mechanisms (SPA-router style teardown, crosswind purging) do not apply
+      to a page that is always a full document load. Revisit if this page
+      ever joins the app's design system.
+    --}}
     <style>
       /*
        * Stacks marketing design system, 2026 refresh.

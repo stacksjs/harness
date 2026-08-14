@@ -32,5 +32,16 @@
     /* Performance - worth keeping `skipLibCheck` on */
     "incremental": true,
     "skipLibCheck": true
-  }
+  },
+  // `include` is not merged on extends — this list restates the framework's
+  // (with its paths re-rooted here) and adds the app's own `types/`, which
+  // the inherited list cannot see. Keep both in step.
+  "include": [
+    "types/**/*.d.ts",
+    "storage/framework/types/**/*.d.ts",
+    "app/**/*.ts",
+    "config/**/*.ts",
+    "resources/**/*.ts",
+    "routes/**/*.ts"
+  ]
 }
