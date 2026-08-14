@@ -88,10 +88,28 @@ try {
     osascript('tell application "System Events" to set frontmost of process "craft" to true')
     // The page needs a moment past window-creation to hydrate the island.
     await Bun.sleep(2500)
+    // Informational, not a check: this readback reports false on this craft
+    // build even while keystrokes demonstrably land in the page — the two
+    // checks below are the ground truth for delivery.
+    const frontmost = osascript('tell application "System Events" to get frontmost of process "craft"')
+    console.log(`  (frontmost readback: ${frontmost})`)
 
     // Ctrl+` — key code 50 is the backtick key.
     osascript('tell application "System Events" to key code 50 using control down')
     await Bun.sleep(1200)
+
+    // The chord's first observable server-side effect: term-open spawns the
+    // PTY, which runs the shell under script(1).
+    let ptySpawned = false
+    for (let i = 0; i < 12 && !ptySpawned; i++) {
+      await Bun.sleep(250)
+      try {
+        execSync('pgrep -f "script -q /dev/null"', { stdio: 'pipe' })
+        ptySpawned = true
+      }
+      catch { /* not yet */ }
+    }
+    check('Ctrl+` reached the page and opened a PTY', ptySpawned)
 
     // Typed into the focused terminal host; the value is computed by the
     // shell, so the file proves execution, not echo.

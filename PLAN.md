@@ -1879,9 +1879,20 @@ session page. Two pre-existing page warnings surfaced on the way (an stx
 `section.collapsible` hydration invariant) — noted here, unrelated to the
 terminal.
 
-What remains: the desktop reusing the same view, and live
-resize, which `script` cannot do — that one genuinely waits on a native ioctl
-shim or craft's `bridge_shell.zig` growing one.
+The desktop reuses the same view, and it is verified rather than assumed:
+`scripts/drive-desktop.ts` spawns the Zig-built craft binary on a live session
+page and drives it with OS-level keystrokes (System Events — a dev-machine
+check needing a GUI session and Accessibility permission, not a CI job).
+`Ctrl+`` — the shell-toggle convention, added to the island window-level so it
+is also the one keyboard path a desktop window can be driven through — opens
+the panel, and a command typed through the window writes a *computed* marker
+to disk: the file appearing proves WKWebView → island → socket → PTY → shell,
+execution and not echo. One quirk recorded in the drive: System Events reads
+`frontmost of process "craft"` as false even while keystrokes demonstrably
+land; the PTY spawn and the marker are the ground truth for delivery.
+
+What remains: live resize, which `script` cannot do — that one genuinely
+waits on a native ioctl shim or craft's `bridge_shell.zig` growing one.
 
 ### M7 — Mobile
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural
