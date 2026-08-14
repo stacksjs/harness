@@ -859,6 +859,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   function toggleTerminal() {
+    // No workspace, no shell to open — the panel is not even rendered.
+    if (!Number(activeWorkspaceId)) return
     termOpen.update(open => !open)
     if (!termOpen()) return
     if (termId === null && term === null)
@@ -866,8 +868,19 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     useRef('termHostBox').current?.focus()
   }
 
+  // Ctrl+` toggles the terminal — the shell-toggle convention every editor
+  // uses. Window-level so it works from the composer too, and the one
+  // keyboard path to the terminal a desktop window can be driven through.
+  useEventListener('keydown', (event) => {
+    if (!(event.ctrlKey && event.key === '`')) return
+    event.preventDefault()
+    toggleTerminal()
+  }, { target: window })
+
   function termKeydown(event) {
     if (event.metaKey) return
+    // The toggle chord belongs to the window handler, not the shell.
+    if (event.ctrlKey && event.key === '`') return
     let data = null
     if (event.ctrlKey && event.key.length === 1) {
       const code = event.key.toLowerCase().charCodeAt(0)

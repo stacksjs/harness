@@ -25,6 +25,9 @@ function resolveCraft(explicit?: string): string | null {
     explicit,
     process.env.CRAFT_BIN,
     join(process.cwd(), 'node_modules/.bin/craft'),
+    // The local Zig checkout, which is where the upstream fixes harness
+    // depends on (§10) actually live until they ship in a release.
+    join(homedir(), 'Documents/Projects/craft/packages/zig/zig-out/bin/craft'),
     join(homedir(), 'Code/Tools/craft/packages/zig/zig-out/bin/craft'),
   ].filter((c): c is string => Boolean(c))
   return candidates.find(c => existsSync(c)) ?? null
