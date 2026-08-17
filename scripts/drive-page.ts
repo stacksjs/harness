@@ -157,6 +157,21 @@ if (!(colsAfter > 0 && colsAfter < colsBefore)) console.log('resize readings:', 
 check('shrinking the window resizes the live PTY', colsAfter > 0 && colsAfter < colsBefore)
 await page.setViewportSize({ width: 1280, height: 720 })
 
+// 9. Settings: the Cmd+, chord opens the modal, the driver choice persists,
+// and the desktop menu's `craft:settings` event reaches the same modal.
+await page.keyboard.press('Meta+,')
+await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+check('Cmd+, opens the settings modal', true)
+await page.selectOption('#settings-driver', 'opencode')
+await page.click('[data-settings-modal] button')
+const storedDriver = await page.evaluate(() => localStorage.getItem('harness.defaultDriver'))
+check('driver choice persists', storedDriver === 'opencode')
+await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:settings')))
+await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+const reopenedShowsChoice = await page.evaluate(() => (document.querySelector('#settings-driver') as HTMLSelectElement | null)?.value)
+check('menu event reopens settings with the saved choice', reopenedShowsChoice === 'opencode')
+await page.evaluate(() => localStorage.removeItem('harness.defaultDriver'))
+
 await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
 await browser.close()
 harness.stop()

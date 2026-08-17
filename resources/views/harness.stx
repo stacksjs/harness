@@ -358,6 +358,34 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     </form>
   </div>
 
+  {{--
+    Settings. Opened by Cmd+, — as the app-menu item in the desktop window
+    (craft forwards it as a `craft:settings` event) and as a page chord
+    everywhere else. One setting so far: which agent a new session runs.
+  --}}
+  <div data-settings-modal hidden :hidden="!settingsOpen()" @click.self="closeSettings" class="flex fixed inset-0 z-[70] items-center justify-center bg-black/40">
+    <div class="p-4 w-[360px] bg-white dark:bg-neutral-900 rounded-[10px] shadow-xl">
+      <h2 class="mb-3 font-semibold text-[14px]">Settings</h2>
+      <label class="block mb-2 font-medium text-[13px]" for="settings-driver">Agent for new sessions</label>
+      <select
+        id="settings-driver"
+        ref="settingsDriverBox"
+        @change="saveDriverChoice"
+        class="mb-2 px-3 py-2 w-full text-[13px] bg-white dark:bg-neutral-950 border border-black/10 outline-none rounded-[8px] dark:border-white/10"
+      >
+        <option value="claude">Claude Code</option>
+        <option value="codex">Codex</option>
+        <option value="opencode">OpenCode</option>
+        <option value="cursor">Cursor</option>
+        <option value="grok">Grok</option>
+      </select>
+      <p class="mb-3 text-[12px] opacity-60">Cursor and Grok need their CLIs signed in first.</p>
+      <div class="flex justify-end">
+        <button type="button" @click="closeSettings" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Done</button>
+      </div>
+    </div>
+  </div>
+
   @if(activeWorkspaceId)
     <section data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
       <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
@@ -497,6 +525,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // through a small form the page owns, so it can be styled and cancelled
   // like everything else.
   const profileModalOpen = state(false)
+  // The settings sheet: opened by Cmd+, or the desktop app menu.
+  const settingsOpen = state(false)
   // The checkpoint currently being restored; its button reads this for its
   // label and disabled state.
   const revertingId = state(0)
@@ -645,7 +675,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       return
     }
 
-    await sendCommand({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    await sendCommand({ type: 'session.create', workspaceId, driverKind: defaultDriver() })
     navigate(`/?profile=${encodeURIComponent(spaceId)}`)
   }, { target: document })
 
@@ -658,6 +688,37 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   function closeProfileModal() {
     profileModalOpen.set(false)
   }
+
+  // Settings. The one setting is device-local — which agent this machine
+  // starts sessions with — so it lives in localStorage, not the event log:
+  // a preference of this keyboard, not a fact about the project.
+  const KNOWN_DRIVERS = ['claude', 'codex', 'opencode', 'cursor', 'grok']
+
+  function defaultDriver() {
+    const stored = localStorage.getItem('harness.defaultDriver')
+    return KNOWN_DRIVERS.includes(stored) ? stored : 'claude'
+  }
+
+  function openSettings() {
+    settingsOpen.set(true)
+    requestAnimationFrame(() => {
+      const box = useRef('settingsDriverBox').current
+      if (box) box.value = defaultDriver()
+    })
+  }
+
+  function closeSettings() {
+    settingsOpen.set(false)
+  }
+
+  function saveDriverChoice() {
+    const box = useRef('settingsDriverBox').current
+    if (box) localStorage.setItem('harness.defaultDriver', box.value)
+  }
+
+  // The desktop app menu's Settings… item (Cmd+,): craft evaluates this
+  // event into the page, so the menu opens the same modal the chord does.
+  useEventListener('craft:settings', openSettings, { target: window })
 
   async function createProfile() {
     const box = useRef('profileNameBox').current
@@ -925,7 +986,15 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // Ctrl+` toggles the terminal — the shell-toggle convention every editor
   // uses. Window-level so it works from the composer too, and the one
   // keyboard path to the terminal a desktop window can be driven through.
+  // Cmd+, (or Ctrl+, where the browser owns Cmd+,) opens settings; in the
+  // desktop window the menu item usually claims the chord first and arrives
+  // as `craft:settings` instead.
   useEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === ',') {
+      event.preventDefault()
+      openSettings()
+      return
+    }
     if (!(event.ctrlKey && event.key === '`')) return
     event.preventDefault()
     toggleTerminal()
