@@ -86,9 +86,9 @@ describe('viewProps — shaping the read model for the page', () => {
       .toBe('refactor the parser')
   })
 
-  it('falls back to an id when a session has no turns yet', () => {
+  it('calls a session with no turns new, not by its hash', () => {
     const props = viewProps(stateWith(), { serverUrl: 'ws://x/ws' })
-    expect(props.profiles.find(p => p.name === 'Stacks')!.sessions[0]!.title).toBe('Session 200')
+    expect(props.profiles.find(p => p.name === 'Stacks')!.sessions[0]!.title).toBe('New session')
   })
 
   it('shows a workspace by its last path segment, not the absolute path', () => {

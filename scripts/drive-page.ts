@@ -192,6 +192,16 @@ await page.waitForURL(/\?profile=/, { timeout: 8000 })
 const sessionsAfterSwitch = [...harness.engine.current.sessions.values()]
 check('switching drivers starts a fresh session with the new agent', sessionsAfterSwitch.length === 2 && sessionsAfterSwitch.some(s => s.driverKind === 'codex'))
 
+// 11. Type-to-start: on a page with no session open, the empty state shows
+// and a typed prompt creates a session, navigates to it, and sends itself.
+const emptyStateShown = await page.evaluate(() => document.querySelector('[data-empty-state]') !== null)
+check('no-session page shows the empty state', emptyStateShown)
+await page.fill('[data-prompt]', 'typed with no session open')
+await page.click('[data-send]')
+await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
+await page.waitForFunction(() => (document.body.textContent ?? '').includes('typed with no session open'), undefined, { timeout: 8000 })
+check('type-to-start creates the session and delivers the prompt', harness.engine.current.sessions.size === 3)
+
 await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
 await browser.close()
 harness.stop()

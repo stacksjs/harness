@@ -90,6 +90,7 @@ export const sessionState = activeSession ? activeSession.state : 'idle'
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const sessionDriver = activeSession ? (activeSession.driverKind || '') : ''
+export const promptPlaceholder = activeSession ? 'Ask the agent…' : 'Type here to start a new session…'
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
 // The last turn is the only one that can still change, so it is the only one
@@ -181,6 +182,16 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       the socket writes to.
     --}}
     <div data-transcript ref="transcriptBox" class="overflow-y-auto flex-1 px-4 py-3 min-h-0">
+      {{--
+        A blank canvas says the app is broken; an empty state says what to do.
+        Typing below is the fastest path, so it is the one named first.
+      --}}
+      @if(!activeSession)
+        <div data-empty-state class="flex flex-col gap-2 items-center justify-center h-full text-center">
+          <p class="text-[13px] opacity-60">No session open.</p>
+          <p class="text-[12px] opacity-40">Type below to start one, or pick a session from the sidebar.</p>
+        </div>
+      @endif
       @foreach(settledTurns as turn)
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}">
           <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
@@ -320,7 +331,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         ref="promptBox"
         @keydown="promptKeydown"
         rows="2"
-        placeholder="Ask the agent…"
+        placeholder="{{ promptPlaceholder }}"
         class="flex-1 px-3 py-2 min-h-[40px] text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
       ></textarea>
       {{--
@@ -683,10 +694,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
    * Resolves on the server's ack so a caller can reload without outrunning the
    * write.
    */
-  async function sendCommand(command) {
+  async function sendCommand(command, commandId) {
     const { encode } = await import(codecUrl)
     const envelope = {
-      id: `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      // A caller that needs the command id — entity ids derive from it — can
+      // supply its own; everything else gets a fresh one.
+      id: commandId ?? `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       at: Date.now(),
       command,
     }
@@ -788,11 +801,27 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   // After mount: the picker shows this session's driver (or the default when
-  // no session is open), then the probe results land in the labels.
+  // no session is open), then the probe results land in the labels. A prompt
+  // left by type-to-start sends itself once the socket can carry it.
   requestAnimationFrame(() => {
     const picker = useRef('driverPickerBox').current
     if (picker) picker.value = sessionDriver || defaultDriver()
     annotateDriverPickers()
+
+    const pending = sessionId ? sessionStorage.getItem('harness.pendingPrompt') : null
+    if (pending) {
+      const box = useRef('promptBox').current
+      if (box) box.value = pending
+      const trySend = () => {
+        if (!liveSocket || liveSocket.readyState !== WebSocket.OPEN) {
+          useTimeout(trySend, 120)
+          return
+        }
+        sessionStorage.removeItem('harness.pendingPrompt')
+        sendPrompt()
+      }
+      trySend()
+    }
   })
 
   function defaultDriver() {
@@ -963,10 +992,42 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // one, which is most of the point of a control surface. Cleared
   // optimistically: the turn appears when `turn.started` comes back from the
   // server, so the transcript still only ever shows what the log contains.
-  function sendPrompt() {
+  // The engine's id derivation (packages/engine/src/reducer.ts), verbatim:
+  // FNV-1a over the command id. Duplicated so the page can know a session's
+  // id at creation time and navigate straight to it — the alternative is
+  // parsing it back out of the event stream it just caused.
+  function derivedSessionId(commandId) {
+    let hash = 2166136261
+    for (let i = 0; i < commandId.length; i++) {
+      hash ^= commandId.charCodeAt(i)
+      hash = Math.imul(hash, 16777619)
+    }
+    return (hash >>> 0) % 2147483647 + 1
+  }
+
+  async function sendPrompt() {
     const box = useRef('promptBox').current
     const text = (box?.value ?? '').trim()
-    if (!text || !sessionId) return
+    if (!text) return
+
+    // Type-to-start: with no session open, the prompt itself creates one —
+    // the convention every LLM surface follows. The text rides sessionStorage
+    // across the navigation and sends itself on arrival.
+    if (!sessionId) {
+      const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(String(activeProfile))}"]`)
+      const workspaceId = Number(panel?.querySelector('[data-space-pinned-item]')?.dataset.pinnedId)
+      if (!workspaceId) {
+        stxAlert('This profile has no workspace yet. Add one with `./buddy harness:run --path <dir>`.')
+        return
+      }
+      const picker = useRef('driverPickerBox').current
+      const commandId = `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+      await sendCommand({ type: 'session.create', workspaceId, driverKind: picker?.value || defaultDriver() }, commandId)
+      sessionStorage.setItem('harness.pendingPrompt', text)
+      navigate(`/s/${derivedSessionId(commandId)}`)
+      return
+    }
+
     box.value = ''
     dispatch({ type: 'session.turn.start', sessionId, text })
   }
