@@ -59,6 +59,9 @@ const script: ProviderEvent[] = [
 const instance: ProviderInstance = {
   async *startTurn() {
     for (const event of script) {
+      // A beat before the first token, so the thinking indicator has a
+      // deterministic window to be seen in.
+      if (event.type === 'assistant-delta') await new Promise(r => setTimeout(r, 300))
       yield event
       if (event.type === 'approval-request') await gate
     }
@@ -98,10 +101,18 @@ page.on('dialog', async d => d.accept())
 page.on('pageerror', e => console.log('PAGEERROR:', String(e).slice(0, 200)))
 await page.goto(`http://localhost:${port}/s/${sessionId}`)
 
-// 1. Composer: type a prompt, send, watch the turn stream in.
+// 1. Composer: type a prompt, send, watch the turn stream in — with the
+// thinking dots holding the gap before the first token.
 await page.fill('[data-prompt]', 'run the drive turn')
 await page.click('[data-send]')
+await page.waitForFunction(() => {
+  const dots = document.querySelector('[data-turn][data-live], [data-turn]:not([data-live])') && document.querySelector('[data-thinking]')
+  return dots !== null && !(dots as HTMLElement).hasAttribute('hidden')
+}, undefined, { timeout: 4000 })
+check('thinking dots show before the first token', true)
 await page.waitForFunction(() => document.querySelector('[data-approval]')?.hasAttribute('hidden') === false, undefined, { timeout: 8000 })
+const dotsHiddenAfterDelta = await page.evaluate(() => document.querySelector('[data-thinking]')?.hasAttribute('hidden'))
+check('first token hides the dots', dotsHiddenAfterDelta === true)
 check('composer starts a turn and the approval surfaces', true)
 const tool = await page.textContent('[data-approval-tool]')
 check('approval names the tool', (tool ?? '').includes('Bash'))

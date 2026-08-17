@@ -36,6 +36,20 @@ const TOOL_DOT = `
 `
 
 /**
+ * The wait between sending a prompt and the first token: three pulsing dots
+ * under the Agent label, because a bare label over blank space reads as a
+ * hang. Same reduced-motion respect as the tool dot.
+ */
+const THINKING_DOTS = `
+.thinking-dots { display: inline-flex; gap: 4px; padding: 4px 0; }
+.thinking-dots span { width: 5px; height: 5px; border-radius: 9999px; background: currentColor; opacity: 0.25; animation: thinking-pulse 1.2s ease-in-out infinite; }
+.thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes thinking-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.9; } }
+@media (prefers-reduced-motion: reduce) { .thinking-dots span { animation: none; opacity: 0.5; } }
+`
+
+/**
  * The terminal. One dark scheme regardless of page theme — a terminal is its
  * own surface, and shells assume a dark ground. The 16-color palette is the
  * app's token set for the t-fg-N and t-bg-N classes from `@harness/ansi`
@@ -88,6 +102,7 @@ export default {
   preflights: [
     { getCSS: () => HIDDEN_PIN },
     { getCSS: () => TOOL_DOT },
+    { getCSS: () => THINKING_DOTS },
     { getCSS: () => TERMINAL_PANEL },
     { getCSS: () => TERMINAL_CSS },
   ],
