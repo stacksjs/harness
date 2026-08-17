@@ -22,6 +22,13 @@ export interface ViewProps {
   }>
   activeProfile: string
   activeSession: unknown
+  /**
+   * Paired devices, for the settings sheet's Access section. The token hash
+   * stays server-side — the page needs to name a device, never to match one.
+   */
+  devices: Array<{ id: string, name: string, pairedAt: number }>
+  /** Whether this server accepts paired devices, which gates the pairing UI. */
+  remoteEnabled: boolean
   serverUrl: string
   /** URL of the browser CBOR bundle, or '' when it could not be built. */
   codecUrl: string
@@ -56,6 +63,7 @@ export function viewProps(state: HarnessState, options: {
   profileId?: number
   serverUrl: string
   codecUrl?: string
+  remoteEnabled?: boolean
 }): ViewProps {
   const profiles = [...state.profiles.values()].map((profile) => {
     const workspaces = profile.workspaceIds
@@ -93,6 +101,12 @@ export function viewProps(state: HarnessState, options: {
 
   return {
     profiles,
+    devices: [...state.devices.values()].map(device => ({
+      id: device.id,
+      name: device.name,
+      pairedAt: device.pairedAt,
+    })),
+    remoteEnabled: options.remoteEnabled === true,
     activeProfile: String(
       // The requested profile, the one owning the open session, then the first.
       profiles.find(p => p.id === options.profileId)?.id

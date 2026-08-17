@@ -380,6 +380,30 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <option value="grok">Grok</option>
       </select>
       <p class="mb-3 text-[12px] opacity-60">Cursor and Grok need their CLIs signed in first.</p>
+
+      <h3 class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Access</h3>
+      @if(devices.length)
+        <ul class="mb-2">
+          @foreach(devices as device)
+            <li class="flex gap-2 items-center py-1 text-[13px]">
+              <span class="flex-1 truncate">{{ device.name }}</span>
+              <button type="button" data-revoke-device data-device-id="{{ device.id }}" @click="revokeDevice" class="px-2 py-0.5 text-[11px] text-red-600 border border-red-600/30 rounded-[6px] dark:text-red-400 dark:border-red-400/30">Revoke</button>
+            </li>
+          @endforeach
+        </ul>
+      @else
+        <p class="mb-2 text-[12px] opacity-60">No devices are paired.</p>
+      @endif
+      @if(remoteEnabled)
+        <div class="flex gap-2 items-center mb-3">
+          <button type="button" data-pair-device @click="startPairing" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Pair a device…</button>
+          {{-- The minted code, shown beside the button. Five minutes, once. --}}
+          <code data-pair-code :text="pairCode()" class="text-[13px] tracking-widest"></code>
+        </div>
+      @else
+        <p class="mb-3 text-[12px] opacity-60">Pairing needs the server started with <code>--remote</code>.</p>
+      @endif
+
       <div class="flex justify-end">
         <button type="button" @click="closeSettings" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Done</button>
       </div>
@@ -527,6 +551,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const profileModalOpen = state(false)
   // The settings sheet: opened by Cmd+, or the desktop app menu.
   const settingsOpen = state(false)
+  // A freshly minted pairing code, shown beside the button that minted it.
+  const pairCode = state('')
   // The checkpoint currently being restored; its button reads this for its
   // label and disabled state.
   const revertingId = state(0)
@@ -719,6 +745,30 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // The desktop app menu's Settings… item (Cmd+,): craft evaluates this
   // event into the page, so the menu opens the same modal the chord does.
   useEventListener('craft:settings', openSettings, { target: window })
+
+  // Access: the devices paired with this server. Revoking dispatches the
+  // same command the CLI uses; the list is server-rendered, so refresh.
+  async function revokeDevice(event) {
+    const deviceId = event.currentTarget.dataset.deviceId
+    if (!deviceId) return
+    const device = event.currentTarget.closest('li')
+    if (!(await stxConfirm(`Revoke ${device?.querySelector('span')?.textContent ?? deviceId}? Its socket drops immediately.`))) return
+    await sendCommand({ type: 'device.revoke', deviceId })
+    refresh()
+  }
+
+  // Mint a pairing code through the endpoint the CLI uses; the session cookie
+  // authenticates the fetch. Shown inline: the person pairing a phone is
+  // looking at this screen and the phone at the same time.
+  async function startPairing() {
+    const response = await fetch('/pair/new', { method: 'POST' }).catch(() => null)
+    if (!response?.ok) {
+      stxAlert('Could not open pairing — is the server running with --remote?')
+      return
+    }
+    const { code } = await response.json()
+    pairCode.set(code)
+  }
 
   async function createProfile() {
     const box = useRef('profileNameBox').current

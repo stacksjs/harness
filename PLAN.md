@@ -1941,6 +1941,42 @@ open.
 Craft iOS/Android over the same views. The swipe is native here and the Arc sidebar is the natural
 navigation model. This is where the design pays off most.
 
+### M8 — Accounts, honestly scoped
+
+"Account management" splits into three things that get conflated, and two of them already exist here
+in some form. Written down after reading how t3code actually does it (2026-08-17), because their
+account stack is the reference implementation of the third.
+
+**What t3code has** (from `apps/server/src/auth/` and `cloud/`):
+
+1. *T3 Connect* — a loopback OAuth flow (`CliTokenManager.ts`): the CLI opens a browser to their
+   hosted service, catches the callback on localhost, stores a refresh-capable token in an encrypted
+   secret store. This is a login to *their cloud* — subscription, hosted model endpoints, and the
+   relay their mobile app rides. It feels like "an account" because there is a paid backend behind it.
+2. *Environment auth* (`EnvironmentAuth.ts`) — OAuth-shaped scoped tokens with DPoP
+   proof-of-possession and pairing grants, for clients connecting to *your* server.
+3. *Provider CLI auth* (`cliAuthFormat.ts`) — normalizing the agent CLIs' own credential state.
+
+**Where harness stands:** #2 is §12 — pairing codes, hashed device tokens, revoke, all shipped, with
+the settings sheet's Access section as its UI. #3 is the driver probes (`ready`/`unauthenticated`)
+plus the per-profile `HOME` model that already handles multiple provider accounts. #1 does not exist
+because there is no harness cloud, and pretending otherwise with a login screen over nothing would be
+theatre.
+
+**What M8 would actually be: a relay identity.** The tunnel (M6's `--tunnel`) already makes a harness
+reachable from outside the network; what it lacks is discovery and standing trust. An account against
+a relay service would mean: sign in once on the desktop (t3code's loopback-OAuth shape is right),
+sign in on the phone, and the phone finds this machine through the relay — no LAN, no pairing code
+per network. The account owns: the machine list, the device list (superseding per-server pairing for
+remote access), and revocation that works even when the target machine is off.
+
+**The line that keeps it honest:** the account authenticates *reachability*, never execution. Tool
+approvals, workspace trust and the execution boundary stay on the machine, exactly as §12 draws
+them — a compromised relay account can see that a machine exists and knock on its door, not run
+anything. Requires: a hosted relay with identity (a product decision with billing and ops attached,
+not a feature), the loopback OAuth flow server-side, and a device-identity handshake phone-side.
+Blocked on that product decision; nothing in M0–M7 depends on it.
+
 ---
 
 ## 16. Risks

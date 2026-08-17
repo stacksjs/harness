@@ -633,6 +633,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           profileId: Number(url.searchParams.get('profile')) || undefined,
           serverUrl: `ws://${url.host}/ws`,
           codecUrl,
+          remoteEnabled: access !== null,
         })).then(async (rendered) => {
           if (rendered === null) return new Response('view not found', { status: 404 })
 
