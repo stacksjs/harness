@@ -89,6 +89,7 @@ export const sessionTitle = activeSession ? (activeSession.title || `Session ${a
 export const sessionState = activeSession ? activeSession.state : 'idle'
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
+export const sessionDriver = activeSession ? (activeSession.driverKind || '') : ''
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
 // The last turn is the only one that can still change, so it is the only one
@@ -129,6 +130,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         class="px-2 py-[2px] leading-[14px] text-[11px] rounded-full opacity-70"
         :text="uiState()"
       >{{ sessionState }}</span>
+      {{-- Which agent answers in this session — the composer picker's ground truth. --}}
+      @if(sessionDriver)
+        <span data-session-driver class="px-[6px] py-[1px] leading-[15px] text-[11px] border border-black/10 rounded-[5px] dark:border-white/15 opacity-70">{{ sessionDriver }}</span>
+      @endif
       {{--
         An isolated session edits its own checkout, not the workspace. Saying
         which branch makes that visible, and names the thing you merge.
@@ -318,6 +323,25 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         placeholder="Ask the agent…"
         class="flex-1 px-3 py-2 min-h-[40px] text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
       ></textarea>
+      {{--
+        The agent picker, where every LLM surface puts its model switch. It
+        shows the session's own driver; picking another offers a fresh session
+        with it — a different CLI cannot resume this one's conversation, and
+        pretending otherwise would silently drop the context.
+      --}}
+      <select
+        data-driver-picker
+        ref="driverPickerBox"
+        @change="driverPicked"
+        title="Agent for this session"
+        class="px-2 h-[36px] max-w-[170px] text-[12px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10"
+      >
+        <option value="claude">Claude Code</option>
+        <option value="codex">Codex</option>
+        <option value="opencode">OpenCode</option>
+        <option value="cursor">Cursor</option>
+        <option value="grok">Grok</option>
+      </select>
       <button type="submit" data-send :hidden="uiBusy()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
       {{--
         Stop is the one control a running agent must always offer. It replaces
@@ -719,6 +743,57 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // starts sessions with — so it lives in localStorage, not the event log:
   // a preference of this keyboard, not a fact about the project.
   const KNOWN_DRIVERS = ['claude', 'codex', 'opencode', 'cursor', 'grok']
+  const DRIVER_LABELS = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
+
+  // Live feedback on what each driver can actually do right now: the server
+  // probes the CLIs (installed? signed in? version?) and both pickers carry
+  // the answer in their option labels, with unusable agents disabled — a
+  // driver you cannot run should not be one click from a dead session.
+  async function annotateDriverPickers() {
+    const response = await fetch('/drivers').catch(() => null)
+    if (!response?.ok) return
+    const { drivers } = await response.json()
+    for (const info of drivers) {
+      for (const boxName of ['driverPickerBox', 'settingsDriverBox']) {
+        const option = useRef(boxName).current?.querySelector(`option[value="${info.kind}"]`)
+        if (!option) continue
+        const label = DRIVER_LABELS[info.kind] ?? info.kind
+        if (info.status === 'ready') {
+          option.disabled = false
+          option.textContent = info.version ? `${label} · ${info.version}` : label
+        }
+        else {
+          option.disabled = true
+          option.textContent = `${label} — ${info.status === 'unauthenticated' ? 'signed out' : 'not installed'}`
+        }
+      }
+    }
+  }
+
+  // Switching agents mid-session gets a new session rather than a silent
+  // handover: a different CLI cannot resume this conversation, so the honest
+  // move is a fresh start in the same workspace, said out loud.
+  async function driverPicked(event) {
+    const kind = event.currentTarget.value
+    localStorage.setItem('harness.defaultDriver', kind)
+    if (!activeSessionId || kind === sessionDriver) return
+    const label = DRIVER_LABELS[kind] ?? kind
+    if (await stxConfirm(`Start a new ${label} session in this workspace? This session stays as it is.`)) {
+      await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), driverKind: kind })
+      navigate(`/?profile=${encodeURIComponent(activeProfile)}`)
+    }
+    else {
+      event.currentTarget.value = sessionDriver
+    }
+  }
+
+  // After mount: the picker shows this session's driver (or the default when
+  // no session is open), then the probe results land in the labels.
+  requestAnimationFrame(() => {
+    const picker = useRef('driverPickerBox').current
+    if (picker) picker.value = sessionDriver || defaultDriver()
+    annotateDriverPickers()
+  })
 
   function defaultDriver() {
     const stored = localStorage.getItem('harness.defaultDriver')

@@ -119,6 +119,9 @@ export function viewProps(state: HarnessState, options: {
           id: active.id,
           title: active.turns[0]?.prompt?.slice(0, 60) ?? `Session ${active.id}`,
           state: active.state,
+          // Which agent this session runs — shown in the header and preselected
+          // in the composer's picker, so switching has a visible ground truth.
+          driverKind: active.driverKind,
           lastSeq: active.lastSeq,
           // For the terminal: a shell opens in the session's workspace, and
           // the island should not have to reverse-engineer it from the DOM.

@@ -177,6 +177,21 @@ await page.waitForFunction(() => document.querySelector('[data-settings-modal]')
 check('Esc closes the settings modal', true)
 await page.evaluate(() => localStorage.removeItem('harness.defaultDriver'))
 
+// 10. The composer's agent picker: preselected with the session's driver,
+// backed by live probes, and switching offers a fresh session honestly.
+const pickerState = await page.evaluate(async () => ({
+  value: (document.querySelector('[data-driver-picker]') as HTMLSelectElement | null)?.value,
+  headerChip: document.querySelector('[data-session-driver]')?.textContent,
+  probes: await fetch('/drivers').then(r => r.json()),
+}))
+check('picker shows the session driver', pickerState.value === 'claude' && pickerState.headerChip === 'claude')
+check('driver probes answer for every kind', pickerState.probes.drivers.length === 5 && pickerState.probes.drivers.every((d: any) => d.status === 'ready'))
+await page.selectOption('[data-driver-picker]', 'codex')
+await page.click('[role="alertdialog"] button:has-text("OK")')
+await page.waitForURL(/\?profile=/, { timeout: 8000 })
+const sessionsAfterSwitch = [...harness.engine.current.sessions.values()]
+check('switching drivers starts a fresh session with the new agent', sessionsAfterSwitch.length === 2 && sessionsAfterSwitch.some(s => s.driverKind === 'codex'))
+
 await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
 await browser.close()
 harness.stop()

@@ -10,6 +10,8 @@
 import type { CommandEnvelope, DriverKind } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver } from '@harness/drivers'
+import { tmpdir } from 'node:os'
+import { driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
 import { Pty } from './pty'
@@ -147,6 +149,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     // than appearing all at once when the turn ends.
     onEvents: events => broadcast(events),
   })
+  // Probe results for the composer's agent picker, held for 30s.
+  let driverProbes: { at: number, payload: unknown } | null = null
+
   // Hydrate before listening, not after. A socket that connects into a
   // half-built read model would be served a projection missing everything the
   // log has not replayed yet, and it has no way to tell.
@@ -618,6 +623,27 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // paths are fixed and a render must never shadow them.
       const asset = assetCache.respond(url.pathname)
       if (asset) return asset
+
+      // Driver availability, for the composer's agent picker. Probes spawn
+      // provider CLIs, so results are held briefly — a dropdown opened twice
+      // should not fork ten processes.
+      if (url.pathname === '/drivers') {
+        if (driverProbes && Date.now() - driverProbes.at < 30_000)
+          return Response.json(driverProbes.payload)
+        const resolve = options.resolveDriver ?? resolveRegisteredDriver
+        return Promise.all(driverKinds().map(async (kind) => {
+          const driver = resolve(kind)
+          if (!driver) return { kind, status: 'unavailable' as const }
+          const probe = await driver.probe({ workspacePath: tmpdir() }).catch((error: unknown) => ({
+            status: 'failed' as const,
+            message: error instanceof Error ? error.message : String(error),
+          }))
+          return { kind, status: probe.status, version: 'version' in probe ? probe.version : undefined, message: probe.message }
+        })).then((drivers) => {
+          driverProbes = { at: Date.now(), payload: { drivers } }
+          return Response.json(driverProbes.payload)
+        })
+      }
 
       // The web surface. Rendered per request from the in-memory projection —
       // no query runs, so the shell paints immediately.
