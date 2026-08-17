@@ -853,7 +853,7 @@ Enforced in CI. stx already has `scripts/performance-budgets.ts`; mirror the app
 
 | Metric | t3code (Electron) | harness budget |
 |---|---|---|
-| Desktop cold start → interactive | ~1–2s | **< 300ms** |
+| Desktop cold start → interactive | ~1–2s | **< 600ms** (re-baselined 2026-08-17; the WKWebView floor alone is ~450ms — see M4) |
 | Desktop installed size | ~150MB | **< 15MB** |
 | Idle RSS, one session open | ~250MB | **< 60MB** |
 | Session-list first paint, 500 sessions | — | **< 50ms** (SSR shell) |
@@ -1185,7 +1185,7 @@ budget from §11 holds.
 | Budget | Target | Measured | |
 |---|---|---|---|
 | Installed size | < 15MB | **1.1MB** release binary | ✅ |
-| Cold start → interactive | < 300ms | **~665ms** median | ❌ |
+| Cold start → interactive | < 600ms (re-baselined from 300 — see below) | **~665ms** median, pre-deferral; the SSR slice has since gone 166→129ms | ❌ pending remeasure |
 
 The size budget is not close — Craft's whole thesis, confirmed.
 
@@ -1227,6 +1227,27 @@ Two conclusions, both actionable:
 **The Craft floor alone is ~455ms — over 1.5× the entire 300ms budget.** An 88-byte page cannot beat it.
 No amount of work on the harness page can meet the budget while that floor stands, so the budget is a
 Craft problem first and a harness problem second.
+
+**The floor was probed and it held (2026-08-17).** The two remaining experiments from issue #5, run
+against craft main (v0.0.66 + the activation/TLS fix):
+
+- *Create the WKWebView (and start the load) before the window*: an interleaved A/B, eight pairs,
+  spawn → page-JS beacon on a ~60-byte page — median **451ms old order vs 474ms new order**, inside the
+  ±100ms run noise. The mechanism, in hindsight: everything before run-loop entry is serialized
+  main-thread work whose total is order-invariant, and WebContent cannot finish its handshake until the
+  run loop starts servicing XPC — which happens at the same absolute time in either order. Reordering
+  shifts the wait; it removes nothing. The change was discarded.
+- *A warmed `WKProcessPool` surviving launches*: impossible by construction. The pool is in-process
+  state — nothing about it outlives the process — and the API is deprecated besides. The only warmth
+  across launches is OS-level (dyld and XPC caches), which every measurement above already includes.
+
+One number did move on its own: window creation now measures **40–90ms** (`craft --benchmark`) against
+the 165ms recorded above — newer Craft is faster — but the ~450ms floor to page-JS stands regardless.
+
+**Decision: the budget is re-baselined to < 600ms** (§11 updated). 300ms is not achievable for *any*
+WKWebView app on this machine; ~450ms is macOS WebKit's price of admission, and the harness-controlled
+slice on top (SSR + parse/layout) budgets to < 150ms — which deferred spaces already meet at realistic
+profile counts (77ms render at 3–5 profiles).
 
 **The SSR render is the largest harness-controlled slice, and it scales with the number of projects** —
 which is exactly the axis a control surface grows along:
@@ -1324,7 +1345,7 @@ credentials, and shipping an unverifiable installer is worse than not claiming o
 ### M4 — Desktop surface *(original scope)*
 Craft window over the server. Native chrome: per-profile titlebar tint, system tray, global
 shortcut, native spaces sidebar (§10.2) mirroring the web one. Craft updater.
-**Exit:** a signed `.dmg` under 15MB that cold-starts under 300ms, both measured in CI.
+**Exit:** a signed `.dmg` under 15MB that cold-starts under 600ms (§11, re-baselined), both measured in CI.
 
 ### M5 — The rest of the drivers *(all five implemented)*
 
