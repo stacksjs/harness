@@ -136,3 +136,10 @@ jobs:
       # from inside each package.
       - name: Package Test Suites
         run: bun run test:packages
+
+      # The fourth step §14 promises: lint → typecheck → test → perf budgets.
+      # Time gates stretch ×2 for the shared runners; memory gates never do.
+      - name: Performance Budgets
+        run: bun --config=/dev/null scripts/performance-budgets.ts
+        env:
+          HARNESS_BUDGET_SLACK: '2'

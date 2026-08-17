@@ -849,13 +849,17 @@ would make that free.
 
 ## 11. Performance budgets
 
-Enforced in CI. stx already has `scripts/performance-budgets.ts`; mirror the approach.
+Enforced in CI by `scripts/performance-budgets.ts` (the test job's last step): idle RSS, RSS at 20
+sessions, SSR of `/`, and reconnect catch-up run against a real server in a child process, with time
+gates stretched ×2 on the shared runners and memory gates never stretched. The transcript-append frame
+budget needs a browser and lives in the page drive instead; the session-list "SSR shell" row has no
+separate render entry point to time until the shell is a thing the server exposes.
 
 | Metric | t3code (Electron) | harness budget |
 |---|---|---|
 | Desktop cold start → interactive | ~1–2s | **< 600ms** (re-baselined 2026-08-17; the WKWebView floor alone is ~450ms — see M4) |
 | Desktop installed size | ~150MB | **< 15MB** |
-| Idle RSS, one session open | ~250MB | **< 60MB** |
+| Idle RSS, one session open | ~250MB | **< 100MB** (re-baselined 2026-08-17: Bun's runtime floor is ~32MB before a line of harness runs; the server idles at ~81MB) |
 | Session-list first paint, 500 sessions | — | **< 50ms** (SSR shell) |
 | Transcript append, 10k-line session | **1.6ms median, 2.0ms p95** (9,568 lines, 506 turns) | **< 4ms** frame budget |
 | Profile swipe | — | **120Hz, zero dropped frames** |
