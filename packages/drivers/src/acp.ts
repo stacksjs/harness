@@ -152,18 +152,27 @@ export function permissionChoice(options: any[] | undefined, allow: boolean): st
 }
 
 /**
- * The prompt response's `stopReason` → the turn's terminal event.
+ * The prompt response → the turn's terminal event.
  *
  * `cancelled` completes rather than errors: the user asked for the stop, and an
- * error would blame them for it. ACP carries no token usage in its core
- * protocol, so usage is zero rather than an invention — the same call Codex's
- * driver makes on cost.
+ * error would blame them for it. Core ACP carries no token usage, but opencode
+ * extends the prompt response with a per-turn `usage` object (recorded live:
+ * `{inputTokens: 7032, outputTokens: 4, ...}` alongside `stopReason`), so read
+ * it when present and report zero when absent — never invented. Cost stays
+ * zero: the wire's other candidate, `usage_update`'s `cost`, looks
+ * session-cumulative, and a wrong per-turn cost compounds across a session
+ * where zero merely undercounts.
  */
-export function terminalOf(stopReason: unknown): ProviderEvent {
-  switch (stopReason) {
+export function terminalOf(result: { stopReason?: unknown, usage?: { inputTokens?: unknown, outputTokens?: unknown } } | undefined): ProviderEvent {
+  switch (result?.stopReason) {
     case 'end_turn':
     case 'cancelled':
-      return { type: 'turn-complete', tokensIn: 0, tokensOut: 0, costMicros: 0 }
+      return {
+        type: 'turn-complete',
+        tokensIn: tokenCount(result?.usage?.inputTokens),
+        tokensOut: tokenCount(result?.usage?.outputTokens),
+        costMicros: 0,
+      }
     case 'max_tokens':
       return { type: 'error', message: 'the turn hit the model\'s token limit' }
     case 'max_turn_requests':
@@ -171,8 +180,13 @@ export function terminalOf(stopReason: unknown): ProviderEvent {
     case 'refusal':
       return { type: 'error', message: 'the agent refused to continue' }
     default:
-      return { type: 'error', message: `the turn stopped (${String(stopReason)})` }
+      return { type: 'error', message: `the turn stopped (${String(result?.stopReason)})` }
   }
+}
+
+/** A token count from the wire: a non-negative finite number, else zero. */
+function tokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : 0
 }
 
 /**
@@ -383,7 +397,7 @@ class AcpInstance implements ProviderInstance {
       queue.finish({ type: 'error', message: readableAcpError(done.error) })
       return
     }
-    queue.finish(terminalOf(done.result?.stopReason))
+    queue.finish(terminalOf(done.result))
   }
 
   async interrupt(): Promise<void> {

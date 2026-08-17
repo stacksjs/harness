@@ -141,21 +141,35 @@ describe('acp permission choices', () => {
 
 describe('acp stop reasons', () => {
   it('completes on end_turn', () => {
-    expect(terminalOf('end_turn')).toEqual({ type: 'turn-complete', tokensIn: 0, tokensOut: 0, costMicros: 0 })
+    expect(terminalOf({ stopReason: 'end_turn' })).toEqual({ type: 'turn-complete', tokensIn: 0, tokensOut: 0, costMicros: 0 })
   })
 
   it('completes on cancelled rather than erroring', () => {
     // The user asked for the stop; an error would blame them for it.
-    expect(terminalOf('cancelled').type).toBe('turn-complete')
+    expect(terminalOf({ stopReason: 'cancelled' }).type).toBe('turn-complete')
+  })
+
+  it('reads the usage opencode attaches to the prompt response', () => {
+    // Recorded live from opencode 1.18.18: core ACP has no usage, but the
+    // response carries it as an extension and dropping it zeroed every total.
+    expect(terminalOf({ stopReason: 'end_turn', usage: { inputTokens: 7032, outputTokens: 4 } }))
+      .toEqual({ type: 'turn-complete', tokensIn: 7032, tokensOut: 4, costMicros: 0 })
+  })
+
+  it('reports zero for usage it cannot trust', () => {
+    // Token counts are summed across turns; NaN or a negative would poison a
+    // session total where zero merely undercounts.
+    expect(terminalOf({ stopReason: 'end_turn', usage: { inputTokens: -5, outputTokens: Number.NaN } }))
+      .toEqual({ type: 'turn-complete', tokensIn: 0, tokensOut: 0, costMicros: 0 })
   })
 
   it('surfaces the limits and refusals as errors', () => {
     for (const reason of ['max_tokens', 'max_turn_requests', 'refusal'])
-      expect(terminalOf(reason).type).toBe('error')
+      expect(terminalOf({ stopReason: reason }).type).toBe('error')
   })
 
   it('names an unknown stop reason instead of inventing a completion', () => {
-    expect(terminalOf('some_new_reason')).toEqual({ type: 'error', message: 'the turn stopped (some_new_reason)' })
+    expect(terminalOf({ stopReason: 'some_new_reason' })).toEqual({ type: 'error', message: 'the turn stopped (some_new_reason)' })
   })
 })
 
