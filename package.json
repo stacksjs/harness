@@ -78,8 +78,8 @@
   },
   "dependencies": {
     "@harness/ansi": "workspace:*",
-    "@stacksjs/components": "^0.2.168",
-    "@stacksjs/stx": "^0.2.165",
+    "@stacksjs/components": "^0.2.188",
+    "@stacksjs/stx": "^0.2.188",
     "stacks": "^0.70.304"
   },
   "workspaces": [
