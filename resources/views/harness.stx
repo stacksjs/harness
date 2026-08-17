@@ -157,6 +157,24 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         :aria-expanded="diffOpen() ? 'true' : 'false'"
         @click="toggleDiff"
       >Changes</button>
+      {{--
+        The account corner every surface has. Until M8 gives it an account to
+        show, it is the door to the settings sheet — same target as Cmd+, and
+        the app menu, so there is one settings surface, reached three ways.
+      --}}
+      <button
+        type="button"
+        data-account-button
+        title="Settings (⌘,)"
+        aria-label="Settings"
+        @click="openSettings"
+        class="flex items-center justify-center w-[26px] h-[26px] border border-black/10 rounded-full dark:border-white/15 opacity-70 hover:opacity-100"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="8" r="4"/>
+          <path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/>
+        </svg>
+      </button>
     </header>
 
     <section data-diff hidden :hidden="!diffOpen()" class="overflow-y-auto shrink-0 px-4 py-3 max-h-[45%] border-b border-black/5 dark:border-white/5">

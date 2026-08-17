@@ -202,6 +202,12 @@ await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
 await page.waitForFunction(() => (document.body.textContent ?? '').includes('typed with no session open'), undefined, { timeout: 8000 })
 check('type-to-start creates the session and delivers the prompt', harness.engine.current.sessions.size === 3)
 
+// 12. The account corner: the header's person icon opens the same settings.
+await page.click('[data-account-button]')
+await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+check('the account icon opens settings', true)
+await page.keyboard.press('Escape')
+
 await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
 await browser.close()
 harness.stop()
