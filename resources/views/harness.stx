@@ -959,6 +959,61 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // event into the page, so the menu opens the same modal the chord does.
   useEventListener('craft:settings', openSettings, { target: window })
 
+  // The desktop menu bar, declared by the page — the page is what knows
+  // what harness can do. craft builds the native NSMenu from this: role
+  // items (copy, paste, minimize…) act through the responder chain exactly
+  // like a nib-built menu — the Edit roles are what make Cmd+C/V/X work in
+  // the webview at all — and id items come back as `craft:menu:action`
+  // events, routed below. In a plain browser there is no bridge and the
+  // browser's own menus apply.
+  if (window.craft?.menu?.set) {
+    window.craft.menu.set([
+      { label: 'harness', items: [
+        { id: 'about', label: 'About harness', role: 'about' },
+        { separator: true },
+        { id: 'settings', label: 'Settings…', shortcut: 'cmd+,' },
+        { separator: true },
+        { id: 'hide', label: 'Hide harness', role: 'hide', shortcut: 'cmd+h' },
+        { id: 'hide-others', label: 'Hide Others', role: 'hideOthers', shortcut: 'cmd+alt+h' },
+        { id: 'show-all', label: 'Show All', role: 'showAll' },
+        { separator: true },
+        { id: 'quit', label: 'Quit harness', role: 'quit', shortcut: 'cmd+q' },
+      ] },
+      { label: 'File', items: [
+        { id: 'new-session', label: 'New Session', shortcut: 'cmd+n' },
+        { separator: true },
+        { id: 'close-window', label: 'Close Window', role: 'close', shortcut: 'cmd+w' },
+      ] },
+      { label: 'Edit', items: [
+        { id: 'undo', label: 'Undo', role: 'undo', shortcut: 'cmd+z' },
+        { id: 'redo', label: 'Redo', role: 'redo', shortcut: 'cmd+shift+z' },
+        { separator: true },
+        { id: 'cut', label: 'Cut', role: 'cut', shortcut: 'cmd+x' },
+        { id: 'copy', label: 'Copy', role: 'copy', shortcut: 'cmd+c' },
+        { id: 'paste', label: 'Paste', role: 'paste', shortcut: 'cmd+v' },
+        { id: 'select-all', label: 'Select All', role: 'selectAll', shortcut: 'cmd+a' },
+      ] },
+      { label: 'View', items: [
+        { id: 'toggle-terminal', label: 'Toggle Terminal', shortcut: 'ctrl+`' },
+        { separator: true },
+        { id: 'reload', label: 'Reload', role: 'reload', shortcut: 'cmd+r' },
+      ] },
+      { label: 'Window', items: [
+        { id: 'minimize', label: 'Minimize', role: 'minimize', shortcut: 'cmd+m' },
+        { id: 'zoom', label: 'Zoom', role: 'zoom' },
+        { separator: true },
+        { id: 'front', label: 'Bring All to Front', role: 'front' },
+      ] },
+    ])
+  }
+
+  useEventListener('craft:menu:action', (event) => {
+    const id = event.detail?.id
+    if (id === 'settings') openSettings()
+    else if (id === 'new-session') navigate(`/?profile=${encodeURIComponent(activeProfile)}`)
+    else if (id === 'toggle-terminal') toggleTerminal()
+  }, { target: window })
+
   // Access: the devices paired with this server. Revoking dispatches the
   // same command the CLI uses; the list is server-rendered, so refresh.
   async function revokeDevice(event) {

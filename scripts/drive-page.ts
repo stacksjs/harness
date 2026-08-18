@@ -97,6 +97,13 @@ const executablePath = process.env.PLAYWRIGHT_CHROMIUM
   ?? join(homedir(), 'Library/Caches/ms-playwright/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing')
 const browser = await chromium.launch({ executablePath, headless: true })
 const page = await browser.newPage()
+
+// A stub of craft's menu bridge, present before any page script runs: the
+// island declares the desktop menu bar through it, and the drive asserts the
+// declaration without a native window anywhere near the test.
+await page.addInitScript(() => {
+  ;(window as any).craft = { menu: { set: (menus: unknown) => { (window as any).__menuSet = menus } } }
+})
 page.on('dialog', async d => d.accept())
 page.on('pageerror', e => console.log('PAGEERROR:', String(e).slice(0, 200)))
 await page.goto(`http://localhost:${port}/s/${sessionId}`)
@@ -236,6 +243,27 @@ await page.waitForFunction(() => document.querySelector('[data-settings-modal]')
 await page.waitForFunction(() => document.querySelector('[data-terminal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
 await page.waitForFunction(() => (document.querySelector('[data-terminal-screen]')?.textContent ?? '').includes('codex login'), undefined, { timeout: 8000 })
 check('Log in opens the terminal and types the login command', true)
+
+// 14. The desktop menu bar: the island declares it through craft's bridge
+// (stubbed above), with an Edit menu of role items — the roles are what make
+// Cmd+C/V work natively — and id items that come back as craft:menu:action
+// events, which must land in the same handlers the buttons use.
+const menuShape = await page.evaluate(() => {
+  const menus = ((window as any).__menuSet ?? []) as Array<{ label: string, items?: Array<{ role?: string }> }>
+  const edit = menus.find(m => m.label === 'Edit')
+  return {
+    labels: menus.map(m => m.label),
+    editRoles: edit?.items?.filter(i => i.role).length ?? 0,
+  }
+})
+check(
+  'the page declares the menu bar with an Edit menu of roles',
+  menuShape.labels.join(',') === 'harness,File,Edit,View,Window' && menuShape.editRoles >= 6,
+)
+await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:menu:action', { detail: { id: 'settings' } })))
+await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+check('a menu action routes to the page handler', true)
+await page.keyboard.press('Escape')
 
 await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
 await browser.close()
