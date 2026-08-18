@@ -219,6 +219,24 @@ await page.waitForFunction(() => document.querySelector('[data-settings-modal]')
 check('the account icon opens settings', true)
 await page.keyboard.press('Escape')
 
+// 13. The Agents section: each CLI's live status, and a Log in button that
+// runs the CLI's own login flow in the workspace terminal. codex is the safe
+// row to click — not installed on the machines that run this drive, so the
+// shell answers "command not found" instead of starting a real OAuth flow,
+// while still proving the whole path: close settings, open terminal, type.
+await page.click('[data-account-button]')
+await page.waitForFunction(() => document.querySelector('[data-agent-row="claude"] [data-agent-state]')?.textContent === 'ready', undefined, { timeout: 4000 })
+const agentRows = await page.evaluate(() => [...document.querySelectorAll('[data-agent-row]')].map(row => ({
+  state: row.querySelector('[data-agent-state]')?.textContent,
+  loginShown: !(row.querySelector('[data-agent-login]') as HTMLElement).hidden,
+})))
+check('the agents section reports all five CLIs', agentRows.length === 5 && agentRows.every(r => r.state === 'ready' && r.loginShown))
+await page.click('[data-agent-row="codex"] [data-agent-login]')
+await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === true, undefined, { timeout: 4000 })
+await page.waitForFunction(() => document.querySelector('[data-terminal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+await page.waitForFunction(() => (document.querySelector('[data-terminal-screen]')?.textContent ?? '').includes('codex login'), undefined, { timeout: 8000 })
+check('Log in opens the terminal and types the login command', true)
+
 await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
 await browser.close()
 harness.stop()

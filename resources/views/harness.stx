@@ -441,7 +441,40 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <option value="cursor">Cursor</option>
         <option value="grok">Grok</option>
       </select>
-      <p class="mb-3 text-[12px] opacity-60">Cursor and Grok need their CLIs signed in first.</p>
+      <h3 class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Agents</h3>
+      {{--
+        One row per agent CLI, filled by the same `/drivers` probe that
+        annotates the pickers. "Log in" runs the CLI's own login flow in the
+        workspace terminal — the CLIs own their credentials; harness never
+        holds a provider secret (PLAN §M8).
+      --}}
+      <ul class="mb-3" data-agent-list>
+        <li data-agent-row="claude" class="flex gap-2 items-center py-1 text-[13px]">
+          <span class="flex-1 truncate">Claude Code</span>
+          <span data-agent-state class="text-[11px] opacity-60">checking…</span>
+          <button type="button" data-agent-login data-kind="claude" @click="loginAgent" hidden class="px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15">Log in</button>
+        </li>
+        <li data-agent-row="codex" class="flex gap-2 items-center py-1 text-[13px]">
+          <span class="flex-1 truncate">Codex</span>
+          <span data-agent-state class="text-[11px] opacity-60">checking…</span>
+          <button type="button" data-agent-login data-kind="codex" @click="loginAgent" hidden class="px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15">Log in</button>
+        </li>
+        <li data-agent-row="opencode" class="flex gap-2 items-center py-1 text-[13px]">
+          <span class="flex-1 truncate">OpenCode</span>
+          <span data-agent-state class="text-[11px] opacity-60">checking…</span>
+          <button type="button" data-agent-login data-kind="opencode" @click="loginAgent" hidden class="px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15">Log in</button>
+        </li>
+        <li data-agent-row="cursor" class="flex gap-2 items-center py-1 text-[13px]">
+          <span class="flex-1 truncate">Cursor</span>
+          <span data-agent-state class="text-[11px] opacity-60">checking…</span>
+          <button type="button" data-agent-login data-kind="cursor" @click="loginAgent" hidden class="px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15">Log in</button>
+        </li>
+        <li data-agent-row="grok" class="flex gap-2 items-center py-1 text-[13px]">
+          <span class="flex-1 truncate">Grok</span>
+          <span data-agent-state class="text-[11px] opacity-60">checking…</span>
+          <button type="button" data-agent-login data-kind="grok" @click="loginAgent" hidden class="px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15">Log in</button>
+        </li>
+      </ul>
 
       <h3 class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Access</h3>
       @if(devices.length)
@@ -785,6 +818,16 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const KNOWN_DRIVERS = ['claude', 'codex', 'opencode', 'cursor', 'grok']
   const DRIVER_LABELS = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
 
+  // Each CLI's own login flow, run in the workspace terminal. The CLIs hold
+  // their credentials; harness only starts the conversation.
+  const LOGIN_COMMANDS = {
+    claude: 'claude /login',
+    codex: 'codex login',
+    opencode: 'opencode auth login',
+    cursor: 'cursor-agent login',
+    grok: 'grok login',
+  }
+
   // Live feedback on what each driver can actually do right now: the server
   // probes the CLIs (installed? signed in? version?) and both pickers carry
   // the answer in their option labels, with unusable agents disabled — a
@@ -807,7 +850,42 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           option.textContent = `${label} — ${info.status === 'unauthenticated' ? 'signed out' : 'not installed'}`
         }
       }
+
+      // The settings sheet's Agents rows carry the same answer, plus the way
+      // in: Log in shows for any installed CLI — signed-out ones need it,
+      // signed-in ones may want to switch accounts.
+      const row = document.querySelector(`[data-agent-row="${info.kind}"]`)
+      if (row) {
+        const stateText = info.status === 'ready'
+          ? (info.version ? `ready · ${info.version}` : 'ready')
+          : info.status === 'unauthenticated' ? 'signed out'
+            : info.status === 'unavailable' ? 'not installed' : 'error'
+        row.querySelector('[data-agent-state]').textContent = stateText
+        const login = row.querySelector('[data-agent-login]')
+        login.hidden = info.status !== 'ready' && info.status !== 'unauthenticated'
+        // The signed-out row is the one this section exists for.
+        login.classList.toggle('font-medium', info.status === 'unauthenticated')
+      }
     }
+  }
+
+  // Log in = run the CLI's own login flow where it expects to run: a
+  // terminal. Opens the workspace terminal and types the command; the CLI
+  // takes it from there (device codes, browser hand-offs, whatever it does).
+  function loginAgent(event) {
+    const kind = event.currentTarget.dataset.kind
+    const command = LOGIN_COMMANDS[kind]
+    if (!command) return
+    if (!Number(activeWorkspaceId)) {
+      stxAlert(`Open a workspace first — the login runs in its terminal. Or run \`${command}\` in any terminal yourself.`)
+      return
+    }
+    closeSettings()
+    if (!termOpen()) toggleTerminal()
+    // Buffered by termSend until the PTY binds, so this works on a terminal
+    // that is still opening. A paired phone gets the server's local-only
+    // refusal instead, which names the command to run by hand.
+    termSend(`${command}\r`)
   }
 
   // Switching agents mid-session gets a new session rather than a silent
@@ -858,6 +936,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
   function openSettings() {
     settingsOpen.set(true)
+    // Re-probe on open: someone who just logged in comes back to a sheet
+    // that should say so. The server holds results for 30s, so this is a
+    // cheap read, not a process fork per open.
+    annotateDriverPickers()
     requestAnimationFrame(() => {
       const box = useRef('settingsDriverBox').current
       if (box) box.value = defaultDriver()
