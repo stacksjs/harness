@@ -967,7 +967,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // events, routed below. In a plain browser there is no bridge and the
   // browser's own menus apply.
   if (window.craft?.menu?.set) {
-    window.craft.menu.set([
+    window.craft.menu.set({ menus: [
       { label: 'harness', items: [
         { id: 'about', label: 'About harness', role: 'about' },
         { separator: true },
@@ -1004,7 +1004,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         { separator: true },
         { id: 'front', label: 'Bring All to Front', role: 'front' },
       ] },
-    ])
+    ] })
   }
 
   useEventListener('craft:menu:action', (event) => {

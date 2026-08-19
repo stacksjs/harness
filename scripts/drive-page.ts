@@ -102,7 +102,7 @@ const page = await browser.newPage()
 // island declares the desktop menu bar through it, and the drive asserts the
 // declaration without a native window anywhere near the test.
 await page.addInitScript(() => {
-  ;(window as any).craft = { menu: { set: (menus: unknown) => { (window as any).__menuSet = menus } } }
+  ;(window as any).craft = { menu: { set: (options: unknown) => { (window as any).__menuSet = options } } }
 })
 page.on('dialog', async d => d.accept())
 page.on('pageerror', e => console.log('PAGEERROR:', String(e).slice(0, 200)))
@@ -249,7 +249,8 @@ check('Log in opens the terminal and types the login command', true)
 // Cmd+C/V work natively — and id items that come back as craft:menu:action
 // events, which must land in the same handlers the buttons use.
 const menuShape = await page.evaluate(() => {
-  const menus = ((window as any).__menuSet ?? []) as Array<{ label: string, items?: Array<{ role?: string }> }>
+  // The v0.0.67 contract: set() takes `{menus}` and passes it through raw.
+  const menus = (((window as any).__menuSet as { menus?: unknown })?.menus ?? []) as Array<{ label: string, items?: Array<{ role?: string }> }>
   const edit = menus.find(m => m.label === 'Edit')
   return {
     labels: menus.map(m => m.label),
