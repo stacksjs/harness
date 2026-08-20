@@ -306,12 +306,28 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   /**
+   * Rendered pages, keyed by URL and state revision.
+   *
+   * SSR of an unchanged projection re-does megabytes of allocator churn per
+   * render for byte-identical output (issue #11) — a control surface polling
+   * `/` should pay the render exactly once per state change. The revision
+   * bumps in `broadcast`, the one path every applied event already takes, so
+   * a stale page cannot outlive the event that invalidated it. Keys embed
+   * the revision, which makes entries self-expiring; the cap only bounds the
+   * window between events.
+   */
+  let stateRev = 0
+  const renderCache = new Map<string, string>()
+  const RENDER_CACHE_CAP = 16
+
+  /**
    * Push events to everyone subscribed to their session.
    *
    * Global events (session id 0) go to every socket: a new profile is
    * relevant to every open client, and none of them subscribe to it.
    */
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
+    if (events.length > 0) stateRev++
     for (const event of events) {
       // A revoke has to reach the connection, not just the next handshake.
       // Closed before the event is delivered, so the socket being cut off does
@@ -645,9 +661,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         })
       }
 
-      // The web surface. Rendered per request from the in-memory projection —
-      // no query runs, so the shell paints immediately.
+      // The web surface. Rendered from the in-memory projection — no query
+      // runs, so the shell paints immediately — and cached against the state
+      // revision, so only the first request after a state change renders.
       if (url.pathname === '/' || url.pathname.startsWith('/s/')) {
+        // `host` is in the key because the page embeds its own ws:// URL.
+        const cacheKey = `${url.pathname}${url.search}|${url.host}|${stateRev}`
+        const cached = renderCache.get(cacheKey)
+        if (cached !== undefined) {
+          return new Response(cached, {
+            headers: { 'content-type': 'text/html; charset=utf-8', 'x-render-cache': 'hit' },
+          })
+        }
         const sessionId = url.pathname.startsWith('/s/')
           ? Number(url.pathname.slice(3)) || undefined
           : undefined
@@ -672,7 +697,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // this process cannot yet serve.
           assetCache.remember(assets)
 
-          return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } })
+          // Stored under the key captured at request time: if an event landed
+          // mid-render, the new revision's requests miss this entry and
+          // render fresh, which is the consistency renders had all along.
+          renderCache.set(cacheKey, html)
+          if (renderCache.size > RENDER_CACHE_CAP) {
+            const oldest = renderCache.keys().next().value
+            if (oldest !== undefined) renderCache.delete(oldest)
+          }
+
+          return new Response(html, {
+            headers: { 'content-type': 'text/html; charset=utf-8', 'x-render-cache': 'miss' },
+          })
         }).catch((error: unknown) => {
           // A template error must not take the socket down with it.
           const message = error instanceof Error ? error.message : String(error)

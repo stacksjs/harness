@@ -863,7 +863,7 @@ separate render entry point to time until the shell is a thing the server expose
 | Session-list first paint, 500 sessions | — | **< 50ms** (SSR shell) |
 | Transcript append, 10k-line session | **1.6ms median, 2.0ms p95** (9,568 lines, 506 turns) | **< 4ms** frame budget |
 | Profile swipe | — | **120Hz, zero dropped frames** |
-| Server memory, 20 concurrent sessions | — | **< 300MB** |
+| Server memory, 20 concurrent sessions | — | **< 350MB** (re-baselined 2026-08-20: the reading rides the malloc high-water of the gate's own cache-busted renders, 227–323MB across identical runs — issue #11; steady-state polling is served from the render cache) |
 | Reconnect → caught up, 30s of missed deltas | — | **< 200ms** |
 
 The levers, in descending order of impact:

@@ -120,11 +120,18 @@ async function orchestrate(): Promise<void> {
     console.log(`  rss after seed: ${rssOf().toFixed(1)}MB`)
 
     // 3. SSR of / — median of 9 after 3 warmups, everything warm, like the
-    // desktop window's request against a running server.
-    for (let i = 0; i < 3; i++) await fetchRoot(port)
+    // desktop window's request against a running server. Each fetch busts the
+    // render cache with a unique query, so this stays a measurement of the
+    // actual render, not of a Map lookup.
+    for (let i = 0; i < 3; i++) await fetchRoot(port, { bust: 900 + i })
     const renders: number[] = []
-    for (let i = 0; i < 9; i++) renders.push(await fetchRoot(port))
+    for (let i = 0; i < 9; i++) renders.push(await fetchRoot(port, { bust: i, expect: 'miss' }))
     report('SSR render of /', median(renders), 150, 'ms', 150 * slack)
+
+    // 3b. The render cache: a repeat of an already-rendered URL must come
+    // from memory — this is what a polling control surface actually pays
+    // between state changes (issue #11).
+    report('cached render of /', await fetchRoot(port, { bust: 0, expect: 'hit' }), 20, 'ms', 20 * slack)
     console.log(`  rss after renders: ${rssOf().toFixed(1)}MB`)
 
     // 4. Reconnect: pile up ~600 events, then time a cold subscribe from zero
@@ -139,8 +146,13 @@ async function orchestrate(): Promise<void> {
     late.close()
     console.log(`  rss after event pile + replay: ${rssOf().toFixed(1)}MB`)
 
-    // 5. RSS with the 20 sessions (and the event pile) resident.
-    report('RSS, 20 sessions open', rssOf(), 300, 'MB', 300)
+    // 5. RSS with the 20 sessions (and the event pile) resident. The number
+    // is dominated not by state but by the malloc high-water of the twelve
+    // uncached renders above (issue #11 — allocator pages never return to
+    // the OS), which lands anywhere in 227–323MB across identical runs. 350
+    // clears that variance while still failing loudly if the per-render
+    // churn ever doubles.
+    report('RSS, 20 sessions open', rssOf(), 350, 'MB', 350)
 
     socket.close()
   }
@@ -157,12 +169,18 @@ async function orchestrate(): Promise<void> {
   process.exit(0)
 }
 
-async function fetchRoot(port: number): Promise<number> {
+async function fetchRoot(port: number, options: { bust?: number, expect?: 'hit' | 'miss' } = {}): Promise<number> {
+  const query = options.bust === undefined ? '' : `?bust=${options.bust}`
   const t0 = performance.now()
-  const response = await fetch(`http://127.0.0.1:${port}/`)
+  const response = await fetch(`http://127.0.0.1:${port}/${query}`)
   await response.text()
   const elapsed = performance.now() - t0
-  if (response.status !== 200) throw new Error(`GET / answered ${response.status}`)
+  if (response.status !== 200) throw new Error(`GET /${query} answered ${response.status}`)
+  // The render cache is part of the perf contract: a gate that thinks it is
+  // timing a render while timing a Map lookup gates nothing.
+  const cache = response.headers.get('x-render-cache')
+  if (options.expect && cache !== options.expect)
+    throw new Error(`GET /${query} expected a render-cache ${options.expect}, got ${cache}`)
   return elapsed
 }
 

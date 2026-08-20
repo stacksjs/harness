@@ -469,3 +469,46 @@ describe('terminals over the socket', () => {
     client.close()
   })
 })
+
+describe('the render cache', () => {
+  // The real template renders here — slow, so one test carries the whole
+  // contract: miss, hit with identical bytes, invalidation on the next event.
+  // The view resolves from cwd, which under `bun test` is the package dir.
+  it('renders once per state change and invalidates on the next event', async () => {
+    const root = join(import.meta.dir, '../../..')
+    const previousCwd = process.cwd()
+    process.chdir(root)
+    try {
+      const base = `http://127.0.0.1:${port}`
+      const first = await fetch(`${base}/`)
+      expect(first.status).toBe(200)
+      expect(first.headers.get('x-render-cache')).toBe('miss')
+      const body = await first.text()
+
+      const second = await fetch(`${base}/`)
+      expect(second.headers.get('x-render-cache')).toBe('hit')
+      expect(await second.text()).toBe(body)
+
+      // A different URL is a different page, never the cached one.
+      const other = await fetch(`${base}/?profile=1`)
+      expect(other.headers.get('x-render-cache')).toBe('miss')
+
+      const client = await TestClient.connect(url())
+      await client.until('ready')
+      client.send({
+        t: 'dispatch',
+        envelope: { id: 'rc_1', at: Date.now(), command: { type: 'profile.create', name: 'Cache' } },
+      })
+      await client.until('dispatched')
+      client.close()
+
+      const third = await fetch(`${base}/`)
+      expect(third.headers.get('x-render-cache')).toBe('miss')
+      // The invalidation was not ceremonial: the new state is in the page.
+      expect(await third.text()).toContain('Cache')
+    }
+    finally {
+      process.chdir(previousCwd)
+    }
+  }, 60000)
+})
