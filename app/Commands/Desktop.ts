@@ -1,7 +1,7 @@
 import type { CLI } from '@stacksjs/types'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { serve } from '@harness/server'
@@ -31,29 +31,6 @@ function resolveCraft(explicit?: string): string | null {
     join(homedir(), 'Code/Tools/craft/packages/zig/zig-out/bin/craft'),
   ].filter((c): c is string => Boolean(c))
   return candidates.find(c => existsSync(c)) ?? null
-}
-
-/**
- * The binary, under this app's name. macOS titles the application menu with
- * the process name — spawned directly, the menu bar says "craft" over a
- * window that says harness. Craft reads NSProcessInfo's processName for its
- * menu labels too, so launching through a `harness`-named symlink fixes the
- * bold title, "Hide harness"/"Quit harness", and Activity Monitor in one
- * move, without renaming the real binary.
- */
-function namedAs(craftBin: string, name: string): string {
-  const dir = join(tmpdir(), 'harness-app')
-  const link = join(dir, name)
-  try {
-    mkdirSync(dir, { recursive: true })
-    rmSync(link, { force: true })
-    symlinkSync(craftBin, link)
-    return link
-  }
-  catch {
-    // A read-only temp dir loses the menu title, not the app.
-    return craftBin
-  }
 }
 
 export default function (cli: CLI) {
@@ -95,11 +72,18 @@ export default function (cli: CLI) {
       // the window and its page — not this command's own startup, which the
       // user pays once and which tells us nothing about page weight.
       markWindowSpawned()
-      const child = spawn(namedAs(craftBin, 'harness'), [
+      const child = spawn(craftBin, [
         // The window authenticates through a one-time token in the URL; the
         // server swaps it for a cookie and redirects, so it does not linger.
         '--url', access ? `http://127.0.0.1:${port}/?token=${access.localToken}` : `http://127.0.0.1:${port}/`,
         '--title', 'harness',
+        // The menu bar's name (craft v0.0.77+). Before this flag existed the
+        // same effect took a symlink named `harness` in a temp dir, so that
+        // NSProcessInfo.processName read right.
+        '--app-name', 'harness',
+        // AppKit remembers the frame under this key; width/height below are
+        // first-launch defaults, not overrides.
+        '--frame-autosave', 'harness',
         '--width', String(options.width ?? 1280),
         '--height', String(options.height ?? 820),
         // The web UI draws the sidebar; AppKit draws the material behind it.
