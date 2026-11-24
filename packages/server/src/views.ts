@@ -10,6 +10,7 @@
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { threadTitle } from './thread-search'
 
 interface ProjectSummary {
   id: number
@@ -86,7 +87,7 @@ export function viewProps(state: HarnessState, options: {
         // A session with no title yet is named by its first prompt — the same
         // thing a person would call it. Before that it is simply new: the
         // derived id is a hash, and a hash is not a name.
-        title: session.turns[0]?.prompt?.slice(0, 60) ?? 'New session',
+        title: threadTitle(session),
         state: session.state,
       }))
 
@@ -131,7 +132,7 @@ export function viewProps(state: HarnessState, options: {
     activeSession: active
       ? {
           id: active.id,
-          title: active.turns[0]?.prompt?.slice(0, 60) ?? 'New session',
+          title: threadTitle(active),
           state: active.state,
           // Which agent this session runs — shown in the header and preselected
           // in the composer's picker, so switching has a visible ground truth.

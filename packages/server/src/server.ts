@@ -25,6 +25,7 @@ import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
 import { SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
+import { searchThreads } from './thread-search'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
 
@@ -699,6 +700,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // paths are fixed and a render must never shadow them.
       const asset = assetCache.respond(url.pathname)
       if (asset) return asset
+
+      if (url.pathname === '/threads/search' && request.method === 'GET') {
+        const profileId = Number(url.searchParams.get('profile'))
+        return Response.json({ results: searchThreads(engine.current, profileId, url.searchParams.get('q') ?? '') }, {
+          headers: { 'cache-control': 'no-store' },
+        })
+      }
 
       // Driver availability, for the composer's agent picker. Probes spawn
       // provider CLIs, so results are held briefly — a dropdown opened twice

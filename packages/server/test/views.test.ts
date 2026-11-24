@@ -1,6 +1,7 @@
 import type { HarnessState, ProfileState, SessionState, TurnState } from '@harness/engine'
 import { describe, expect, it } from 'bun:test'
 import { emptyState } from '@harness/engine'
+import { searchThreads } from '../src/thread-search'
 import { viewProps } from '../src/views'
 
 /**
@@ -66,6 +67,34 @@ function stateWith(): HarnessState {
   state.sessions.set(200, session({ id: 200, workspaceId: 20, state: 'idle', lastSeq: 1, turns: [] }))
   return state
 }
+
+describe('thread search', () => {
+  it('ranks titles, projects and branches ahead of message hits within one profile', () => {
+    const state = stateWith()
+    state.sessions.set(101, session({ id: 101, workspaceId: 11, turns: [turn({ prompt: 'Investigation notes', response: 'parser issue is reproduced' })] }))
+    state.sessions.set(100, session({ turns: [turn({ prompt: 'Release notes' })], branch: 'fix/parser' }))
+    state.sessions.set(200, session({ id: 200, workspaceId: 20, turns: [turn({ response: 'also a parser issue' })] }))
+
+    expect(searchThreads(state, 1, 'PARSER')).toEqual([
+      { id: 100, project: 'alpha', title: 'Release notes' },
+      { id: 101, project: 'beta', title: 'Investigation notes', turnId: 1, excerpt: 'parser issue is reproduced' },
+    ])
+    expect(searchThreads(state, 1, 'issue parser')).toEqual([
+      { id: 101, project: 'beta', title: 'Investigation notes', turnId: 1, excerpt: 'parser issue is reproduced' },
+    ])
+    expect(searchThreads(state, 2, 'alpha')).toEqual([])
+    expect(searchThreads(state, 99, 'parser')).toEqual([])
+  })
+
+  it('matches search punctuation literally and requires longer words for message search', () => {
+    const state = stateWith()
+    state.sessions.set(100, session({ turns: [turn({ response: 'Literal [api] notes, 字形' })] }))
+    expect(searchThreads(state, 1, '[api]')).toMatchObject([{ id: 100, turnId: 1 }])
+    expect(searchThreads(state, 1, 'api.*')).toEqual([])
+    expect(searchThreads(state, 1, 'ap')).toEqual([])
+    expect(searchThreads(state, 1, '字形')).toMatchObject([{ id: 100, turnId: 1 }])
+  })
+})
 
 describe('viewProps — shaping the read model for the page', () => {
   it('groups sessions under the profile that owns their workspace', () => {

@@ -214,6 +214,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         @endif
       </div>
       @endif
+      @if(hasProfiles)
+        <button type="button" data-thread-search-toggle ref="threadSearchToggleBox" @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" aria-keyshortcuts="Meta+K Control+K">
+          <span class="inline-block size-4 i-hugeicons-search-01" aria-hidden="true"></span>
+        </button>
+      @endif
       {{--
         The account corner every surface has. Until M8 gives it an account to
         show, it is the door to the settings sheet — same target as Cmd+, and
@@ -292,7 +297,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         </div>
       @endif
       @foreach(settledTurns as turn)
-        <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}">
+        <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}" id="turn-{{ turn.id }}">
           <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
           <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ turn.prompt }}</div>
           {{--
@@ -330,7 +335,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       @endforeach
 
       @if(liveTurn)
-        <article class="mb-5" data-turn="{{ liveTurn.id }}" data-live>
+        <article class="mb-5" data-turn="{{ liveTurn.id }}" id="turn-{{ liveTurn.id }}" data-live>
           <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
           <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ liveTurn.prompt }}</div>
           <div data-tools>
@@ -395,7 +400,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         arrive through :text, which assigns text and never parses markup.
       --}}
       <template :for="turn in liveTurns" :key="turn.id">
-        <article class="mb-5" :data-turn="turn.id">
+        <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
           <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
           <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap" :text="turn.prompt"></div>
           <div data-tools>
@@ -475,6 +480,28 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     </form>
     @endif
   </main>
+
+  <dialog data-thread-search ref="threadSearchDialogBox" aria-labelledby="thread-search-heading" @cancel="cancelThreadSearch" @click.self="closeThreadSearch" class="mb-auto mt-8 mx-auto p-0 md:mt-auto text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[12px] dark:border-white/15 shadow-xl">
+    <div class="p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 id="thread-search-heading" class="font-semibold text-[14px]">Search threads</h2>
+        <button type="button" @click="closeThreadSearch" aria-label="Close search" class="inline-flex items-center justify-center size-7 hover:bg-black/5 dark:hover:bg-white/10 rounded-[6px]">
+          <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </div>
+      <input data-thread-search-input ref="threadSearchInputBox" type="search" maxlength="120" role="combobox" aria-label="Search thread titles and messages" aria-controls="thread-search-list" aria-autocomplete="list" aria-expanded="false" :aria-expanded="threadSearchResults().length ? 'true' : 'false'" :aria-activedescendant="selectedThreadSearchId()" @input="queueThreadSearch" @compositionend="queueThreadSearch" @keydown="threadSearchKeydown" autocomplete="off" placeholder="Search titles, projects, and messages" class="px-3 py-2 w-full text-[14px] bg-neutral-50 dark:bg-neutral-950 border border-black/15 rounded-[8px] dark:border-white/20" />
+      <p role="status" :hidden="!threadSearchStatus()" :text="threadSearchStatus()" class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300"></p>
+      <ul id="thread-search-list" data-thread-search-list ref="threadSearchListBox" role="listbox" aria-label="Matching threads" :hidden="!threadSearchResults().length" class="overflow-y-auto mt-2">
+        <li :for="(result, index) in threadSearchResults()" :key="result.id" :id="'thread-search-result-' + result.id" data-thread-search-option role="option" :aria-selected="threadSearchIndex() === index ? 'true' : 'false'" @click="chooseThreadSearchResult(result)" class="px-3 py-2 rounded-[6px] cursor-pointer">
+          <div class="flex gap-2 items-center justify-between">
+            <span class="min-w-0 font-medium text-[13px] truncate" :text="result.title"></span>
+            <span class="max-w-[40%] text-[11px] text-neutral-600 truncate dark:text-neutral-300" :text="result.project"></span>
+          </div>
+          <p :if="result.excerpt" class="mt-1 text-[12px] text-neutral-600 truncate dark:text-neutral-300" :text="result.excerpt"></p>
+        </li>
+      </ul>
+    </div>
+  </dialog>
 
   <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
     <form class="flex flex-col gap-4 p-5" @submit.prevent="registerProject">
@@ -776,6 +803,17 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const settingsDriverRef = useRef('settingsDriverBox')
   const settingsToggleRef = useRef('settingsToggleBox')
   const settingsDialogRef = useRef('settingsDialogBox')
+  const threadSearchDialog = useRef('threadSearchDialogBox')
+  const threadSearchInput = useRef('threadSearchInputBox')
+  const threadSearchList = useRef('threadSearchListBox')
+  const threadSearchToggle = useRef('threadSearchToggleBox')
+  const threadSearchResults = state([])
+  const threadSearchStatus = state('')
+  const threadSearchIndex = state(0)
+  const selectedThreadSearchId = derived(() => {
+    const id = threadSearchResults()[threadSearchIndex()]?.id
+    return id === undefined ? undefined : `thread-search-result-${id}`
+  })
   const transcriptRef = useRef('transcriptBox')
   const termScreenRef = useRef('termScreenBox')
   const termHostRef = useRef('termHostBox')
@@ -1281,6 +1319,94 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     closeSettings()
   }
 
+  let threadSearchTimer = null
+  let threadSearchRequest = null
+  let threadSearchFromButton = false
+
+  function openThreadSearch(event) {
+    const dialog = threadSearchDialog.current
+    if (!dialog || dialog.open || !Number(activeProfile)) return
+    threadSearchFromButton = event?.currentTarget === threadSearchToggle.current
+    workspaceActionsOpen.set(false)
+    dialog.showModal()
+    threadSearchInput.current?.focus()
+  }
+
+  function closeThreadSearch() {
+    threadSearchTimer?.stop()
+    threadSearchRequest?.abort()
+    threadSearchResults.set([])
+    threadSearchStatus.set('')
+    if (threadSearchInput.current) threadSearchInput.current.value = ''
+    threadSearchDialog.current?.close()
+    if (threadSearchFromButton) threadSearchToggle.current?.focus()
+    threadSearchFromButton = false
+  }
+
+  function cancelThreadSearch(event) {
+    event.preventDefault()
+    closeThreadSearch()
+  }
+
+  function queueThreadSearch(event) {
+    if (event.isComposing) return
+    const query = event.currentTarget.value.trim()
+    threadSearchTimer?.stop()
+    threadSearchRequest?.abort()
+    threadSearchResults.set([])
+    threadSearchIndex.set(0)
+    threadSearchStatus.set('')
+    if (!query) return
+    threadSearchTimer = useTimeout(() => searchThreadResults(query), 160)
+  }
+
+  async function searchThreadResults(query) {
+    const request = new AbortController()
+    threadSearchRequest = request
+    threadSearchStatus.set('Searching…')
+    try {
+      const params = new URLSearchParams({ profile: String(activeProfile), q: query })
+      const response = await fetch(`/threads/search?${params}`, { signal: request.signal })
+      if (!response.ok) throw new Error('Thread search failed.')
+      const { results } = await response.json()
+      if (request.signal.aborted) return
+      threadSearchResults.set(results)
+      threadSearchStatus.set(results.length ? '' : 'No matching threads.')
+    }
+    catch {
+      if (!request.signal.aborted) threadSearchStatus.set('Could not search threads. Try again.')
+    }
+  }
+
+  function chooseThreadSearchResult(result) {
+    if (!result) return
+    closeThreadSearch()
+    navigate(`/s/${result.id}${result.turnId ? `#turn-${result.turnId}` : ''}`)
+  }
+
+  function threadSearchKeydown(event) {
+    if (event.isComposing) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closeThreadSearch()
+      return
+    }
+    const results = threadSearchResults()
+    if (results.length === 0) return
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      chooseThreadSearchResult(results[threadSearchIndex()])
+      return
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    event.preventDefault()
+    const step = event.key === 'ArrowDown' ? 1 : -1
+    const index = (threadSearchIndex() + step + results.length) % results.length
+    threadSearchIndex.set(index)
+    threadSearchList.current?.children[index]?.scrollIntoView({ block: 'nearest' })
+  }
+
   function saveDriverChoice() {
     const box = settingsDriverRef.current
     if (box) localStorage.setItem('harness.defaultDriver', box.value)
@@ -1692,7 +1818,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // desktop window the menu item usually claims the chord first and arrives
   // as `craft:settings` instead.
   useEventListener('keydown', (event) => {
-    if (projectDialog.current?.open || settingsDialogRef.current?.open) return
+    if (projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.
@@ -1714,6 +1840,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if ((event.metaKey || event.ctrlKey) && event.key === ',') {
       event.preventDefault()
       openSettings()
+      return
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && Number(activeProfile)) {
+      event.preventDefault()
+      openThreadSearch()
       return
     }
     if (!(event.ctrlKey && event.key === '`')) return
