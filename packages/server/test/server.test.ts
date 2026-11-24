@@ -567,6 +567,20 @@ describe('the render cache', () => {
       expect(first.status).toBe(200)
       expect(first.headers.get('x-render-cache')).toBe('miss')
       const body = await first.text()
+      const assets = [...new Set(Array.from(
+        body.matchAll(/(?:src|href)="(\/_stx\/(?:runtime|router|modules|css)\.[0-9a-f]{16}\.(?:js|css))"/gu),
+        match => match[1]!,
+      ))]
+      expect(assets.some(path => path.startsWith('/_stx/runtime.'))).toBe(true)
+      expect(assets.some(path => path.startsWith('/_stx/css.'))).toBe(true)
+      for (const path of assets) {
+        const asset = await fetch(`${base}${path}`)
+        expect(asset.status).toBe(200)
+        expect(asset.headers.get('cache-control')).toContain('immutable')
+        expect(asset.headers.get('content-type')).toContain(path.endsWith('.css') ? 'text/css' : 'text/javascript')
+        expect((await asset.text()).length).toBeGreaterThan(0)
+      }
+      expect((await fetch(`${base}/_stx/runtime.0000000000000000.js`)).status).toBe(404)
 
       const second = await fetch(`${base}/`)
       expect(second.headers.get('x-render-cache')).toBe('hit')

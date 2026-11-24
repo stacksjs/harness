@@ -216,6 +216,7 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
   // build resolves them.
   return renderView(path, props as unknown as Record<string, unknown>, {
     ...ui,
+    buildMode: 'serve',
     componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
   })
 }

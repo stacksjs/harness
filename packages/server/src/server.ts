@@ -20,7 +20,7 @@ import { Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
 import { Engine, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
-import { ASSET_PREFIX, AssetCache } from './assets'
+import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -751,7 +751,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
       // Shared page assets. Checked before the page routes because their
       // paths are fixed and a render must never shadow them.
-      const asset = assetCache.respond(url.pathname)
+      const asset = respondStxAsset(url.pathname) ?? assetCache.respond(url.pathname)
       if (asset) return asset
 
       if (url.pathname === '/threads/search' && request.method === 'GET') {
@@ -815,17 +815,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,
           remoteEnabled: access !== null,
-        })).then(async (rendered) => {
-          if (rendered === null) return new Response('view not found', { status: 404 })
-
-          // Lift the runtime, router and stylesheet out into cacheable assets.
-          // They are byte-identical on every request, so inlining them means
-          // re-sending ~190KB the browser already has.
-          const { externalizeHtml } = await import('@stacksjs/stx')
-          const { html, assets } = externalizeHtml(rendered, ASSET_PREFIX)
-          // Remembered before responding, or the page would reference an asset
-          // this process cannot yet serve.
-          assetCache.remember(assets)
+        })).then((html) => {
+          if (html === null) return new Response('view not found', { status: 404 })
 
           // Stored under the key captured at request time: if an event landed
           // mid-render, the new revision's requests miss this entry and

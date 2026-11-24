@@ -1,26 +1,38 @@
 /**
- * Shared page assets, served once instead of inlined every render.
- *
- * stx inlines the signals runtime, the router and the generated stylesheet
- * directly into the HTML. For a static build that is a per-page cost; for a
- * server it is a per-*request* cost, and nothing bounds it. Measured on the
- * harness page: 392KB, of which 159KB is the runtime and 33KB is component
- * code, all byte-identical on every request.
- *
- * `externalizeHtml` (stx) lifts those blobs out and hands back the rewritten
- * HTML plus content-addressed assets. This keeps them in memory and serves them
- * under `/_stx/`, immutable — the filename contains the content hash, so a URL
- * can never go stale and the browser never revalidates.
- *
- * In memory rather than on disk on purpose: the assets are derived from the
- * render, a restart re-derives them, and a cache that outlives the process
- * would be one more thing that can disagree with the code that produced it.
+ * Serve the framework's shared assets and the client codec by content hash.
  */
 
 import type { ExternalizedAsset } from '@stacksjs/stx'
 
 /** Where externalized assets are mounted. Matches stx's own default. */
 export const ASSET_PREFIX = '/_stx'
+
+const IMMUTABLE = 'public, max-age=31536000, immutable'
+
+export function respondStxAsset(pathname: string): Promise<Response> | null {
+  const parts = /^\/_stx\/(?:(runtime|router|modules)\.([0-9a-f]{16})\.js|css\.([0-9a-f]{16})\.css)$/u.exec(pathname)
+  if (!parts) return null
+  const [, kind, scriptHash, cssHash] = parts
+  return import('@stacksjs/stx').then(async (stx) => {
+    let content: string | undefined
+    if (cssHash)
+      content = stx.getCssServeAsset(cssHash)
+    else if (kind === 'modules' && scriptHash)
+      content = stx.getServeModuleBundle(scriptHash)
+    else if (kind === 'runtime' || kind === 'router') {
+      const asset = await stx.getServeClientAsset(kind)
+      if (asset.hash === scriptHash) content = asset.content
+    }
+    if (content === undefined) return new Response('not found', { status: 404 })
+    return new Response(content, {
+      headers: {
+        'content-type': cssHash ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
+        'cache-control': IMMUTABLE,
+        'x-content-type-options': 'nosniff',
+      },
+    })
+  })
+}
 
 export class AssetCache {
   private readonly assets = new Map<string, ExternalizedAsset>()
@@ -50,7 +62,7 @@ export class AssetCache {
       headers: {
         'content-type': asset.contentType,
         // The hash is the filename, so this content is this URL forever.
-        'cache-control': 'public, max-age=31536000, immutable',
+        'cache-control': IMMUTABLE,
       },
     })
   }
