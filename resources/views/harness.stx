@@ -277,7 +277,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       the socket writes to.
     --}}
     <div class="relative flex-1 min-h-0 min-w-0">
-    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="copyTranscriptCode" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto px-4 py-3 h-full min-w-0">
+    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto px-4 py-3 h-full min-w-0">
       {{--
         A blank canvas says the app is broken; an empty state says what to do.
         Typing below is the fastest path, so it is the one named first.
@@ -788,6 +788,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const transcriptAnnouncement = state('')
   const responseByTurn = new Map()
   const changedResponses = new Set()
+  let transcriptControl
+  let transcriptMenuKeyboard
   let transcriptFrame = 0
   const ssrTools = state([])
   // callId -> 'ok' | 'failed'. One map for every row — server-rendered rows
@@ -1704,23 +1706,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     transcript.focus({ preventScroll: true })
   }
 
-  async function copyTranscriptCode(event) {
-    const button = event.target.closest?.('[data-copy-code]')
-    const code = button?.closest('.transcript-code')?.querySelector('code')?.textContent
-    if (code === undefined || code === null) return
+  async function handleTranscriptControl(event) {
     try {
-      const nativeClipboard = desktop()?.clipboard
-      const browserClipboard = button.ownerDocument.defaultView?.navigator.clipboard
-      if (nativeClipboard?.writeText) await nativeClipboard.writeText(code)
-      else if (nativeClipboard?.write) await nativeClipboard.write(code)
-      else if (browserClipboard) await browserClipboard.writeText(code)
-      else throw new Error('Clipboard unavailable')
-      transcriptAnnouncement.set('Code copied to clipboard.')
+      const message = await transcriptControl?.(event.target, desktop()?.clipboard)
+      if (message) transcriptAnnouncement.set(message)
     }
     catch {
-      stxAlert('Could not copy this code. You can select it and copy it manually.')
+      stxAlert('Could not copy to the clipboard.')
     }
   }
+
+  function handleTranscriptKeyboard(event) { transcriptMenuKeyboard?.(event) }
 
   function paintTranscript(updateMarkdown) {
     if (transcriptFrame) return
@@ -2088,7 +2084,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm } = await import(codecUrl)
+    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, useTranscriptControl, closeTranscriptMenu } = await import(codecUrl)
+    transcriptControl = useTranscriptControl
+    transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
       state,
       initialRequests: initialInputs,

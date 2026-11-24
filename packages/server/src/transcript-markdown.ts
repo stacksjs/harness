@@ -1,6 +1,7 @@
 import MarkdownIt from 'markdown-it'
 
 const markdown = new MarkdownIt({ html: false, breaks: true, linkify: true })
+const responsesWithWrapOverrides = new WeakSet<Element>()
 
 function escapeTranscriptText(value: string): string {
   // The stx hydration fallback scans individual text nodes for template
@@ -42,7 +43,7 @@ markdown.renderer.rules.image = (tokens, index) => escapeTranscriptText(tokens[i
 
 function codeBlock(code: string, language = ''): string {
   const label = language ? escapeTranscriptText(language) : 'Code'
-  return `<div class="transcript-code"><div class="transcript-code-bar"><span>${label}</span><button type="button" data-copy-code>Copy code</button></div><pre tabindex="0"><code>${escapeTranscriptText(code)}</code></pre></div>\n`
+  return `<div class="transcript-code" data-wrap="true"><div class="transcript-code-bar"><span>${label}</span><div class="transcript-code-actions"><button type="button" data-wrap-code aria-pressed="true">Wrap lines</button><button type="button" data-copy-code>Copy code</button></div></div><pre tabindex="0"><code>${escapeTranscriptText(code)}</code></pre></div>\n`
 }
 
 markdown.renderer.rules.fence = (tokens, index) => {
@@ -51,14 +52,44 @@ markdown.renderer.rules.fence = (tokens, index) => {
 }
 markdown.renderer.rules.code_block = (tokens, index) => codeBlock(tokens[index]!.content)
 
+markdown.renderer.rules.table_open = () => '<div class="transcript-table"><div class="transcript-table-scroll" tabindex="0" role="region" aria-label="Table"><table>\n'
+markdown.renderer.rules.table_close = () => `</table></div><details class="transcript-table-actions">
+  <summary>Copy table</summary><div class="transcript-table-menu">
+  <button type="button" data-copy-table="markdown">Copy as Markdown</button>
+  <button type="button" data-copy-table="csv">Copy as CSV</button>
+  <button type="button" data-copy-table="html">Copy as HTML</button>
+  </div></details></div>\n`
+
 export function renderTranscriptMarkdown(source: string): string {
   return markdown.render(source)
+}
+
+export function setTranscriptCodeWrap(button: Element, wrapped: boolean): void {
+  const response = button.closest('[data-response]')
+  if (response && !wrapped) responsesWithWrapOverrides.add(response)
+  button.setAttribute('aria-pressed', String(wrapped))
+  button.closest('.transcript-code')?.setAttribute('data-wrap', String(wrapped))
+}
+
+function retainCodeWrapOverrides(response: Element, nextContent: DocumentFragment): void {
+  const oldCode = response.querySelectorAll('.transcript-code')
+  const newCode = nextContent.querySelectorAll('.transcript-code')
+  oldCode.forEach((block, index) => {
+    const next = newCode[index]
+    const button = next?.querySelector('[data-wrap-code]')
+    const previousText = block.querySelector('code')?.textContent ?? ''
+    if (button && block.getAttribute('data-wrap') === 'false'
+      && next?.querySelector('code')?.textContent?.startsWith(previousText)) {
+      setTranscriptCodeWrap(button, false)
+    }
+  })
 }
 
 /** Keep the unchanged leading blocks and replace only the changed tail. */
 export function updateTranscriptMarkdown(response: Element, source: string): void {
   const template = response.ownerDocument.createElement('template')
   template.innerHTML = renderTranscriptMarkdown(source)
+  if (responsesWithWrapOverrides.has(response)) retainCodeWrapOverrides(response, template.content)
   let previous = response.firstChild
   while (previous && template.content.firstChild?.isEqualNode(previous)) {
     template.content.firstChild.remove()

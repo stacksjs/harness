@@ -69,6 +69,7 @@ const parallelApprovalGate = Promise.withResolvers<void>()
 const parallelDecisions = new Map<string, boolean>()
 const questionGate = Promise.withResolvers<void>()
 const questionAnswers = new Map<string, unknown>()
+const markdownControlsGate = Promise.withResolvers<void>()
 const script: ProviderEvent[] = [
   { type: 'session-bound', providerSessionId: 'ps-drive' },
   { type: 'assistant-delta', text: 'Thinking… ' },
@@ -87,6 +88,14 @@ const instance: ProviderInstance = {
       yield { type: 'assistant-delta', text: '\n\n<em data-fixture="literal">literal markup</em> {{ 1 + 1 }}\n\n```ts\nconst result = ' }
       yield { type: 'assistant-delta', text: '42\nconst format = "{{ value }}"\n```\n' }
       yield { type: 'turn-complete', tokensIn: 3, tokensOut: 4, costMicros: 0 }
+      return
+    }
+    if (input.text === 'exercise transcript controls') {
+      yield { type: 'assistant-delta', text: '| Check | Result |\n| --- | --- |\n| Type check | Passed |\n| Formatting | Passed |\n\n' }
+      yield { type: 'assistant-delta', text: '\x60\x60\x60ts\nconst line = "' + 'sample-'.repeat(80) + '"\n' }
+      await markdownControlsGate.promise
+      yield { type: 'assistant-delta', text: 'const next = 1\n\x60\x60\x60\n\nChecks recorded.' }
+      yield { type: 'turn-complete', tokensIn: 2, tokensOut: 3, costMicros: 0 }
       return
     }
     if (input.text === 'exercise parallel approvals') {
@@ -646,7 +655,13 @@ check('retry uses the same id and clears the draft after receipt', attemptedIds.
 await page.addInitScript(() => {
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
-    value: { writeText: async (value: string) => { document.body.dataset.fixtureClipboard = value } },
+    value: {
+      writeText: async (value: string) => { document.body.dataset.fixtureClipboard = value },
+      write: async (items: ClipboardItem[]) => {
+        const html = await items[0]?.getType('text/html')
+        document.body.dataset.fixtureClipboardHtml = html ? await html.text() : ''
+      },
+    },
   })
 })
 await page.reload()
@@ -741,6 +756,46 @@ check('the provider receives both answers and transcript records the outcome',
 await page.reload()
 await transcript.getByText('Question answered', { exact: true }).waitFor()
 check('question answers stay out of the restored page', !((await page.content()).includes('fixture private answer')))
+
+await page.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
+await promptBox.fill('exercise transcript controls')
+await page.click('[data-send]')
+const controlsTurn = transcript.locator('[data-turn]').last()
+const wrap = controlsTurn.getByRole('button', { name: 'Wrap lines' })
+const previewCode = controlsTurn.locator('pre')
+await wrap.waitFor()
+check('code wraps within the phone layout by default', await wrap.getAttribute('aria-pressed') === 'true'
+  && await previewCode.evaluate(element => element.scrollWidth <= element.clientWidth))
+await wrap.click()
+check('turning wrap off gives the code its own horizontal scroll', await wrap.getAttribute('aria-pressed') === 'false'
+  && await previewCode.evaluate(element => element.scrollWidth > element.clientWidth))
+markdownControlsGate.resolve()
+await controlsTurn.getByText('Checks recorded.', { exact: true }).waitFor()
+check('code wrap choice survives a streamed update', await wrap.getAttribute('aria-pressed') === 'false')
+const tableCopy = controlsTurn.locator('.transcript-table-actions summary')
+await tableCopy.click()
+await capture('transcript-table-copy-mobile')
+await controlsTurn.getByRole('button', { name: 'Copy as Markdown' }).click()
+check('table copies as Markdown and returns focus to its menu',
+  await page.locator('body').getAttribute('data-fixture-clipboard') === '| Check | Result |\n| --- | --- |\n| Type check | Passed |\n| Formatting | Passed |'
+  && await tableCopy.evaluate(element => element === element.ownerDocument.activeElement))
+await tableCopy.click()
+await controlsTurn.getByRole('button', { name: 'Copy as CSV' }).click()
+check('table copies as CSV', await page.locator('body').getAttribute('data-fixture-clipboard') === 'Check,Result\nType check,Passed\nFormatting,Passed')
+await tableCopy.click()
+await controlsTurn.getByRole('button', { name: 'Copy as HTML' }).click()
+await page.waitForFunction(() => document.body.dataset.fixtureClipboardHtml !== undefined)
+check('table copies as rich HTML', (await page.locator('body').getAttribute('data-fixture-clipboard-html'))?.includes('<table>') === true)
+await tableCopy.click()
+await controlsTurn.getByRole('button', { name: 'Copy as Markdown' }).focus()
+await page.keyboard.press('Escape')
+check('Escape restores focus and closes the table copy menu',
+  await tableCopy.evaluate(element => element === element.ownerDocument.activeElement && !element.closest('details')?.open))
+if (screenshotDir) {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await tableCopy.click()
+  await capture('transcript-table-copy-desktop')
+}
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

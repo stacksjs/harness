@@ -22,7 +22,7 @@ const TRANSCRIPT_MARKDOWN = `
 }
 .transcript-markdown > :first-child { margin-block-start: 0; }
 .transcript-markdown > :last-child { margin-block-end: 0; }
-.transcript-markdown :where(p, ul, ol, blockquote, table, hr, .transcript-code) { margin-block: 0.65em; }
+.transcript-markdown :where(p, ul, ol, blockquote, hr, .transcript-code, .transcript-table) { margin-block: 0.65em; }
 .transcript-markdown :where(h1, h2, h3, h4, h5, h6) { margin-block: 0.8em 0.3em; font-weight: 650; }
 .transcript-markdown :where(h1, h2) { font-size: 1.18em; }
 .transcript-markdown :where(ul, ol) { padding-inline-start: 1.6em; }
@@ -30,8 +30,20 @@ const TRANSCRIPT_MARKDOWN = `
 .transcript-markdown ol { list-style: decimal; }
 .transcript-markdown blockquote { border-inline-start: 2px solid rgb(127 127 127 / 42%); padding-inline-start: 0.8em; }
 .transcript-markdown a { text-decoration: underline; text-underline-offset: 2px; }
-.transcript-markdown table { display: block; overflow-x: auto; max-width: 100%; border-spacing: 0; }
+.transcript-table-scroll { overflow-x: auto; }
+.transcript-table table { width: 100%; border-spacing: 0; }
 .transcript-markdown :where(th, td) { padding: 0.25em 0.6em; border: 1px solid rgb(127 127 127 / 24%); text-align: start; }
+.transcript-table-actions { position: relative; margin-block-start: 4px; text-align: end; }
+.transcript-table-actions summary { display: inline-block; cursor: pointer; padding: 5px 8px; border-radius: 4px; font-size: 12px; }
+.transcript-table-actions summary:is(:hover, :focus-visible) { background: rgb(127 127 127 / 20%); }
+.transcript-table-menu {
+  display: grid; position: absolute; inset-inline-end: 0; inset-block-end: 100%; z-index: 2;
+  min-width: 156px; padding: 4px; text-align: start; border-radius: 8px;
+  border: 1px solid rgb(127 127 127 / 32%); background: #fff;
+}
+.dark .transcript-table-menu { background: #171717; }
+.transcript-table-menu button { min-height: 32px; padding: 4px 8px; text-align: start; font-size: 12px; border-radius: 4px; }
+.transcript-table-menu button:is(:hover, :focus-visible) { background: rgb(127 127 127 / 20%); }
 .transcript-markdown :not(pre) > code { padding: 0.1em 0.32em; border-radius: 4px; background: rgb(127 127 127 / 13%); }
 .transcript-code { border: 1px solid rgb(127 127 127 / 27%); border-radius: 8px; overflow: hidden; }
 .transcript-code-bar {
@@ -40,7 +52,10 @@ const TRANSCRIPT_MARKDOWN = `
 }
 .transcript-code-bar button { min-height: 32px; padding-inline: 8px; border-radius: 4px; }
 .transcript-code-bar button:is(:hover, :focus-visible) { background: rgb(127 127 127 / 20%); }
+.transcript-code-actions { display: flex; flex-wrap: wrap; gap: 2px; justify-content: flex-end; }
+.transcript-code-bar button[aria-pressed="true"] { background: rgb(127 127 127 / 12%); }
 .transcript-code pre { overflow: auto; padding: 9px 11px; white-space: pre; tab-size: 2; }
+.transcript-code[data-wrap="true"] pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 `
 
 const RESPONSIVE_SHELL = `
