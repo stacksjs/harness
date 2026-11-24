@@ -81,6 +81,8 @@ export default function (cli: CLI) {
         // same effect took a symlink named `harness` in a temp dir, so that
         // NSProcessInfo.processName read right.
         '--app-name', 'harness',
+        // Keep composer drafts and appearance preferences across app restarts.
+        '--persistent-storage',
         // AppKit remembers the frame under this key; width/height below are
         // first-launch defaults, not overrides.
         '--frame-autosave', 'harness',
