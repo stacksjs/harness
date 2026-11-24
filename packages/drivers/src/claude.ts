@@ -16,22 +16,17 @@
 
 import type { AccountInfo, CanUseTool, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
-import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
 import process from 'node:process'
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { providerConfigPath } from './cli-driver'
 
 function claudeEnvironment(config: DriverConfig): NodeJS.ProcessEnv {
   const homePath = config.home?.trim()
   if (!homePath) return process.env
 
-  const expanded = homePath === '~' || homePath.startsWith('~/') || homePath.startsWith('~\\')
-    ? join(homedir(), homePath.slice(2))
-    : homePath
   return {
     ...process.env,
     // Changing HOME hides macOS Keychain credentials; use CLAUDE_CONFIG_DIR to keep login access.
-    CLAUDE_CONFIG_DIR: resolve(config.workspacePath, expanded),
+    CLAUDE_CONFIG_DIR: providerConfigPath(config.workspacePath, homePath),
   }
 }
 
@@ -131,6 +126,7 @@ class ClaudeInstance implements ProviderInstance {
   }
 
   async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+    const { query } = await import('@anthropic-ai/claude-agent-sdk')
     const run = query({ prompt: input.text, options: this.options(input.providerSessionId) })
     this.running = run
 
@@ -302,6 +298,7 @@ export const ClaudeDriver: Driver = {
     const deadline = setTimeout(() => abort.abort(), 25_000)
     let run: Query | undefined
     try {
+      const { query } = await import('@anthropic-ai/claude-agent-sdk')
       run = query({
         // Keep IPC open for initialization without yielding a user message.
         // eslint-disable-next-line require-yield

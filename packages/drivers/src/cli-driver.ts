@@ -12,6 +12,15 @@
 
 import type { ProbeResult } from './types'
 import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+
+export function providerConfigPath(workspacePath: string, path: string): string {
+  const expanded = path === '~' || path.startsWith('~/') || path.startsWith('~\\')
+    ? join(homedir(), path.slice(2))
+    : path
+  return resolve(workspacePath, expanded)
+}
 
 /** Run `<binary> --version` to decide installed-or-not, with a timeout. */
 async function probeBinary(binary: string, home?: string): Promise<ProbeResult> {

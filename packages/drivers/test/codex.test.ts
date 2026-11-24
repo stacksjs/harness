@@ -1,5 +1,45 @@
 import { describe, expect, it } from 'bun:test'
-import { approvalLabel, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from '../src/codex'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { approvalLabel, CodexDriver, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from '../src/codex'
+
+describe('codex account detection', () => {
+  it('probes app-server from the same account directory used to run Codex', async () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-account-'))
+    const binaryPath = join(workspacePath, 'codex-fixture')
+    try {
+      writeFileSync(binaryPath, `#!/usr/bin/env bun
+import { createInterface } from 'node:readline';
+import { realpathSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
+if (process.argv.includes('--version')) {
+  console.log('codex fixture');
+} else {
+  for await (const line of createInterface({ input: process.stdin })) {
+    const frame = JSON.parse(line);
+    if (frame.method === 'initialize') console.log(JSON.stringify({ id: frame.id, result: {} }));
+    if (frame.method !== 'account/read') continue;
+    const path = process.env.CODEX_HOME;
+    if (!path || realpathSync(dirname(path)) !== process.cwd()) process.exit(1);
+    console.log(JSON.stringify({
+      id: frame.id,
+      result: { account: null, requiresOpenaiAuth: basename(path) === 'signed-out' },
+    }));
+  }
+}
+`, { mode: 0o755 })
+
+      expect(await CodexDriver.probe({ binaryPath, workspacePath, home: 'signed-out' }))
+        .toMatchObject({ status: 'unauthenticated', message: 'Run \`codex login\` on this machine.' })
+      expect(await CodexDriver.probe({ binaryPath, workspacePath, home: 'no-login-required' }))
+        .toMatchObject({ status: 'ready' })
+    }
+    finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+})
 
 /**
  * Frames below are either verbatim from a live `codex app-server` run

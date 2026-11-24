@@ -19,7 +19,8 @@
 import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
-import { probeBinary, runQuiet } from './cli-driver'
+import process from 'node:process'
+import { probeBinary, providerConfigPath } from './cli-driver'
 import { EventQueue } from './event-queue'
 
 /** JSON-RPC frames, only as much of them as this driver reads. */
@@ -208,10 +209,13 @@ class CodexInstance implements ProviderInstance {
   private async ensureProcess(): Promise<ChildProcessWithoutNullStreams> {
     if (this.child) return this.child
 
+    const home = this.config.home?.trim()
     const child = spawn(this.config.binaryPath ?? 'codex', ['app-server'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.config.workspacePath,
-      env: this.config.home ? { ...process.env, HOME: this.config.home } : process.env,
+      env: home
+        ? { ...process.env, CODEX_HOME: providerConfigPath(this.config.workspacePath, home) }
+        : process.env,
     }) as ChildProcessWithoutNullStreams
     this.child = child
 
@@ -222,18 +226,57 @@ class CodexInstance implements ProviderInstance {
     // routinely carries warnings on a healthy run, so it must not fail a turn.
     child.stderr.resume()
 
-    child.on('exit', (code) => {
+    const onFailure = (message: string): void => {
+      if (this.child !== child) return
       this.child = null
-      // A live turn dies with the process; without this it would await a frame
-      // that can no longer arrive.
-      this.queue?.finish({ type: 'error', message: `codex app-server exited (${code})` })
-    })
+      this.finishRequests(message)
+      this.queue?.finish({ type: 'error', message })
+      child.kill()
+    }
+    child.on('exit', code => onFailure(`codex app-server exited (${code})`))
+    child.on('error', () => onFailure('Could not start codex app-server.'))
+    child.stdin.on('error', () => onFailure('Codex app-server closed its input.'))
 
-    await this.request('initialize', {
+    const initialized = await this.request('initialize', {
       clientInfo: { name: 'harness', title: 'harness', version: '0.1.0' },
     })
+    if (initialized.error) throw new Error(initialized.error.message ?? 'Could not initialize codex app-server.')
     this.notify('initialized', {})
     return child
+  }
+
+  private finishRequests(message: string): void {
+    for (const resolve of this.pending.values()) resolve({ error: { message } })
+    this.pending.clear()
+  }
+
+  async readAccount(): Promise<ProbeResult> {
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      const request = this.ensureProcess().then(() => this.request('account/read', {}))
+      const response = await Promise.race([
+        request,
+        new Promise<null>(resolve => { deadline = setTimeout(() => resolve(null), 5000) }),
+      ])
+      if (!response) return { status: 'failed', message: 'Codex did not report account status within 5 seconds.' }
+
+      const accountResponse = response.result
+      if (response.error || !accountResponse || typeof accountResponse.requiresOpenaiAuth !== 'boolean')
+        return { status: 'failed', message: 'Could not read account status from codex app-server.' }
+
+      // Adapted from apps/server/src/provider/CodexProvider.ts at T3 Code
+      // 902d369808c5c30ae9b178c6c6f86587b8f4f336. See T3CODE-LICENSE.md.
+      if (!accountResponse.account && accountResponse.requiresOpenaiAuth)
+        return { status: 'unauthenticated', message: 'Run `codex login` on this machine.' }
+      return { status: 'ready' }
+    }
+    catch {
+      return { status: 'failed', message: 'Could not initialize codex app-server while checking account status.' }
+    }
+    finally {
+      clearTimeout(deadline)
+      await this.stop()
+    }
   }
 
   private onLine(line: string): void {
@@ -415,6 +458,7 @@ class CodexInstance implements ProviderInstance {
     this.child = null
     this.threadId = null
     this.turnId = null
+    this.finishRequests('Codex app-server stopped.')
     child?.kill()
   }
 }
@@ -423,16 +467,11 @@ export const CodexDriver: Driver = {
   kind: 'codex',
 
   async probe(config: DriverConfig): Promise<ProbeResult> {
-    const result = await probeBinary(config.binaryPath ?? 'codex', config.home)
+    const result = await probeBinary(config.binaryPath ?? 'codex')
     if (result.status !== 'ready') return result
 
-    // Installed is not the same as usable. `codex login status` distinguishes
-    // "install the CLI" from "sign in", which are different fixes for the user.
-    const auth = await runQuiet(config.binaryPath ?? 'codex', ['login', 'status'], config.home)
-    if (!auth.ok || /not logged in/i.test(auth.output)) {
-      return { ...result, status: 'unauthenticated', message: 'run `codex login`' }
-    }
-    return result
+    const account = await new CodexInstance(config).readAccount()
+    return { ...result, ...account }
   },
 
   async create(config: DriverConfig): Promise<ProviderInstance> {
