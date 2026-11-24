@@ -51,6 +51,8 @@ export interface EngineOptions {
   reducer: Reducer
   /** Rejects commands a client is not allowed to send. Defaults to the contract's allowlist. */
   isClientAllowed?: (type: string) => boolean
+  /** Resolve host inputs for a new client command. Retries use their original receipt. */
+  prepareClientCommand?: (command: Command) => Promise<Command>
 }
 
 export class Engine {
@@ -103,7 +105,7 @@ export class Engine {
     const allowed = this.options.isClientAllowed ?? isClientCommand
     if (!allowed(envelope.command.type))
       throw new CommandRejected(`${envelope.command.type} is not client-dispatchable`)
-    return this.enqueue(envelope)
+    return this.enqueue(envelope, this.options.prepareClientCommand)
   }
 
   /** Dispatch a command the server itself raised, e.g. from provider output. */
@@ -111,15 +113,15 @@ export class Engine {
     return this.enqueue(envelope)
   }
 
-  private enqueue(envelope: CommandEnvelope): Promise<DispatchResult> {
+  private enqueue(envelope: CommandEnvelope, prepare?: EngineOptions['prepareClientCommand']): Promise<DispatchResult> {
     // Chain onto the tail, and make the tail swallow failures so one rejected
     // command does not poison every command queued behind it.
-    const result = this.tail.then(() => this.process(envelope))
+    const result = this.tail.then(() => this.process(envelope, prepare))
     this.tail = result.catch(() => {})
     return result
   }
 
-  private async process(envelope: CommandEnvelope): Promise<DispatchResult> {
+  private async process(envelope: CommandEnvelope, prepare?: EngineOptions['prepareClientCommand']): Promise<DispatchResult> {
     if (!this.booted)
       throw new CommandRejected('engine has not hydrated; call hydrate() before dispatching')
 
@@ -127,7 +129,8 @@ export class Engine {
     if (existing !== null)
       return { events: existing, replayed: true }
 
-    const produced = this.options.reducer(this.state, envelope.command, envelope)
+    const command = prepare ? await prepare(envelope.command) : envelope.command
+    const produced = this.options.reducer(this.state, command, { ...envelope, command })
     const events = await this.options.store.commitCommand({ commandId: envelope.id, at: envelope.at }, produced)
 
     for (const event of events) apply(this.state, event)

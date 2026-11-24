@@ -193,6 +193,25 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'workspace.register': {
+      const existingProfile = command.profileId ?? state.profiles.keys().next().value
+      const profileId = existingProfile ?? derivedId(commandId)
+      if (existingProfile !== undefined && !state.profiles.has(profileId))
+        throw new InvalidCommand('This profile is no longer available.')
+      if ([...state.workspaces.values()].some(w => w.profileId === profileId && w.path === command.path))
+        throw new InvalidCommand('This folder is already in the profile.')
+
+      const workspaceId = derivedId(commandId)
+      const event = { sessionId: GLOBAL_SESSION_ID, commandId, at }
+      const events: AppendableEvent[] = []
+      if (existingProfile === undefined)
+        events.push({ ...event, payload: { type: 'profile.created', profileId, name: 'Projects' } })
+      events.push({ ...event, payload: { type: 'workspace.added', workspaceId, profileId, path: command.path } })
+      if (command.trusted === true)
+        events.push({ ...event, payload: { type: 'workspace.trust-changed', workspaceId, trusted: true } })
+      return events
+    }
+
     case 'device.pair': {
       if (!command.deviceId.trim() || !command.tokenHash.trim())
         throw new InvalidCommand('a paired device needs an id and a token hash')

@@ -9,7 +9,13 @@
 
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+
+interface ProjectSummary {
+  id: number
+  name: string
+  trusted: boolean
+}
 
 export interface ViewProps {
   profiles: Array<{
@@ -17,10 +23,11 @@ export interface ViewProps {
     name: string
     icon?: string
     tint?: string
-    workspaces: Array<{ id: number, name: string }>
+    workspaces: ProjectSummary[]
     sessions: Array<{ id: number, title: string, state: string }>
   }>
   activeProfile: string
+  draftWorkspace: ProjectSummary | null
   activeSession: unknown
   /**
    * Paired devices, for the settings sheet's Access section. The token hash
@@ -61,6 +68,7 @@ export function viewProps(state: HarnessState, options: {
    * server already knows how to render.
    */
   profileId?: number
+  workspaceId?: number
   serverUrl: string
   codecUrl?: string
   remoteEnabled?: boolean
@@ -92,13 +100,23 @@ export function viewProps(state: HarnessState, options: {
       workspaces: workspaces.map(w => ({
         id: w.id,
         // The last path segment reads better in a tile than the absolute path.
-        name: w.path.split('/').filter(Boolean).pop() ?? w.path,
+        name: basename(w.path) || w.path,
+        trusted: w.trusted,
       })),
       sessions,
     }
   })
 
   const active = options.sessionId ? state.sessions.get(options.sessionId) : undefined
+  const requestedWorkspace = !active && options.workspaceId ? state.workspaces.get(options.workspaceId) : undefined
+  const selectedProfile = profiles.find(p => p.id === (requestedWorkspace?.profileId ?? options.profileId))
+    ?? profiles.find(p => active && p.sessions.some(session => session.id === active.id))
+    ?? profiles[0]
+  const draftWorkspace = selectedProfile?.workspaces.find(w => w.id === requestedWorkspace?.id)
+    ?? selectedProfile?.workspaces.find(w => w.id === active?.workspaceId)
+    ?? selectedProfile?.workspaces.find(w => w.trusted)
+    ?? selectedProfile?.workspaces[0]
+    ?? null
 
   return {
     profiles,
@@ -108,13 +126,8 @@ export function viewProps(state: HarnessState, options: {
       pairedAt: device.pairedAt,
     })),
     remoteEnabled: options.remoteEnabled === true,
-    activeProfile: String(
-      // The requested profile, the one owning the open session, then the first.
-      profiles.find(p => p.id === options.profileId)?.id
-      ?? (active ? profiles.find(p => p.sessions.some(session => session.id === active.id))?.id : undefined)
-      ?? profiles[0]?.id
-      ?? '',
-    ),
+    activeProfile: String(selectedProfile?.id ?? ''),
+    draftWorkspace,
     activeSession: active
       ? {
           id: active.id,

@@ -102,6 +102,18 @@ describe('viewProps — shaping the read model for the page', () => {
     expect(props.activeProfile).toBe('1')
   })
 
+  it('selects a deep-linked workspace and its owning profile for a new session', () => {
+    const props = viewProps(stateWith(), { workspaceId: 20, profileId: 1, serverUrl: 'ws://x/ws' })
+    expect(props.activeSession).toBeNull()
+    expect(props.activeProfile).toBe('2')
+    expect(props.draftWorkspace).toEqual({ id: 20, name: 'stacks', trusted: true })
+  })
+
+  it('keeps an explicitly selected untrusted workspace visible', () => {
+    const props = viewProps(stateWith(), { workspaceId: 11, serverUrl: 'ws://x/ws' })
+    expect(props.draftWorkspace).toEqual({ id: 11, name: 'beta', trusted: false })
+  })
+
   it('carries no active session when the route names none', () => {
     expect(viewProps(stateWith(), { serverUrl: 'ws://x/ws' }).activeSession).toBeNull()
   })

@@ -15,6 +15,7 @@ export const profiles = $props.profiles || []
 export const sessions = $props.sessions || []
 export const activeProfile = $props.activeProfile || (profiles[0] && profiles[0].id) || ''
 export const activeSession = $props.activeSession || null
+export const draftProject = $props.draftWorkspace || null
 export const serverUrl = $props.serverUrl || ''
 // The browser CBOR bundle. Empty when the server could not build one, which
 // costs the page its live updates but not its rendered transcript.
@@ -54,6 +55,7 @@ export const spaces = profiles.map((profile, index) => ({
     id: String(workspace.id),
     label: workspace.name,
     icon: 'i-hugeicons-folder-01',
+    href: `/?workspace=${workspace.id}`,
   })),
   // Only groups that have something in them. An empty "Active" heading with
   // nothing under it is noise, and with most profiles idle it was showing on
@@ -85,7 +87,7 @@ function toItem(session) {
 
 export const hasProfiles = profiles.length > 0
 export const turns = activeSession ? activeSession.turns : []
-export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : 'No session'
+export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : draftProject?.name || 'Harness'
 export const sessionState = activeSession ? activeSession.state : 'idle'
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
@@ -93,6 +95,12 @@ export const sessionDriver = activeSession ? (activeSession.driverKind || '') : 
 export const promptPlaceholder = activeSession ? 'Ask the agent…' : 'Type here to start a new session…'
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
+export const canCompose = Boolean(activeSession || draftProject?.trusted)
+export const profileProjects = Object.fromEntries(profiles.map(profile => {
+  const projects = profile.workspaces || []
+  return [String(profile.id), projects.find(workspace => workspace.trusted) || projects[0] || null]
+}))
+export const draftProjectChoices = profiles.find(profile => String(profile.id) === String(activeProfile))?.workspaces || []
 // The last turn is the only one that can still change, so it is the only one
 // that needs hydrating — everything above it is settled history.
 export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
@@ -118,7 +126,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     @else
       <div class="flex flex-col gap-2 items-center justify-center px-6 h-full text-center">
         <p class="text-[13px] text-neutral-600 dark:text-neutral-300">No profiles yet</p>
-        <button type="button" @click="openProfileModal" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Create profile</button>
+        <button type="button" @click="openProfileModal" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Create profile</button>
       </div>
     @endif
   </aside>
@@ -130,6 +138,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
       </button>
       <span class="font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+      @if(activeSession)
       <span
         data-session-state
         data-state="{{ sessionState }}"
@@ -137,6 +146,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         class="px-2 py-[2px] leading-[14px] text-[11px] rounded-full opacity-70"
         :text="uiState()"
       >{{ sessionState }}</span>
+      @endif
       {{-- Which agent answers in this session — the composer picker's ground truth. --}}
       @if(sessionDriver)
         <span data-session-driver class="px-[6px] py-[1px] leading-[15px] text-[11px] border border-black/10 rounded-[5px] dark:border-white/15 opacity-70">{{ sessionDriver }}</span>
@@ -155,6 +165,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         Changes sit behind a toggle rather than always-on. Reading a repository
         costs a subprocess, and most page loads never look at the diff.
       --}}
+      @if(activeSession)
       <button
         type="button"
         data-diff-toggle
@@ -163,10 +174,17 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         :aria-expanded="diffOpen() ? 'true' : 'false'"
         @click="toggleDiff"
       >Changes</button>
+      @endif
       @if(activeWorkspaceId)
         <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
           <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
         </button>
+      @endif
+      @if(draftProject || activeSession)
+      <button type="button" data-project-add @click="openProjectPicker" class="flex gap-1.5 items-center shrink-0 px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15" aria-label="Add project" title="Add project">
+        <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
+        <span class="hidden sm:inline">Add project</span>
+      </button>
       @endif
       {{--
         The account corner every surface has. Until M8 gives it an account to
@@ -180,7 +198,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         title="Settings (⌘,)"
         aria-label="Settings"
         @click="openSettings"
-        class="flex items-center justify-center w-[26px] h-[26px] border border-black/10 rounded-full dark:border-white/15 opacity-70 hover:opacity-100"
+        class="flex items-center justify-center ml-auto h-[26px] w-[26px] border border-black/10 rounded-full dark:border-white/15 opacity-70 hover:opacity-100"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="8" r="4"/>
@@ -221,9 +239,27 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           @if(activeSession)
             <p class="text-[14px] font-medium">Start the conversation</p>
             <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Send a prompt to the agent below.</p>
+          @elseif(draftProject && draftProject.trusted)
+            <p class="text-[16px] font-semibold">Start a session in {{ draftProject.name }}</p>
+            <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Choose an agent and send your first message.</p>
+          @elseif(draftProject)
+            <p class="text-[16px] font-semibold">Trust {{ draftProject.name }} to start</p>
+            <p class="max-w-[34ch] text-[13px] text-neutral-600 dark:text-neutral-300">Trust lets agents access this folder when you start a session.</p>
+            <button type="button" data-project-trust @click="trustProject" :disabled="projectBusy()" class="mt-1 px-3 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Trust folder</button>
           @else
-            <p class="text-[14px] font-medium">No session open</p>
-            <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Send a prompt to start a session, or open one from navigation.</p>
+            <h1 class="text-[20px] font-semibold">Open a project</h1>
+            <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Add a folder from the host to start working with an agent.</p>
+            <button type="button" data-first-project @click="openProjectPicker" class="mt-2 px-4 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
+          @endif
+          @if(!activeSession && draftProjectChoices.length > 1)
+            <label class="flex gap-2 items-center mt-4 text-[12px] text-neutral-600 dark:text-neutral-300">
+              Workspace
+              <select data-draft-project @change="chooseProject" class="px-2 h-8 max-w-[190px] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-[6px] dark:border-white/20">
+                @foreach(draftProjectChoices as workspace)
+                  <option value="{{ workspace.id }}" @if(workspace.id === draftProject.id)selected@endif>{{ workspace.name }}</option>
+                @endforeach
+              </select>
+            </label>
           @endif
         </div>
       @endif
@@ -365,6 +401,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       </div>
     </div>
 
+    @if(canCompose)
     <form data-composer @submit.prevent="sendPrompt" class="grid gap-2 items-end shrink-0 p-3 border-black/5 border-t md:flex dark:border-white/5">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
@@ -397,7 +434,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <option value="cursor">Cursor</option>
         <option value="grok">Grok</option>
       </select>
-      <button type="submit" data-send :hidden="uiBusy()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
+      <button type="submit" data-send :hidden="uiBusy()" :disabled="startPending()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
       {{--
         Stop is the one control a running agent must always offer. It replaces
         Send rather than sitting beside it: while a turn runs there is nothing
@@ -407,7 +444,33 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       --}}
       <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" @click="stopTurn" class="px-4 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Stop</button>
     </form>
+    @endif
   </main>
+
+  <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
+    <form class="flex flex-col gap-4 p-5" @submit.prevent="registerProject">
+      <div class="flex flex-col gap-1">
+        <h2 id="project-dialog-heading" class="text-[17px] font-semibold">Add project</h2>
+        <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Enter the absolute path of a folder on the computer running Harness.</p>
+      </div>
+      <div class="flex flex-col gap-2">
+        <label for="project-folder" class="text-[13px] font-medium">Folder path</label>
+        <div class="flex gap-2">
+          <input id="project-folder" data-project-path ref="projectPathBox" type="text" required autocomplete="off" spellcheck="false" :disabled="projectBusy()" class="px-3 py-2 w-full min-w-0 font-mono text-[13px] bg-neutral-50 dark:bg-neutral-950 border border-black/15 rounded-[8px] dark:border-white/20" />
+          <button type="button" data-project-browse hidden :hidden="!hasFolderPicker()" :disabled="projectBusy()" @click="browseProject" class="px-3 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Browse</button>
+        </div>
+      </div>
+      <label class="flex gap-2 items-start text-[13px]">
+        <input data-project-trust-checkbox ref="projectTrustBox" type="checkbox" :disabled="projectBusy()" class="mt-[3px] accent-neutral-900 dark:accent-neutral-100" />
+        <span>Trust this folder for agent sessions</span>
+      </label>
+      <p data-project-error role="alert" :text="projectError()" :hidden="!projectError()" hidden class="text-[13px] text-red-700 dark:text-red-300"></p>
+      <div class="flex gap-2 justify-end">
+        <button type="button" :disabled="projectBusy()" @click="closeProjectPicker" class="px-3 h-9 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
+        <button type="submit" data-project-submit :disabled="projectBusy()" :text="projectBusy() ? 'Adding…' : 'Add project'" class="px-3 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
+      </div>
+    </form>
+  </dialog>
 
   {{--
     The terminal (M6). Structure is server-rendered so the island only wires
@@ -564,21 +627,21 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // Report what native surfaces this window actually has. In a browser every
   // flag is false and nothing else changes; in a Craft window it tells us
   // whether the host's injection and gesture bridge are really there.
+  function reportNativeProbe(payload) {
+    navigator.sendBeacon('/native-probe', new Blob([JSON.stringify(payload)], { type: 'application/json' }))
+  }
+
   try {
     const craft = window.craft
-    fetch('/native-probe', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        seen: true,
-        craft: Boolean(craft),
-        gestures: typeof craft?.gestures?.onSwipe === 'function',
-        nativeUI: Boolean(craft?.nativeUI),
-        spacesSidebar: typeof craft?.nativeUI?.createSpacesSidebar === 'function',
-        nativeSidebarFlag: Boolean(window.__craftNativeSidebar),
-        userAgent: navigator.userAgent.slice(0, 60),
-      }),
-    }).catch(() => {})
+    reportNativeProbe({
+      seen: true,
+      craft: Boolean(craft),
+      gestures: typeof craft?.gestures?.onSwipe === 'function',
+      nativeUI: Boolean(craft?.nativeUI),
+      spacesSidebar: typeof craft?.nativeUI?.createSpacesSidebar === 'function',
+      nativeSidebarFlag: Boolean(window.__craftNativeSidebar),
+      userAgent: navigator.userAgent.slice(0, 60),
+    })
   }
   catch {}
 
@@ -587,20 +650,16 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // signal-bearing, stx would defer it to the mount queue, and the patch
   // above would install after the Sidebar's mount — too late to count.
   setTimeout(() => {
-    fetch('/native-probe', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        seen: true,
-        phase: 'mounted',
-        craft: Boolean(window.craft),
-        gestures: typeof window.craft?.gestures?.onSwipe === 'function',
-        spacesSidebar: typeof window.craft?.nativeUI?.createSpacesSidebar === 'function',
-        spacesBound: window.__harnessSpacesCalls ?? 0,
-        spacesCount: window.__harnessSpacesArg?.spaces?.length ?? 0,
-        activeSpace: window.__harnessSpacesArg?.activeSpace ?? null,
-      }),
-    }).catch(() => {})
+    reportNativeProbe({
+      seen: true,
+      phase: 'mounted',
+      craft: Boolean(window.craft),
+      gestures: typeof window.craft?.gestures?.onSwipe === 'function',
+      spacesSidebar: typeof window.craft?.nativeUI?.createSpacesSidebar === 'function',
+      spacesBound: window.__harnessSpacesCalls ?? 0,
+      spacesCount: window.__harnessSpacesArg?.spaces?.length ?? 0,
+      activeSpace: window.__harnessSpacesArg?.activeSpace ?? null,
+    })
   }, 2500)
 </script>
 
@@ -656,6 +715,18 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
   const diffOpen = state(false)
   const termOpen = state(false)
+  const startPending = state(false)
+  const projectBusy = state(false)
+  const projectError = state('')
+  const visibleProfile = state(activeProfile)
+  const desktop = useNativeDesktop()
+  const hasFolderPicker = state(typeof desktop()?.dialog?.showOpenDialog === 'function')
+  desktop.onReady((craft) => {
+    hasFolderPicker.set(typeof craft.dialog?.showOpenDialog === 'function')
+  })
+  const projectDialog = useRef('projectDialogBox')
+  const projectPath = useRef('projectPathBox')
+  const projectTrust = useRef('projectTrustBox')
   const sidebarOpen = state(false)
   const sidebarRef = useRef('sidebarBox')
   const sidebarToggleRef = useRef('sidebarToggleBox')
@@ -770,7 +841,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       useTimeout(resolve, 15000)
     })
 
-    await sendCommand({ type: 'session.checkpoint.revert', sessionId, checkpointId })
+    try {
+      await sendCommand({ type: 'session.checkpoint.revert', sessionId, checkpointId })
+    }
+    catch (error) {
+      revertingId.set(0)
+      stxAlert(error.message)
+      return
+    }
     await restored
 
     // Reloaded rather than patched: the diff, the turn list and the workspace
@@ -793,51 +871,115 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
    * write.
    */
   async function sendCommand(command, commandId) {
-    const { encode } = await import(codecUrl)
-    const envelope = {
-      // A caller that needs the command id — entity ids derive from it — can
-      // supply its own; everything else gets a fresh one.
-      id: commandId ?? `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    const { sendBrowserCommand } = await import(codecUrl)
+    return sendBrowserCommand(serverUrl, {
+      id: commandId ?? newCommandId(),
       at: Date.now(),
       command,
-    }
-
-    if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
-      liveSocket.send(encode({ t: 'dispatch', envelope }))
-      // The island's own handler will see the ack; a short settle is enough,
-      // and the command is idempotent by id if the reload races it.
-      return new Promise(resolve => useTimeout(() => resolve(true), 150))
-    }
-
-    return new Promise((resolve) => {
-      const socket = new WebSocket(serverUrl)
-      socket.binaryType = 'arraybuffer'
-      socket.addEventListener('open', () => socket.send(encode({ t: 'dispatch', envelope })))
-      socket.addEventListener('message', () => { socket.close(); resolve(true) })
-      // A dispatch that never acks must not leave the page waiting forever.
-      useTimeout(() => { try { socket.close() } catch {} ; resolve(false) }, 4000)
-    })
+    }, liveSocket)
   }
 
-  // The `[data-space]` lookups below reach into the Sidebar component's own
-  // rendering — panels this page did not draw, so refs cannot name them. A
-  // query scoped to the component's public data attributes is the boundary.
-  useEventListener('spaceAction', async (event) => {
+  function newCommandId() {
+    return `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  let projectPickerTrigger = null
+
+  function openProjectPicker(event) {
+    const dialog = projectDialog.current
+    if (!dialog || dialog.open) return
+    projectPickerTrigger = event?.currentTarget ?? null
+    projectError.set('')
+    if (projectPath.current) projectPath.current.value = ''
+    if (projectTrust.current) projectTrust.current.checked = false
+    dialog.showModal()
+    projectPath.current?.focus()
+  }
+
+  function closeProjectPicker() {
+    projectDialog.current?.close()
+    projectPickerTrigger?.focus()
+    projectPickerTrigger = null
+  }
+
+  function cancelProjectPicker(event) {
+    event.preventDefault()
+    if (!projectBusy()) closeProjectPicker()
+  }
+
+  async function browseProject() {
+    const craft = desktop()
+    if (typeof craft?.dialog?.showOpenDialog !== 'function') return
+    try {
+      const selection = await craft.dialog.showOpenDialog({
+        title: 'Choose a project folder',
+        properties: ['openDirectory'],
+      })
+      const path = selection?.filePaths?.[0]
+      if (!selection?.canceled && typeof path === 'string' && projectPath.current)
+        projectPath.current.value = path
+    }
+    catch {
+      projectError.set('Could not open the folder picker. You can enter the path above.')
+    }
+  }
+
+  async function registerProject() {
+    const path = projectPath.current?.value
+    if (!path?.trim() || projectBusy()) return
+    const id = newCommandId()
+    projectBusy.set(true)
+    projectError.set('')
+    try {
+      const profileId = Number(visibleProfile()) || undefined
+      await sendCommand({
+        type: 'workspace.register',
+        ...(profileId ? { profileId } : {}),
+        path,
+        trusted: projectTrust.current?.checked === true,
+      }, id)
+      closeProjectPicker()
+      navigate(`/?workspace=${derivedSessionId(id)}`)
+    }
+    catch (error) {
+      projectError.set(error.message || 'Could not add the folder.')
+    }
+    finally {
+      projectBusy.set(false)
+    }
+  }
+
+  async function trustProject() {
+    if (!draftProject || projectBusy()) return
+    projectBusy.set(true)
+    try {
+      await sendCommand({ type: 'workspace.trust', workspaceId: draftProject.id, trusted: true })
+      refresh()
+    }
+    catch (error) {
+      stxAlert(error.message || 'Could not trust the folder.')
+    }
+    finally {
+      projectBusy.set(false)
+    }
+  }
+
+  function chooseProject(event) {
+    const id = Number(event.currentTarget.value)
+    if (id) navigate(`/?workspace=${id}`)
+  }
+
+  function openDraft(profileId) {
+    const project = String(profileId) === String(activeProfile) ? draftProject : profileProjects[String(profileId)]
+    if (project) navigate(`/?workspace=${project.id}`)
+    else openProjectPicker()
+  }
+
+  useEventListener('spaceAction', (event) => {
     const { spaceId, role } = event.detail || {}
     if (role !== 'action' || !spaceId) return
-
-    // A session needs somewhere to run. The profile's first workspace is the
-    // obvious default; with none there is nothing to guess at, and saying so
-    // beats creating a session that fails on its first turn.
-    const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(spaceId)}"]`)
-    const workspaceId = Number(panel?.querySelector('[data-space-pinned-item]')?.dataset.pinnedId)
-    if (!workspaceId) {
-      stxAlert('This profile has no workspace yet. Add one with `./buddy harness:run --path <dir>`.')
-      return
-    }
-
-    await sendCommand({ type: 'session.create', workspaceId, driverKind: defaultDriver() })
-    navigate(`/?profile=${encodeURIComponent(spaceId)}`)
+    visibleProfile.set(spaceId)
+    openDraft(spaceId)
   }, { target: document })
 
   function openProfileModal() {
@@ -932,16 +1074,23 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // handover: a different CLI cannot resume this conversation, so the honest
   // move is a fresh start in the same workspace, said out loud.
   async function driverPicked(event) {
-    const kind = event.currentTarget.value
+    const picker = event.currentTarget
+    const kind = picker.value
     localStorage.setItem('harness.defaultDriver', kind)
     if (!activeSessionId || kind === sessionDriver) return
     const label = DRIVER_LABELS[kind] ?? kind
     if (await stxConfirm(`Start a new ${label} session in this workspace? This session stays as it is.`)) {
-      await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), driverKind: kind })
-      navigate(`/?profile=${encodeURIComponent(activeProfile)}`)
+      try {
+        await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), driverKind: kind })
+        navigate(`/?profile=${encodeURIComponent(activeProfile)}&workspace=${activeWorkspaceId}`)
+      }
+      catch (error) {
+        picker.value = sessionDriver
+        stxAlert(error.message)
+      }
     }
     else {
-      event.currentTarget.value = sessionDriver
+      picker.value = sessionDriver
     }
   }
 
@@ -1054,7 +1203,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   useEventListener('craft:menu:action', (event) => {
     const id = event.detail?.id
     if (id === 'settings') openSettings()
-    else if (id === 'new-session') navigate(`/?profile=${encodeURIComponent(activeProfile)}`)
+    else if (id === 'new-session') openDraft(visibleProfile())
     else if (id === 'toggle-terminal') toggleTerminal()
   }, { target: window })
 
@@ -1065,8 +1214,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if (!deviceId) return
     const device = event.currentTarget.closest('li')
     if (!(await stxConfirm(`Revoke ${device?.querySelector('span')?.textContent ?? deviceId}? Its socket drops immediately.`))) return
-    await sendCommand({ type: 'device.revoke', deviceId })
-    refresh()
+    try {
+      await sendCommand({ type: 'device.revoke', deviceId })
+      refresh()
+    }
+    catch (error) {
+      stxAlert(error.message)
+    }
   }
 
   // Mint a pairing code through the endpoint the CLI uses; the session cookie
@@ -1086,10 +1240,15 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     const box = profileNameRef.current
     const name = (box?.value ?? '').trim()
     if (!name) return
-    profileModalOpen.set(false)
-    box.value = ''
-    await sendCommand({ type: 'profile.create', name })
-    refresh()
+    try {
+      await sendCommand({ type: 'profile.create', name })
+      profileModalOpen.set(false)
+      box.value = ''
+      refresh()
+    }
+    catch (error) {
+      stxAlert(error.message)
+    }
   }
 
   // Spaces beyond the active one's neighbours render without their rows, so
@@ -1101,9 +1260,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   useEventListener('spaceChange', (event) => {
     const id = event.detail?.id
     if (!id) return
+    visibleProfile.set(id)
     // Repaint first: a swipe should feel like the window changed colour with
     // it, not after a round trip.
     paintWindow(id)
+    if (!sessionId && String(id) !== String(activeProfile)) {
+      navigate(`/?profile=${encodeURIComponent(id)}`)
+      return
+    }
     const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(id)}"]`)
     // Only a deferred panel needs the round trip; a neighbour is already drawn.
     if (!panel || !panel.hasAttribute('data-space-deferred')) return
@@ -1216,23 +1380,25 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   async function sendPrompt() {
     const box = promptRef.current
     const text = (box?.value ?? '').trim()
-    if (!text) return
+    if (!text || startPending() || uiBusy()) return
 
     // Type-to-start: with no session open, the prompt itself creates one —
     // the convention every LLM surface follows. The text rides sessionStorage
     // across the navigation and sends itself on arrival.
     if (!sessionId) {
-      const panel = document.querySelector(`[data-space][data-space-id="${CSS.escape(String(activeProfile))}"]`)
-      const workspaceId = Number(panel?.querySelector('[data-space-pinned-item]')?.dataset.pinnedId)
-      if (!workspaceId) {
-        stxAlert('This profile has no workspace yet. Add one with `./buddy harness:run --path <dir>`.')
-        return
+      if (!draftProject?.trusted) return
+      startPending.set(true)
+      const commandId = newCommandId()
+      try {
+        const driverKind = driverPickerRef.current?.value || defaultDriver()
+        await sendCommand({ type: 'session.create', workspaceId: draftProject.id, driverKind }, commandId)
+        sessionStorage.setItem('harness.pendingPrompt', text)
+        navigate(`/s/${derivedSessionId(commandId)}`)
       }
-      const picker = driverPickerRef.current
-      const commandId = `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-      await sendCommand({ type: 'session.create', workspaceId, driverKind: picker?.value || defaultDriver() }, commandId)
-      sessionStorage.setItem('harness.pendingPrompt', text)
-      navigate(`/s/${derivedSessionId(commandId)}`)
+      catch (error) {
+        startPending.set(false)
+        stxAlert(error.message)
+      }
       return
     }
 
@@ -1384,6 +1550,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // desktop window the menu item usually claims the chord first and arrives
   // as `craft:settings` instead.
   useEventListener('keydown', (event) => {
+    if (projectDialog.current?.open) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.

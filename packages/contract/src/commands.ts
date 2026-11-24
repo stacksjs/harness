@@ -61,6 +61,7 @@ export type ClientCommand =
   | { type: 'mcp.remove', profileId: number, name: string }
   | { type: 'mcp.setEnabled', profileId: number, name: string, enabled: boolean }
   | { type: 'workspace.add', profileId: number, path: string, name?: string }
+  | { type: 'workspace.register', profileId?: number, path: string, trusted: boolean }
   | { type: 'workspace.trust', workspaceId: number, trusted: boolean }
   /**
    * Withdraw a paired device's access.
@@ -121,6 +122,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'profile.update',
   'profile.delete',
   'workspace.add',
+  'workspace.register',
   'workspace.trust',
   'device.revoke',
 ])

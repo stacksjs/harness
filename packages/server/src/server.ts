@@ -10,7 +10,9 @@
 import type { CommandEnvelope, DriverKind } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver } from '@harness/drivers'
+import { access as checkAccess, constants, realpath, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { isAbsolute } from 'node:path'
 import { driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
@@ -112,6 +114,20 @@ export interface HarnessServer {
   stop: () => void
 }
 
+async function projectDirectory(path: string): Promise<string> {
+  if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0'))
+    throw new Error('Enter an absolute folder path on the host.')
+  try {
+    const resolved = await realpath(path)
+    if ((await stat(resolved)).isDirectory()) {
+      await checkAccess(resolved, constants.R_OK | constants.X_OK)
+      return resolved
+    }
+  }
+  catch { /* Missing and unreadable paths get the same actionable message. */ }
+  throw new Error('The host could not open that folder.')
+}
+
 export async function serve(options: ServeOptions = {}): Promise<HarnessServer> {
   const port = options.port ?? 3789
   const hostname = options.hostname ?? '127.0.0.1'
@@ -139,7 +155,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
   // After the bind check, so a refused start leaves no database behind.
   const store = new SqliteStore(options.databasePath ?? 'database/stacks.sqlite')
-  const engine = new Engine({ store, reducer: reduce })
+  const engine = new Engine({
+    store,
+    reducer: reduce,
+    async prepareClientCommand(command) {
+      if (command.type !== 'workspace.register') return command
+      if (typeof command.trusted !== 'boolean')
+        throw new Error('Choose whether to trust the folder.')
+      const path = await projectDirectory(command.path)
+      return { ...command, path }
+    },
+  })
   const runtime = new ProviderRuntime({
     engine,
     resolve: options.resolveDriver,
@@ -665,8 +691,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // runs, so the shell paints immediately — and cached against the state
       // revision, so only the first request after a state change renders.
       if (url.pathname === '/' || url.pathname.startsWith('/s/')) {
-        // `host` is in the key because the page embeds its own ws:// URL.
-        const cacheKey = `${url.pathname}${url.search}|${url.host}|${stateRev}`
+        // The socket URL embedded in the page depends on both host and scheme.
+        const cacheKey = `${url.pathname}${url.search}|${url.origin}|${stateRev}`
         const cached = renderCache.get(cacheKey)
         if (cached !== undefined) {
           return new Response(cached, {
@@ -682,7 +708,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // active space's neighbours lands here, so the server renders that
           // space's rows rather than the client rebuilding them.
           profileId: Number(url.searchParams.get('profile')) || undefined,
-          serverUrl: `ws://${url.host}/ws`,
+          workspaceId: Number(url.searchParams.get('workspace')) || undefined,
+          serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,
           remoteEnabled: access !== null,
         })).then(async (rendered) => {

@@ -18,6 +18,8 @@ const HIDDEN_PIN = '[hidden] { display: none !important; }'
 
 const RESPONSIVE_SHELL = `
 [data-sidebar-toggle], [data-sidebar-scrim] { display: none; }
+[data-project-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
+[data-project-dialog] { width: min(480px, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); }
 [data-composer] { width: 100%; max-width: 820px; margin-inline: auto; }
 [data-transcript] > [data-turn], [data-transcript] > [data-approval] {
   max-width: 788px; margin-inline: auto;

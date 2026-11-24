@@ -1,6 +1,6 @@
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -82,10 +82,10 @@ class TestClient {
   }
 
   /** Skip forward to the first frame of a given type. */
-  async until(type: string): Promise<any> {
+  async until(...types: string[]): Promise<any> {
     for (let i = 0; i < 40; i++) {
       const frame = await this.next()
-      if (frame?.t === type) return frame
+      if (types.includes(frame?.t)) return frame
       if (frame?.t === 'timeout') return frame
     }
     return { t: 'timeout' }
@@ -136,6 +136,89 @@ describe('harness serve — the socket protocol', () => {
     const client = await TestClient.connect(url())
     expect(await client.until('ready')).toMatchObject({ t: 'ready' })
     client.close()
+  })
+
+  it('registers a canonical project with an explicit trust choice and rejects duplicate folders', async () => {
+    const client = await TestClient.connect(url())
+    await client.until('ready')
+    const register = (id: string, path: string, trusted: boolean) => client.send({
+      t: 'dispatch', envelope: { id, at: 1, command: { type: 'workspace.register', path, trusted } },
+    })
+
+    try {
+      register('relative', 'projects/repo', true)
+      expect(await client.until('rejected')).toMatchObject({ id: 'relative', message: expect.stringContaining('absolute') })
+      register('file', join(dir, 'test.sqlite'), true)
+      expect(await client.until('rejected')).toMatchObject({ id: 'file', message: expect.stringContaining('open that folder') })
+      expect(harness.engine.current.profiles.size).toBe(0)
+
+      register('project', dir, false)
+      expect(await client.until('dispatched')).toMatchObject({ id: 'project', replayed: false })
+      const id = derivedId('project')
+      expect(harness.engine.current.workspaces.get(id)).toMatchObject({ profileId: id, path: realpathSync(dir), trusted: false })
+      expect(harness.engine.current.profiles.get(id)?.workspaceIds).toEqual([id])
+
+      register('project', dir, false)
+      expect(await client.until('dispatched')).toMatchObject({ id: 'project', replayed: true })
+
+      const alias = join(dir, 'alias')
+      symlinkSync(dir, alias, 'dir')
+      register('duplicate', alias, true)
+      expect(await client.until('rejected')).toMatchObject({ id: 'duplicate', message: expect.stringContaining('already') })
+      expect(harness.engine.current.workspaces.size).toBe(1)
+      expect(harness.engine.current.workspaces.get(id)?.trusted).toBe(false)
+    }
+    finally {
+      client.close()
+    }
+  })
+
+  it('acks a replay after the folder is deleted and refuses a new registration for it', async () => {
+    const client = await TestClient.connect(url())
+    const folder = join(dir, 'temporary-project')
+    mkdirSync(folder)
+    const register = (id: string) => client.send({
+      t: 'dispatch', envelope: { id, at: 1, command: { type: 'workspace.register', path: folder, trusted: false } },
+    })
+
+    try {
+      await client.until('ready')
+      register('project')
+      const first = await client.until('dispatched')
+      expect(first).toMatchObject({ id: 'project', replayed: false })
+      rmSync(folder, { recursive: true })
+
+      register('project')
+      expect(await client.until('dispatched')).toMatchObject({ id: 'project', replayed: true, seqs: first.seqs })
+      register('missing')
+      expect(await client.until('rejected')).toMatchObject({ id: 'missing', message: expect.stringContaining('open that folder') })
+      expect(harness.engine.current.workspaces.size).toBe(1)
+    }
+    finally {
+      client.close()
+    }
+  })
+
+  it('registers one project when two connections submit the same folder', async () => {
+    const clients = await Promise.all([TestClient.connect(url()), TestClient.connect(url())])
+    try {
+      await Promise.all(clients.map(client => client.until('ready')))
+      for (const [index, client] of clients.entries()) {
+        client.send({
+          t: 'dispatch',
+          envelope: { id: `register-${index}`, at: 1, command: { type: 'workspace.register', path: dir, trusted: false } },
+        })
+      }
+      const results = await Promise.all(clients.map(client => client.until('dispatched', 'rejected')))
+
+      expect(results.map(frame => frame.t).sort()).toEqual(['dispatched', 'rejected'])
+      expect(harness.engine.current.profiles.size).toBe(1)
+      expect(harness.engine.current.workspaces.size).toBe(1)
+    }
+    finally {
+      for (const client of clients)
+        client.close()
+    }
   })
 
   it('dispatches a command and acks it', async () => {

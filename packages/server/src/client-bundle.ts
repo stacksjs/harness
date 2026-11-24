@@ -25,7 +25,8 @@ import { join } from 'node:path'
  * names on `window` that anything could overwrite.
  */
 const ENTRY = `export { encode, decode } from '@harness/contract'
-export { Terminal, toHtml } from '@harness/ansi'`
+export { Terminal, toHtml } from '@harness/ansi'
+export { sendBrowserCommand } from './packages/server/src/browser-command'`
 
 let cached: ExternalizedAsset | null = null
 
