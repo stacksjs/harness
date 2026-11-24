@@ -569,11 +569,15 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   {{--
     Settings. Opened by Cmd+, — as the app-menu item in the desktop window
     (craft forwards it as a `craft:settings` event) and as a page chord
-    everywhere else. One setting so far: which agent a new session runs.
+    everywhere else.
   --}}
   <dialog data-settings-modal ref="settingsDialogBox" aria-labelledby="harness-settings-title" @click.self="closeSettings" @cancel="cancelSettings" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[10px] dark:border-white/15 shadow-xl">
     <div class="p-4">
       <h2 id="harness-settings-title" class="mb-3 font-semibold text-[14px]">Settings</h2>
+      <div class="mb-3 pb-3 border-b border-black/10 dark:border-white/10">
+        <h3 class="mb-2 font-medium text-[13px]">Appearance</h3>
+        <AppearancePicker v-model:value="appearancePreference" label="Appearance" :options="[{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'auto', label: 'System' }]" />
+      </div>
       <label class="block mb-2 font-medium text-[13px]" for="settings-driver">Agent for new sessions</label>
       <select
         id="settings-driver"
@@ -813,6 +817,17 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const settingsDriverRef = useRef('settingsDriverBox')
   const settingsToggleRef = useRef('settingsToggleBox')
   const settingsDialogRef = useRef('settingsDialogBox')
+  const colorMode = useColorMode()
+  const appearancePreference = state(colorMode.preference)
+  const unsubscribeAppearance = colorMode.subscribe((_mode, preference) => appearancePreference.set(preference))
+  onDestroy(unsubscribeAppearance)
+  effect(() => {
+    const preference = appearancePreference()
+    if (preference !== colorMode.preference) colorMode.set(preference)
+    const nativeWindow = desktop()?.window
+    if (typeof nativeWindow?.setAppearance === 'function')
+      void nativeWindow.setAppearance(preference === 'auto' ? 'system' : preference).catch(() => {})
+  })
   const threadSearchDialog = useRef('threadSearchDialogBox')
   const threadSearchInput = useRef('threadSearchInputBox')
   const threadSearchList = useRef('threadSearchListBox')
@@ -897,7 +912,6 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // through a small form the page owns, so it can be styled and cancelled
   // like everything else.
   const profileModalOpen = state(false)
-  // The settings sheet: opened by Cmd+, or the desktop app menu.
   // A freshly minted pairing code, shown beside the button that minted it.
   const pairCode = state('')
   // The checkpoint currently being restored; its button reads this for its

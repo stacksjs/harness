@@ -110,7 +110,8 @@ const reducedMotion = process.env.HARNESS_REDUCED_MOTION === 'reduce' ? 'reduce'
 const browser = browserName === 'webkit'
   ? await webkit.launch()
   : await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM, headless: true })
-const page = await browser.newPage({ colorScheme, reducedMotion })
+const browserContext = await browser.newContext({ colorScheme, reducedMotion })
+const page = await browserContext.newPage()
 const captures: Array<{ name: string, width: number, height: number }> = []
 
 async function capture(name: string): Promise<void> {
@@ -179,6 +180,7 @@ const sessionId = [...harness.engine.current.sessions.keys()][0]
 await page.addInitScript((folder) => {
   ;(window as any).craft = {
     menu: { set: (options: unknown) => { (window as any).__menuSet = options } },
+    window: { setAppearance: async (mode: string) => { (window as any).__windowAppearance = mode } },
     dialog: {
       showOpenDialog: async (options: { properties: string[] }) => {
         if (!options.properties.includes('openDirectory')) throw new Error('Expected the Craft directory picker')
@@ -421,6 +423,44 @@ check(
 await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:menu:action', { detail: { id: 'settings' } })))
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('a menu action routes to the page handler', true)
+const appearancePicker = settingsDialog.getByRole('radiogroup', { name: 'Appearance' })
+const systemAppearance = appearancePicker.getByRole('radio', { name: 'System' })
+await systemAppearance.waitFor({ timeout: 4000 })
+check('appearance defaults to the host’s system preference', await systemAppearance.getAttribute('aria-checked') === 'true')
+const manualAppearance = colorScheme === 'light' ? 'dark' : 'light'
+const manualLabel = manualAppearance === 'dark' ? 'Dark' : 'Light'
+await appearancePicker.getByRole('radio', { name: manualLabel }).click()
+await page.waitForFunction(mode => document.documentElement.classList.contains('dark') === (mode === 'dark'), manualAppearance)
+check('manual appearance overrides the system and reaches the Craft bridge fixture', await page.evaluate(
+  mode => (window as any).__windowAppearance === mode, manualAppearance,
+))
+await capture('settings-manual-appearance')
+
+const prePaintPage = await browserContext.newPage()
+await prePaintPage.route('**/_stx/**', route => route.request().resourceType() === 'script' ? route.abort() : route.continue())
+await prePaintPage.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+check('appearance is restored before the stx runtime loads', await prePaintPage.evaluate(
+  mode => document.documentElement.classList.contains('dark') === (mode === 'dark'), manualAppearance,
+))
+await prePaintPage.goto(baseUrl.replace('localhost', '127.0.0.1'), { waitUntil: 'domcontentloaded' })
+check('another origin keeps its own appearance', await prePaintPage.evaluate(
+  scheme => document.documentElement.classList.contains('dark') === (scheme === 'dark'), colorScheme,
+))
+await prePaintPage.evaluate(() => localStorage.setItem('stx-color-mode', 'fixture-invalid'))
+await prePaintPage.reload({ waitUntil: 'domcontentloaded' })
+check('an invalid stored appearance falls back to the system', await prePaintPage.evaluate(
+  scheme => document.documentElement.classList.contains('dark') === (scheme === 'dark'), colorScheme,
+))
+await prePaintPage.close()
+
+await page.reload()
+await page.locator('[data-account-button]').click()
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
+check('appearance selection survives reload', await appearancePicker.getByRole('radio', { name: manualLabel }).getAttribute('aria-checked') === 'true')
+await appearancePicker.getByRole('radio', { name: manualLabel }).press('End')
+await page.waitForFunction(scheme => document.documentElement.classList.contains('dark') === (scheme === 'dark'), colorScheme)
+check('keyboard selection returns Craft to its inherited appearance', await systemAppearance.getAttribute('aria-checked') === 'true'
+  && await page.evaluate(() => (window as any).__windowAppearance === 'system'))
 await page.keyboard.press('Escape')
 
 if (screenshotDir) {
