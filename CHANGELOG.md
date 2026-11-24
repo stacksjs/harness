@@ -1,5 +1,27 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.1...v0.0.2)
+
+## 🐛 Bug Fixes
+
+- **engine**: commit command receipts and events atomically ([e2bad1e](https://github.com/stacksjs/harness/commit/e2bad1e)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ⚡ Performance Improvements
+
+- **engine**: reuse prepared SQLite statements ([691eb6c](https://github.com/stacksjs/harness/commit/691eb6c)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 📝 Documentation
+
+- track pinned T3 Code parity coverage ([924280f](https://github.com/stacksjs/harness/commit/924280f)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🔧 Chores
+
+- **deps**: apply Buddy manifest refresh ([85d2ffd](https://github.com/stacksjs/harness/commit/85d2ffd)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 ## v0.0.1
 
 ## ✨ Features
