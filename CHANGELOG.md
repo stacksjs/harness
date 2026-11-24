@@ -1,5 +1,28 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.5...v0.0.6)
+
+## ✨ Features
+
+- **composer**: preserve drafts until the host confirms a send ([98c9d84](https://github.com/stacksjs/harness/commit/98c9d84)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **providers**: add local ChatGPT plan preview ([9f83791](https://github.com/stacksjs/harness/commit/9f83791)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🐛 Bug Fixes
+
+- **desktop**: retain drafts and appearance after relaunch ([7782837](https://github.com/stacksjs/harness/commit/7782837)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ⚡ Performance Improvements
+
+- **server**: serve stx assets before rendering HTML ([1a166a2](https://github.com/stacksjs/harness/commit/1a166a2)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🔧 Chores
+
+- **drivers**: import T3 Code OAuth callback validation ([b1d8f92](https://github.com/stacksjs/harness/commit/b1d8f92)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.4...v0.0.5)
 
 ## ✨ Features
