@@ -1,5 +1,20 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.3...v0.0.4)
+
+## ✨ Features
+
+- **providers**: configure named accounts with native login ([85f22d2](https://github.com/stacksjs/harness/commit/85f22d2)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **providers**: use saved accounts in sessions and settings ([f069229](https://github.com/stacksjs/harness/commit/f069229)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🐛 Bug Fixes
+
+- **drivers**: require a successful conformance reply ([099c307](https://github.com/stacksjs/harness/commit/099c307)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.2...v0.0.3)
 
 ## ✨ Features
