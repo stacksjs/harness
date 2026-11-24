@@ -454,6 +454,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         data-prompt
         ref="promptBox"
         @keydown="promptKeydown"
+        @input="rememberPrompt"
+        @keyup="rememberPrompt"
+        @select="rememberPrompt"
+        @click="rememberPrompt"
         rows="2"
         placeholder="{{ promptPlaceholder }}"
         class="flex-1 px-3 py-2 min-h-[40px] min-w-0 text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
@@ -767,6 +771,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const diffPatch = state('')
 
   const sessionId = Number(activeSessionId) || 0
+  const promptScope = sessionId ? `session:${sessionId}`
+    : draftProject ? `project:${draftProject.id}` : 'projectless'
+  const composerDraft = useLocalStorage(`harness.composer.v1:${activeProfile || 0}:${promptScope}`, null, {
+    listenToStorageChanges: false,
+  })
+  const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
 
   // The session's own state string, not a boolean: a turn blocked on an
   // approval is still in flight, and collapsing that to "not running" once
@@ -1322,20 +1332,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if (picker) picker.value = activeDriverValue || defaultDriver()
     annotateDriverPickers()
 
-    const pending = sessionId ? sessionStorage.getItem('harness.pendingPrompt') : null
-    if (pending) {
-      const box = promptRef.current
-      if (box) box.value = pending
-      const trySend = () => {
-        if (!liveSocket || liveSocket.readyState !== WebSocket.OPEN) {
-          useTimeout(trySend, 120)
-          return
-        }
-        sessionStorage.removeItem('harness.pendingPrompt')
-        sendPrompt()
-      }
-      trySend()
-    }
+    restorePrompt()
   })
 
   function defaultDriver() {
@@ -1681,10 +1678,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       index === turns.length - 1 ? change(turn) : turn))
   }
 
-  // The composer. Without this the page could watch a session but not drive
-  // one, which is most of the point of a control surface. Cleared
-  // optimistically: the turn appears when `turn.started` comes back from the
-  // server, so the transcript still only ever shows what the log contains.
+  // The composer keeps the text and caret until the host accepts the command.
+  // A retry of the same draft reuses the recorded command ID.
   // The engine's id derivation (packages/engine/src/reducer.ts), verbatim:
   // FNV-1a over the command id. Duplicated so the page can know a session's
   // id at creation time and navigate straight to it — the alternative is
@@ -1698,18 +1693,53 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     return (hash >>> 0) % 2147483647 + 1
   }
 
+  function rememberPrompt() {
+    const box = promptRef.current
+    if (!box) return
+    const previous = composerDraft()
+    if (!box.value) {
+      if (previous) composerDraft.set(null)
+      return
+    }
+    const { value: text, selectionStart: start, selectionEnd: end, selectionDirection: direction } = box
+    if (previous?.text === text && previous.start === start && previous.end === end && previous.direction === direction) return
+    composerDraft.set({
+      text, start, end, direction,
+      ...(previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
+    })
+  }
+
+  function restorePrompt() {
+    const box = promptRef.current
+    if (!box || box.value) return
+    const saved = composerDraft()
+    const pending = pendingFirstPrompt()
+    const first = sessionId && pending?.sessionId === sessionId && typeof pending.text === 'string' ? pending : null
+    if (first) pendingFirstPrompt.set(null)
+    const current = typeof saved?.text === 'string' ? saved : first
+    if (!current?.text) return
+    box.value = current.text
+    const start = Number.isInteger(current.start) ? current.start : box.value.length
+    const end = Number.isInteger(current.end) ? current.end : start
+    box.setSelectionRange(start, end, current.direction)
+    rememberPrompt()
+    if (current === first) void sendPrompt()
+  }
+
   async function sendPrompt() {
     const box = promptRef.current
-    const text = (box?.value ?? '').trim()
+    const raw = box?.value ?? ''
+    const text = raw.trim()
     if (!text || startPending() || uiBusy()) return
 
-    // Type-to-start: with no session open, the prompt itself creates one —
-    // the convention every LLM surface follows. The text rides sessionStorage
-    // across the navigation and sends itself on arrival.
+    rememberPrompt()
+    const draft = composerDraft()
+    const commandId = draft?.commandId ?? newCommandId()
+    if (draft) composerDraft.set({ ...draft, commandId })
+
     if (!sessionId) {
       if (!draftProject?.trusted && !draftWithoutProject) return
       startPending.set(true)
-      const commandId = newCommandId()
       try {
         const picker = driverPickerRef.current
         if (picker?.selectedOptions[0]?.disabled) throw new Error('Choose an available agent to start this session.')
@@ -1721,8 +1751,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         else {
           await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice }, commandId)
         }
-        sessionStorage.setItem('harness.pendingPrompt', text)
-        navigate(`/s/${derivedSessionId(commandId)}`)
+        const nextSession = derivedSessionId(commandId)
+        pendingFirstPrompt.set({ sessionId: nextSession, text: raw })
+        if (box.value === raw) {
+          box.value = ''
+          composerDraft.set(null)
+        }
+        navigate(`/s/${nextSession}`)
       }
       catch (error) {
         startPending.set(false)
@@ -1731,12 +1766,24 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       return
     }
 
-    box.value = ''
-    dispatch({ type: 'session.turn.start', sessionId, text })
+    startPending.set(true)
+    try {
+      await sendCommand({ type: 'session.turn.start', sessionId, text }, commandId)
+      if (box.value === raw) {
+        box.value = ''
+        composerDraft.set(null)
+      }
+    }
+    catch (error) {
+      stxAlert(error.message || 'Could not send the prompt. Your draft is still here.')
+    }
+    finally {
+      startPending.set(false)
+    }
   }
 
   function promptKeydown(event) {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault()
       event.target.form?.requestSubmit()
     }

@@ -20,7 +20,7 @@ import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, webkit } from 'playwright-core'
-import { encode } from '../packages/contract/src/index'
+import { decode, encode } from '../packages/contract/src/index'
 import { serve } from '../packages/server/src/index'
 
 const checks: Array<[string, boolean]> = []
@@ -540,6 +540,64 @@ check('turning a scratch folder into a project keeps the session and files in pl
   && !harness.engine.current.workspaces.get(scratchSessionId)?.scratch
   && harness.engine.current.sessions.get(scratchSessionId)?.workspaceId === scratchSessionId
   && readFileSync(join(scratch.path, 'kept.txt'), 'utf8') === 'scratch fixture'))
+
+const promptBox = page.locator('[data-prompt]')
+const scratchDraft = 'Draft for the scratch thread\nSecond line'
+await promptBox.fill(scratchDraft)
+await promptBox.evaluate((box: HTMLTextAreaElement) => {
+  box.setSelectionRange(14, 21, 'backward')
+  box.dispatchEvent(new Event('select', { bubbles: true }))
+})
+await page.goto(`${baseUrl}/s/${sessionId}`)
+check('a different thread starts with its own empty composer', await promptBox.inputValue() === '')
+await promptBox.fill('A separate draft in another project')
+await page.goto(`${baseUrl}/s/${scratchSessionId}`)
+await page.waitForFunction(text => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === text, scratchDraft)
+check('switching threads restores the draft and selection', await promptBox.evaluate((box: HTMLTextAreaElement) =>
+  box.selectionStart === 14 && box.selectionEnd === 21 && box.selectionDirection === 'backward'))
+await page.reload()
+await page.waitForFunction(text => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === text, scratchDraft)
+check('the mobile composer restores the draft after reload', await promptBox.evaluate((box: HTMLTextAreaElement) =>
+  box.selectionStart === 14 && box.selectionEnd === 21))
+check('confirming either form of input composition leaves Enter to the editor', await promptBox.evaluate((box: HTMLTextAreaElement) =>
+  [true, false].every((isComposing) => {
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', isComposing, bubbles: true, cancelable: true })
+    if (!isComposing) Object.defineProperty(enter, 'keyCode', { value: 229 })
+    return box.dispatchEvent(enter)
+  })))
+await capture('composer-draft-recovery-mobile')
+
+const attemptedIds: string[] = []
+const retryText = 'Retry a turn whose receipt was interrupted'
+let droppedReceipt = false
+await page.routeWebSocket('**/ws', (client) => {
+  const upstream = client.connectToServer()
+  client.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (frame?.t === 'dispatch' && frame.envelope?.command?.text === retryText)
+      attemptedIds.push(frame.envelope.id)
+    upstream.send(message)
+  })
+  upstream.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (!droppedReceipt && frame?.t === 'dispatched' && attemptedIds.includes(frame.id)) {
+      droppedReceipt = true
+      return
+    }
+    client.send(message)
+  })
+})
+await page.reload()
+await promptBox.fill(retryText)
+await page.click('[data-send]')
+await page.getByText('The server did not confirm the request. Try again.').waitFor({ timeout: 12_000 })
+check('a dropped send receipt leaves the draft and stores one turn', droppedReceipt && await promptBox.inputValue() === retryText
+  && harness.engine.current.sessions.get(scratchSessionId)?.turns.filter(turn => turn.prompt === retryText).length === 1)
+await page.keyboard.press('Escape')
+await page.click('[data-send]')
+await page.waitForFunction(() => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === '')
+check('retry uses the same id and clears the draft after receipt', attemptedIds.length === 2 && attemptedIds[0] === attemptedIds[1]
+  && harness.engine.current.sessions.get(scratchSessionId)?.turns.filter(turn => turn.prompt === retryText).length === 1)
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
