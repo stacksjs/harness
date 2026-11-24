@@ -1,0 +1,52 @@
+name: Browser parity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/browser-parity.yml'
+      - 'bun.lock'
+      - 'config/css.ts'
+      - 'packages/**'
+      - 'resources/**'
+      - 'scripts/drive-page.ts'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/browser-parity.yml'
+      - 'bun.lock'
+      - 'config/css.ts'
+      - 'packages/**'
+      - 'resources/**'
+      - 'scripts/drive-page.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  page-drive:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, webkit]
+        appearance: [light, dark]
+    env:
+      HARNESS_BROWSER: ${{ matrix.browser }}
+      HARNESS_COLOR_SCHEME: ${{ matrix.appearance }}
+      HARNESS_SCREENSHOT_DIR: ${{ runner.temp }}/harness-browser-parity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pantry-pm/pantry/packages/action@485c7b102fe14f8af00b57441a13dc3daa1505e7 # v0.10.39
+        with:
+          install: 'false'
+      - run: test "$(bun --version)" = 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: ./node_modules/.bin/playwright-core install --with-deps "$HARNESS_BROWSER"
+      - run: bun --config=/dev/null scripts/drive-page.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: harness-${{ matrix.browser }}-${{ matrix.appearance }}
+          path: ${{ env.HARNESS_SCREENSHOT_DIR }}
+          if-no-files-found: ignore

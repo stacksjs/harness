@@ -14,12 +14,12 @@
  * if yours lives somewhere else.
  */
 import type { Driver, ProviderEvent, ProviderInstance } from '../packages/drivers/src/types'
-import { execSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
-import { chromium } from 'playwright-core'
+import { chromium, webkit } from 'playwright-core'
 import { encode } from '../packages/contract/src/index'
 import { serve } from '../packages/server/src/index'
 
@@ -40,13 +40,18 @@ process.env.ENV = ''
 process.env.PATH = `${fixtureBin}:${process.env.PATH ?? ''}`
 
 // --- workspace: a real repo with an uncommitted change, so the diff has content
-const dir = mkdtempSync(join(tmpdir(), 'harness-page-drive-'))
+const driveRoot = mkdtempSync(join(tmpdir(), 'harness-page-drive-'))
+const dir = join(driveRoot, 'notes-app')
+const secondProject = join(driveRoot, 'docs-site')
+mkdirSync(dir)
+mkdirSync(secondProject)
 writeFileSync(join(dir, 'notes.txt'), 'original\n')
 execSync('git init -q && git add notes.txt && git -c user.email=t@t -c user.name=t commit -q -m init', { cwd: dir })
 
 // --- db schema
 const { Database } = await import('bun:sqlite')
-const db = new Database(join(dir, 'h.sqlite'))
+const databasePath = join(driveRoot, 'h.sqlite')
+const db = new Database(databasePath)
 db.exec('PRAGMA foreign_keys = ON')
 db.exec('CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT)')
 db.exec('CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT)')
@@ -82,40 +87,85 @@ const instance: ProviderInstance = {
 }
 const driver: Driver = { kind: 'claude', async probe() { return { status: 'ready' } }, async create() { return instance } }
 
-const port = 3973
-const harness = await serve({ port, databasePath: join(dir, 'h.sqlite'), resolveDriver: () => driver })
+const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
+const harness = await serve({ port, databasePath, resolveDriver: () => driver })
+const baseUrl = `http://localhost:${port}`
+const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
+if (screenshotDir) mkdirSync(screenshotDir, { recursive: true })
+
+const browserName = process.env.HARNESS_BROWSER === 'webkit' ? 'webkit' : 'chromium'
+const colorScheme = process.env.HARNESS_COLOR_SCHEME === 'dark' ? 'dark' : 'light'
+const reducedMotion = process.env.HARNESS_REDUCED_MOTION === 'reduce' ? 'reduce' : 'no-preference'
+const browser = browserName === 'webkit'
+  ? await webkit.launch()
+  : await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM, headless: true })
+const page = await browser.newPage({ colorScheme, reducedMotion })
+const captures: Array<{ name: string, width: number, height: number }> = []
+
+async function capture(name: string): Promise<void> {
+  if (!screenshotDir) return
+  const viewport = page.viewportSize()
+  if (!viewport) throw new Error('The screenshot drive requires an explicit viewport.')
+  await page.screenshot({ path: join(screenshotDir, `${name}.png`), animations: 'disabled' })
+  captures.push({ name, ...viewport })
+}
+
+const pageErrors: string[] = []
+page.on('pageerror', e => pageErrors.push(e.message))
+
+// The first visit has no profiles or workspaces. The flow works in a plain
+// browser even when the native directory picker is unavailable.
+await page.goto(baseUrl)
+await page.setViewportSize({ width: 1280, height: 800 })
+await capture('onboarding-desktop')
+await page.locator('[data-first-project]').click()
+await page.locator('[data-project-dialog]').waitFor({ state: 'visible' })
+check('folder input receives focus and browser hides native browse', await page.locator('[data-project-path]').evaluate(el => el === document.activeElement)
+  && !(await page.locator('[data-project-browse]').isVisible()))
+await page.keyboard.press('Escape')
+await page.locator('[data-project-dialog]').waitFor({ state: 'hidden' })
+check('cancelling the first folder picker keeps the empty profile state', harness.engine.current.profiles.size === 0
+  && await page.locator('[data-first-project]').evaluate(el => el === document.activeElement))
+await page.locator('[data-first-project]').click()
+await page.locator('[data-project-path]').fill('notes-app')
+await page.locator('[data-project-submit]').click()
+await page.locator('[data-project-error]').waitFor({ state: 'visible' })
+check('server rejection stays in the picker without creating a profile', (await page.locator('[data-project-error]').textContent())?.includes('absolute') === true
+  && harness.engine.current.profiles.size === 0)
+await capture('onboarding-path-error')
+await page.locator('[data-project-path]').fill(dir)
+await page.locator('[data-project-submit]').click()
+await page.waitForURL(/\?workspace=/)
+const workspaceId = [...harness.engine.current.workspaces.keys()][0]!
+check('adds the folder and opens its untrusted workspace', harness.engine.current.workspaces.get(workspaceId)?.trusted === false
+  && !(await page.locator('[data-composer]').isVisible()))
+await page.locator('[data-project-trust]').click()
+await page.locator('[data-composer]').waitFor({ state: 'visible' })
+check('explicit trust enables composing in the selected project', harness.engine.current.workspaces.get(workspaceId)?.trusted === true)
 
 // --- seed over the socket
 const ws = new WebSocket(`ws://localhost:${port}/ws`)
 ws.binaryType = 'arraybuffer'
 await new Promise(r => (ws.onopen = r))
 const cmd = (id: string, command: unknown) => ws.send(encode({ t: 'dispatch', envelope: { id, at: Date.now(), command } }))
-cmd('d_p', { type: 'profile.create', name: 'Drive' })
-await Bun.sleep(150)
-const profileId = [...harness.engine.current.profiles.keys()][0]
-cmd('d_w', { type: 'workspace.add', profileId, path: dir })
-await Bun.sleep(150)
-const workspaceId = [...harness.engine.current.workspaces.keys()][0]
-cmd('d_t', { type: 'workspace.trust', workspaceId, trusted: true })
-await Bun.sleep(150)
 cmd('d_s', { type: 'session.create', workspaceId, driverKind: 'claude' })
 await Bun.sleep(300)
 const sessionId = [...harness.engine.current.sessions.keys()][0]
 
-// --- browser
-const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM, headless: true })
-const page = await browser.newPage()
-
-// A stub of craft's menu bridge, present before any page script runs: the
-// island declares the desktop menu bar through it, and the drive asserts the
-// declaration without a native window anywhere near the test.
-await page.addInitScript(() => {
-  ;(window as any).craft = { menu: { set: (options: unknown) => { (window as any).__menuSet = options } } }
-})
+// Verify the real Craft bridge contract through a deterministic test double.
+await page.addInitScript((folder) => {
+  ;(window as any).craft = {
+    menu: { set: (options: unknown) => { (window as any).__menuSet = options } },
+    dialog: {
+      showOpenDialog: async (options: { properties: string[] }) => {
+        if (!options.properties.includes('openDirectory')) throw new Error('Expected the Craft directory picker')
+        return { canceled: false, filePaths: [folder] }
+      },
+    },
+  }
+}, secondProject)
 page.on('dialog', async d => d.accept())
-const pageErrors: string[] = []
-page.on('pageerror', e => pageErrors.push(e.message))
-await page.goto(`http://localhost:${port}/s/${sessionId}`)
+await page.goto(`${baseUrl}/s/${sessionId}`)
 await page.setViewportSize({ width: 390, height: 844 })
 await page.locator('[data-sidebar-toggle]').click()
 await page.waitForFunction(() => document.querySelector('[data-harness-sidebar]')?.getAttribute('data-open') === 'true')
@@ -234,11 +284,30 @@ check('switching drivers starts a fresh session with the new agent', sessionsAft
 // and a typed prompt creates a session, navigates to it, and sends itself.
 const emptyStateShown = await page.evaluate(() => document.querySelector('[data-empty-state]') !== null)
 check('no-session page shows the empty state', emptyStateShown)
+await page.setViewportSize({ width: 390, height: 844 })
+await page.locator('[data-project-add]').click()
+await page.locator('[data-project-browse]').click()
+check('native Browse fills the selected host folder', await page.locator('[data-project-path]').inputValue() === secondProject)
+await page.locator('[data-project-trust-checkbox]').check()
+await capture('onboarding-mobile')
+await page.locator('[data-project-submit]').click()
+await page.waitForURL(/\?workspace=/)
+const secondWorkspaceId = [...harness.engine.current.workspaces.keys()].find(id => id !== workspaceId)!
+check('adding a trusted second folder selects it without creating a session', harness.engine.current.workspaces.get(secondWorkspaceId)?.trusted === true
+  && harness.engine.current.sessions.size === 2)
+await page.locator('[data-draft-project]').selectOption(String(workspaceId))
+await page.waitForURL(`**/?workspace=${workspaceId}`)
+await page.locator('[data-draft-project]').selectOption(String(secondWorkspaceId))
+await page.waitForURL(`**/?workspace=${secondWorkspaceId}`)
+await capture('onboarding-selected-project')
+await page.setViewportSize({ width: 1280, height: 800 })
 await page.fill('[data-prompt]', 'typed with no session open')
 await page.click('[data-send]')
 await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
 await page.waitForFunction(() => (document.body.textContent ?? '').includes('typed with no session open'), undefined, { timeout: 8000 })
-check('type-to-start creates the session and delivers the prompt', harness.engine.current.sessions.size === 3)
+const newSessionId = Number(new URL(page.url()).pathname.split('/').at(-1))
+check('type-to-start delivers the prompt in the selected workspace', harness.engine.current.sessions.size === 3
+  && harness.engine.current.sessions.get(newSessionId)?.workspaceId === secondWorkspaceId)
 
 // 12. The account corner: the header's person icon opens the same settings.
 await page.click('[data-account-button]')
@@ -283,14 +352,12 @@ await page.waitForFunction(() => document.querySelector('[data-settings-modal]')
 check('a menu action routes to the page handler', true)
 await page.keyboard.press('Escape')
 
-const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
 if (screenshotDir) {
-  mkdirSync(screenshotDir, { recursive: true })
-  await page.screenshot({ path: join(screenshotDir, 'workspace-desktop.png') })
+  await capture('workspace-desktop')
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.screenshot({ path: join(screenshotDir, 'workspace-mobile.png') })
+  await capture('workspace-mobile')
   await page.locator('[data-account-button]').click()
-  await page.screenshot({ path: join(screenshotDir, 'settings-mobile.png') })
+  await capture('settings-mobile')
 }
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
@@ -298,5 +365,21 @@ await browser.close()
 harness.stop()
 
 const failed = checks.filter(([, ok]) => !ok)
+if (screenshotDir) {
+  writeFileSync(join(screenshotDir, 'manifest.json'), JSON.stringify({
+    fixture: 'project-onboarding-and-thread',
+    evidence: 'browser fixture',
+    revision: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+    workingTreeModified: execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim() !== '',
+    platform: process.platform,
+    osRelease: release(),
+    browser: browserName,
+    browserVersion: browser.version(),
+    colorScheme,
+    reducedMotion,
+    captures,
+    checks: checks.map(([name, passed]) => ({ name, passed })),
+  }, null, 2) + '\n')
+}
 console.log(failed.length === 0 ? 'PAGE DRIVE: PASS' : `PAGE DRIVE: FAIL (${failed.length})`)
 process.exit(failed.length === 0 ? 0 : 1)

@@ -18,17 +18,32 @@ This reference run verifies pairing and welcome behavior. It used local browser 
 
 | Workflow | Surfaces | Status | Reproduction | Expected | Harness evidence or gap | Owner |
 | --- | --- | --- | --- | --- | --- | --- |
-| Fresh browser onboarding and folder trust | web, desktop | partial | Reject a relative path, register a real folder without trust, grant trust, then send one prompt. | A draft opens against the chosen workspace and the agent starts only after trust. | Chromium and WebKit fixture runs from codex/project-onboarding. Native picker and released reference replay pending. | [P05](https://github.com/stacksjs/harness/issues/17) |
+| Fresh browser onboarding and folder trust | web, desktop | partial | Reject a relative path, register a real folder without trust, grant trust, then send one prompt. | A draft opens against the chosen workspace and the agent starts only after trust. | Browser fixtures exercise the first prompt. Actual macOS Craft returned a folder selected in the native chooser, then showed the trust gate before exposing the composer. Recents and remaining reference workflow variants are open. | [P05](https://github.com/stacksjs/harness/issues/17) |
 | Use the host Claude Code login | web, desktop, mobile | partial | Select the local Claude account and run a benign prompt through the host. | Status, account selection, and launch resolve the same configuration. | v0.0.1 includes a provider initialization probe. Live signed-in Claude turn and selected-instance wiring pending. | [P10](https://github.com/stacksjs/harness/issues/22) |
 | Use existing Codex CLI login | web, desktop, mobile | partial | Probe a signed-in default Codex home and a separate empty home. | Connected and signed-out states remain distinct and the prompt launches the selected instance. | v0.0.1 startup probe passed against existing and isolated CLI homes. Selected-instance launch pending. | [P11](https://github.com/stacksjs/harness/issues/23) |
 | Connect and revoke a managed ChatGPT plan | web, desktop, mobile | missing | Consent, run one turn, refresh, and disconnect the managed account. | Revocation removes the managed connection and leaves independent CLI status unchanged. | Live supported registration and account pending. | [P12](https://github.com/stacksjs/harness/issues/24) |
 | Stream a turn with approval | web, desktop, mobile | partial | Start a turn, receive a tool approval, approve and let it complete. | One approval and one final outcome appear on both clients. | Browser playback proves basic streaming. Two-client and native reference comparisons pending. | [P16](https://github.com/stacksjs/harness/issues/27) |
 | Review and rewind a session edit | web, desktop, mobile | partial | Modify one tracked file in a scratch repository, open the diff, then rewind. | The correct thread owns the edit and the final Git state matches the checkpoint. | Existing Bun package tests and Chromium fixture cover baseline behavior. Expanded reference cases pending. | [P20](https://github.com/stacksjs/harness/issues/31) |
 | Pair, reconnect, and revoke a device | web, desktop, mobile | partial | Pair from an independent client, reconnect, revoke, then attempt another request. | Authenticated state survives reconnect and stops after revocation. | v0.0.1 has pairing and access tests. Two-device native and released reference comparisons pending. | [P25](https://github.com/stacksjs/harness/issues/36) |
-| Browse from a real Craft window | macOS, Windows, Linux | blocked | Verify foreground, open the native folder chooser, select the fixture path, and capture the result. | The returned path appears in the active window and the native screenshot is nonblank. | Saved macOS capture is black and the automated window did not become foreground. | [P27](https://github.com/stacksjs/harness/issues/38) |
+| Browse from a real Craft window | macOS, Windows, Linux | partial | Open the native folder chooser, select the fixture path, and capture the result. | The returned path appears in the active window and the native screenshot is nonblank. | A bundled local Craft app passed the macOS chooser test with a nonblank window capture. The automated CLI-launched foreground check and Windows and Linux evidence remain open. | [P27](https://github.com/stacksjs/harness/issues/38) |
 | Approve from an installed phone app | iOS, Android | missing | Pair an installed phone to another host, approve during a desktop turn, background and resume. | The approval settles once and both clients catch up after resume. | Responsive web test exists. No installed Harness iOS or Android proof. | [P28](https://github.com/stacksjs/harness/issues/39) |
 
 ## Work packages
+
+### Browser fixture evidence
+
+Run the browser drive from the Harness checkout with the pinned Bun version and a Playwright browser installed.
+
+```sh
+./node_modules/.bin/playwright-core install chromium webkit
+HARNESS_BROWSER=webkit HARNESS_COLOR_SCHEME=dark HARNESS_SCREENSHOT_DIR=/tmp/harness-parity-webkit bun --config=/dev/null scripts/drive-page.ts
+```
+
+Set `HARNESS_BROWSER=chromium` to use Chromium and `HARNESS_COLOR_SCHEME=light` to capture light appearance. Use `HARNESS_DRIVE_PORT` to run another drive on a separate port. The drive uses a scratch Git workspace, database, and provider trace. Its manifest records the revision, platform, engine, appearance, capture dimensions, and assertion results. The Browser parity workflow publishes artifacts for all four browser and appearance combinations.
+
+Treat the browser fixture's simulated Craft dialog as contract coverage. The actual macOS Craft check covers opening the folder chooser, returning a selected scratch folder, registering with trust disabled, and unlocking the composer through a separate trust action.
+
+### Ticket index
 
 | ID | Work package | Acceptance summary |
 | --- | --- | --- |
