@@ -1,5 +1,24 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.2...v0.0.3)
+
+## ✨ Features
+
+- **ui**: add mobile workspace actions and resizable navigation ([ebc8f05](https://github.com/stacksjs/harness/commit/ebc8f05)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **workspace**: register projects with explicit trust ([b8c1fe5](https://github.com/stacksjs/harness/commit/b8c1fe5)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🐛 Bug Fixes
+
+- **ci**: resolve the screenshot path inside each runner ([3a52f0e](https://github.com/stacksjs/harness/commit/3a52f0e)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ✅ Tests
+
+- **browser**: publish onboarding parity captures ([9c982c5](https://github.com/stacksjs/harness/commit/9c982c5)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.1...v0.0.2)
 
 ## 🐛 Bug Fixes
