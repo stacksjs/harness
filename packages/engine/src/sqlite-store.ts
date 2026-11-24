@@ -65,10 +65,10 @@ export class SqliteStore implements EngineStore {
   private appendEvents(events: AppendableEvent[]): HarnessEvent[] {
     // `IS` rather than `=` so the global stream (session_id NULL) gets its own
     // running sequence instead of matching nothing and restarting at 1 forever.
-    const nextSeq = this.db.prepare<{ next: number }, [number | null]>(
+    const nextSeq = this.db.query<{ next: number }, [number | null]>(
       'SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM events WHERE session_id IS ?',
     )
-    const insert = this.db.prepare(
+    const insert = this.db.query(
       `INSERT INTO events (session_id, turn_id, seq, type, payload, command_id, at, created_at, updated_at, uuid)
       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
     )
@@ -104,7 +104,7 @@ export class SqliteStore implements EngineStore {
 
   async read(sessionId: number, sinceSeq = 0): Promise<HarnessEvent[]> {
     const rows = this.db
-      .prepare<EventRow, [number | null, number]>(
+      .query<EventRow, [number | null, number]>(
         'SELECT session_id, seq, payload, command_id, at FROM events WHERE session_id IS ? AND seq > ? ORDER BY seq ASC',
       )
       .all(toColumn(sessionId), sinceSeq)
@@ -121,7 +121,7 @@ export class SqliteStore implements EngineStore {
    */
   async readAll(): Promise<HarnessEvent[]> {
     const rows = this.db
-      .prepare<EventRow, []>(
+      .query<EventRow, []>(
         'SELECT session_id, seq, payload, command_id, at FROM events ORDER BY id ASC',
       )
       .all()
@@ -131,7 +131,7 @@ export class SqliteStore implements EngineStore {
 
   async sessionIds(): Promise<number[]> {
     const rows = this.db
-      .prepare<{ session_id: number | null }, []>(
+      .query<{ session_id: number | null }, []>(
         'SELECT DISTINCT session_id FROM events ORDER BY session_id ASC',
       )
       .all()
@@ -141,7 +141,7 @@ export class SqliteStore implements EngineStore {
   async commitCommand(command: CommandIdentity, events: AppendableEvent[]): Promise<HarnessEvent[]> {
     return this.db.transaction(() => {
       const committed = events.length > 0 ? this.appendEvents(events) : []
-      this.db.prepare(
+      this.db.query(
         `INSERT INTO command_receipts (command_id, seqs, at, created_at, updated_at, uuid)
          VALUES (?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
       ).run(command.commandId, JSON.stringify(committed.map(event => event.seq)), command.at)
@@ -150,10 +150,10 @@ export class SqliteStore implements EngineStore {
   }
 
   async readCommand(commandId: string): Promise<HarnessEvent[] | null> {
-    const receipt = this.db.prepare('SELECT 1 FROM command_receipts WHERE command_id = ?').get(commandId)
+    const receipt = this.db.query('SELECT 1 FROM command_receipts WHERE command_id = ?').get(commandId)
     if (!receipt) return null
 
-    return this.db.prepare<EventRow, [string]>(
+    return this.db.query<EventRow, [string]>(
       'SELECT session_id, seq, payload, command_id, at FROM events WHERE command_id = ? ORDER BY id ASC',
     ).all(commandId).map(fromRow)
   }
