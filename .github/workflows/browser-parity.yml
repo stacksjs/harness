@@ -34,7 +34,6 @@ jobs:
     env:
       HARNESS_BROWSER: ${{ matrix.browser }}
       HARNESS_COLOR_SCHEME: ${{ matrix.appearance }}
-      HARNESS_SCREENSHOT_DIR: ${{ runner.temp }}/harness-browser-parity
     steps:
       - uses: actions/checkout@v4
       - uses: pantry-pm/pantry/packages/action@485c7b102fe14f8af00b57441a13dc3daa1505e7 # v0.10.39
@@ -44,9 +43,11 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: ./node_modules/.bin/playwright-core install --with-deps "$HARNESS_BROWSER"
       - run: bun --config=/dev/null scripts/drive-page.ts
+        env:
+          HARNESS_SCREENSHOT_DIR: ${{ runner.temp }}/harness-browser-parity
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: harness-${{ matrix.browser }}-${{ matrix.appearance }}
-          path: ${{ env.HARNESS_SCREENSHOT_DIR }}
+          path: ${{ runner.temp }}/harness-browser-parity
           if-no-files-found: ignore
