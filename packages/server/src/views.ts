@@ -30,7 +30,10 @@ export interface ViewProps {
   activeProfile: string
   draftWorkspace: ProjectSummary | null
   draftWithoutProject: boolean
-  activeSession: unknown
+  activeSession: {
+    turns: ReadonlyArray<{ id: number, response: string, status: string }>
+    [key: string]: unknown
+  } | null
   /**
    * Paired devices, for the settings sheet's Access section. The token hash
    * stays server-side — the page needs to name a device, never to match one.
@@ -151,7 +154,7 @@ export function viewProps(state: HarnessState, options: {
           // it. Previously an approval only reached whichever browser happened
           // to be connected when it fired, and the turn waited forever if that
           // one went away.
-          pendingApproval: active.pendingApproval,
+          pendingApprovals: active.pendingApprovals,
           // Shown in the header when the session has a checkout of its own, so
           // it is obvious the agent is not editing the workspace directly.
           branch: active.branch,
@@ -214,9 +217,28 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
   // while `src/ui/<name>/<Name>.stx` keeps the tag name. That is also what the
   // package's own stx plugin registers, so this matches how a configured stx
   // build resolves them.
-  return renderView(path, props as unknown as Record<string, unknown>, {
+  const html = await renderView(path, props as unknown as Record<string, unknown>, {
     ...ui,
     buildMode: 'serve',
     componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
   })
+  const responses = props.activeSession?.turns.filter(turn => turn.response)
+  if (!responses?.length) return html
+
+  // Inject generated Markdown after stx has processed the template, so its
+  // content cannot become a template directive or interpolation.
+  const { renderTranscriptMarkdown } = await import('./transcript-markdown')
+  const byTurn = new Map(responses.map(turn => [String(turn.id), turn]))
+  return new HTMLRewriter().on('[data-ssr-response]', {
+    element(element) {
+      const turn = byTurn.get(element.getAttribute('data-ssr-response') ?? '')
+      if (!turn) return
+      if (turn.status === 'running' && element.hasAttribute('data-live-response')) {
+        // HTMLRewriter escapes the attribute's quotes. Encode existing
+        // ampersands so the browser preserves the original Markdown source.
+        element.setAttribute('data-response-source', JSON.stringify(turn.response).replaceAll('&', '&amp;').replaceAll('<', '&lt;'))
+      }
+      element.setInnerContent(renderTranscriptMarkdown(turn.response), { html: true })
+    },
+  }).transform(html)
 }

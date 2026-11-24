@@ -124,7 +124,7 @@ describe('a pending approval is part of the session, not the socket', () => {
     const session = sessionAfter({ type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Write' })
 
     expect(session.state).toBe('awaiting-approval')
-    expect(session.pendingApproval).toEqual({ approvalId: 5, toolName: 'Write' })
+    expect(session.pendingApprovals).toEqual([{ approvalId: 5, toolName: 'Write' }])
   })
 
   it('clears it once answered', () => {
@@ -134,7 +134,18 @@ describe('a pending approval is part of the session, not the socket', () => {
     )
 
     expect(session.state).toBe('running')
-    expect(session.pendingApproval).toBeNull()
+    expect(session.pendingApprovals).toEqual([])
+  })
+
+  it('keeps the other requests visible when a parallel decision settles', () => {
+    const session = sessionAfter(
+      { type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Read' },
+      { type: 'approval.requested', approvalId: 6, requestId: 'apr_2', toolName: 'Write' },
+      { type: 'approval.resolved', approvalId: 6, decision: 'denied', scope: 'once' },
+      { type: 'approval.resolved', approvalId: 6, decision: 'allowed', scope: 'once' },
+    )
+    expect(session.state).toBe('awaiting-approval')
+    expect(session.pendingApprovals).toEqual([{ approvalId: 5, toolName: 'Read' }])
   })
 
   it('clears it when the turn is interrupted', () => {
@@ -146,7 +157,7 @@ describe('a pending approval is part of the session, not the socket', () => {
       { type: 'turn.interrupted', turnId: 10 },
     )
 
-    expect(session.pendingApproval).toBeNull()
+    expect(session.pendingApprovals).toEqual([])
   })
 
   it('clears it when the turn completes', () => {
@@ -155,7 +166,7 @@ describe('a pending approval is part of the session, not the socket', () => {
       { type: 'turn.completed', turnId: 10, tokensIn: 1, tokensOut: 1, cost: 0 },
     )
 
-    expect(session.pendingApproval).toBeNull()
+    expect(session.pendingApprovals).toEqual([])
   })
 
   it('clears it when the session fails', () => {
@@ -164,7 +175,7 @@ describe('a pending approval is part of the session, not the socket', () => {
       { type: 'session.failed', message: 'provider died' },
     )
 
-    expect(session.pendingApproval).toBeNull()
+    expect(session.pendingApprovals).toEqual([])
   })
 
   it('survives a replay, which is the point', () => {
@@ -174,6 +185,6 @@ describe('a pending approval is part of the session, not the socket', () => {
       { type: 'approval.requested', approvalId: 5, requestId: 'apr_1', toolName: 'Write' },
     ]
 
-    expect(sessionAfter(...payloads).pendingApproval).toEqual(sessionAfter(...payloads).pendingApproval)
+    expect(sessionAfter(...payloads).pendingApprovals).toEqual([{ approvalId: 5, toolName: 'Write' }])
   })
 })

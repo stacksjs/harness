@@ -26,7 +26,8 @@ export const codecUrl = $props.codecUrl || ''
 export const sinceSeq = $props.sinceSeq || 0
 // A decision this session is blocked on, if any. Rendered rather than waited
 // for: the client that raised it may be long gone.
-export const pendingApproval = activeSession ? (activeSession.pendingApproval || null) : null
+export const initialApprovals = activeSession?.pendingApprovals || []
+const pendingApproval = initialApprovals[0]
 
 // One space per profile. `pinned` is the favourite-repos tile grid; the
 // sections are the profile's sessions, split by whether they are live.
@@ -108,6 +109,8 @@ export const draftProjectChoices = profiles.find(profile => String(profile.id) =
 // that needs hydrating — everything above it is settled history.
 export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
+export const initialHasResponse = Boolean(liveTurn?.response)
+export const initialResponseTurn = liveTurn?.id || 0
 </script>
 
 <div class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-950">
@@ -267,7 +270,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       you actually scroll. The live tail hydrates eagerly — it is the only part
       the socket writes to.
     --}}
-    <div data-transcript ref="transcriptBox" class="overflow-y-auto flex-1 px-4 py-3 min-h-0">
+    <div class="relative flex-1 min-h-0 min-w-0">
+    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="copyTranscriptCode" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto px-4 py-3 h-full min-w-0">
       {{--
         A blank canvas says the app is broken; an empty state says what to do.
         Typing below is the fastest path, so it is the one named first.
@@ -324,7 +328,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           @endforeach
           </div>
           <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
-          <div class="leading-[20px] text-[13px] whitespace-pre-wrap" data-response>{{ turn.response }}</div>
+          <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
           {{--
             Undo this turn. Only offered where a snapshot exists: a workspace
             that is not a repository has nothing to revert to, and a disabled
@@ -374,14 +378,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             that gap too, and the first streamed byte hides them.
           --}}
           @if(!liveTurn.response)
-            <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="!!ssrTail() || !uiBusy()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
+            <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || !uiBusy()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           @endif
-          {{--
-            The server-rendered response plus the part that streams in after
-            load. Its own span, because :text owns an element's whole content
-            and must not overwrite the SSR text beside it.
-          --}}
-          <div class="leading-[20px] text-[13px] whitespace-pre-wrap" data-response data-live-response>{{ liveTurn.response }}<span :text="ssrTail()"></span></div>
+          <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
           {{--
             The newest turn is the one people most want to undo, and it was the
             only one without the button because it is not in `settledTurns`.
@@ -406,8 +405,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       {{--
         Turns started on this page. The island pushes into `liveTurns` and the
         runtime renders the rows — the keyed reuse means a streaming response
-        updates its own article in place. Prompts, tool names and responses all
-        arrive through :text, which assigns text and never parses markup.
+        updates its own article in place. Prompts and tool names stay plain text.
       --}}
       <template :for="turn in liveTurns" :key="turn.id">
         <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
@@ -423,8 +421,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           </div>
           <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
           {{-- Until the first token: dots, not a label over blank space. --}}
-          <div data-thinking class="thinking-dots" :hidden="!!turn.response || !uiBusy()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
-          <div class="leading-[20px] text-[13px] whitespace-pre-wrap" data-response :text="turn.response"></div>
+          <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || !uiBusy()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
+          <div class="transcript-markdown" data-response></div>
         </article>
       </template>
 
@@ -438,10 +436,15 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           <span data-approval-tool :text="approvalTool()">{{ pendingApproval ? pendingApproval.toolName : '' }}</span> wants to run.
         </div>
         <div class="flex gap-2">
-          <button type="button" data-approve @click="approveTool" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Allow</button>
-          <button type="button" data-deny @click="denyTool" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Deny</button>
+          <button type="button" data-approve @click="approveTool" :disabled="!!pendingApprovalId()" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px] disabled:opacity-50">Allow</button>
+          <button type="button" data-deny @click="denyTool" :disabled="!!pendingApprovalId()" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15 disabled:opacity-50">Deny</button>
         </div>
       </div>
+    </div>
+    @if(activeSession)
+      <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="absolute bottom-3 inset-e-4 px-3 h-9 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full shadow-sm dark:border-white/20">Jump to latest</button>
+      <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
+    @endif
     </div>
 
     @if(canCompose)
@@ -756,10 +759,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
   // What can change after load, as signals; the template renders them.
   // Turns started on this page. The server-rendered live turn is not here —
-  // its tail streams into `ssrTail`, its new tool calls into `ssrTools`, so
-  // the HTML the server already painted is never rebuilt.
+  // its new tool calls stream into `ssrTools`.
   const liveTurns = state([])
-  const ssrTail = state('')
+  const ssrHasResponse = state(initialHasResponse)
+  const followingTranscript = state(true)
+  const transcriptAnnouncement = state('')
+  const responseByTurn = new Map()
+  const changedResponses = new Set()
+  let transcriptFrame = 0
   const ssrTools = state([])
   // callId -> 'ok' | 'failed'. One map for every row — server-rendered rows
   // read it through their own `:data-tool-state` binding, loop rows through
@@ -793,10 +800,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     })
   }
 
-  // The decision this session is blocked on. Zero means none; the panel's
-  // :hidden and the tool name track these two.
-  const approvalId = state(pendingApproval ? pendingApproval.approvalId : 0)
-  const approvalTool = state(pendingApproval ? pendingApproval.toolName : '')
+  const pendingApprovals = state(initialApprovals)
+  const pendingApprovalId = state(0)
+  const approvalId = derived(() => pendingApprovals()[0]?.approvalId || 0)
+  const approvalTool = derived(() => pendingApprovals()[0]?.toolName || '')
 
   const diffOpen = state(false)
   const termOpen = state(false)
@@ -1656,26 +1663,55 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     })
   }
 
-  // A turn started on this page is a `liveTurns` entry; the `:for` template
-  // in the markup renders it. Deltas and tool rows are signal updates on the
-  // newest entry — no node building here, and the prompt/tool names go
-  // through `:text` bindings, which assign text, never markup.
-  //
-  // Follow the tail after the bindings have painted: their effects are
-  // registered before this script's updates run, but the DOM write lands in
-  // the same flush, so the scroll waits a frame.
-  function followTail() {
-    requestAnimationFrame(() => {
-      const transcript = transcriptRef.current
-      if (transcript) transcript.scrollTop = transcript.scrollHeight
-    })
+  function trackTranscriptPosition(event) {
+    const { scrollHeight, scrollTop, clientHeight } = event.currentTarget
+    followingTranscript.set(scrollHeight - scrollTop - clientHeight <= 48)
   }
 
-  // The newest client-started turn, or the server-rendered live turn's
-  // signals while none has begun yet.
-  function updateNewestTurn(change) {
-    liveTurns.update(turns => turns.map((turn, index) =>
-      index === turns.length - 1 ? change(turn) : turn))
+  function jumpToLatest() {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+    followingTranscript.set(true)
+    transcript.scrollTop = transcript.scrollHeight
+    transcript.focus({ preventScroll: true })
+  }
+
+  async function copyTranscriptCode(event) {
+    const button = event.target.closest?.('[data-copy-code]')
+    const code = button?.closest('.transcript-code')?.querySelector('code')?.textContent
+    if (code === undefined || code === null) return
+    try {
+      const nativeClipboard = desktop()?.clipboard
+      const browserClipboard = button.ownerDocument.defaultView?.navigator.clipboard
+      if (nativeClipboard?.writeText) await nativeClipboard.writeText(code)
+      else if (nativeClipboard?.write) await nativeClipboard.write(code)
+      else if (browserClipboard) await browserClipboard.writeText(code)
+      else throw new Error('Clipboard unavailable')
+      transcriptAnnouncement.set('Code copied to clipboard.')
+    }
+    catch {
+      stxAlert('Could not copy this code. You can select it and copy it manually.')
+    }
+  }
+
+  function paintTranscript(updateMarkdown) {
+    if (transcriptFrame) return
+    transcriptFrame = requestAnimationFrame(() => {
+      transcriptFrame = 0
+      const transcript = transcriptRef.current
+      if (!transcript) return
+      for (const turnId of changedResponses) {
+        const response = transcript.querySelector(`[data-turn="${turnId}"] [data-response]`)
+        if (response) updateMarkdown(response, responseByTurn.get(turnId))
+      }
+      changedResponses.clear()
+      if (followingTranscript()) transcript.scrollTop = transcript.scrollHeight
+    })
+  }
+  onDestroy(() => cancelAnimationFrame(transcriptFrame))
+
+  function updateClientTurn(turnId, change) {
+    liveTurns.update(turns => turns.map(turn => turn.id === turnId ? change(turn) : turn))
   }
 
   // The composer keeps the text and caret until the host accepts the command.
@@ -1797,19 +1833,25 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     dispatch({ type: 'session.turn.interrupt', sessionId })
   }
 
-  // Answered once: the panel hides the moment the decision is made, because
-  // leaving it up invites a second click answering an id the server retired.
-  function respondToApproval(allow) {
+  async function respondToApproval(allow) {
     const id = approvalId()
-    if (!id || !sessionId) return
-    approvalId.set(0)
-    dispatch({
-      type: 'session.approval.respond',
-      sessionId,
-      approvalId: id,
-      decision: allow ? 'allowed' : 'denied',
-      scope: 'once',
-    })
+    if (!id || !sessionId || pendingApprovalId()) return
+    pendingApprovalId.set(id)
+    try {
+      await sendCommand({
+        type: 'session.approval.respond',
+        sessionId,
+        approvalId: id,
+        decision: allow ? 'allowed' : 'denied',
+        scope: 'once',
+      })
+    }
+    catch (error) {
+      if (pendingApprovalId() === id) {
+        pendingApprovalId.set(0)
+        stxAlert(error instanceof Error ? error.message : 'Could not submit this approval.')
+      }
+    }
   }
   function approveTool() { respondToApproval(true) }
   function denyTool() { respondToApproval(false) }
@@ -1998,7 +2040,17 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { encode, decode, Terminal, toHtml } = await import(codecUrl)
+    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown } = await import(codecUrl)
+
+    const transcript = transcriptRef.current
+    const liveResponse = transcript?.querySelector('[data-live-response]')
+    if (liveResponse) {
+      responseByTurn.set(initialResponseTurn, JSON.parse(liveResponse.getAttribute('data-response-source') || '""'))
+      liveResponse.removeAttribute('data-response-source')
+    }
+    const hash = transcript?.ownerDocument.location?.hash
+    if (hash?.startsWith('#turn-')) followingTranscript.set(false)
+    else paintTranscript(updateTranscriptMarkdown)
 
     const socket = new WebSocket(serverUrl)
     socket.binaryType = 'arraybuffer'
@@ -2058,21 +2110,23 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         // Only the user's half opens a new exchange; the assistant's turn is
         // the reply within it.
         if (payload.role === 'user') {
+          responseByTurn.set(payload.turnId, '')
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
             prompt: payload.text ?? '',
             tools: [],
-            response: '',
+            hasResponse: false,
           }])
+          transcriptAnnouncement.set('')
           setSessionState('running')
-          followTail()
+          paintTranscript(updateTranscriptMarkdown)
         }
       }
       else if (payload.type === 'tool.call.began') {
         // Deduplicated by id: a replayed frame must not grow a second row.
         const call = { callId: payload.callId, name: payload.toolName }
-        if (liveTurns().length > 0) {
-          updateNewestTurn(turn => turn.tools.some(t => t.callId === call.callId)
+        if (payload.turnId !== initialResponseTurn) {
+          updateClientTurn(payload.turnId, turn => turn.tools.some(t => t.callId === call.callId)
             ? turn
             : { ...turn, tools: [...turn.tools, call] })
         }
@@ -2081,7 +2135,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             ? tools
             : [...tools, call])
         }
-        followTail()
+        paintTranscript(updateTranscriptMarkdown)
       }
       else if (payload.type === 'tool.call.ended') {
         // Recorded by id: tools run in parallel and finish out of order, and
@@ -2093,37 +2147,55 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         }))
       }
       else if (payload.type === 'assistant.delta') {
-        if (liveTurns().length > 0)
-          updateNewestTurn(turn => ({ ...turn, response: turn.response + payload.text }))
-        else
-          ssrTail.update(tail => tail + payload.text)
-        followTail()
+        const previous = responseByTurn.get(payload.turnId)
+        if (previous === undefined || !payload.text) return
+        responseByTurn.set(payload.turnId, previous + payload.text)
+        changedResponses.add(payload.turnId)
+        if (!previous) {
+          if (payload.turnId === initialResponseTurn) ssrHasResponse.set(true)
+          else updateClientTurn(payload.turnId, turn => ({ ...turn, hasResponse: true }))
+        }
+        paintTranscript(updateTranscriptMarkdown)
       }
       else if (payload.type === 'checkpoint.restored') {
         // The workspace is actually back now.
         while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
-        setSessionState('idle')
+        batch(() => {
+          setSessionState('idle')
+          pendingApprovals.set([])
+          pendingApprovalId.set(0)
+        })
+        transcriptAnnouncement.set(payload.type === 'turn.completed' ? 'Agent finished responding.' : 'Response stopped.')
       }
       else if (payload.type === 'session.failed') {
         // A failed turn is over too. Leaving Stop up would offer to interrupt
         // something that already stopped; 'failed' is not busy, so the
         // bindings put Send back while the chip says what happened.
-        setSessionState('failed')
+        batch(() => {
+          setSessionState('failed')
+          pendingApprovals.set([])
+          pendingApprovalId.set(0)
+        })
+        transcriptAnnouncement.set('The agent could not finish this response.')
       }
       else if (payload.type === 'approval.requested') {
         batch(() => {
           setSessionState('awaiting-approval')
-          approvalId.set(payload.approvalId)
-          approvalTool.set(payload.toolName)
+          pendingApprovals.update(requests => requests.some(request => request.approvalId === payload.approvalId)
+            ? requests
+            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName }])
+          transcriptAnnouncement.set('An approval needs your attention.')
         })
+        paintTranscript(updateTranscriptMarkdown)
       }
       else if (payload.type === 'approval.resolved') {
-        // The turn resumes; it did not end.
+        if (!pendingApprovals().some(request => request.approvalId === payload.approvalId)) return
         batch(() => {
-          setSessionState('running')
-          approvalId.set(0)
+          pendingApprovals.update(requests => requests.filter(request => request.approvalId !== payload.approvalId))
+          if (pendingApprovalId() === payload.approvalId) pendingApprovalId.set(0)
+          if (pendingApprovals().length === 0) setSessionState('running')
         })
       }
     })

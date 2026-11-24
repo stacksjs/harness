@@ -64,6 +64,9 @@ db.close()
 // --- fake driver: delta → approval (blocks) → tool call → delta → complete
 let releaseGate: () => void
 const gate = new Promise<void>((r) => { releaseGate = r })
+const markdownGate = Promise.withResolvers<void>()
+const parallelApprovalGate = Promise.withResolvers<void>()
+const parallelDecisions = new Map<string, boolean>()
 const script: ProviderEvent[] = [
   { type: 'session-bound', providerSessionId: 'ps-drive' },
   { type: 'assistant-delta', text: 'Thinking… ' },
@@ -75,6 +78,22 @@ const script: ProviderEvent[] = [
 ]
 const instance: ProviderInstance = {
   async *startTurn(input) {
+    if (input.text === 'exercise streaming markdown') {
+      yield { type: 'assistant-delta', text: '## Build result\n\n**Completed checks**\n\n' }
+      yield { type: 'assistant-delta', text: `${Array.from({ length: 60 }, (_, i) => `Checked component ${i + 1}`).join('\n\n')}\n\nEncoded comparison: \`&lt;\`` }
+      await markdownGate.promise
+      yield { type: 'assistant-delta', text: '\n\n<em data-fixture="literal">literal markup</em> {{ 1 + 1 }}\n\n```ts\nconst result = ' }
+      yield { type: 'assistant-delta', text: '42\nconst format = "{{ value }}"\n```\n' }
+      yield { type: 'turn-complete', tokensIn: 3, tokensOut: 4, costMicros: 0 }
+      return
+    }
+    if (input.text === 'exercise parallel approvals') {
+      yield { type: 'approval-request', requestId: 'parallel_read', toolName: 'Read', args: {} }
+      yield { type: 'approval-request', requestId: 'parallel_write', toolName: 'Write', args: {} }
+      await parallelApprovalGate.promise
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     for (const event of script) {
       if (event.type === 'approval-request' && input.text !== 'run the drive turn') continue
       // A beat before the first token, so the thinking indicator has a
@@ -85,7 +104,13 @@ const instance: ProviderInstance = {
     }
   },
   async interrupt() {},
-  async respondApproval(_id, allow) { if (allow) releaseGate() },
+  async respondApproval(id, allow) {
+    if (id === 'parallel_read' || id === 'parallel_write') {
+      parallelDecisions.set(id, allow)
+      if (parallelDecisions.size === 2) parallelApprovalGate.resolve()
+    }
+    else if (allow) releaseGate()
+  },
   async stop() {},
 }
 const driver: Driver = {
@@ -598,6 +623,70 @@ await page.click('[data-send]')
 await page.waitForFunction(() => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === '')
 check('retry uses the same id and clears the draft after receipt', attemptedIds.length === 2 && attemptedIds[0] === attemptedIds[1]
   && harness.engine.current.sessions.get(scratchSessionId)?.turns.filter(turn => turn.prompt === retryText).length === 1)
+
+await page.addInitScript(() => {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (value: string) => { document.body.dataset.fixtureClipboard = value } },
+  })
+})
+await page.reload()
+await promptBox.fill('exercise streaming markdown')
+await page.click('[data-send]')
+const transcript = page.getByRole('region', { name: 'Conversation' })
+await transcript.getByRole('heading', { name: 'Build result' }).waitFor()
+await transcript.getByText('Encoded comparison:', { exact: false }).waitFor({ state: 'attached' })
+await page.reload()
+await transcript.getByText('Encoded comparison:', { exact: false }).waitFor({ state: 'attached' })
+await page.waitForFunction(() => {
+  const pane = document.querySelector('[data-transcript]')
+  return pane && pane.scrollHeight > pane.clientHeight && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16
+})
+await transcript.evaluate(element => { element.scrollTop = 0 })
+const jump = page.getByRole('button', { name: 'Jump to latest' })
+await jump.waitFor()
+markdownGate.resolve()
+await transcript.getByText(/const result = 42/).waitFor()
+check('streaming Markdown preserves a reader’s scroll position', await transcript.evaluate(element => element.scrollTop) === 0)
+check('assistant markup stays text while Markdown code renders',
+  await transcript.locator('[data-fixture="literal"]').count() === 0
+  && await transcript.getByText(/literal markup.*\{\{ 1 \+ 1 \}\}/).count() === 1)
+check('reloading mid-turn preserves literal entities when streaming resumes',
+  await transcript.locator('p code').last().textContent() === '&lt;')
+await jump.click()
+const copy = transcript.getByRole('button', { name: 'Copy code' })
+await copy.click()
+check('the copy action preserves the fenced code', await page.locator('body').getAttribute('data-fixture-clipboard') === 'const result = 42\nconst format = "{{ value }}"\n')
+check('jump returns to the latest response', await jump.isHidden()
+  && await transcript.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight < 16))
+await capture('transcript-markdown-mobile')
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.reload()
+await transcript.getByText(/const result = 42/).waitFor()
+await page.waitForFunction(() => {
+  const pane = document.querySelector('[data-transcript]')
+  return pane && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16
+})
+check('reloading uses the same Markdown history and preserves literal markup',
+  await transcript.getByRole('heading', { name: 'Build result' }).count() === 1
+  && await transcript.getByText(/literal markup.*\{\{ 1 \+ 1 \}\}/).count() === 1
+  && await transcript.locator('[data-fixture="literal"]').count() === 0)
+await capture('transcript-markdown-desktop')
+
+await promptBox.fill('exercise parallel approvals')
+await page.click('[data-send]')
+const approval = page.locator('[data-approval]')
+const approvalTool = approval.locator('[data-approval-tool]')
+await page.waitForFunction(() => document.querySelector('[data-approval-tool]')?.textContent === 'Read')
+await page.reload()
+await approval.waitFor()
+check('reloading restores the oldest outstanding approval', await approvalTool.textContent() === 'Read')
+await approval.getByRole('button', { name: 'Allow', exact: true }).click()
+await page.waitForFunction(() => document.querySelector('[data-approval-tool]')?.textContent === 'Write')
+await approval.getByRole('button', { name: 'Deny', exact: true }).click()
+await approval.waitFor({ state: 'hidden' })
+check('parallel approvals advance in order and reach their matching callbacks',
+  parallelDecisions.get('parallel_read') === true && parallelDecisions.get('parallel_write') === false)
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

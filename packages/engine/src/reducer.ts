@@ -388,7 +388,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // Refused while a turn is running. Restoring files underneath a working
       // agent would have it editing a tree that changed for reasons it cannot
       // see, and the resulting diff would belong to nobody.
-      if (session.state === 'running')
+      if (session.state === 'running' || session.state === 'awaiting-approval')
         throw new InvalidCommand('cannot revert while a turn is running')
 
       return [{
@@ -403,7 +403,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
-      if (session.state === 'running')
+      if (session.state === 'running' || session.state === 'awaiting-approval')
         throw new InvalidCommand('a turn is already running')
       if (session.state === 'stopped')
         throw new InvalidCommand('session is stopped')
@@ -532,6 +532,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      if (session.state !== 'awaiting-approval' || !session.pendingApprovals.some(request => request.approvalId === command.approvalId))
+        throw new InvalidCommand('This approval is no longer pending.')
+      if (command.decision !== 'allowed' && command.decision !== 'denied')
+        throw new InvalidCommand('Invalid approval decision.')
       return [{
         sessionId: command.sessionId,
         commandId,

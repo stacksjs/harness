@@ -22,14 +22,14 @@ export interface SessionState {
   /** Oldest first, so the newest revert target is the last one. */
   checkpoints: CheckpointState[]
   /**
-   * The decision a turn is blocked on, if any.
+   * Outstanding tool decisions in arrival order.
    *
    * Projected rather than left to the socket, because the client that raised it
    * may be gone. An approval only ever reached the browser that happened to be
    * connected when it fired; anyone arriving afterwards saw a session marked
    * `awaiting-approval` with nothing to act on, and the turn waited forever.
    */
-  pendingApproval: { approvalId: number, toolName: string } | null
+  pendingApprovals: Array<{ approvalId: number, toolName: string }>
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
   /**
@@ -296,7 +296,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         lastSeq: 0,
         turns: [],
         checkpoints: [],
-        pendingApproval: null,
+        pendingApprovals: [],
         isolate: p.isolate === true,
         worktreePath: '',
         branch: '',
@@ -311,7 +311,9 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
     case 'session.stopped': {
       const session = state.sessions.get(event.sessionId)
-      if (session) session.state = 'stopped'
+      if (!session) break
+      session.state = 'stopped'
+      session.pendingApprovals = []
       break
     }
 
@@ -319,7 +321,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'failed'
-      session.pendingApproval = null
+      session.pendingApprovals = []
       break
     }
 
@@ -327,6 +329,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'running'
+      session.pendingApprovals = []
       session.turns.push({
         id: p.turnId,
         role: p.role,
@@ -406,7 +409,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       // A finished turn cannot still be blocked on a decision.
-      session.pendingApproval = null
+      session.pendingApprovals = []
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'complete'
@@ -425,7 +428,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (t) t.status = 'interrupted'
       session.state = 'idle'
       // Nothing is waiting on a decision once the turn is gone.
-      session.pendingApproval = null
+      session.pendingApprovals = []
       break
     }
 
@@ -435,6 +438,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) t.status = 'failed'
       session.state = 'idle'
+      session.pendingApprovals = []
       break
     }
 
@@ -442,17 +446,17 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'awaiting-approval'
-      session.pendingApproval = { approvalId: p.approvalId, toolName: p.toolName }
+      session.pendingApprovals.push({ approvalId: p.approvalId, toolName: p.toolName })
       break
     }
 
     case 'approval.resolved': {
       const session = state.sessions.get(event.sessionId)
-      if (!session) break
-      // Back to running, not idle: the turn that raised the approval is still
-      // in flight and the provider resumes it.
-      session.state = 'running'
-      session.pendingApproval = null
+      if (!session || session.state !== 'awaiting-approval') break
+      const index = session.pendingApprovals.findIndex(request => request.approvalId === p.approvalId)
+      if (index === -1) break
+      session.pendingApprovals.splice(index, 1)
+      if (session.pendingApprovals.length === 0) session.state = 'running'
       break
     }
 

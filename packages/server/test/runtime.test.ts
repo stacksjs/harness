@@ -825,7 +825,7 @@ describe('a restart does not strand a turn', () => {
     expect(session.state).toBe('idle')
     expect(session.turns.at(-1)!.status).toBe('interrupted')
     // And nothing is still waiting on a decision that can never be answered.
-    expect(session.pendingApproval).toBeNull()
+    expect(session.pendingApprovals).toEqual([])
   })
 
   it('leaves a session that was already idle alone', async () => {
@@ -889,6 +889,54 @@ describe('approvals round-trip through the socket', () => {
     await new Promise(r => setTimeout(r, 100))
     expect(approvals).toEqual([{ requestId: 'req_a', allow: false }])
     client.close()
+  })
+
+  it('replays an outstanding approval to replacement clients and accepts one decision', async () => {
+    const gate = Promise.withResolvers<void>()
+    const { driver, approvals } = fakeDriver([
+      { type: 'approval-request', requestId: 'req_race', toolName: 'Read', args: {} },
+      { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 },
+    ], { gate: gate.promise })
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    const url = `ws://127.0.0.1:${port}/ws`
+    const starter = await Client.connect(url)
+    const { sessionId } = await bootstrap(starter)
+    starter.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'start' } } })
+    const { approvalId } = await starter.waitFor('approval.requested')
+    starter.close()
+
+    const [first, second] = await Promise.all([Client.connect(url), Client.connect(url)])
+    try {
+      first.send({ t: 'subscribe', sessionId })
+      second.send({ t: 'subscribe', sessionId })
+      for (const client of [first, second]) {
+        expect(await client.waitFor('approval.requested')).toMatchObject({ approvalId })
+      }
+      first.send({ t: 'dispatch', envelope: { id: 'c_extra', at: 6, command: { type: 'session.turn.start', sessionId, text: 'extra' } } })
+      expect(await first.waitForRejection('c_extra')).toMatchObject({ message: 'a turn is already running' })
+
+      const command = { type: 'session.approval.respond', sessionId, approvalId, scope: 'once' }
+      first.send({ t: 'dispatch', envelope: { id: 'c_allow', at: 7, command: { ...command, decision: 'allowed' } } })
+      second.send({ t: 'dispatch', envelope: { id: 'c_deny', at: 7, command: { ...command, decision: 'denied' } } })
+      const settled = await first.waitFor('approval.resolved')
+      const allowed = settled.decision === 'allowed'
+      expect(await (allowed ? second : first).waitForRejection(allowed ? 'c_deny' : 'c_allow'))
+        .toMatchObject({ message: 'This approval is no longer pending.' })
+      expect(await second.waitFor('approval.resolved')).toEqual(settled)
+
+      gate.resolve()
+      expect(await first.waitFor('turn.completed')).toBeTruthy()
+      expect(await second.waitFor('turn.completed')).toBeTruthy()
+      expect(approvals).toEqual([{ requestId: 'req_race', allow: allowed }])
+      expect(first.payloads('approval.resolved')).toHaveLength(1)
+      expect(second.payloads('approval.resolved')).toHaveLength(1)
+      expect(harness.engine.current.sessions.get(sessionId)?.state).toBe('idle')
+    }
+    finally {
+      gate.resolve()
+      first.close()
+      second.close()
+    }
   })
 })
 

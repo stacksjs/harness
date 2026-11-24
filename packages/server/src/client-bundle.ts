@@ -26,6 +26,7 @@ import { join } from 'node:path'
  */
 const ENTRY = `export { encode, decode } from '@harness/contract'
 export { Terminal, toHtml } from '@harness/ansi'
+export { updateTranscriptMarkdown } from './packages/server/src/transcript-markdown'
 export { sendBrowserCommand } from './packages/server/src/browser-command'`
 
 let cached: ExternalizedAsset | null = null

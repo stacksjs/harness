@@ -16,6 +16,33 @@ import { TERMINAL_CSS } from '@harness/ansi'
  */
 const HIDDEN_PIN = '[hidden] { display: none !important; }'
 
+const TRANSCRIPT_MARKDOWN = `
+.transcript-markdown {
+  display: flow-root; min-width: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere;
+}
+.transcript-markdown > :first-child { margin-block-start: 0; }
+.transcript-markdown > :last-child { margin-block-end: 0; }
+.transcript-markdown :where(p, ul, ol, blockquote, table, hr, .transcript-code) { margin-block: 0.65em; }
+.transcript-markdown :where(h1, h2, h3, h4, h5, h6) { margin-block: 0.8em 0.3em; font-weight: 650; }
+.transcript-markdown :where(h1, h2) { font-size: 1.18em; }
+.transcript-markdown :where(ul, ol) { padding-inline-start: 1.6em; }
+.transcript-markdown ul { list-style: disc; }
+.transcript-markdown ol { list-style: decimal; }
+.transcript-markdown blockquote { border-inline-start: 2px solid rgb(127 127 127 / 42%); padding-inline-start: 0.8em; }
+.transcript-markdown a { text-decoration: underline; text-underline-offset: 2px; }
+.transcript-markdown table { display: block; overflow-x: auto; max-width: 100%; border-spacing: 0; }
+.transcript-markdown :where(th, td) { padding: 0.25em 0.6em; border: 1px solid rgb(127 127 127 / 24%); text-align: start; }
+.transcript-markdown :not(pre) > code { padding: 0.1em 0.32em; border-radius: 4px; background: rgb(127 127 127 / 13%); }
+.transcript-code { border: 1px solid rgb(127 127 127 / 27%); border-radius: 8px; overflow: hidden; }
+.transcript-code-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 3px 8px 3px 11px; font-size: 12px; background: rgb(127 127 127 / 10%);
+}
+.transcript-code-bar button { min-height: 32px; padding-inline: 8px; border-radius: 4px; }
+.transcript-code-bar button:is(:hover, :focus-visible) { background: rgb(127 127 127 / 20%); }
+.transcript-code pre { overflow: auto; padding: 9px 11px; white-space: pre; tab-size: 2; }
+`
+
 const RESPONSIVE_SHELL = `
 [data-sidebar-toggle], [data-sidebar-scrim], [data-workspace-actions-toggle],
 [data-workspace-actions-scrim], [data-workspace-action-label] { display: none; }
@@ -178,6 +205,7 @@ export default {
   preflights: [
     { getCSS: () => HIDDEN_PIN },
     { getCSS: () => RESPONSIVE_SHELL },
+    { getCSS: () => TRANSCRIPT_MARKDOWN },
     { getCSS: () => TOOL_DOT },
     { getCSS: () => THINKING_DOTS },
     { getCSS: () => TERMINAL_PANEL },
