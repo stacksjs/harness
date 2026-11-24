@@ -1,4 +1,5 @@
 export { createAcpDriver, CursorDriver, GrokDriver, initializeParams, mcpServersParam, OpenCodeDriver, permissionChoice, readableAcpError, terminalOf, translateUpdate } from './acp'
+export { nativeProviderAuth } from './account-environment'
 export { ClaudeDriver, translate } from './claude'
 export { probeBinary, providerConfigPath, runQuiet } from './cli-driver'
 export { approvalLabel, CodexDriver, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from './codex'

@@ -16,6 +16,13 @@ interface ListedProviderRow extends ProviderRow {
   config: string | null
 }
 
+interface ProviderAccountInput {
+  kind: DriverKind
+  name: string
+  binaryPath?: string
+  home?: string
+}
+
 function launchConfig(row: ProviderRow, workspacePath: string): SavedProviderLaunch {
   const binary = row.binary_path?.trim()
   const home = row.resolved_home?.trim()
@@ -36,6 +43,10 @@ function accountName(row: ListedProviderRow): string {
   return `Account ${row.id}`
 }
 
+function hasProviderTable(db: Database): boolean {
+  return Boolean(db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'provider_instances'").get())
+}
+
 /** Reads the host-side ProviderInstance model for an explicitly selected account. */
 export class SavedProviderInstances {
   private db: Database | null = null
@@ -46,8 +57,7 @@ export class SavedProviderInstances {
     const db = this.db ??= new Database(this.databasePath, { readonly: true })
 
     // Minimal and pre-migration databases still run default provider accounts.
-    const exists = db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'provider_instances'").get()
-    return exists ? db : null
+    return hasProviderTable(db) ? db : null
   }
 
   find(instanceId: number, profileId: number, driver: DriverKind, workspacePath: string): SavedProviderLaunch | null {
@@ -72,4 +82,56 @@ export class SavedProviderInstances {
   close(): void {
     this.db?.close()
   }
+}
+
+/** Writes provider launch settings from the host CLI. Browser clients only read their catalog. */
+export function addSavedProvider(
+  databasePath: string,
+  profileId: number,
+  input: ProviderAccountInput,
+): number {
+  const name = input.name.trim()
+  if (!name || name.length > 80) throw new Error('Enter an account name from 1 to 80 characters.')
+  if (input.binaryPath?.includes('\0') || input.home?.includes('\0'))
+    throw new Error('Provider paths cannot contain a null character.')
+
+  using db = new Database(databasePath, { readwrite: true })
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000')
+  if (!hasProviderTable(db)) throw new Error('Run ./buddy migrate before adding named provider accounts.')
+  return db.transaction(() => {
+    const profile = db.query<{ type: string, name: string }, [number]>(`
+      SELECT type, json_extract(payload, '$.name') AS name FROM events
+      WHERE type IN ('profile.created', 'profile.deleted') AND json_extract(payload, '$.profileId') = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(profileId)
+    if (profile?.type !== 'profile.created') throw new Error('No Harness profile has that ID.')
+
+    const binaryPath = input.binaryPath?.trim() || null
+    const home = input.home?.trim() || null
+    const named = db.query<ListedProviderRow, [number, DriverKind]>(`
+      SELECT id, driver_kind, config, binary_path, resolved_home FROM provider_instances
+      WHERE profile_id = ? AND driver_kind = ? ORDER BY id
+    `).all(profileId, input.kind).find(row => accountName(row).toLowerCase() === name.toLowerCase())
+    if (named) {
+      if (named.binary_path === binaryPath && named.resolved_home === home) return named.id
+      throw new Error('That account name already has different launch settings.')
+    }
+
+    // Harness profiles come from the event log. Keep a row for the model's
+    // foreign key when an account is first attached, including older profiles.
+    db.query('INSERT INTO profiles (id, name) VALUES (?, ?) ON CONFLICT (id) DO NOTHING').run(profileId, profile.name)
+    const result = db.query<{ id: number }, [number, DriverKind, string, string | null, string | null]>(`
+      INSERT INTO provider_instances (profile_id, driver_kind, config, status, binary_path, resolved_home)
+      VALUES (?, ?, ?, 'unknown', ?, ?) RETURNING id
+    `).get(profileId, input.kind, JSON.stringify({ name }), binaryPath, home)
+    if (!result) throw new Error('Could not save the provider account.')
+    return result.id
+  }).immediate()
+}
+
+export function removeSavedProvider(databasePath: string, profileId: number, accountId: number): boolean {
+  using db = new Database(databasePath, { readwrite: true })
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000')
+  if (!hasProviderTable(db)) return false
+  return db.query('DELETE FROM provider_instances WHERE id = ? AND profile_id = ?').run(accountId, profileId).changes === 1
 }

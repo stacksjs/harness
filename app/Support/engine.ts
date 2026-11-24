@@ -13,7 +13,7 @@ import { Engine, reduce, SqliteStore } from '@harness/engine'
  * drifts from the first.
  */
 
-const DB_PATH = 'database/stacks.sqlite'
+export const DB_PATH = 'database/stacks.sqlite'
 
 export async function boot(): Promise<EngineType> {
   const engine = new Engine({ store: new SqliteStore(DB_PATH), reducer: reduce })

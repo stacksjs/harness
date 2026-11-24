@@ -16,19 +16,7 @@
 
 import type { AccountInfo, CanUseTool, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
-import process from 'node:process'
-import { providerConfigPath } from './cli-driver'
-
-function claudeEnvironment(config: DriverConfig): NodeJS.ProcessEnv {
-  const homePath = config.home?.trim()
-  if (!homePath) return process.env
-
-  return {
-    ...process.env,
-    // Changing HOME hides macOS Keychain credentials; use CLAUDE_CONFIG_DIR to keep login access.
-    CLAUDE_CONFIG_DIR: providerConfigPath(config.workspacePath, homePath),
-  }
-}
+import { claudeEnvironment } from './account-environment'
 
 // Adapted from apps/server/src/provider/ClaudeProvider.ts at T3 Code
 // 902d369808c5c30ae9b178c6c6f86587b8f4f336. See T3CODE-LICENSE.md.

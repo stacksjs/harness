@@ -19,8 +19,8 @@
 import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
-import process from 'node:process'
-import { probeBinary, providerConfigPath } from './cli-driver'
+import { codexEnvironment } from './account-environment'
+import { probeBinary } from './cli-driver'
 import { EventQueue } from './event-queue'
 
 /** JSON-RPC frames, only as much of them as this driver reads. */
@@ -209,13 +209,10 @@ class CodexInstance implements ProviderInstance {
   private async ensureProcess(): Promise<ChildProcessWithoutNullStreams> {
     if (this.child) return this.child
 
-    const home = this.config.home?.trim()
     const child = spawn(this.config.binaryPath ?? 'codex', ['app-server'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.config.workspacePath,
-      env: home
-        ? { ...process.env, CODEX_HOME: providerConfigPath(this.config.workspacePath, home) }
-        : process.env,
+      env: codexEnvironment(this.config),
     }) as ChildProcessWithoutNullStreams
     this.child = child
 

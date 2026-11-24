@@ -29,6 +29,7 @@ export type CommandRegistry = Record<string, string | CommandConfig>
 export default {
   'inspire': 'Inspire',
   'profiles': 'Profiles',
+  'providers': 'Providers',
   'serve': 'Serve',
   'run': 'Run',
   'desktop': 'Desktop',

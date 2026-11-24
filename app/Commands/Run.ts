@@ -27,9 +27,15 @@ export default function (cli: CLI) {
     .option('--path [path]', 'Workspace path', { default: process.cwd() })
     .option('--yes', 'Approve tool calls automatically', { default: false })
     .option('--driver [kind]', 'Agent to run the turn (claude, codex, ...)', { default: 'claude' })
+    .option('--provider-instance [id]', 'Named account ID from the workspace profile')
     .option('--model [model]', "Model override; omit to use the provider's default")
     .option('--isolate', 'Run in a git worktree of its own, on its own branch', { default: false })
-    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string, isolate?: boolean }) => {
+    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string, isolate?: boolean, providerInstance?: string }) => {
+      const providerInstanceId = options.providerInstance === undefined ? undefined : Number(options.providerInstance)
+      if (providerInstanceId !== undefined && (!Number.isSafeInteger(providerInstanceId) || providerInstanceId <= 0)) {
+        console.error('Enter a positive provider instance ID.')
+        process.exit(ExitCode.FatalError)
+      }
       let client: HarnessClient
       try {
         client = await connect(options.url)
@@ -50,6 +56,10 @@ export default function (cli: CLI) {
         workspaceId = existingWorkspace.id
       }
       else {
+        if (providerInstanceId !== undefined) {
+          console.error('Register this workspace in the provider account’s profile before selecting the account.')
+          process.exit(ExitCode.FatalError)
+        }
         const profileCmd = commandId('profile')
         await client.dispatch(profileCmd, { type: 'profile.create', name: options.profile })
         const workspaceCmd = commandId('workspace')
@@ -72,6 +82,7 @@ export default function (cli: CLI) {
         type: 'session.create',
         workspaceId,
         driverKind: options.driver as DriverKind,
+        ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
         ...(options.model ? { model: options.model } : {}),
         ...(options.isolate ? { isolate: true } : {}),
       })

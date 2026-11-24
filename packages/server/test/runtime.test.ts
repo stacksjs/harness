@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
+import { addSavedProvider, removeSavedProvider } from '../src/provider-instances'
 import { serve } from '../src/server'
 
 /**
@@ -166,19 +167,16 @@ describe('a turn drives the provider', () => {
   it('uses only the selected project account for provider status and launch', async () => {
     const databasePath = join(dir, 'test.sqlite')
     const profileId = derivedId('configured-profile')
+    const otherProfileId = derivedId('other-profile')
     const workspaceId = derivedId('configured-workspace')
     const db = new Database(databasePath)
     db.exec(`
+      CREATE TABLE profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
       CREATE TABLE provider_instances (
-        id INTEGER PRIMARY KEY, profile_id INTEGER, driver_kind TEXT,
-        binary_path TEXT, resolved_home TEXT, config TEXT
+        id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER NOT NULL REFERENCES profiles(id), driver_kind TEXT,
+        binary_path TEXT, resolved_home TEXT, config TEXT, status TEXT
       );
     `)
-    const save = db.query('INSERT INTO provider_instances VALUES (?, ?, ?, ?, ?, ?)')
-    save.run(1, profileId, 'claude', './bin/claude', './work-account', '{"name":"Work"}')
-    save.run(2, profileId, 'claude', '/fixture/personal/claude', '/fixture/personal/account', '{"name":"Personal"}')
-    save.run(3, profileId + 1, 'claude', '/fixture/other/claude', '/fixture/other/account', null)
-    save.run(4, profileId, 'codex', '/fixture/codex', '/fixture/codex/account', null)
     db.close()
 
     const launched: DriverConfig[] = []
@@ -203,6 +201,16 @@ describe('a turn drives the provider', () => {
     const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     try {
       await harness.engine.dispatch({ id: 'configured-profile', at: 1, command: { type: 'profile.create', name: 'P' } })
+      await harness.engine.dispatch({ id: 'other-profile', at: 1, command: { type: 'profile.create', name: 'Other' } })
+      const work = { kind: 'claude', name: 'Work', binaryPath: './bin/claude', home: './work-account' } as const
+      expect(addSavedProvider(databasePath, profileId, work)).toBe(1)
+      expect(addSavedProvider(databasePath, profileId, work)).toBe(1)
+      expect(() => addSavedProvider(databasePath, profileId, { ...work, home: './different' })).toThrow('already has different launch settings')
+      expect(() => addSavedProvider(databasePath, otherProfileId + 1, work)).toThrow('No Harness profile')
+      expect(addSavedProvider(databasePath, profileId, { kind: 'claude', name: 'Personal', binaryPath: '/fixture/personal/claude', home: '/fixture/personal/account' })).toBe(2)
+      expect(addSavedProvider(databasePath, otherProfileId, { kind: 'claude', name: 'Other' })).toBe(3)
+      expect(addSavedProvider(databasePath, profileId, { kind: 'codex', name: 'Codex' })).toBe(4)
+      expect(removeSavedProvider(databasePath, otherProfileId, 2)).toBe(false)
       await harness.engine.dispatch({ id: 'configured-workspace', at: 2, command: { type: 'workspace.add', profileId, path: dir } })
       const catalog = () => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}`).then(response => response.json())
       expect(await catalog()).toMatchObject({ accounts: [] })
@@ -211,7 +219,7 @@ describe('a turn drives the provider', () => {
       expect(profileCatalog.accounts).toEqual([
         { id: 1, kind: 'claude', name: 'Work', status: 'ready' },
         { id: 2, kind: 'claude', name: 'Personal', status: 'ready' },
-        { id: 4, kind: 'codex', name: 'Account 4', status: 'ready' },
+        { id: 4, kind: 'codex', name: 'Codex', status: 'ready' },
       ])
       expect(JSON.stringify(profileCatalog)).not.toContain('/fixture/')
       expect(probed).toContainEqual({ workspacePath: dir, binaryPath: join(dir, 'bin/claude'), home: join(dir, 'work-account') })
@@ -245,9 +253,7 @@ describe('a turn drives the provider', () => {
       expect(launched).toMatchObject([expected])
       expect(JSON.stringify(creation.events)).not.toContain('/fixture/personal')
 
-      const settings = new Database(databasePath)
-      settings.query('DELETE FROM provider_instances WHERE id = ?').run(2)
-      settings.close()
+      expect(removeSavedProvider(databasePath, profileId, 2)).toBe(true)
       client.send({ t: 'dispatch', envelope: {
         id: 'removed-account-turn', at: 7, command: { type: 'session.turn.start', sessionId, text: 'another turn' },
       } })
