@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "stacks",
+      "name": "harness",
       "dependencies": {
         "@harness/ansi": "workspace:*",
         "@stacksjs/components": "^0.2.932",
