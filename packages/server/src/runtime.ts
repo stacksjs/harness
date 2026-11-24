@@ -18,12 +18,14 @@ import { existsSync } from 'node:fs'
 import { resolveDriver } from '@harness/drivers'
 import { capture, restore } from './checkpoint'
 import { missingReferences, resolveForDriver } from './mcp'
+import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
 import * as worktree from './worktree'
 
 export interface RuntimeOptions {
   engine: Engine
   /** Injectable so tests bind a fake driver instead of spawning an agent. */
   resolve?: (kind: DriverKind) => Driver | null
+  savedProviders?: Pick<SavedProviderInstances, 'find'>
   /** Resolve a session's workspace path. Defaults to the projection. */
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
   now?: () => number
@@ -41,6 +43,7 @@ export interface RuntimeOptions {
 
 interface Running {
   instance: ProviderInstance
+  savedLaunch?: SavedProviderLaunch
   /** Provider's own session id, so the next turn resumes rather than restarts. */
   providerSessionId?: string
   /** Approval request id → the id the engine assigned, for routing responses. */
@@ -89,8 +92,34 @@ export class ProviderRuntime {
   }
 
   private async instanceFor(sessionId: number, driverKind: DriverKind): Promise<Running | null> {
+    const session = this.options.engine.current.sessions.get(sessionId)
+    const workspace = session ? this.options.engine.current.workspaces.get(session.workspaceId) : undefined
+    const savedId = session?.providerInstanceId
+    const savedLaunch = savedId !== undefined && workspace
+      ? this.options.savedProviders?.find(savedId, workspace.profileId, driverKind, workspace.path)
+      : undefined
+    if (savedId !== undefined && !savedLaunch) {
+      await this.emit({
+        type: 'thread.error',
+        sessionId,
+        message: 'The selected provider account is no longer available. Start a session with another account.',
+      })
+      return null
+    }
+
     const existing = this.sessions.get(sessionId)
-    if (existing) return existing
+    if (existing) {
+      if (existing.savedLaunch?.binaryPath !== savedLaunch?.binaryPath
+        || existing.savedLaunch?.home !== savedLaunch?.home) {
+        await this.emit({
+          type: 'thread.error',
+          sessionId,
+          message: 'The provider account settings changed. Start a new session to use the updated account.',
+        })
+        return null
+      }
+      return existing
+    }
 
     const resolve = this.options.resolve ?? resolveDriver
     const driver = resolve(driverKind)
@@ -104,7 +133,6 @@ export class ProviderRuntime {
     await this.ensureWorktree(sessionId)
 
     const state = this.options.engine.current
-    const session = state.sessions.get(sessionId)
     const workspacePath = this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
       : defaultWorkspacePath(state, sessionId)
@@ -131,7 +159,13 @@ export class ProviderRuntime {
     // Probe before creating, so a missing or signed-out CLI surfaces as the fix
     // ("run `codex login`") rather than as an opaque failure part-way through
     // the user's first turn. Probes run once per session, not once per turn.
-    const probe = await driver.probe({ workspacePath, autoApprove: this.options.autoApprove })
+    const launch = {
+      ...savedLaunch,
+      workspacePath,
+      autoApprove: this.options.autoApprove,
+      model: session?.model || undefined,
+    }
+    const probe = await driver.probe(launch)
     if (probe.status !== 'ready') {
       await this.emit({
         type: 'thread.error',
@@ -143,7 +177,6 @@ export class ProviderRuntime {
 
     // The profile's servers, not the session's: a project's tools belong to the
     // project, and every session in it should reach the same ones.
-    const workspace = session ? state.workspaces.get(session.workspaceId) : undefined
     const profile = workspace ? state.profiles.get(workspace.profileId) : undefined
     const mcpServers = resolveForDriver(profile?.mcpServers ?? [])
 
@@ -162,15 +195,14 @@ export class ProviderRuntime {
       }
     }
 
-    const instance = await driver.create({
-      workspacePath,
-      autoApprove: this.options.autoApprove,
-      mcpServers,
-      // Empty means "no preference" — the driver must omit it so the provider
-      // picks its own default, rather than being asked for a model named ''.
-      model: session?.model || undefined,
-    })
-    const running: Running = { instance, approvals: new Map(), abandoned: false, interrupted: false }
+    const instance = await driver.create({ ...launch, mcpServers })
+    const running: Running = {
+      instance,
+      ...(savedLaunch ? { savedLaunch } : {}),
+      approvals: new Map(),
+      abandoned: false,
+      interrupted: false,
+    }
     this.sessions.set(sessionId, running)
     return running
   }

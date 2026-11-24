@@ -12,6 +12,7 @@ export interface SessionState {
   id: number
   workspaceId: number
   driverKind: DriverKind
+  providerInstanceId?: number
   /** Model override for this session. Empty means the provider's own default. */
   model: string
   providerSessionId: string
@@ -280,6 +281,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         id: event.sessionId,
         workspaceId: p.workspaceId,
         driverKind: p.driverKind,
+        ...(p.providerInstanceId !== undefined ? { providerInstanceId: p.providerInstanceId } : {}),
         model: p.model ?? '',
         providerSessionId: '',
         state: 'idle',

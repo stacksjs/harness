@@ -92,6 +92,7 @@ export const sessionState = activeSession ? activeSession.state : 'idle'
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const sessionDriver = activeSession ? (activeSession.driverKind || '') : ''
+export const sessionProviderInstanceId = activeSession?.providerInstanceId ?? null
 export const promptPlaceholder = activeSession ? 'Ask the agent…' : 'Type here to start a new session…'
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
@@ -460,6 +461,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <option value="opencode">OpenCode</option>
         <option value="cursor">Cursor</option>
         <option value="grok">Grok</option>
+        <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
       </select>
       <button type="submit" data-send :hidden="uiBusy()" :disabled="startPending()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
       {{--
@@ -532,8 +534,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     (craft forwards it as a `craft:settings` event) and as a page chord
     everywhere else. One setting so far: which agent a new session runs.
   --}}
-  <div data-settings-modal hidden :hidden="!settingsOpen()" @click.self="closeSettings" class="flex fixed inset-0 z-[70] items-center justify-center p-4 bg-black/40">
-    <div role="dialog" aria-modal="true" aria-labelledby="harness-settings-title" class="p-4 w-full max-w-[360px] max-h-full overflow-y-auto bg-white dark:bg-neutral-900 rounded-[10px] shadow-xl">
+  <dialog data-settings-modal ref="settingsDialogBox" aria-labelledby="harness-settings-title" @click.self="closeSettings" @cancel="cancelSettings" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[10px] dark:border-white/15 shadow-xl">
+    <div class="p-4">
       <h2 id="harness-settings-title" class="mb-3 font-semibold text-[14px]">Settings</h2>
       <label class="block mb-2 font-medium text-[13px]" for="settings-driver">Agent for new sessions</label>
       <select
@@ -582,6 +584,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           <button type="button" data-agent-login data-kind="grok" @click="loginAgent" hidden class="px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15">Log in</button>
         </li>
       </ul>
+      <ul :if="providerAccounts().length" class="mb-3" aria-label="Project provider accounts">
+        <li :for="account in providerAccounts()" :key="account.id" class="flex gap-2 items-center py-1 text-[13px]">
+          <span class="flex-1 truncate" :text="account.name"></span>
+          <span class="text-[11px] opacity-60" :text="account.stateText"></span>
+        </li>
+      </ul>
 
       <h3 class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Access</h3>
       @if(devices.length)
@@ -610,7 +618,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <button type="button" @click="closeSettings" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Done</button>
       </div>
     </div>
-  </div>
+  </dialog>
 
   @if(activeWorkspaceId)
     <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
@@ -767,6 +775,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const driverPickerRef = useRef('driverPickerBox')
   const settingsDriverRef = useRef('settingsDriverBox')
   const settingsToggleRef = useRef('settingsToggleBox')
+  const settingsDialogRef = useRef('settingsDialogBox')
   const transcriptRef = useRef('transcriptBox')
   const termScreenRef = useRef('termScreenBox')
   const termHostRef = useRef('termHostBox')
@@ -841,7 +850,6 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // like everything else.
   const profileModalOpen = state(false)
   // The settings sheet: opened by Cmd+, or the desktop app menu.
-  const settingsOpen = state(false)
   // A freshly minted pairing code, shown beside the button that minted it.
   const pairCode = state('')
   // The checkpoint currently being restored; its button reads this for its
@@ -1087,6 +1095,24 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // a preference of this keyboard, not a fact about the project.
   const KNOWN_DRIVERS = ['claude', 'codex', 'opencode', 'cursor', 'grok']
   const DRIVER_LABELS = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
+  const providerAccounts = state([])
+  const activeDriverValue = sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`
+
+  function driverStateLabel(status, version) {
+    if (status === 'ready') return version ? `ready · ${version}` : 'ready'
+    if (status === 'unauthenticated') return 'signed out'
+    if (status === 'unavailable') return 'not installed'
+    if (status === 'deleted') return 'account unavailable'
+    return 'check failed'
+  }
+
+  function agentChoice(value) {
+    const [driverKind, accountId] = value.split(':')
+    return {
+      driverKind,
+      ...(accountId ? { providerInstanceId: Number(accountId) } : {}),
+    }
+  }
 
   // Each CLI's own login flow, run in the workspace terminal. The CLIs hold
   // their credentials; harness only starts the conversation.
@@ -1103,10 +1129,25 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // the answer in their option labels, with unusable agents disabled — a
   // driver you cannot run should not be one click from a dead session.
   async function annotateDriverPickers() {
-    const response = await fetch('/drivers').catch(() => null)
+    const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
+    const response = await fetch(`/drivers?workspace=${workspace}`).catch(() => null)
     if (!response?.ok) return
-    const { drivers } = await response.json()
+    const { drivers, accounts = [] } = await response.json()
+    if (sessionProviderInstanceId !== null && !accounts.some(account => account.id === sessionProviderInstanceId)) {
+      accounts.push({ id: sessionProviderInstanceId, kind: sessionDriver, name: 'Saved account', status: 'deleted' })
+    }
+    const picker = driverPickerRef.current
+    const selection = picker?.value || activeDriverValue || defaultDriver()
+    providerAccounts.set(accounts.map(account => {
+      const stateText = driverStateLabel(account.status, account.version)
+      const name = `${DRIVER_LABELS[account.kind] ?? account.kind} · ${account.name}`
+      return { ...account, name, stateText, label: `${name} · ${stateText}`, value: `${account.kind}:${account.id}` }
+    }))
+    void nextTick(() => {
+      if (picker) picker.value = selection
+    })
     for (const info of drivers) {
+      const stateText = driverStateLabel(info.status, info.version)
       for (const boxName of ['driverPickerBox', 'settingsDriverBox']) {
         const option = useRef(boxName).current?.querySelector(`option[value="${info.kind}"]`)
         if (!option) continue
@@ -1117,24 +1158,16 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         }
         else {
           option.disabled = true
-          option.textContent = `${label} — ${info.status === 'unauthenticated' ? 'signed out' : 'not installed'}`
+          option.textContent = `${label} · ${stateText}`
         }
       }
 
-      // The settings sheet's Agents rows carry the same answer, plus the way
-      // in: Log in shows for any installed CLI — signed-out ones need it,
-      // signed-in ones may want to switch accounts.
+      // Use the CLI's login action only when the default account is signed out.
       const row = document.querySelector(`[data-agent-row="${info.kind}"]`)
       if (row) {
-        const stateText = info.status === 'ready'
-          ? (info.version ? `ready · ${info.version}` : 'ready')
-          : info.status === 'unauthenticated' ? 'signed out'
-            : info.status === 'unavailable' ? 'not installed' : 'error'
         row.querySelector('[data-agent-state]').textContent = stateText
         const login = row.querySelector('[data-agent-login]')
-        login.hidden = info.status !== 'ready' && info.status !== 'unauthenticated'
-        // The signed-out row is the one this section exists for.
-        login.classList.toggle('font-medium', info.status === 'unauthenticated')
+        login.hidden = info.status !== 'unauthenticated'
       }
     }
   }
@@ -1163,22 +1196,27 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // move is a fresh start in the same workspace, said out loud.
   async function driverPicked(event) {
     const picker = event.currentTarget
-    const kind = picker.value
-    localStorage.setItem('harness.defaultDriver', kind)
-    if (!activeSessionId || kind === sessionDriver) return
-    const label = DRIVER_LABELS[kind] ?? kind
-    if (await stxConfirm(`Start a new ${label} session in this workspace? This session stays as it is.`)) {
+    const value = picker.value
+    const choice = agentChoice(value)
+    if (!activeSessionId) {
+      if (choice.providerInstanceId === undefined) localStorage.setItem('harness.defaultDriver', choice.driverKind)
+      return
+    }
+    if (value === activeDriverValue) return
+    const label = providerAccounts().find(account => account.value === value)?.name || DRIVER_LABELS[choice.driverKind]
+    if (await stxConfirm(`Start a new session with ${label} in this workspace?`)) {
       try {
-        await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), driverKind: kind })
-        navigate(`/?profile=${encodeURIComponent(activeProfile)}&workspace=${activeWorkspaceId}`)
+        const commandId = newCommandId()
+        await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), ...choice }, commandId)
+        navigate(`/s/${derivedSessionId(commandId)}`)
       }
       catch (error) {
-        picker.value = sessionDriver
+        picker.value = activeDriverValue
         stxAlert(error.message)
       }
     }
     else {
-      picker.value = sessionDriver
+      picker.value = activeDriverValue
     }
   }
 
@@ -1187,7 +1225,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // left by type-to-start sends itself once the socket can carry it.
   requestAnimationFrame(() => {
     const picker = driverPickerRef.current
-    if (picker) picker.value = sessionDriver || defaultDriver()
+    if (picker) picker.value = activeDriverValue || defaultDriver()
     annotateDriverPickers()
 
     const pending = sessionId ? sessionStorage.getItem('harness.pendingPrompt') : null
@@ -1211,9 +1249,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     return KNOWN_DRIVERS.includes(stored) ? stored : 'claude'
   }
 
-  function openSettings() {
+  let settingsFromAccount = false
+
+  function openSettings(event) {
+    const dialog = settingsDialogRef.current
+    if (!dialog || dialog.open) return
+    settingsFromAccount = event?.currentTarget === settingsToggleRef.current
     workspaceActionsOpen.set(false)
-    settingsOpen.set(true)
+    dialog.showModal()
     // Re-probe on open: someone who just logged in comes back to a sheet
     // that should say so. The server holds results for 30s, so this is a
     // cheap read, not a process fork per open.
@@ -1228,8 +1271,14 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   function closeSettings() {
-    settingsOpen.set(false)
-    settingsToggleRef.current?.focus()
+    settingsDialogRef.current?.close()
+    if (settingsFromAccount) settingsToggleRef.current?.focus()
+    settingsFromAccount = false
+  }
+
+  function cancelSettings(event) {
+    event.preventDefault()
+    closeSettings()
   }
 
   function saveDriverChoice() {
@@ -1480,8 +1529,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       startPending.set(true)
       const commandId = newCommandId()
       try {
-        const driverKind = driverPickerRef.current?.value || defaultDriver()
-        await sendCommand({ type: 'session.create', workspaceId: draftProject.id, driverKind }, commandId)
+        const picker = driverPickerRef.current
+        if (picker?.selectedOptions[0]?.disabled) throw new Error('Choose an available agent to start this session.')
+        const choice = agentChoice(picker?.value || defaultDriver())
+        await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice }, commandId)
         sessionStorage.setItem('harness.pendingPrompt', text)
         navigate(`/s/${derivedSessionId(commandId)}`)
       }
@@ -1641,16 +1692,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // desktop window the menu item usually claims the chord first and arrives
   // as `craft:settings` instead.
   useEventListener('keydown', (event) => {
-    if (projectDialog.current?.open) return
+    if (projectDialog.current?.open || settingsDialogRef.current?.open) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.
     if (event.key === 'Escape') {
-      if (settingsOpen()) {
-        event.preventDefault()
-        closeSettings()
-      }
-      else if (profileModalOpen()) {
+      if (profileModalOpen()) {
         event.preventDefault()
         closeProfileModal()
       }

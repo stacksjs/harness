@@ -12,6 +12,8 @@ import { schema } from '@stacksjs/validation'
  * Credentials are **not** here. They live in the OS keychain via
  * `@stacksjs/desktop`; this row only records where to find the binary and which
  * HOME to run it under.
+ * Host-side configuration chooses which executable Harness starts, so this
+ * model is excluded from the app's generated CRUD routes.
  */
 export default defineModel({
   name: 'ProviderInstance',
@@ -29,11 +31,6 @@ export default defineModel({
       filterable: ['profileId', 'driverKind', 'status'],
     },
     useSeeder: { count: 0 },
-    useApi: {
-      uri: 'provider-instances',
-      routes: ['index', 'store', 'show', 'update', 'destroy'],
-      middleware: ['auth'],
-    },
   },
 
   belongsTo: ['Profile'],

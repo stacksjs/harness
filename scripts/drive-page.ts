@@ -57,6 +57,7 @@ db.exec('CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT)')
 db.exec('CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT)')
 db.exec('CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, turn_id INTEGER, seq INTEGER NOT NULL, type TEXT NOT NULL, payload TEXT, command_id TEXT, at INTEGER, created_at TEXT, updated_at TEXT, uuid TEXT)')
 db.exec('CREATE TABLE command_receipts (id INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, seqs TEXT, at INTEGER, created_at TEXT, updated_at TEXT, uuid TEXT)')
+db.exec('CREATE TABLE provider_instances (id INTEGER PRIMARY KEY, profile_id INTEGER, driver_kind TEXT, binary_path TEXT, resolved_home TEXT, config TEXT)')
 db.close()
 
 // --- fake driver: delta → approval (blocks) → tool call → delta → complete
@@ -86,9 +87,10 @@ const instance: ProviderInstance = {
   async stop() {},
 }
 const driver: Driver = { kind: 'claude', async probe() { return { status: 'ready' } }, async create() { return instance } }
+const signedOutDriver: Driver = { ...driver, kind: 'codex', async probe() { return { status: 'unauthenticated' } } }
 
 const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
-const harness = await serve({ port, databasePath, resolveDriver: () => driver })
+const harness = await serve({ port, databasePath, resolveDriver: kind => kind === 'codex' ? signedOutDriver : driver })
 const baseUrl = `http://localhost:${port}`
 const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
 if (screenshotDir) mkdirSync(screenshotDir, { recursive: true })
@@ -137,6 +139,12 @@ await page.locator('[data-project-path]').fill(dir)
 await page.locator('[data-project-submit]').click()
 await page.waitForURL(/\?workspace=/)
 const workspaceId = [...harness.engine.current.workspaces.keys()][0]!
+const providerProfileId = harness.engine.current.workspaces.get(workspaceId)!.profileId
+const settingsDb = new Database(databasePath)
+const saveProvider = settingsDb.query('INSERT INTO provider_instances (id, profile_id, driver_kind, config) VALUES (?, ?, ?, ?)')
+saveProvider.run(1, providerProfileId, 'claude', '{"name":"Work"}')
+saveProvider.run(2, providerProfileId, 'claude', '{"name":"Personal"}')
+settingsDb.close()
 check('adds the folder and opens its untrusted workspace', harness.engine.current.workspaces.get(workspaceId)?.trusted === false
   && !(await page.locator('[data-composer]').isVisible()))
 await page.locator('[data-project-trust]').click()
@@ -273,21 +281,22 @@ await page.setViewportSize({ width: 1280, height: 720 })
 
 // 9. Settings: the Cmd+, chord opens the modal, the driver choice persists,
 // and the desktop menu's `craft:settings` event reaches the same modal.
+const settingsDialog = page.getByRole('dialog', { name: 'Settings' })
 await page.keyboard.press('Meta+,')
-await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('Cmd+, opens the settings modal', true)
 await page.selectOption('#settings-driver', 'opencode')
-await page.click('[data-settings-modal] button')
+await page.locator('[data-settings-modal]').getByRole('button', { name: 'Done' }).click()
 const storedDriver = await page.evaluate(() => localStorage.getItem('harness.defaultDriver'))
 check('driver choice persists', storedDriver === 'opencode')
 await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:settings')))
-await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 const reopenedShowsChoice = await page.evaluate(() => (document.querySelector('#settings-driver') as HTMLSelectElement | null)?.value)
 check('menu event reopens settings with the saved choice', reopenedShowsChoice === 'opencode')
 const accessSection = await page.evaluate(() => document.querySelector('[data-settings-modal]')?.textContent ?? '')
 check('settings shows the access section honestly', accessSection.includes('No devices are paired') && accessSection.includes('--remote'))
 await page.keyboard.press('Escape')
-await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === true, undefined, { timeout: 4000 })
+await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
 check('Esc closes the settings modal', true)
 await page.evaluate(() => localStorage.removeItem('harness.defaultDriver'))
 
@@ -299,15 +308,19 @@ const pickerState = await page.evaluate(async () => ({
   probes: await fetch('/drivers').then(r => r.json()),
 }))
 check('picker shows the session driver', pickerState.value === 'claude' && pickerState.headerChip === 'claude')
-check('driver probes answer for every kind', pickerState.probes.drivers.length === 5 && pickerState.probes.drivers.every((d: any) => d.status === 'ready'))
-await page.selectOption('[data-driver-picker]', 'codex')
+check('driver probes answer for every kind', pickerState.probes.drivers.length === 5
+  && pickerState.probes.drivers.every((d: any) => d.status === (d.kind === 'codex' ? 'unauthenticated' : 'ready')))
+await page.selectOption('[data-driver-picker]', 'claude:1')
 await page.click('[role="alertdialog"] button:has-text("OK")')
-await page.waitForURL(/\?profile=/, { timeout: 8000 })
+await page.waitForURL(url => url.pathname.startsWith('/s/') && url.pathname !== `/s/${sessionId}`, { timeout: 8000 })
+await page.waitForFunction(() => (document.querySelector('[data-driver-picker]') as HTMLSelectElement)?.value === 'claude:1')
 const sessionsAfterSwitch = [...harness.engine.current.sessions.values()]
-check('switching drivers starts a fresh session with the new agent', sessionsAfterSwitch.length === 2 && sessionsAfterSwitch.some(s => s.driverKind === 'codex'))
+check('switching accounts starts a fresh session with the selected account', sessionsAfterSwitch.length === 2
+  && sessionsAfterSwitch.some(s => s.driverKind === 'claude' && s.providerInstanceId === 1))
 
 // 11. Type-to-start: on a page with no session open, the empty state shows
 // and a typed prompt creates a session, navigates to it, and sends itself.
+await page.goto(`${baseUrl}/?workspace=${workspaceId}`)
 const emptyStateShown = await page.evaluate(() => document.querySelector('[data-empty-state]') !== null)
 check('no-session page shows the empty state', emptyStateShown)
 await page.setViewportSize({ width: 390, height: 844 })
@@ -318,7 +331,10 @@ check('native Browse fills the selected host folder', await page.locator('[data-
 await page.locator('[data-project-trust-checkbox]').check()
 await capture('onboarding-mobile')
 await page.locator('[data-project-submit]').click()
-await page.waitForURL(/\?workspace=/)
+await page.waitForURL(url => {
+  const workspace = url.searchParams.get('workspace')
+  return Boolean(workspace && workspace !== String(workspaceId))
+})
 const secondWorkspaceId = [...harness.engine.current.workspaces.keys()].find(id => id !== workspaceId)!
 check('adding a trusted second folder selects it without creating a session', harness.engine.current.workspaces.get(secondWorkspaceId)?.trusted === true
   && harness.engine.current.sessions.size === 2)
@@ -328,19 +344,28 @@ await page.locator('[data-draft-project]').selectOption(String(secondWorkspaceId
 await page.waitForURL(`**/?workspace=${secondWorkspaceId}`)
 await capture('onboarding-selected-project')
 await page.setViewportSize({ width: 1280, height: 800 })
+await page.selectOption('[data-driver-picker]', 'claude:2')
 await page.fill('[data-prompt]', 'typed with no session open')
 await page.click('[data-send]')
 await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
 await page.waitForFunction(() => (document.body.textContent ?? '').includes('typed with no session open'), undefined, { timeout: 8000 })
 const newSessionId = Number(new URL(page.url()).pathname.split('/').at(-1))
 check('type-to-start delivers the prompt in the selected workspace', harness.engine.current.sessions.size === 3
-  && harness.engine.current.sessions.get(newSessionId)?.workspaceId === secondWorkspaceId)
+  && harness.engine.current.sessions.get(newSessionId)?.workspaceId === secondWorkspaceId
+  && harness.engine.current.sessions.get(newSessionId)?.providerInstanceId === 2)
 
 // 12. The account corner: the header's person icon opens the same settings.
 await page.click('[data-account-button]')
-await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('the account icon opens settings', true)
+const backgroundCanFocus = await page.locator('[data-account-button]').evaluate((button: HTMLElement) => {
+  button.focus()
+  return document.activeElement === button
+})
+check('modal settings make the background inert', !backgroundCanFocus)
 await page.keyboard.press('Escape')
+await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
+check('closing settings returns focus to its trigger', await page.locator('[data-account-button]').evaluate(button => document.activeElement === button))
 
 // 13. The Agents section: each CLI's live status, and a Log in button that
 // runs the CLI's login flow against the fixture executable in the terminal.
@@ -350,9 +375,13 @@ const agentRows = await page.evaluate(() => [...document.querySelectorAll('[data
   state: row.querySelector('[data-agent-state]')?.textContent,
   loginShown: !(row.querySelector('[data-agent-login]') as HTMLElement).hidden,
 })))
-check('the agents section reports all five CLIs', agentRows.length === 5 && agentRows.every(r => r.state === 'ready' && r.loginShown))
+check('login shows only for the signed-out CLI', agentRows.length === 5
+  && agentRows.filter(r => r.state === 'signed out' && r.loginShown).length === 1
+  && agentRows.filter(r => r.state === 'ready' && !r.loginShown).length === 4)
+await page.getByRole('list', { name: 'Project provider accounts' }).getByText('Claude Code · Personal').waitFor()
+await capture('settings-provider-accounts')
 await page.click('[data-agent-row="codex"] [data-agent-login]')
-await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === true, undefined, { timeout: 4000 })
+await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
 await page.waitForFunction(() => document.querySelector('[data-terminal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
 await page.waitForFunction(() => (document.querySelector('[data-terminal-screen]')?.textContent ?? '').includes('Codex test sign-in'), undefined, { timeout: 8000 })
 check('Log in opens the terminal and runs the fixture login command', true)
@@ -375,7 +404,7 @@ check(
   menuShape.labels.join(',') === 'harness,File,Edit,View,Window' && menuShape.editRoles >= 6,
 )
 await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:menu:action', { detail: { id: 'settings' } })))
-await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('a menu action routes to the page handler', true)
 await page.keyboard.press('Escape')
 

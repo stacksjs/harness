@@ -9,7 +9,7 @@
 
 import type { CommandEnvelope, DriverKind } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
-import type { Driver } from '@harness/drivers'
+import type { Driver, DriverConfig, ProbeResult } from '@harness/drivers'
 import { access as checkAccess, constants, realpath, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute } from 'node:path'
@@ -23,6 +23,7 @@ import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from '.
 import { ASSET_PREFIX, AssetCache } from './assets'
 import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
+import { SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
@@ -154,11 +155,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   // After the bind check, so a refused start leaves no database behind.
-  const store = new SqliteStore(options.databasePath ?? 'database/stacks.sqlite')
+  const databasePath = options.databasePath ?? 'database/stacks.sqlite'
+  const store = new SqliteStore(databasePath)
+  const savedProviders = new SavedProviderInstances(databasePath)
   const engine = new Engine({
     store,
     reducer: reduce,
     async prepareClientCommand(command) {
+      if (command.type === 'session.create' && command.providerInstanceId !== undefined) {
+        const workspace = engine.current.workspaces.get(command.workspaceId)
+        if (!workspace || !savedProviders.find(command.providerInstanceId, workspace.profileId, command.driverKind, workspace.path))
+          throw new Error('The selected provider account is unavailable for this project.')
+      }
       if (command.type !== 'workspace.register') return command
       if (typeof command.trusted !== 'boolean')
         throw new Error('Choose whether to trust the folder.')
@@ -169,14 +177,40 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const runtime = new ProviderRuntime({
     engine,
     resolve: options.resolveDriver,
+    savedProviders,
     workspacePath: options.workspacePath,
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
     // than appearing all at once when the turn ends.
     onEvents: events => broadcast(events),
   })
-  // Probe results for the composer's agent picker, held for 30s.
-  let driverProbes: { at: number, payload: unknown } | null = null
+  const resolveDriver = options.resolveDriver ?? resolveRegisteredDriver
+  type PublicProbe = Pick<ProbeResult, 'status' | 'version'>
+  const driverProbes = new Map<string, { at: number, result: Promise<PublicProbe> }>()
+
+  function probeDriver(kind: DriverKind, config: DriverConfig): Promise<PublicProbe> {
+    const key = JSON.stringify([kind, config.workspacePath, config.binaryPath, config.home])
+    const now = Date.now()
+    for (const [key, value] of driverProbes) {
+      if (now - value.at >= 30_000) driverProbes.delete(key)
+    }
+    const cached = driverProbes.get(key)
+    if (cached) return cached.result
+
+    const result = (async (): Promise<PublicProbe> => {
+      const driver = resolveDriver(kind)
+      if (!driver) return { status: 'unavailable' }
+      try {
+        const { status, version } = await driver.probe(config)
+        return { status, version }
+      }
+      catch {
+        return { status: 'failed' }
+      }
+    })()
+    driverProbes.set(key, { at: now, result })
+    return result
+  }
 
   // Hydrate before listening, not after. A socket that connects into a
   // half-built read model would be served a projection missing everything the
@@ -670,21 +704,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // provider CLIs, so results are held briefly — a dropdown opened twice
       // should not fork ten processes.
       if (url.pathname === '/drivers') {
-        if (driverProbes && Date.now() - driverProbes.at < 30_000)
-          return Response.json(driverProbes.payload)
-        const resolve = options.resolveDriver ?? resolveRegisteredDriver
-        return Promise.all(driverKinds().map(async (kind) => {
-          const driver = resolve(kind)
-          if (!driver) return { kind, status: 'unavailable' as const }
-          const probe = await driver.probe({ workspacePath: tmpdir() }).catch((error: unknown) => ({
-            status: 'failed' as const,
-            message: error instanceof Error ? error.message : String(error),
-          }))
-          return { kind, status: probe.status, version: 'version' in probe ? probe.version : undefined, message: probe.message }
-        })).then((drivers) => {
-          driverProbes = { at: Date.now(), payload: { drivers } }
-          return Response.json(driverProbes.payload)
-        })
+        const workspace = engine.current.workspaces.get(Number(url.searchParams.get('workspace')))
+        const workspacePath = workspace?.trusted ? workspace.path : tmpdir()
+        const drivers = Promise.all(driverKinds().map(async kind => ({
+          kind,
+          ...await probeDriver(kind, { workspacePath }),
+        })))
+        const accounts = workspace?.trusted
+          ? Promise.all(savedProviders.list(workspace.profileId, workspace.path).map(async ({ id, kind, name, launch }) => ({
+              id,
+              kind,
+              name,
+              ...await probeDriver(kind, { ...launch, workspacePath }),
+            })))
+          : []
+        return Promise.all([drivers, accounts]).then(([drivers, accounts]) => Response.json({ drivers, accounts }))
       }
 
       // The web surface. Rendered from the in-memory projection — no query
@@ -823,6 +857,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // open. A caller that catches this and retries would otherwise find its
       // own port in use, by itself.
       server.stop(true)
+      savedProviders.close()
       store.close()
       throw error
     }
@@ -839,6 +874,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       void tunnel?.close()
       void runtime.stopAll()
       server.stop(true)
+      savedProviders.close()
       store.close()
     },
   }

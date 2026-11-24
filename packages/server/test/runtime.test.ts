@@ -1,4 +1,4 @@
-import type { Driver, ProviderEvent, ProviderInstance } from '@harness/drivers'
+import type { Driver, DriverConfig, ProviderEvent, ProviderInstance } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -163,6 +163,104 @@ afterEach(() => {
 })
 
 describe('a turn drives the provider', () => {
+  it('uses only the selected project account for provider status and launch', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const profileId = derivedId('configured-profile')
+    const workspaceId = derivedId('configured-workspace')
+    const db = new Database(databasePath)
+    db.exec(`
+      CREATE TABLE provider_instances (
+        id INTEGER PRIMARY KEY, profile_id INTEGER, driver_kind TEXT,
+        binary_path TEXT, resolved_home TEXT, config TEXT
+      );
+    `)
+    const save = db.query('INSERT INTO provider_instances VALUES (?, ?, ?, ?, ?, ?)')
+    save.run(1, profileId, 'claude', './bin/claude', './work-account', '{"name":"Work"}')
+    save.run(2, profileId, 'claude', '/fixture/personal/claude', '/fixture/personal/account', '{"name":"Personal"}')
+    save.run(3, profileId + 1, 'claude', '/fixture/other/claude', '/fixture/other/account', null)
+    save.run(4, profileId, 'codex', '/fixture/codex', '/fixture/codex/account', null)
+    db.close()
+
+    const launched: DriverConfig[] = []
+    const probed: DriverConfig[] = []
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    harness = await serve({
+      port,
+      databasePath,
+      resolveDriver: () => ({
+        ...driver,
+        probe(config) {
+          probed.push(config)
+          return driver.probe(config)
+        },
+        create(config) {
+          launched.push(config)
+          return driver.create(config)
+        },
+      }),
+    })
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    try {
+      await harness.engine.dispatch({ id: 'configured-profile', at: 1, command: { type: 'profile.create', name: 'P' } })
+      await harness.engine.dispatch({ id: 'configured-workspace', at: 2, command: { type: 'workspace.add', profileId, path: dir } })
+      const catalog = () => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}`).then(response => response.json())
+      expect(await catalog()).toMatchObject({ accounts: [] })
+      await harness.engine.dispatch({ id: 'trust-configured-workspace', at: 3, command: { type: 'workspace.trust', workspaceId, trusted: true } })
+      const profileCatalog = await catalog()
+      expect(profileCatalog.accounts).toEqual([
+        { id: 1, kind: 'claude', name: 'Work', status: 'ready' },
+        { id: 2, kind: 'claude', name: 'Personal', status: 'ready' },
+        { id: 4, kind: 'codex', name: 'Account 4', status: 'ready' },
+      ])
+      expect(JSON.stringify(profileCatalog)).not.toContain('/fixture/')
+      expect(probed).toContainEqual({ workspacePath: dir, binaryPath: join(dir, 'bin/claude'), home: join(dir, 'work-account') })
+      probed.length = 0
+      for (const id of [3, 4, 99]) {
+        await expect(harness.engine.dispatch({
+          id: `invalid-account-${id}`,
+          at: 4,
+          command: { type: 'session.create', workspaceId, driverKind: 'claude', providerInstanceId: id },
+        })).rejects.toThrow('unavailable for this project')
+      }
+      expect(harness.engine.current.sessions.size).toBe(0)
+
+      const id = 'use-personal-account'
+      const sessionId = derivedId(id)
+      const creation = await harness.engine.dispatch({
+        id,
+        at: 5,
+        command: { type: 'session.create', workspaceId, driverKind: 'claude', providerInstanceId: 2, model: 'fixture-model' },
+      })
+      expect(creation.events[0]?.payload).toMatchObject({ providerInstanceId: 2 })
+      expect(harness.engine.current.sessions.get(sessionId)?.providerInstanceId).toBe(2)
+
+      client.send({ t: 'subscribe', sessionId })
+      client.send({ t: 'dispatch', envelope: {
+        id: 'configured-turn', at: 6, command: { type: 'session.turn.start', sessionId, text: 'hello' },
+      } })
+      expect(await client.waitFor('turn.completed')).toBeTruthy()
+      const expected = { workspacePath: dir, binaryPath: '/fixture/personal/claude', home: '/fixture/personal/account', model: 'fixture-model' }
+      expect(probed).toMatchObject([expected])
+      expect(launched).toMatchObject([expected])
+      expect(JSON.stringify(creation.events)).not.toContain('/fixture/personal')
+
+      const settings = new Database(databasePath)
+      settings.query('DELETE FROM provider_instances WHERE id = ?').run(2)
+      settings.close()
+      client.send({ t: 'dispatch', envelope: {
+        id: 'removed-account-turn', at: 7, command: { type: 'session.turn.start', sessionId, text: 'another turn' },
+      } })
+      expect(await client.waitFor('session.failed')).toMatchObject({
+        message: expect.stringContaining('account is no longer available'),
+      })
+      expect(launched).toHaveLength(1)
+    }
+    finally {
+      client.close()
+    }
+  })
+
   it('streams deltas into the log as they arrive', async () => {
     const { driver } = fakeDriver([
       { type: 'session-bound', providerSessionId: 'prov_1' },
