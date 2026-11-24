@@ -27,6 +27,7 @@ export const sinceSeq = $props.sinceSeq || 0
 // A decision this session is blocked on, if any. Rendered rather than waited
 // for: the client that raised it may be long gone.
 export const initialApprovals = activeSession?.pendingApprovals || []
+export const initialInputs = activeSession?.pendingInputs || []
 const pendingApproval = initialApprovals[0]
 
 // One space per profile. `pinned` is the favourite-repos tile grid; the
@@ -66,12 +67,12 @@ export const spaces = profiles.map((profile, index) => ({
     {
       id: `active-${profile.id}`,
       label: 'Active',
-      items: (profile.sessions || []).filter(s => s.state === 'running').map(toItem),
+      items: (profile.sessions || []).filter(isActiveThread).map(toItem),
     },
     {
       id: `recent-${profile.id}`,
       label: 'Recent',
-      items: (profile.sessions || []).filter(s => s.state !== 'running').map(toItem),
+      items: (profile.sessions || []).filter(session => !isActiveThread(session)).map(toItem),
     },
   ].filter(section => section.items.length > 0),
   clear: { id: 'clear', label: 'Clear' },
@@ -85,6 +86,10 @@ function toItem(session) {
     icon: 'i-hugeicons-message-01',
     href: `/s/${session.id}`,
   }
+}
+
+function isActiveThread(session) {
+  return session.state === 'running' || session.state === 'awaiting-approval' || session.state === 'awaiting-input'
 }
 
 export const hasProfiles = profiles.length > 0
@@ -111,6 +116,7 @@ export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 export const initialHasResponse = Boolean(liveTurn?.response)
 export const initialResponseTurn = liveTurn?.id || 0
+export const initialInputActivity = liveTurn?.inputRequests || []
 </script>
 
 <div class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-950">
@@ -166,9 +172,9 @@ export const initialResponseTurn = liveTurn?.id || 0
         data-session-state
         data-state="{{ sessionState }}"
         :data-state="uiState()"
-        class="px-2 py-[2px] leading-[14px] text-[11px] rounded-full opacity-70"
-        :text="uiState()"
-      >{{ sessionState }}</span>
+        class="px-2 py-[2px] leading-[14px] text-[11px] whitespace-nowrap rounded-full opacity-70"
+        :text="uiState() === 'awaiting-input' ? 'Question' : uiState() === 'awaiting-approval' ? 'Approval' : uiState()"
+      >{{ sessionState === 'awaiting-input' ? 'Question' : sessionState === 'awaiting-approval' ? 'Approval' : sessionState }}</span>
       @endif
       {{-- Which agent answers in this session — the composer picker's ground truth. --}}
       @if(sessionDriver)
@@ -327,7 +333,12 @@ export const initialResponseTurn = liveTurn?.id || 0
             </div>
           @endforeach
           </div>
-          <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
+          @foreach(turn.inputRequests as request)
+            <div data-question-activity class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400">
+              {{ request.outcome === 'answered' ? 'Question answered' : request.outcome === 'declined' ? 'Question declined' : 'Question interrupted' }}
+            </div>
+          @endforeach
+          @if(turn.response)<div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>@endif
           <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
           {{--
             Undo this turn. Only offered where a snapshot exists: a workspace
@@ -372,13 +383,18 @@ export const initialResponseTurn = liveTurn?.id || 0
             </div>
           </template>
           </div>
-          <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
+          <template :for="request in ssrInputActivity()" :key="request.requestId">
+            <div data-question-activity class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400" :text="questionActivityLabel(request.outcome)"></div>
+          </template>
+          <div @if(!liveTurn.response && sessionState !== 'running')hidden@endif
+            :hidden="!ssrHasResponse() && (runningTurnId() !== initialResponseTurn || uiState() !== 'running')"
+            class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
           {{--
             A page can load mid-turn before any token exists; the dots hold
             that gap too, and the first streamed byte hides them.
           --}}
           @if(!liveTurn.response)
-            <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || !uiBusy()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
+            <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || uiState() !== 'running' || runningTurnId() !== initialResponseTurn" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           @endif
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
           {{--
@@ -419,9 +435,13 @@ export const initialResponseTurn = liveTurn?.id || 0
               </div>
             </template>
           </div>
-          <div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
+          <template :for="request in turn.inputRequests" :key="request.requestId">
+            <div data-question-activity class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400" :text="questionActivityLabel(request.outcome)"></div>
+          </template>
+          <div :hidden="!turn.hasResponse && (runningTurnId() !== turn.id || uiState() !== 'running')"
+            class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
           {{-- Until the first token: dots, not a label over blank space. --}}
-          <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || !uiBusy()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
+          <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || uiState() !== 'running' || runningTurnId() !== turn.id" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           <div class="transcript-markdown" data-response></div>
         </article>
       </template>
@@ -447,8 +467,10 @@ export const initialResponseTurn = liveTurn?.id || 0
     @endif
     </div>
 
+    @includeWhen(activeSession, '../partials/harness-question-card')
+
     @if(canCompose)
-    <form data-composer @submit.prevent="sendPrompt" class="grid gap-2 items-end shrink-0 p-3 border-black/5 border-t md:flex dark:border-white/5">
+    <form data-composer @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt" class="grid md:flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -790,7 +812,8 @@ export const initialResponseTurn = liveTurn?.id || 0
   // made a session waiting on *you* look idle. Seeded from the server render;
   // the chip, Send/Stop and the revert buttons all bind to it.
   const uiState = state(sessionState || 'idle')
-  const uiBusy = derived(() => uiState() === 'running' || uiState() === 'awaiting-approval')
+  const runningTurnId = state(initialResponseTurn)
+  const uiBusy = derived(() => uiState() === 'running' || uiState() === 'awaiting-approval' || uiState() === 'awaiting-input')
   // Stop hides the moment it is clicked, before the log settles the turn.
   const stopPressed = state(false)
   function setSessionState(next) {
@@ -804,6 +827,11 @@ export const initialResponseTurn = liveTurn?.id || 0
   const pendingApprovalId = state(0)
   const approvalId = derived(() => pendingApprovals()[0]?.approvalId || 0)
   const approvalTool = derived(() => pendingApprovals()[0]?.toolName || '')
+
+  const questionForm = state(null)
+  const questionCard = useRef('questionCardBox')
+  const ssrInputActivity = state(initialInputActivity)
+  const inputRequest = derived(() => questionForm() ? questionForm().request() : initialInputs[0])
 
   const diffOpen = state(false)
   const termOpen = state(false)
@@ -1856,6 +1884,26 @@ export const initialResponseTurn = liveTurn?.id || 0
   function approveTool() { respondToApproval(true) }
   function denyTool() { respondToApproval(false) }
 
+  function waitingSessionState() {
+    return pendingApprovals().length ? 'awaiting-approval' : inputRequest() ? 'awaiting-input' : 'running'
+  }
+
+  function questionActivityLabel(outcome) {
+    if (outcome === 'answered') return 'Question answered'
+    if (outcome === 'declined') return 'Question declined'
+    if (outcome === 'interrupted') return 'Question interrupted'
+    return 'Input requested'
+  }
+
+  function updateInputActivity(request, outcome) {
+    const updated = { requestId: request.requestId, outcome }
+    const applyActivity = (list) => list.some(item => item.requestId === request.requestId)
+      ? list.map(item => item.requestId === request.requestId ? updated : item)
+      : [...list, updated]
+    if (request.turnId === initialResponseTurn) ssrInputActivity.update(applyActivity)
+    else updateClientTurn(request.turnId, turn => ({ ...turn, inputRequests: applyActivity(turn.inputRequests) }))
+  }
+
   // ── Terminal (M6): a shell in the session's workspace ─────────────────
   // The server owns the PTY and streams bytes as term-data frames; the page
   // renders them through @harness/ansi's grid and sends keystrokes back
@@ -2040,7 +2088,24 @@ export const initialResponseTurn = liveTurn?.id || 0
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown } = await import(codecUrl)
+    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm } = await import(codecUrl)
+    questionForm.set(createQuestionForm({
+      state,
+      initialRequests: initialInputs,
+      focus(target) {
+        void nextTick(() => {
+          if (target === 'answer') questionCard.current?.querySelector('[data-question-answer]')?.focus()
+          else (target === 'prompt' ? promptRef.current : questionCard.current)?.focus({ preventScroll: true })
+        })
+      },
+      hasFocus(target) {
+        return target === 'card' ? questionCard.current?.matches(':focus-within') : promptRef.current?.matches(':focus')
+      },
+      recordActivity: updateInputActivity,
+      send(requestId, answers) {
+        return sendCommand({ type: 'session.input.respond', sessionId, requestId, answers })
+      },
+    }))
 
     const transcript = transcriptRef.current
     const liveResponse = transcript?.querySelector('[data-live-response]')
@@ -2111,10 +2176,12 @@ export const initialResponseTurn = liveTurn?.id || 0
         // the reply within it.
         if (payload.role === 'user') {
           responseByTurn.set(payload.turnId, '')
+          runningTurnId.set(payload.turnId)
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
             prompt: payload.text ?? '',
             tools: [],
+            inputRequests: [],
             hasResponse: false,
           }])
           transcriptAnnouncement.set('')
@@ -2166,6 +2233,7 @@ export const initialResponseTurn = liveTurn?.id || 0
           setSessionState('idle')
           pendingApprovals.set([])
           pendingApprovalId.set(0)
+          questionForm()?.interrupt()
         })
         transcriptAnnouncement.set(payload.type === 'turn.completed' ? 'Agent finished responding.' : 'Response stopped.')
       }
@@ -2177,6 +2245,7 @@ export const initialResponseTurn = liveTurn?.id || 0
           setSessionState('failed')
           pendingApprovals.set([])
           pendingApprovalId.set(0)
+          questionForm()?.interrupt()
         })
         transcriptAnnouncement.set('The agent could not finish this response.')
       }
@@ -2195,8 +2264,16 @@ export const initialResponseTurn = liveTurn?.id || 0
         batch(() => {
           pendingApprovals.update(requests => requests.filter(request => request.approvalId !== payload.approvalId))
           if (pendingApprovalId() === payload.approvalId) pendingApprovalId.set(0)
-          if (pendingApprovals().length === 0) setSessionState('running')
+          setSessionState(waitingSessionState())
         })
+      }
+      else if (payload.type === 'input.requested' || payload.type === 'input.resolved') {
+        batch(() => {
+          questionForm()?.update(payload)
+          setSessionState(waitingSessionState())
+          transcriptAnnouncement.set(payload.type === 'input.requested' ? 'The agent has a question.' : questionActivityLabel(payload.outcome))
+        })
+        paintTranscript(updateTranscriptMarkdown)
       }
     })
   }

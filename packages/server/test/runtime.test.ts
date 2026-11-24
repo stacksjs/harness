@@ -1,3 +1,4 @@
+import type { InputAnswer } from '@harness/contract'
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
@@ -104,30 +105,39 @@ class Client {
     return this.events.filter(f => f?.t === 'event' && f.event.payload.type === type).map(f => f.event.payload)
   }
 
-  async waitFor(type: string, timeoutMs = 3000): Promise<any> {
+  private async waitForFrame(predicate: (frame: any) => boolean, timeoutMs: number): Promise<any> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      const found = this.payloads(type)
-      if (found.length > 0) return found[0]
-      await new Promise(r => setTimeout(r, 10))
-    }
-    return null
-  }
-
-  async waitForRejection(id: string): Promise<unknown> {
-    const deadline = Date.now() + 3000
-    while (Date.now() < deadline) {
-      const found = this.events.find(frame => frame?.t === 'rejected' && frame.id === id)
+      const found = this.events.find(predicate)
       if (found) return found
       await Bun.sleep(10)
     }
     return null
   }
 
+  async waitFor(type: string, timeoutMs = 3000): Promise<any> {
+    const frame = await this.waitForFrame(frame => frame?.t === 'event' && frame.event.payload.type === type, timeoutMs)
+    return frame?.event.payload ?? null
+  }
+
+  waitForRejection(id: string): Promise<unknown> {
+    return this.waitForFrame(frame => frame?.t === 'rejected' && frame.id === id, 3000)
+  }
+
+  async subscribeCreatedSession(id: string): Promise<number> {
+    const receipt = await this.waitForFrame(frame => (frame?.t === 'dispatched' || frame?.t === 'rejected') && frame.id === id, 5000)
+    if (receipt?.t !== 'dispatched') throw new Error(receipt?.message ?? 'Session creation was not acknowledged')
+    const sessionId = derivedId(id)
+    this.send({ t: 'subscribe', sessionId })
+    const subscribed = await this.waitForFrame(frame => frame?.t === 'subscribed' && frame.sessionId === sessionId, 5000)
+    if (!subscribed) throw new Error('Session subscription was not acknowledged')
+    return sessionId
+  }
+
   close(): void { this.socket.close() }
 }
 
-async function bootstrap(client: Client, workspace: string = dir): Promise<{ sessionId: number }> {
+async function bootstrap(client: Client, workspace: string = dir, isolate = false): Promise<{ sessionId: number }> {
   client.send({ t: 'dispatch', envelope: { id: 'c_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
   const profileId = derivedId('c_p')
   client.send({
@@ -141,29 +151,14 @@ async function bootstrap(client: Client, workspace: string = dir): Promise<{ ses
   })
   client.send({
     t: 'dispatch',
-    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind: 'claude' } },
+    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate } },
   })
-  const sessionId = derivedId('c_s')
-  await client.waitFor('session.created')
-  client.send({ t: 'subscribe', sessionId })
-  return { sessionId }
+  return { sessionId: await client.subscribeCreatedSession('c_s') }
 }
 
 /** Bootstrap, but asking for a checkout of its own. */
-async function bootstrapIsolated(client: Client, workspace: string): Promise<{ sessionId: number }> {
-  client.send({ t: 'dispatch', envelope: { id: 'c_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
-  const profileId = derivedId('c_p')
-  client.send({ t: 'dispatch', envelope: { id: 'c_w', at: 2, command: { type: 'workspace.add', profileId, path: workspace } } })
-  const workspaceId = derivedId('c_w')
-  client.send({ t: 'dispatch', envelope: { id: 'c_t', at: 3, command: { type: 'workspace.trust', workspaceId, trusted: true } } })
-  client.send({
-    t: 'dispatch',
-    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate: true } },
-  })
-  const sessionId = derivedId('c_s')
-  await client.waitFor('session.created')
-  client.send({ t: 'subscribe', sessionId })
-  return { sessionId }
+function bootstrapIsolated(client: Client, workspace: string): Promise<{ sessionId: number }> {
+  return bootstrap(client, workspace, true)
 }
 
 beforeEach(() => {
@@ -1025,6 +1020,104 @@ describe('interrupt reaches the provider', () => {
 
     expect(harness.engine.current.sessions.get(sessionId)!.turns[0]!.status).toBe('interrupted')
     client.close()
+  })
+})
+
+describe('structured input over the socket', () => {
+  const questions: Extract<ProviderEvent, { type: 'input-request' }>['questions'] = [
+    { id: 'private', kind: 'text', question: 'Private fixture answer', sensitive: true, options: [] },
+    { id: 'choices', kind: 'multiple', question: 'Choose two', minSelections: 2, options: [
+      { value: 'a', label: 'Alpha' }, { value: 'b', label: 'Beta' }, { value: 'c', label: 'Gamma' },
+    ] },
+  ]
+
+  function inputDriver(onAnswer?: (answers: InputAnswer[] | null) => void): Driver {
+    const gate = Promise.withResolvers<void>()
+    return {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn() {
+            yield { type: 'input-request', requestId: 'provider-question', questions }
+            await gate.promise
+            yield { type: 'turn-complete', tokensIn: 0, tokensOut: 0, costMicros: 0 }
+          },
+          async interrupt() { gate.resolve() },
+          async respondApproval() {},
+          async respondInput(requestId, answers) {
+            if (requestId !== 'provider-question') throw new Error('Incorrect provider request')
+            onAnswer?.(answers)
+            gate.resolve()
+          },
+          async stop() { gate.resolve() },
+        }
+      },
+    }
+  }
+
+  it('replays questions and accepts one valid answer without storing its values', async () => {
+    const callbacks: Array<InputAnswer[] | null> = []
+    const dbPath = join(dir, 'test.sqlite')
+    harness = await serve({ port, databasePath: dbPath, resolveDriver: () => inputDriver(answers => callbacks.push(answers)) })
+    const url = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(url)
+    const { sessionId } = await bootstrap(first)
+    first.send({ t: 'dispatch', envelope: { id: 'q_start', at: 5, command: { type: 'session.turn.start', sessionId, text: 'ask' } } })
+    const requested = await first.waitFor('input.requested')
+    expect(requested).toMatchObject({ questions })
+    expect(harness.engine.current.sessions.get(sessionId)?.state).toBe('awaiting-input')
+    const second = await Client.connect(url)
+    try {
+      second.send({ t: 'subscribe', sessionId })
+      expect(await second.waitFor('input.requested')).toEqual(requested)
+      const command = { type: 'session.input.respond', requestId: requested.requestId, sessionId }
+      second.send({ t: 'dispatch', envelope: { id: 'q_invalid', at: 6, command: { ...command, answers: [] } } })
+      expect(await second.waitForRejection('q_invalid')).toMatchObject({ message: 'Complete all required questions with valid answers.' })
+      first.send({ t: 'dispatch', envelope: { id: 'q_extra', at: 6, command: { type: 'session.turn.start', sessionId, text: 'extra' } } })
+      expect(await first.waitForRejection('q_extra')).toMatchObject({ message: 'a turn is already running' })
+
+      const answers = [{ questionId: 'private', values: ['synthetic private marker A'] }, { questionId: 'choices', values: ['b', 'c'] }]
+      const competingAnswers = [{ questionId: 'private', values: ['synthetic private marker B'] }, { questionId: 'choices', values: ['a', 'b'] }]
+      first.send({ t: 'dispatch', envelope: { id: 'q_answer_a', at: 7, command: { ...command, answers } } })
+      second.send({ t: 'dispatch', envelope: { id: 'q_answer_b', at: 7, command: { ...command, answers: competingAnswers } } })
+      expect(await second.waitFor('input.resolved')).toMatchObject({ requestId: requested.requestId, outcome: 'answered' })
+      expect(await second.waitFor('turn.completed')).toBeTruthy()
+      expect(callbacks).toHaveLength(1)
+      const firstWon = callbacks[0]?.[0]?.values[0] === 'synthetic private marker A'
+      expect(callbacks[0]).toEqual(firstWon ? answers : competingAnswers)
+      expect(await (firstWon ? second : first).waitForRejection(firstWon ? 'q_answer_b' : 'q_answer_a'))
+        .toMatchObject({ message: 'This question is no longer pending.' })
+      expect(second.payloads('input.resolved')).toHaveLength(1)
+      expect(harness.engine.current.sessions.get(sessionId)?.pendingInputs).toEqual([])
+      const db = new Database(dbPath, { readonly: true })
+      try {
+        const events = db.query('SELECT payload FROM events').all()
+        expect(JSON.stringify(events)).not.toContain('synthetic private marker')
+      }
+      finally { db.close() }
+    }
+    finally {
+      first.close()
+      second.close()
+    }
+  })
+
+  it('marks an unanswered question interrupted when the host restarts', async () => {
+    const dbPath = join(dir, 'test.sqlite')
+    harness = await serve({ port, databasePath: dbPath, resolveDriver: () => inputDriver() })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    client.send({ t: 'dispatch', envelope: { id: 'q_start', at: 5, command: { type: 'session.turn.start', sessionId, text: 'ask' } } })
+    expect(await client.waitFor('input.requested')).toBeTruthy()
+    client.close()
+    harness.stop()
+    port = ++portCounter
+    harness = await serve({ port, databasePath: dbPath, resolveDriver: () => inputDriver() })
+    const session = harness.engine.current.sessions.get(sessionId)
+    expect(session?.state).toBe('idle')
+    expect(session?.pendingInputs).toEqual([])
+    expect(session?.turns.at(-1)?.inputRequests?.[0]?.outcome).toBe('interrupted')
   })
 })
 

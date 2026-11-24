@@ -20,13 +20,14 @@
  * CLI's model flag and auth-state reporting.
  */
 
-import type { DriverKind } from '@harness/contract'
+import type { DriverKind, InputAnswer } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, ResolvedMcpServer, StartTurnInput } from './types'
 import { spawn } from 'node:child_process'
 import { probeBinary, runQuiet } from './cli-driver'
 import { createLineReader } from './codex'
 import { EventQueue } from './event-queue'
+import { acpInputForm } from './input-questions'
 
 /** JSON-RPC frames, only as much of them as this driver reads. */
 interface Frame {
@@ -52,6 +53,7 @@ export function initializeParams(): Record<string, unknown> {
     clientCapabilities: {
       fs: { readTextFile: false, writeTextFile: false },
       terminal: false,
+      elicitation: { form: {} },
     },
   }
 }
@@ -216,6 +218,7 @@ class AcpInstance implements ProviderInstance {
   private nextId = 0
   private readonly pending = new Map<number | string, (frame: Frame) => void>()
   private readonly permissions = new Map<string, PendingPermission>()
+  private readonly inputs = new Map<string, { rpcId: number | string, form: NonNullable<ReturnType<typeof acpInputForm>> }>()
   private sessionId: string | null = null
   private queue: EventQueue | null = null
   /**
@@ -249,8 +252,13 @@ class AcpInstance implements ProviderInstance {
     child.stderr.resume()
 
     child.on('exit', (code) => {
+      if (this.child !== child) return
       this.child = null
-      this.queue?.finish({ type: 'error', message: `${this.binary} exited (${code})` })
+      this.inputs.clear()
+      const error = { message: `${this.binary} exited (${code})` }
+      for (const resolve of this.pending.values()) resolve({ error })
+      this.pending.clear()
+      this.queue?.finish({ type: 'error', message: error.message })
     })
 
     const initialized = await this.request('initialize', initializeParams())
@@ -286,6 +294,20 @@ class AcpInstance implements ProviderInstance {
   }
 
   private onServerRequest(frame: Frame): void {
+    if (frame.method === 'elicitation/create') {
+      const form = acpInputForm(frame.params?.requestedSchema, frame.params?.message)
+      if (!this.queue || this.queue.closed || this.replaying || !form
+        || (frame.params?.mode !== undefined && frame.params.mode !== 'form')
+        || (frame.params?.sessionId !== undefined && frame.params.sessionId !== this.sessionId)) {
+        this.respond(frame.id!, { action: 'decline' })
+        return
+      }
+      const requestId = String(frame.id)
+      this.inputs.set(requestId, { rpcId: frame.id!, form })
+      this.queue.push({ type: 'input-request', requestId, questions: form.questions })
+      return
+    }
+
     if (frame.method !== 'session/request_permission') {
       // fs/* and terminal/* cannot arrive — initialize declared them
       // unsupported — so anything else is a method this client does not serve.
@@ -346,6 +368,7 @@ class AcpInstance implements ProviderInstance {
   startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
     const queue = new EventQueue()
     this.queue = queue
+    this.inputs.clear()
 
     void this.run(input, queue).catch((error: unknown) => {
       queue.finish({ type: 'error', message: error instanceof Error ? error.message : String(error) })
@@ -393,6 +416,7 @@ class AcpInstance implements ProviderInstance {
       sessionId: this.sessionId,
       prompt: [{ type: 'text', text: input.text }],
     })
+    this.cancelInputs()
     if (done.error) {
       queue.finish({ type: 'error', message: readableAcpError(done.error) })
       return
@@ -407,6 +431,7 @@ class AcpInstance implements ProviderInstance {
     // A notification, not a request: the answer is the running prompt resolving
     // with `stopReason: 'cancelled'`.
     this.notify('session/cancel', { sessionId: this.sessionId })
+    this.cancelInputs()
   }
 
   async respondApproval(requestId: string, allow: boolean): Promise<void> {
@@ -422,16 +447,33 @@ class AcpInstance implements ProviderInstance {
     })
   }
 
+  async respondInput(requestId: string, answers: InputAnswer[] | null): Promise<void> {
+    const request = this.inputs.get(requestId)
+    if (!request) throw new Error('The agent is no longer waiting for this answer.')
+    this.inputs.delete(requestId)
+    this.respond(request.rpcId, answers === null
+      ? { action: 'decline' }
+      : { action: 'accept', content: request.form.content(answers) })
+  }
+
+  private cancelInputs(): void {
+    for (const request of this.inputs.values()) this.respond(request.rpcId, { action: 'cancel' })
+    this.inputs.clear()
+  }
+
   async stop(): Promise<void> {
     // Unblock the agent on anything it is still waiting for, so it can exit
     // rather than sit on a pipe we are about to close.
     for (const permission of this.permissions.values())
       this.respond(permission.rpcId, { outcome: { outcome: 'cancelled' } })
     this.permissions.clear()
+    this.cancelInputs()
     this.queue?.finish()
     const child = this.child
     this.child = null
     this.sessionId = null
+    for (const resolve of this.pending.values()) resolve({ error: { message: 'The agent stopped.' } })
+    this.pending.clear()
     child?.kill()
   }
 }

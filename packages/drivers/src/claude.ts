@@ -14,9 +14,12 @@
  * stops at this boundary on purpose.
  */
 
-import type { AccountInfo, CanUseTool, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { AccountInfo, CanUseTool, Options, PermissionResult, Query, query as sdkQuery, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { InputAnswer } from '@harness/contract'
 import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
 import { claudeEnvironment } from './account-environment'
+import { EventQueue } from './event-queue'
+import { toolInputQuestions } from './input-questions'
 
 // Adapted from apps/server/src/provider/ClaudeProvider.ts at T3 Code
 // 902d369808c5c30ae9b178c6c6f86587b8f4f336. See T3CODE-LICENSE.md.
@@ -46,7 +49,9 @@ function toMicros(usd: number): number {
   return Math.round(usd * 1_000_000)
 }
 
-interface PendingApproval {
+interface PendingPermission {
+  kind: 'approval' | 'input'
+  queue: EventQueue
   resolve: (result: PermissionResult) => void
   /**
    * The tool's own input, kept so an allow can hand it back.
@@ -58,38 +63,65 @@ interface PendingApproval {
    * auto-approved one worked.
    */
   input: Record<string, unknown>
+  toolUseID?: string
 }
 
-class ClaudeInstance implements ProviderInstance {
+export class ClaudeInstance implements ProviderInstance {
   private running: Query | null = null
-  private pending = new Map<string, PendingApproval>()
-  /** Queue of approval requests raised between `startTurn` yields. */
-  private approvalQueue: ProviderEvent[] = []
-  private nextApprovalId = 0
+  private activeQueue: EventQueue | null = null
+  private pending = new Map<string, PendingPermission>()
+  private nextRequestId = 0
 
-  constructor(private config: DriverConfig) {}
+  constructor(private config: DriverConfig, private readonly queryFactory?: typeof sdkQuery) {}
 
   /**
    * The SDK asks permission through a callback, but the engine expects an
    * event plus a later response. Bridging the two means parking the callback's
    * promise and resolving it when `respondApproval` arrives.
    */
-  private canUseTool: CanUseTool = async (toolName, input) => {
-    if (this.config.autoApprove)
+  private async canUseTool(queue: EventQueue, toolName: string, input: Record<string, unknown>, options: Parameters<CanUseTool>[2]): Promise<PermissionResult> {
+    if (options.signal.aborted || queue.closed)
+      return { behavior: 'deny', message: 'The turn ended.' }
+    const asksQuestion = toolName === 'AskUserQuestion'
+    if (!asksQuestion && this.config.autoApprove)
       return { behavior: 'allow', updatedInput: input }
 
-    const requestId = `apr_${++this.nextApprovalId}`
-    this.approvalQueue.push({ type: 'approval-request', requestId, toolName, args: input })
+    const requestId = `req_${++this.nextRequestId}`
+    let event: ProviderEvent
+    if (asksQuestion) {
+      const questions = toolInputQuestions(input.questions, 'claude')
+      if (!questions) return { behavior: 'deny', message: 'Could not display these questions.' }
+      event = { type: 'input-request', requestId, questions }
+    }
+    else {
+      event = { type: 'approval-request', requestId, toolName, args: input }
+    }
 
     return new Promise<PermissionResult>((resolve) => {
-      this.pending.set(requestId, { resolve, input })
+      const onAbort = () => {
+        this.pending.get(requestId)?.resolve({ behavior: 'deny', message: 'The request was cancelled.' })
+        if (asksQuestion) queue.push({ type: 'input-cancelled', requestId })
+      }
+      this.pending.set(requestId, {
+        kind: asksQuestion ? 'input' : 'approval',
+        queue,
+        input,
+        toolUseID: options.toolUseID,
+        resolve: (result) => {
+          options.signal.removeEventListener('abort', onAbort)
+          this.pending.delete(requestId)
+          resolve(result)
+        },
+      })
+      options.signal.addEventListener('abort', onAbort, { once: true })
+      queue.push(event)
     })
   }
 
-  private options(providerSessionId?: string): Options {
+  private options(queue: EventQueue, providerSessionId?: string): Options {
     const options: Options = {
       cwd: this.config.workspacePath,
-      canUseTool: this.canUseTool,
+      canUseTool: (toolName, input, options) => this.canUseTool(queue, toolName, input, options),
       // Deltas are the whole point of a streaming transcript: without this the
       // SDK only reports complete assistant messages and the UI shows nothing
       // until the turn ends.
@@ -113,58 +145,59 @@ class ClaudeInstance implements ProviderInstance {
     return options
   }
 
-  async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
-    const { query } = await import('@anthropic-ai/claude-agent-sdk')
-    const run = query({ prompt: input.text, options: this.options(input.providerSessionId) })
-    this.running = run
+  startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+    const queue = new EventQueue()
+    this.activeQueue = queue
+    void this.run(input, queue)
+    return queue
+  }
 
-    // Bound to the session, so the next turn can resume rather than restart.
+  private async run(input: StartTurnInput, queue: EventQueue): Promise<void> {
+    let run: Query | undefined
     let bound = input.providerSessionId ?? null
-    // Whether this turn has already reported how it ended. The SDK reports a
-    // failed turn twice — once as a `result` message, then again by throwing
-    // as the iterator finishes — and two terminal events would settle the
-    // turn twice.
-    let terminal = false
 
     try {
+      const query = this.queryFactory ?? (await import('@anthropic-ai/claude-agent-sdk')).query
+      if (queue.closed) return
+      run = query({ prompt: input.text, options: this.options(queue, input.providerSessionId) })
+      this.running = run
       for await (const message of run as AsyncIterable<SDKMessage>) {
-        // Drain anything `canUseTool` parked while we were awaiting the SDK.
-        while (this.approvalQueue.length > 0)
-          yield this.approvalQueue.shift()!
-
         if (!bound && 'session_id' in message && message.session_id) {
           bound = message.session_id
-          yield { type: 'session-bound', providerSessionId: message.session_id }
+          queue.push({ type: 'session-bound', providerSessionId: message.session_id })
         }
 
         for (const event of translate(message)) {
-          if (event.type === 'turn-complete' || event.type === 'error') terminal = true
-          yield event
+          if (event.type === 'turn-complete' || event.type === 'error') {
+            queue.finish(event)
+            return
+          }
+          queue.push(event)
         }
       }
+      queue.finish({ type: 'error', message: 'Claude Code ended before reporting a turn result.' })
     }
     catch (error) {
-      // Only report a throw we have not already described. Rethrowing a
-      // failure the `result` message just delivered would surface the same
-      // problem to the user twice.
-      if (terminal) return
-      yield { type: 'error', message: error instanceof Error ? error.message : String(error) }
-      terminal = true
+      queue.finish({ type: 'error', message: error instanceof Error ? error.message : String(error) })
     }
     finally {
-      // Clear the queue so a cancelled turn's approvals do not surface on the
-      // next one, where their ids mean nothing.
-      this.approvalQueue = []
-      this.running = null
+      this.releasePending(queue)
+      run?.close()
+      if (this.running === run) this.running = null
+      if (this.activeQueue === queue) this.activeQueue = null
     }
   }
 
   async interrupt(): Promise<void> {
     // Interrupting when nothing runs is a no-op, not an error: the user pressed
     // stop just as the turn finished.
-    if (!this.running) return
+    const queue = this.activeQueue
+    if (!queue) return
+    const run = this.running
+    queue.finish()
+    this.releasePending(queue)
     try {
-      await this.running.interrupt()
+      await run?.interrupt()
     }
     catch {
       // The turn ended between the check and the call. Nothing to stop.
@@ -174,8 +207,7 @@ class ClaudeInstance implements ProviderInstance {
   async respondApproval(requestId: string, allow: boolean, reason?: string): Promise<void> {
     const waiter = this.pending.get(requestId)
     // An unknown id is a late or duplicate answer — drop it rather than throw.
-    if (!waiter) return
-    this.pending.delete(requestId)
+    if (waiter?.kind !== 'approval') return
     waiter.resolve(allow
       // Unmodified: the user approved *this* call, so the tool runs with the
       // arguments they were shown, not with anything rewritten in between.
@@ -183,13 +215,31 @@ class ClaudeInstance implements ProviderInstance {
       : { behavior: 'deny', message: reason ?? 'denied by the user' })
   }
 
+  async respondInput(requestId: string, answers: InputAnswer[] | null): Promise<void> {
+    const waiter = this.pending.get(requestId)
+    if (waiter?.kind !== 'input') throw new Error('Claude Code is no longer waiting for this answer.')
+    waiter.resolve(answers === null
+      ? { behavior: 'deny', message: 'The user declined to answer.' }
+      : {
+          behavior: 'allow',
+          updatedInput: {
+            questions: waiter.input.questions,
+            answers: Object.fromEntries(answers.map(({ questionId, values }) => [questionId, values.join(', ')])),
+          },
+          toolUseID: waiter.toolUseID,
+        })
+  }
+
+  private releasePending(queue: EventQueue): void {
+    for (const waiter of this.pending.values()) {
+      if (waiter.queue === queue) waiter.resolve({ behavior: 'deny', message: 'The turn ended.' })
+    }
+  }
+
   async stop(): Promise<void> {
+    const run = this.running
     await this.interrupt()
-    // Release anything still parked on an approval, or those promises never
-    // settle and the process will not exit.
-    for (const [, waiter] of this.pending)
-      waiter.resolve({ behavior: 'deny', message: 'session stopped' })
-    this.pending.clear()
+    run?.close()
   }
 }
 

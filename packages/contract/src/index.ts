@@ -20,3 +20,5 @@ export type {
 export { isClientCommand } from './commands'
 export type { EventBase, EventPayload, EventType, HarnessEvent } from './events'
 export { GLOBAL_SESSION_ID, isGlobalEvent } from './events'
+export type { InputAnswer, InputOption, InputQuestion, InputResponse } from './input'
+export { inputResponseValues, MAX_INPUT_ANSWER_LENGTH, validInputAnswers } from './input'

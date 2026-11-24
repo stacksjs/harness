@@ -18,7 +18,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
 import { Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
-import { Engine, reduce, SqliteStore } from '@harness/engine'
+import { Engine, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff } from './diff'
@@ -244,16 +244,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // Close out turns that were in flight when the process last stopped.
   //
   // A turn only runs because a provider instance is running it, and those die
-  // with the process. Replay faithfully restores the session as `running` or
-  // `awaiting-approval`, which is what the log says — but nothing is going to
-  // finish it. Left alone the session waits forever: it will not accept a new
+  // with the process. Replay faithfully restores the running or waiting
+  // session, but nothing is going to finish it. Left alone it will not accept a new
   // turn ("a turn is already running") and it will not accept a revert, so the
   // only recovery is for someone to notice and press stop.
   //
   // Recorded as an interruption rather than quietly rewritten, so the log says
   // what happened.
   for (const session of engine.current.sessions.values()) {
-    if (session.state !== 'running' && session.state !== 'awaiting-approval') continue
+    if (!isTurnActive(session.state)) continue
     const turn = session.turns.at(-1)
     if (!turn || turn.status !== 'running') continue
     try {
@@ -503,6 +502,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         command.approvalId,
         command.decision === 'allowed',
       )
+      return
+    }
+
+    if (command.type === 'session.input.respond') {
+      await runtime.respondInput(command.sessionId, command.requestId, command)
       return
     }
 

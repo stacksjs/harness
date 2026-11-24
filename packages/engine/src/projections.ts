@@ -6,7 +6,14 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { DriverKind, HarnessEvent } from '@harness/contract'
+import type { DriverKind, HarnessEvent, InputQuestion } from '@harness/contract'
+
+export interface InputRequestState {
+  requestId: string
+  turnId: number
+  questions: InputQuestion[]
+  outcome: 'pending' | 'answered' | 'declined' | 'interrupted'
+}
 
 export interface SessionState {
   id: number
@@ -30,6 +37,7 @@ export interface SessionState {
    * `awaiting-approval` with nothing to act on, and the turn waited forever.
    */
   pendingApprovals: Array<{ approvalId: number, toolName: string }>
+  pendingInputs: InputRequestState[]
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
   /**
@@ -92,6 +100,7 @@ export interface TurnState {
   response: string
   /** In the order the agent ran them. */
   toolCalls: ToolCallState[]
+  inputRequests?: InputRequestState[]
   tokensIn: number
   tokensOut: number
   cost: number
@@ -159,6 +168,21 @@ export interface HarnessState {
 
 export function emptyState(): HarnessState {
   return { sessions: new Map(), profiles: new Map(), workspaces: new Map(), devices: new Map() }
+}
+
+export function isTurnActive(state: SessionState['state']): boolean {
+  return state === 'running' || state === 'awaiting-approval' || state === 'awaiting-input'
+}
+
+function syncTurnWaitingState(session: SessionState): void {
+  session.state = session.pendingApprovals.length ? 'awaiting-approval'
+    : session.pendingInputs.length ? 'awaiting-input' : 'running'
+}
+
+function clearTurnRequests(session: SessionState): void {
+  session.pendingApprovals = []
+  for (const request of session.pendingInputs) request.outcome = 'interrupted'
+  session.pendingInputs = []
 }
 
 function turn(session: SessionState, turnId: number): TurnState | undefined {
@@ -297,6 +321,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         turns: [],
         checkpoints: [],
         pendingApprovals: [],
+        pendingInputs: [],
         isolate: p.isolate === true,
         worktreePath: '',
         branch: '',
@@ -313,15 +338,17 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'stopped'
-      session.pendingApprovals = []
+      clearTurnRequests(session)
       break
     }
 
     case 'session.failed': {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
+      const active = session.turns.at(-1)
+      if (active?.status === 'running') active.status = 'failed'
       session.state = 'failed'
-      session.pendingApprovals = []
+      clearTurnRequests(session)
       break
     }
 
@@ -329,7 +356,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'running'
-      session.pendingApprovals = []
+      clearTurnRequests(session)
       session.turns.push({
         id: p.turnId,
         role: p.role,
@@ -409,7 +436,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       // A finished turn cannot still be blocked on a decision.
-      session.pendingApprovals = []
+      clearTurnRequests(session)
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'complete'
@@ -428,7 +455,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (t) t.status = 'interrupted'
       session.state = 'idle'
       // Nothing is waiting on a decision once the turn is gone.
-      session.pendingApprovals = []
+      clearTurnRequests(session)
       break
     }
 
@@ -438,7 +465,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) t.status = 'failed'
       session.state = 'idle'
-      session.pendingApprovals = []
+      clearTurnRequests(session)
       break
     }
 
@@ -456,7 +483,35 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const index = session.pendingApprovals.findIndex(request => request.approvalId === p.approvalId)
       if (index === -1) break
       session.pendingApprovals.splice(index, 1)
-      if (session.pendingApprovals.length === 0) session.state = 'running'
+      syncTurnWaitingState(session)
+      break
+    }
+
+    case 'input.requested': {
+      const session = state.sessions.get(event.sessionId)
+      const activeTurn = session && turn(session, p.turnId)
+      if (!session || activeTurn?.status !== 'running' || !isTurnActive(session.state)) break
+      const request: InputRequestState = {
+        requestId: p.requestId,
+        turnId: p.turnId,
+        questions: p.questions,
+        outcome: 'pending',
+      }
+      activeTurn.inputRequests ??= []
+      activeTurn.inputRequests.push(request)
+      session.pendingInputs.push(request)
+      syncTurnWaitingState(session)
+      break
+    }
+
+    case 'input.resolved': {
+      const session = state.sessions.get(event.sessionId)
+      if (!session || !isTurnActive(session.state)) break
+      const index = session.pendingInputs.findIndex(request => request.requestId === p.requestId && request.turnId === p.turnId)
+      if (index === -1) break
+      session.pendingInputs[index]!.outcome = p.outcome
+      session.pendingInputs.splice(index, 1)
+      syncTurnWaitingState(session)
       break
     }
 

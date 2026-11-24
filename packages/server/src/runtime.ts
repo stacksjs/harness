@@ -11,10 +11,11 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { CommandEnvelope, DriverKind, HarnessEvent } from '@harness/contract'
+import type { CommandEnvelope, DriverKind, HarnessEvent, InputQuestion, InputResponse } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
+import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
 import { capture, restore } from './checkpoint'
 import { missingReferences, resolveForDriver } from './mcp'
@@ -51,6 +52,8 @@ interface Running {
   providerSessionId?: string
   /** Approval request id → the id the engine assigned, for routing responses. */
   approvals: Map<number, string>
+  inputs: Map<string, { providerId: string, questions: InputQuestion[] }>
+  turnId?: number
   abandoned: boolean
   /**
    * The user asked to stop the turn that is running.
@@ -145,7 +148,7 @@ export class ProviderRuntime {
 
     // Made now rather than at session creation, so a session nobody runs does
     // not leave a checkout behind.
-    await this.ensureWorktree(sessionId)
+    if (!await this.ensureWorktree(sessionId)) return null
 
     const state = this.options.engine.current
     const workspacePath = this.options.workspacePath
@@ -237,6 +240,7 @@ export class ProviderRuntime {
       instance,
       ...(savedLaunch ? { savedLaunch } : {}),
       approvals: new Map(),
+      inputs: new Map(),
       abandoned: false,
       interrupted: false,
     }
@@ -257,6 +261,10 @@ export class ProviderRuntime {
     const running = await this.instanceFor(sessionId, session.driverKind)
     if (!running) return
 
+    if (session.turns.at(-1)?.id !== turnId || session.turns.at(-1)?.status !== 'running') return
+    running.turnId = turnId
+    running.approvals.clear()
+    running.inputs.clear()
     running.abandoned = false
     running.interrupted = false
 
@@ -267,6 +275,7 @@ export class ProviderRuntime {
     // costs one `git add -A` against a temporary index, and it is skipped
     // silently for a workspace that is not a repository.
     await this.captureCheckpoint(sessionId, turnId, 'turn-start')
+    if (running.abandoned || running.interrupted || running.turnId !== turnId) return
 
     try {
       for await (const event of running.instance.startTurn({
@@ -279,7 +288,7 @@ export class ProviderRuntime {
         // A stopped session's remaining events are dropped rather than logged:
         // appending to a session the user has torn down writes history nobody
         // asked for, against a projection that has moved on.
-        if (running.abandoned) break
+        if (running.abandoned || running.turnId !== turnId) break
 
         switch (event.type) {
           case 'session-bound':
@@ -322,10 +331,31 @@ export class ProviderRuntime {
             break
 
           case 'approval-request': {
+            if (running.interrupted) break
             const result = await this.dispatchApproval(sessionId, event.requestId, event.toolName, event.args)
             // Map the engine's approval id back to the provider's request id,
             // so a client answering by approval id reaches the right callback.
             if (result !== null) running.approvals.set(result, event.requestId)
+            break
+          }
+
+          case 'input-request': {
+            if (!running.instance.respondInput || running.interrupted) break
+            if ([...running.inputs.values()].some(request => request.providerId === event.requestId)) break
+            const envelope = this.envelope({ type: 'thread.input.request', sessionId, turnId, questions: event.questions })
+            const result = await this.options.engine.dispatchInternal(envelope)
+            if (result.events.length === 0) break
+            running.inputs.set(envelope.id, { providerId: event.requestId, questions: event.questions })
+            this.options.onEvents?.(result.events)
+            break
+          }
+
+          case 'input-cancelled': {
+            const entry = [...running.inputs].find(([, request]) => request.providerId === event.requestId)
+            if (!entry) break
+            const [requestId] = entry
+            running.inputs.delete(requestId)
+            await this.emit({ type: 'thread.input.cancel', sessionId, requestId })
             break
           }
 
@@ -357,12 +387,19 @@ export class ProviderRuntime {
     catch (error) {
       // Same reasoning as the `error` event: a stream that throws because it
       // was aborted is not a failure the user needs told about.
-      if (running.interrupted) return
+      if (running.interrupted || running.abandoned || running.turnId !== turnId) return
       await this.emit({
         type: 'thread.error',
         sessionId,
         message: error instanceof Error ? error.message : String(error),
       })
+    }
+    finally {
+      if (running.turnId === turnId) {
+        running.inputs.clear()
+        running.approvals.clear()
+        delete running.turnId
+      }
     }
   }
 
@@ -393,15 +430,15 @@ export class ProviderRuntime {
    * the turn — would make `--isolate` a footgun on any directory that happens
    * not to be under version control.
    */
-  private async ensureWorktree(sessionId: number): Promise<void> {
+  private async ensureWorktree(sessionId: number): Promise<boolean> {
     const state = this.options.engine.current
     const session = state.sessions.get(sessionId)
-    if (!session?.isolate || session.worktreePath) return
+    if (!session?.isolate || session.worktreePath) return true
 
     const repository = this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
       : repositoryPath(state, sessionId)
-    if (!repository || !existsSync(repository)) return
+    if (!repository || !existsSync(repository)) return true
 
     // Clears a registration left by a crash, which is otherwise enough to make
     // `worktree add` refuse this session's name.
@@ -409,12 +446,13 @@ export class ProviderRuntime {
 
     const created = await worktree.create(repository, sessionId)
     if (!created.path || !created.branch) {
+      if (created.reason === 'not-a-repository' || created.reason === 'no-commits') return true
       await this.emit({
         type: 'thread.error',
         sessionId,
         message: `could not isolate this session: ${created.reason ?? 'unknown reason'}`,
       })
-      return
+      return false
     }
 
     await this.emit({
@@ -423,6 +461,7 @@ export class ProviderRuntime {
       worktreePath: created.path,
       branch: created.branch,
     })
+    return true
   }
 
   /**
@@ -514,6 +553,7 @@ export class ProviderRuntime {
     // Marked before asking the provider: the abort can surface as an error on
     // the stream before `interrupt()` resolves.
     running.interrupted = true
+    running.inputs.clear()
     await running.instance.interrupt()
   }
 
@@ -525,6 +565,26 @@ export class ProviderRuntime {
     if (!requestId) return
     running.approvals.delete(approvalId)
     await running.instance.respondApproval(requestId, allow, reason)
+  }
+
+  async respondInput(sessionId: number, requestId: string, response: InputResponse): Promise<void> {
+    const running = this.sessions.get(sessionId)
+    const request = running?.inputs.get(requestId)
+    if (!running?.instance.respondInput || !request) return
+    const answers = inputResponseValues(response, request.questions)
+    if (answers === undefined) return
+    const turnId = running.turnId
+    running.inputs.delete(requestId)
+    try {
+      await running.instance.respondInput(request.providerId, answers)
+    }
+    catch {
+      if (running.turnId !== turnId || running.abandoned || running.interrupted) return
+      running.interrupted = true
+      running.inputs.clear()
+      await this.emit({ type: 'thread.error', sessionId, message: 'Could not deliver the answer to the agent.' })
+      await running.instance.interrupt().catch(() => {})
+    }
   }
 
   async stopSession(sessionId: number): Promise<void> {

@@ -8,6 +8,8 @@
  * ordering and one audit trail rather than two.
  */
 
+import type { InputQuestion, InputResponse } from './input'
+
 export type DriverKind = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok'
 
 export type ApprovalDecision = 'allowed' | 'denied'
@@ -34,7 +36,7 @@ export type ClientCommand =
   | { type: 'session.turn.start', sessionId: number, text: string }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
-  | { type: 'session.input.respond', sessionId: number, requestId: string, value: string }
+  | ({ type: 'session.input.respond', sessionId: number, requestId: string } & InputResponse)
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
   | { type: 'session.stop', sessionId: number }
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
@@ -89,7 +91,8 @@ export type InternalCommand =
   | { type: 'thread.tool.call.begin', sessionId: number, turnId: number, callId: string, toolName: string, args: unknown }
   | { type: 'thread.tool.call.end', sessionId: number, turnId: number, callId: string, ok: boolean }
   | { type: 'thread.approval.request', sessionId: number, requestId: string, toolName: string, args: unknown }
-  | { type: 'thread.input.request', sessionId: number, requestId: string, prompt: string }
+  | { type: 'thread.input.request', sessionId: number, turnId: number, questions: InputQuestion[] }
+  | { type: 'thread.input.cancel', sessionId: number, requestId: string }
   | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number }

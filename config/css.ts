@@ -71,6 +71,11 @@ const RESPONSIVE_SHELL = `
 [data-thread-search] { width: min(520px, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); }
 [data-thread-search-list] { max-height: min(410px, 54dvh); }
 [data-composer] { width: 100%; max-width: 820px; margin-inline: auto; }
+[data-question-card] {
+  width: min(788px, calc(100% - 24px));
+  margin-inline: auto;
+  margin-block-end: max(12px, env(safe-area-inset-bottom));
+}
 [data-transcript] > [data-turn], [data-transcript] > [data-approval] {
   max-width: 788px; margin-inline: auto;
 }

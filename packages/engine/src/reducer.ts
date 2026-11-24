@@ -7,7 +7,8 @@
  */
 
 import type { Command, CommandEnvelope } from '@harness/contract'
-import { GLOBAL_SESSION_ID } from '@harness/contract'
+import { GLOBAL_SESSION_ID, inputResponseValues, validInputAnswers } from '@harness/contract'
+import { isTurnActive } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState } from './projections'
 
@@ -388,7 +389,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // Refused while a turn is running. Restoring files underneath a working
       // agent would have it editing a tree that changed for reasons it cannot
       // see, and the resulting diff would belong to nobody.
-      if (session.state === 'running' || session.state === 'awaiting-approval')
+      if (isTurnActive(session.state))
         throw new InvalidCommand('cannot revert while a turn is running')
 
       return [{
@@ -403,7 +404,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
-      if (session.state === 'running' || session.state === 'awaiting-approval')
+      if (isTurnActive(session.state))
         throw new InvalidCommand('a turn is already running')
       if (session.state === 'stopped')
         throw new InvalidCommand('session is stopped')
@@ -425,7 +426,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
-      const running = session.turns.find(t => t.status === 'running')
+      const running = session.turns.findLast(t => t.status === 'running')
       // Interrupting an idle session is a no-op rather than an error: the user
       // pressed stop just as the turn finished, and telling them off for it
       // would be pedantic.
@@ -524,6 +525,46 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           tokensIn: command.tokensIn,
           tokensOut: command.tokensOut,
           cost: command.cost,
+        },
+      }]
+    }
+
+    case 'thread.input.request': {
+      const session = state.sessions.get(command.sessionId)
+      const turn = session?.turns.at(-1)
+      if (!session || !isTurnActive(session.state) || turn?.id !== command.turnId || turn.status !== 'running') return []
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: { type: 'input.requested', requestId: commandId, turnId: command.turnId, questions: command.questions },
+      }]
+    }
+
+    case 'thread.input.cancel':
+    case 'session.input.respond': {
+      const session = state.sessions.get(command.sessionId)
+      const request = session?.pendingInputs.find(request => request.requestId === command.requestId)
+      let outcome: 'answered' | 'declined' | 'interrupted' = 'interrupted'
+      if (command.type === 'session.input.respond') {
+        if (!request) throw new InvalidCommand('This question is no longer pending.')
+        const answers = inputResponseValues(command, request.questions)
+        if (answers !== null && !validInputAnswers(request.questions, answers))
+          throw new InvalidCommand('Complete all required questions with valid answers.')
+        outcome = answers === null ? 'declined' : 'answered'
+      }
+      if (!request) return []
+      // The receipt stores that the response was accepted. Only the live
+      // provider receives its values, which may include private information.
+      return [{
+        sessionId: command.sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'input.resolved',
+          requestId: request.requestId,
+          turnId: request.turnId,
+          outcome,
         },
       }]
     }

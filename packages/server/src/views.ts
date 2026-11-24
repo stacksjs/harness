@@ -155,6 +155,7 @@ export function viewProps(state: HarnessState, options: {
           // to be connected when it fired, and the turn waited forever if that
           // one went away.
           pendingApprovals: active.pendingApprovals,
+          pendingInputs: active.pendingInputs,
           // Shown in the header when the session has a checkout of its own, so
           // it is obvious the agent is not editing the workspace directly.
           branch: active.branch,
@@ -163,6 +164,10 @@ export function viewProps(state: HarnessState, options: {
             prompt: turn.prompt,
             response: turn.response,
             status: turn.status,
+            inputRequests: (turn.inputRequests ?? []).map(request => ({
+              requestId: request.requestId,
+              outcome: request.outcome,
+            })),
             // What the agent actually did. A reply without these is a summary
             // of work you cannot review.
             // The snapshot taken before this turn ran, which is what "undo

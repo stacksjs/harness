@@ -67,6 +67,8 @@ const gate = new Promise<void>((r) => { releaseGate = r })
 const markdownGate = Promise.withResolvers<void>()
 const parallelApprovalGate = Promise.withResolvers<void>()
 const parallelDecisions = new Map<string, boolean>()
+const questionGate = Promise.withResolvers<void>()
+const questionAnswers = new Map<string, unknown>()
 const script: ProviderEvent[] = [
   { type: 'session-bound', providerSessionId: 'ps-drive' },
   { type: 'assistant-delta', text: 'Thinking… ' },
@@ -94,6 +96,19 @@ const instance: ProviderInstance = {
       yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
       return
     }
+    if (input.text === 'exercise structured questions') {
+      yield { type: 'input-request', requestId: 'fixture_schemas', questions: [
+        { id: 'schema', header: 'Fixture', question: 'Should this fixture prefer strict schemas or UI flexibility?', kind: 'choice', allowOther: true, options: [
+          { value: 'strict', label: 'Strict schemas (Recommended)' },
+          { value: 'flexible', label: 'UI flexibility' },
+        ] },
+        { id: 'private-note', question: 'Enter the private fixture code.', kind: 'text', sensitive: true, options: [] },
+      ] }
+      await questionGate.promise
+      yield { type: 'assistant-delta', text: 'Question fixture complete.' }
+      yield { type: 'turn-complete', tokensIn: 2, tokensOut: 2, costMicros: 0 }
+      return
+    }
     for (const event of script) {
       if (event.type === 'approval-request' && input.text !== 'run the drive turn') continue
       // A beat before the first token, so the thinking indicator has a
@@ -110,6 +125,10 @@ const instance: ProviderInstance = {
       if (parallelDecisions.size === 2) parallelApprovalGate.resolve()
     }
     else if (allow) releaseGate()
+  },
+  async respondInput(id, answers) {
+    questionAnswers.set(id, answers)
+    questionGate.resolve()
   },
   async stop() {},
 }
@@ -687,6 +706,41 @@ await approval.getByRole('button', { name: 'Deny', exact: true }).click()
 await approval.waitFor({ state: 'hidden' })
 check('parallel approvals advance in order and reach their matching callbacks',
   parallelDecisions.get('parallel_read') === true && parallelDecisions.get('parallel_write') === false)
+
+await page.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
+await promptBox.fill('exercise structured questions')
+await page.click('[data-send]')
+const question = page.getByRole('form', { name: 'Agent question' })
+const firstQuestion = question.getByText('Should this fixture prefer strict schemas or UI flexibility?')
+await firstQuestion.waitFor()
+await page.reload()
+await firstQuestion.waitFor()
+check('question survives reload and reserves the composer until answered',
+  await promptBox.isHidden() && await question.getByRole('button', { name: 'Next' }).isDisabled())
+await capture('question-card-desktop')
+await page.setViewportSize({ width: 390, height: 844 })
+await capture('question-card-mobile')
+const strictOption = question.getByRole('radio', { name: 'Strict schemas (Recommended)' })
+await strictOption.focus()
+await page.keyboard.press('1')
+await question.getByRole('button', { name: 'Next' }).click()
+const privateInput = question.getByLabel('Answer', { exact: true })
+check('sensitive questions mask the answer', await privateInput.getAttribute('type') === 'password')
+await privateInput.fill('fixture private answer')
+await question.getByRole('button', { name: 'Back' }).click()
+check('back keeps the selected answer', await strictOption.isChecked())
+await question.getByRole('button', { name: 'Next' }).click()
+check('next restores the unsent answer for this question', await privateInput.inputValue() === 'fixture private answer')
+await question.getByRole('button', { name: 'Submit answer' }).click()
+await transcript.getByText('Question fixture complete.', { exact: true }).waitFor()
+check('the provider receives both answers and transcript records the outcome',
+  JSON.stringify(questionAnswers.get('fixture_schemas')) === JSON.stringify([
+    { questionId: 'schema', values: ['strict'] },
+    { questionId: 'private-note', values: ['fixture private answer'] },
+  ]) && await transcript.getByText('Question answered', { exact: true }).isVisible())
+await page.reload()
+await transcript.getByText('Question answered', { exact: true }).waitFor()
+check('question answers stay out of the restored page', !((await page.content()).includes('fixture private answer')))
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

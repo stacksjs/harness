@@ -1,0 +1,61 @@
+<form data-question-card ref="questionCardBox" tabindex="-1" aria-labelledby="agent-question-heading" @submit.prevent="questionForm()?.advance()" @keydown="questionForm()?.shortcut($event)"
+  @if(!initialInputs.length)hidden@endif :hidden="!inputRequest()"
+  class="grid overflow-hidden grid-rows-[auto_minmax(0,1fr)_auto] shrink-0 p-3 max-h-[48dvh] min-w-0 bg-white dark:bg-neutral-900 border border-black/10 rounded-[10px] dark:border-white/15">
+  <div class="flex gap-3 items-center justify-between mb-2">
+    <h2 id="agent-question-heading" class="font-semibold text-[12px]">Agent question</h2>
+    <span class="text-[11px] text-neutral-600 dark:text-neutral-400" :hidden="(inputRequest()?.questions.length || 0) < 2"
+      :text="String((questionForm()?.step() || 0) + 1) + ' of ' + inputRequest()?.questions.length"></span>
+  </div>
+  <div class="overflow-y-auto min-h-0">
+    <template :for="question in (questionForm()?.current() || [])" :key="inputRequest()?.requestId + ':' + question.id">
+      <fieldset :disabled="Boolean(questionForm()?.sending())" class="min-w-0">
+        <legend class="break-words font-medium text-[14px]">
+          <span :text="question.question"></span>
+          <span :hidden="!question.optional" class="ml-1 font-normal text-[11px] text-neutral-600 dark:text-neutral-400">Optional</span>
+        </legend>
+        <div :hidden="!question.header || question.header === question.question" class="mt-1 text-[12px] text-neutral-600 dark:text-neutral-400" :text="question.header"></div>
+        <div class="grid gap-1 mt-2" :hidden="!question.options.length">
+          <template :for="(option, optionIndex) in question.options" :key="option.value">
+            <label class="flex gap-2 items-start p-2 min-w-0 hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px] cursor-pointer">
+              <input name="harness-question-choice" class="shrink-0 mt-[2px] [color-scheme:light] dark:[color-scheme:dark]"
+                :type="question.kind === 'multiple' ? 'checkbox' : 'radio'"
+                :checked="(questionForm()?.choices(question) || []).includes(option.value)"
+                @change="questionForm()?.selectOption(question, option.value, $event.target.checked)">
+              <span class="grid gap-0.5 min-w-0 break-words text-[13px]">
+                <span :text="option.label"></span>
+                <span class="text-[12px] text-neutral-600 dark:text-neutral-400" :hidden="!option.description || option.label === option.description" :text="option.description"></span>
+              </span>
+              <kbd aria-hidden="true" :hidden="optionIndex > 8" :text="String(optionIndex + 1)"
+                class="shrink-0 ml-auto px-1 text-[11px] text-neutral-500 dark:text-neutral-400 bg-black/5 dark:bg-white/10 rounded-[4px]"></kbd>
+            </label>
+          </template>
+          <label :hidden="!question.allowOther" class="flex gap-2 items-center p-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px] cursor-pointer">
+            <input name="harness-question-choice" type="radio" class="[color-scheme:light] dark:[color-scheme:dark]"
+              :checked="questionForm()?.isOther(question)" @change="questionForm()?.chooseOther(question)">
+            Other
+          </label>
+        </div>
+        <label :hidden="question.options.length > 0 && !questionForm()?.isOther(question)" class="block mt-2 text-[12px]">
+          <span>Answer</span>
+          <input data-question-answer autocomplete="off" maxlength="4096"
+            :type="question.sensitive ? 'password' : 'text'"
+            :inputmode="question.kind === 'number' || question.kind === 'integer' ? 'decimal' : 'text'"
+            :value="questionForm()?.text(question)" @input="questionForm()?.editText(question, $event.target.value)"
+            class="block mt-1 px-2 h-9 min-w-0 w-full text-[13px] bg-white dark:bg-neutral-950 border border-black/15 rounded-[6px] dark:border-white/20">
+        </label>
+        <p :hidden="question.kind !== 'multiple'" class="mt-1 text-[11px] text-neutral-600 dark:text-neutral-400" :text="questionForm()?.selectionHint(question)"></p>
+        <button type="button" :hidden="!question.optional || !questionForm()?.draft(question)" @click="questionForm()?.clear(question)"
+          class="mt-1 px-2 h-8 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px]">Clear answer</button>
+      </fieldset>
+    </template>
+    <p :hidden="!questionForm()?.error()" class="mt-2 text-[12px] text-red-700 dark:text-red-300" role="alert" :text="questionForm()?.error()"></p>
+  </div>
+  <div class="flex flex-wrap gap-2 items-center mt-3">
+    <button type="button" @click="stopTurn" :disabled="stopPressed()" class="px-2 h-8 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px]">Stop turn</button>
+    <button type="button" @click="questionForm()?.decline()" :disabled="Boolean(questionForm()?.sending())" class="ml-auto px-2 h-8 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px]">Decline</button>
+    <button type="button" @click="questionForm()?.previous()" :hidden="!(questionForm()?.step() || 0)" :disabled="Boolean(questionForm()?.sending())" class="px-3 h-8 text-[12px] border border-black/15 rounded-[6px] dark:border-white/20">Back</button>
+    <button type="submit" data-submit-question :disabled="!questionForm()?.valid() || Boolean(questionForm()?.sending())"
+      :text="questionForm()?.hasNext() ? 'Next' : 'Submit answer'"
+      class="px-3 h-8 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px] disabled:opacity-50">Submit answer</button>
+  </div>
+</form>

@@ -17,12 +17,14 @@
  */
 
 import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
+import type { InputAnswer } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { codexEnvironment } from './account-environment'
 import { managedChatGptArgs, openManagedChatGptBroker } from './chatgpt/token-broker'
 import { probeBinary } from './cli-driver'
 import { EventQueue } from './event-queue'
+import { toolInputQuestions } from './input-questions'
 
 /** JSON-RPC frames, only as much of them as this driver reads. */
 interface Frame {
@@ -196,6 +198,7 @@ class CodexInstance implements ProviderInstance {
   private readonly pending = new Map<number | string, (frame: Frame) => void>()
   /** Approval id → the JSON-RPC request id Codex is blocking on. */
   private readonly approvals = new Map<string, number | string>()
+  private readonly inputs = new Map<string, number | string>()
   private threadId: string | null = null
   private turnId: string | null = null
   private queue: EventQueue | null = null
@@ -249,6 +252,7 @@ class CodexInstance implements ProviderInstance {
     const onFailure = (message: string): void => {
       if (this.child !== child) return
       this.child = null
+      this.inputs.clear()
       this.finishRequests(message)
       this.queue?.finish({ type: 'error', message })
       child.kill()
@@ -260,6 +264,7 @@ class CodexInstance implements ProviderInstance {
 
     const initialized = await this.request('initialize', {
       clientInfo: { name: 'harness', title: 'Harness', version: '0.1.0' },
+      capabilities: { experimentalApi: true },
     })
     if (initialized.error) {
       await this.stop()
@@ -343,6 +348,20 @@ class CodexInstance implements ProviderInstance {
   }
 
   private onServerRequest(frame: Frame): void {
+    if (frame.method === 'item/tool/requestUserInput') {
+      const questions = toolInputQuestions(frame.params?.questions, 'codex')
+      if (!this.queue || this.queue.closed || !questions
+        || (this.threadId && frame.params?.threadId && this.threadId !== frame.params.threadId)
+        || (this.turnId && frame.params?.turnId && this.turnId !== frame.params.turnId)) {
+        this.send({ id: frame.id, error: { code: -32602, message: 'Cannot display this user input request.' } })
+        return
+      }
+      const requestId = String(frame.id)
+      this.inputs.set(requestId, frame.id!)
+      this.queue.push({ type: 'input-request', requestId, questions })
+      return
+    }
+
     if (!APPROVAL_METHODS.has(frame.method!)) {
       // An unknown server request still has to be answered, or Codex waits
       // forever on a client that simply did not recognise it.
@@ -377,11 +396,19 @@ class CodexInstance implements ProviderInstance {
         this.usage = usageOf(frame.params?.tokenUsage)
         return
 
+      case 'serverRequest/resolved': {
+        const requestId = String(frame.params?.requestId)
+        if (this.inputs.delete(requestId))
+          this.queue?.push({ type: 'input-cancelled', requestId })
+        return
+      }
+
       case 'error':
         this.turnError = this.providerError(frame.params?.error?.message)
         return
 
       case 'turn/completed': {
+        this.inputs.clear()
         const error = this.turnError ?? frame.params?.turn?.error?.message
         this.turnError = null
         this.turnId = null
@@ -421,6 +448,7 @@ class CodexInstance implements ProviderInstance {
     this.queue = queue
     this.usage = { tokensIn: 0, tokensOut: 0 }
     this.turnError = null
+    this.inputs.clear()
 
     void this.run(input, queue).catch((error: unknown) => {
       queue.finish({ type: 'error', message: error instanceof Error ? error.message : String(error) })
@@ -471,7 +499,9 @@ class CodexInstance implements ProviderInstance {
     // No turn, no process, nothing to stop — the user pressing stop just as a
     // turn lands is a race, not an error.
     if (!this.child || !this.threadId || !this.turnId) return
-    await this.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId })
+    const interrupted = this.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId })
+    this.cancelInputs()
+    await interrupted
   }
 
   async respondApproval(requestId: string, allow: boolean): Promise<void> {
@@ -484,12 +514,28 @@ class CodexInstance implements ProviderInstance {
     this.respond(id, { decision: allow ? 'accept' : 'decline' })
   }
 
+  async respondInput(requestId: string, answers: InputAnswer[] | null): Promise<void> {
+    const id = this.inputs.get(requestId)
+    if (id === undefined) throw new Error('Codex is no longer waiting for this answer.')
+    this.inputs.delete(requestId)
+    this.respond(id, { answers: Object.fromEntries((answers ?? []).map(answer => [
+      answer.questionId,
+      { answers: answer.values },
+    ])) })
+  }
+
+  private cancelInputs(): void {
+    for (const id of this.inputs.values()) this.respond(id, { answers: {} })
+    this.inputs.clear()
+  }
+
   async stop(): Promise<void> {
     this.generation++
     // Unblock Codex on anything it is still waiting for, so it can exit rather
     // than sit on a pipe we are about to close.
     for (const id of this.approvals.values()) this.respond(id, { decision: 'cancel' })
     this.approvals.clear()
+    this.cancelInputs()
     this.queue?.finish()
     const child = this.child
     this.child = null
