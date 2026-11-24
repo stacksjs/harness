@@ -1,5 +1,11 @@
 import type { Events } from '@stacksjs/types'
 
+declare module '@stacksjs/events' {
+  interface AppEvents {
+    'user:created': { id: number | string, name: string }
+  }
+}
+
 /**
  * **Events Configuration**
  *

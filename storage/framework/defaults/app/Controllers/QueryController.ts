@@ -349,7 +349,12 @@ export default class QueryController extends Controller {
         .limit(10)
         .execute()
 
-      return results
+      return results.map(row => ({
+        normalized_query: String(row.normalized_query ?? ''),
+        count: typeof row.count === 'number' || typeof row.count === 'bigint' ? row.count : String(row.count ?? '0'),
+        avg_duration: typeof row.avg_duration === 'number' ? row.avg_duration : String(row.avg_duration ?? '0'),
+        max_duration: typeof row.max_duration === 'number' ? row.max_duration : undefined,
+      }))
     }
     catch (error: unknown) {
       const err = error as Error

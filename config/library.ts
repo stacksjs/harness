@@ -10,12 +10,13 @@ import type { LibraryConfig } from '@stacksjs/types'
 export default {
   name: 'hello-world',
   owner: '@stacksjs', // you may or may not add the @ prefix here (it is added automatically)
-  repository: 'stacksjs/stacks',
+  repository: 'stacksjs/harness',
   license: 'MIT',
   author: 'Chris Breuer',
   contributors: ['Chris Breuer <chris@stacksjs.com>'],
   defaultLanguage: 'en',
-  releaseable: true,
+  // Harness ships application releases. The scaffold libraries are local workspaces.
+  releaseable: false,
 
   webComponents: {
     name: 'hello-world-elements',

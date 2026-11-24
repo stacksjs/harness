@@ -1,4 +1,3 @@
-import type { CategorizableRequestType } from '@stacksjs/types'
 import { Action } from '@stacksjs/actions'
 import { categorizable } from '@stacksjs/cms'
 import { response } from '@stacksjs/router'

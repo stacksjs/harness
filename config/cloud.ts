@@ -1,5 +1,6 @@
 import type { CloudConfig } from '@stacksjs/types'
 import type { CloudConfig as TsCloudConfig } from '@stacksjs/ts-cloud'
+import process from 'node:process'
 import { env } from '@stacksjs/env'
 
 /**
@@ -251,7 +252,7 @@ export const tsCloud: TsCloudConfig = {
           keyspaces: [{ name: 'predicthq', sharded: false }],
           vtgatePort: 15306,
           username: 'predicthq',
-          password: String((env as Record<string, string | number | boolean | undefined>).PREDICTHQ_DB_PASSWORD || ''),
+          password: process.env.PREDICTHQ_DB_PASSWORD ?? '',
           bindAddress: '127.0.0.1',
         },
       },
