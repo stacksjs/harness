@@ -75,6 +75,11 @@ export interface DriverConfig {
   home?: string
   binaryPath?: string
   model?: string
+  /** Host-only credentials for a managed Codex connection. */
+  chatGptPlan?: {
+    accessToken: () => Promise<string>
+    connected: () => Promise<boolean>
+  }
   /**
    * MCP servers this session should have, already resolved.
    *

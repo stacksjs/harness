@@ -30,6 +30,13 @@ export function claudeEnvironment(config: DriverConfig, host: NodeJS.ProcessEnv 
 
 export function codexEnvironment(config: DriverConfig, host: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const home = config.home?.trim()
+  if (config.chatGptPlan) {
+    const env: NodeJS.ProcessEnv = { ...host, CODEX_HOME: home }
+    delete env.ACCESS_TOKEN
+    delete env.OPENAI_API_KEY
+    delete env.OPENAI_BASE_URL
+    return env
+  }
   return home ? { ...host, CODEX_HOME: providerConfigPath(config.workspacePath, home) } : host
 }
 

@@ -7,6 +7,11 @@
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.141",
-    "@harness/contract": "workspace:*"
+    "@harness/contract": "workspace:*",
+    "jose": "^6.2.8",
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4"
   }
 }

@@ -13,7 +13,7 @@ import type { Driver, DriverConfig, ProbeResult } from '@harness/drivers'
 import { access as checkAccess, constants, realpath, stat } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
-import { driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
+import { ChatGptCredentialStore, driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
 import { Pty } from './pty'
@@ -23,7 +23,7 @@ import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from '.
 import { ASSET_PREFIX, AssetCache } from './assets'
 import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
-import { SavedProviderInstances } from './provider-instances'
+import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
 import { searchThreads } from './thread-search'
@@ -36,6 +36,7 @@ export interface ServeOptions {
   databasePath?: string
   /** Host-owned storage for projectless sessions. */
   scratchDirectory?: string
+  chatGptCredentialDirectory?: string
   /** Injectable so tests bind a fake driver instead of spawning a real agent. */
   resolveDriver?: (kind: DriverKind) => Driver | null
   /**
@@ -62,6 +63,8 @@ export interface ServeOptions {
    * `access.ts` for why a tunnel makes the peer address meaningless.
    */
   remote?: boolean
+  /** Where a local client reads the authenticated host token in remote mode. */
+  localTokenPath?: string
 }
 
 interface SocketData {
@@ -74,6 +77,7 @@ interface SocketData {
    * while leaving the connection it already had free to keep dispatching.
    */
   deviceId: string | null
+  canUseHostPrivileges: boolean
   /**
    * Live terminals owned by this socket, killed with it. Owned per-socket
    * rather than pooled because a PTY with no reader is a shell running
@@ -163,6 +167,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
   const savedProviders = new SavedProviderInstances(databasePath)
+  const chatGptCredentials = new ChatGptCredentialStore(options.chatGptCredentialDirectory ?? chatGptCredentialDirectory())
   const engine = new Engine({
     store,
     reducer: reduce,
@@ -196,6 +201,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     engine,
     resolve: options.resolveDriver,
     savedProviders,
+    chatGptCredentials,
     workspacePath: options.workspacePath,
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
@@ -212,7 +218,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     for (const [key, value] of driverProbes) {
       if (now - value.at >= 30_000) driverProbes.delete(key)
     }
-    const cached = driverProbes.get(key)
+    const cached = config.chatGptPlan ? undefined : driverProbes.get(key)
     if (cached) return cached.result
 
     const result = (async (): Promise<PublicProbe> => {
@@ -226,7 +232,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return { status: 'failed' }
       }
     })()
-    driverProbes.set(key, { at: now, result })
+    if (!config.chatGptPlan) driverProbes.set(key, { at: now, result })
     return result
   }
 
@@ -282,7 +288,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
   // Written before listening: a desktop app that autostarts alongside the
   // server would otherwise race the file and fail its first connection.
-  if (access) await writeLocalToken(access.localToken)
+  if (access) await writeLocalToken(access.localToken, options.localTokenPath)
+
+  function canUseHostPrivileges(request: Request, url: URL): boolean {
+    const origin = request.headers.get('origin')
+    return isLoopbackHost(url.hostname)
+      && (origin === null || origin === url.origin)
+      && (!access || access.authenticate(request).deviceId === 'local')
+  }
 
   const sockets = new Set<HarnessSocket>()
   let lastTermId = 0
@@ -523,7 +536,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         // (§12). Until the security model has a story for that, terminals
         // belong to this machine only — the plain loopback case and the
         // host's own token, never a paired device.
-        if (socket.data.deviceId !== null && socket.data.deviceId !== 'local') {
+        if (!socket.data.canUseHostPrivileges) {
           send(socket, { t: 'term-error', message: 'terminals are local-only' })
           return
         }
@@ -608,6 +621,16 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           : []
 
         try {
+          if (!socket.data.canUseHostPrivileges) {
+            const command = envelope.command
+            const session = 'sessionId' in command ? engine.current.sessions.get(command.sessionId) : undefined
+            const selection = command.type === 'session.create' ? command : session
+            if (selection?.providerInstanceId !== undefined) {
+              const workspace = engine.current.workspaces.get(selection.workspaceId)
+              const launch = workspace && savedProviders.find(selection.providerInstanceId, workspace.profileId, selection.driverKind, workspace.path)
+              if (launch?.chatGptClientId) throw new Error('This ChatGPT plan is available only on the Harness host.')
+            }
+          }
           const result = await engine.dispatch(envelope)
           send(socket, {
             t: 'dispatched',
@@ -692,9 +715,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       }
 
       if (url.pathname === '/ws') {
+        const hostPrivileges = canUseHostPrivileges(request, url)
+        if (!access && !hostPrivileges)
+          return new Response('This Harness host accepts same-origin loopback clients only.', { status: 403 })
         const upgraded = srv.upgrade(request, {
           data: {
             deviceId: access?.authenticate(request).deviceId ?? null,
+            canUseHostPrivileges: hostPrivileges,
             terminals: new Map<number, Pty>(),
             subscriptions: new Set<number>(),
             cursors: new Map<number, number>(),
@@ -744,13 +771,20 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           kind,
           ...await probeDriver(kind, { workspacePath }),
         })))
+        const hostPrivileges = canUseHostPrivileges(request, url)
         const accounts = workspace?.trusted && !workspace.scratch
-          ? Promise.all(savedProviders.list(workspace.profileId, workspace.path).map(async ({ id, kind, name, launch }) => ({
-              id,
-              kind,
-              name,
-              ...await probeDriver(kind, { ...launch, workspacePath }),
-            })))
+          ? Promise.all(savedProviders.list(workspace.profileId, workspace.path)
+              .filter(({ launch }) => !launch.chatGptClientId || hostPrivileges)
+              .map(async ({ id, kind, name, launch }) => {
+                const account = { id, kind, name, ...(launch.chatGptClientId ? { auth: 'chatgpt' } : {}) }
+                try {
+                  const config = await providerLaunchConfig(chatGptCredentials, launch)
+                  return { ...account, ...await probeDriver(kind, { ...config, workspacePath }) }
+                }
+                catch {
+                  return { ...account, status: 'failed' }
+                }
+              }))
           : []
         return Promise.all([drivers, accounts]).then(([drivers, accounts]) => Response.json({ drivers, accounts }))
       }

@@ -595,8 +595,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       {{--
         One row per agent CLI, filled by the same `/drivers` probe that
         annotates the pickers. "Log in" runs the CLI's own login flow in the
-        workspace terminal — the CLIs own their credentials; harness never
-        holds a provider secret (PLAN §M8).
+        workspace terminal. Managed ChatGPT plan accounts are listed below.
       --}}
       <ul class="mb-3" data-agent-list>
         <li data-agent-row="claude" class="flex gap-2 items-center py-1 text-[13px]">
@@ -1225,8 +1224,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     const picker = driverPickerRef.current
     const selection = picker?.value || activeDriverValue || defaultDriver()
     providerAccounts.set(accounts.map(account => {
-      const stateText = driverStateLabel(account.status, account.version)
-      const name = `${DRIVER_LABELS[account.kind] ?? account.kind} · ${account.name}`
+      const managed = account.auth === 'chatgpt'
+      const stateText = managed && account.status === 'unauthenticated'
+        ? 'Reconnect on host'
+        : driverStateLabel(account.status, account.version)
+      const provider = managed ? 'ChatGPT plan' : DRIVER_LABELS[account.kind] ?? account.kind
+      const name = `${provider} · ${account.name}`
       return { ...account, name, stateText, label: `${name} · ${stateText}`, value: `${account.kind}:${account.id}` }
     }))
     void nextTick(() => {

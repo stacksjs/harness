@@ -39,6 +39,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { isIPv4 } from 'node:net'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 
@@ -140,8 +141,9 @@ export function credentialFrom(request: Request): string | null {
 export function isLoopbackHost(hostname: string): boolean {
   return hostname === '127.0.0.1'
     || hostname === '::1'
+    || hostname === '[::1]'
     || hostname === 'localhost'
-    || hostname.startsWith('127.')
+    || (isIPv4(hostname) && hostname.startsWith('127.'))
 }
 
 export interface AccessOptions {

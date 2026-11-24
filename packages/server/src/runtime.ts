@@ -12,13 +12,14 @@
  */
 
 import type { CommandEnvelope, DriverKind, HarnessEvent } from '@harness/contract'
-import type { Driver, ProviderInstance } from '@harness/drivers'
+import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { resolveDriver } from '@harness/drivers'
 import { capture, restore } from './checkpoint'
 import { missingReferences, resolveForDriver } from './mcp'
 import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
+import { providerLaunchConfig } from './provider-instances'
 import { openScratchWorkspace } from './scratch-workspace'
 import * as worktree from './worktree'
 
@@ -27,6 +28,7 @@ export interface RuntimeOptions {
   /** Injectable so tests bind a fake driver instead of spawning an agent. */
   resolve?: (kind: DriverKind) => Driver | null
   savedProviders?: Pick<SavedProviderInstances, 'find'>
+  chatGptCredentials?: ChatGptCredentialStore
   /** Resolve a session's workspace path. Defaults to the projection. */
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
   now?: () => number
@@ -107,11 +109,23 @@ export class ProviderRuntime {
       })
       return null
     }
+    const store = this.options.chatGptCredentials
+    const clientId = savedLaunch?.chatGptClientId
+    if (clientId && (!store || !await store.connected(clientId).catch(() => false))) {
+      await this.stopSession(sessionId)
+      await this.emit({
+        type: 'thread.error',
+        sessionId,
+        message: 'Reconnect the selected ChatGPT plan on this host before sending another message.',
+      })
+      return null
+    }
 
     const existing = this.sessions.get(sessionId)
     if (existing) {
       if (existing.savedLaunch?.binaryPath !== savedLaunch?.binaryPath
-        || existing.savedLaunch?.home !== savedLaunch?.home) {
+        || existing.savedLaunch?.home !== savedLaunch?.home
+        || existing.savedLaunch?.chatGptClientId !== clientId) {
         await this.emit({
           type: 'thread.error',
           sessionId,
@@ -170,8 +184,20 @@ export class ProviderRuntime {
     // Probe before creating, so a missing or signed-out CLI surfaces as the fix
     // ("run `codex login`") rather than as an opaque failure part-way through
     // the user's first turn. Probes run once per session, not once per turn.
+    let providerConfig
+    try {
+      providerConfig = store && savedLaunch ? await providerLaunchConfig(store, savedLaunch) : savedLaunch
+    }
+    catch {
+      await this.emit({
+        type: 'thread.error',
+        sessionId,
+        message: 'Could not prepare the private Codex directory for the selected ChatGPT plan.',
+      })
+      return null
+    }
     const launch = {
-      ...savedLaunch,
+      ...providerConfig,
       workspacePath,
       autoApprove: this.options.autoApprove,
       model: session?.model || undefined,

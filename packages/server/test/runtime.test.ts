@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { decode, encode } from '@harness/contract'
+import { ChatGptCredentialStore } from '@harness/drivers'
 import { derivedId } from '@harness/engine'
 import { addSavedProvider, removeSavedProvider } from '../src/provider-instances'
 import { serve } from '../src/server'
@@ -83,8 +84,12 @@ class Client {
     socket.onmessage = e => this.events.push(decode(new Uint8Array(e.data as ArrayBuffer)))
   }
 
-  static async connect(url: string): Promise<Client> {
-    const socket = new WebSocket(url)
+  static async connect(url: string, token?: string, origin?: string): Promise<Client> {
+    const headers = {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(origin ? { origin } : {}),
+    }
+    const socket = new WebSocket(url, { headers })
     await new Promise<void>((resolve, reject) => {
       socket.onopen = () => resolve()
       socket.onerror = () => reject(new Error('connect failed'))
@@ -105,6 +110,16 @@ class Client {
       const found = this.payloads(type)
       if (found.length > 0) return found[0]
       await new Promise(r => setTimeout(r, 10))
+    }
+    return null
+  }
+
+  async waitForRejection(id: string): Promise<unknown> {
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      const found = this.events.find(frame => frame?.t === 'rejected' && frame.id === id)
+      if (found) return found
+      await Bun.sleep(10)
     }
     return null
   }
@@ -328,6 +343,105 @@ describe('a turn drives the provider', () => {
     }
     finally {
       client.close()
+    }
+  })
+
+  it('runs the selected ChatGPT plan on the host and excludes it from paired clients', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const credentialsPath = join(dir, 'credentials')
+    using db = new Database(databasePath)
+    db.exec(`
+      CREATE TABLE profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+      CREATE TABLE provider_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER NOT NULL REFERENCES profiles(id), driver_kind TEXT,
+        binary_path TEXT, resolved_home TEXT, config TEXT, status TEXT
+      );
+    `)
+    const clientId = 'oaiapp_managed_fixture'
+    const token = 'fixture-managed-access-token'
+    const store = new ChatGptCredentialStore(credentialsPath, {
+      fetch: Object.assign(async () => Response.json({}), { preconnect() {} }),
+    })
+    await store.saveSession({
+      clientId,
+      subject: 'fixture-managed-account',
+      accessToken: token,
+      refreshToken: 'fixture-managed-refresh',
+      idToken: 'fixture-managed-id-token',
+      scopes: ['openid', 'resource.invoke', 'chatgpt.tokens.use.direct'],
+      expiresAt: Date.now() + 3_600_000,
+    })
+
+    const launched: DriverConfig[] = []
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    harness = await serve({
+      port, databasePath, remote: true, localTokenPath: join(dir, 'host-token'), chatGptCredentialDirectory: credentialsPath,
+      resolveDriver: kind => ({
+        ...driver,
+        kind,
+        async probe(config) {
+          const connected = await config.chatGptPlan?.connected()
+          return { status: connected === false ? 'unauthenticated' : 'ready' }
+        },
+        create(config) {
+          launched.push(config)
+          return driver.create(config)
+        },
+      }),
+    })
+    const access = harness.access!
+    const { code } = access.openPairing()
+    const paired = await access.redeem(code, 'Test Device')
+    if (!paired.ok) throw new Error('Fixture device pairing failed')
+    const host = await Client.connect(`ws://127.0.0.1:${port}/ws`, access.localToken)
+    const device = await Client.connect(`ws://127.0.0.1:${port}/ws`, paired.token)
+    const crossSite = await Client.connect(`ws://127.0.0.1:${port}/ws`, access.localToken, 'https://outside.example')
+    try {
+      const key = 'managed-project'
+      const workspaceId = derivedId(key)
+      await harness.engine.dispatch({ id: key, at: 1, command: { type: 'workspace.register', path: dir, trusted: true } })
+      const accountId = addSavedProvider(databasePath, workspaceId, { kind: 'codex', name: 'Fixture plan', chatGptClientId: clientId })
+      const pick = { type: 'session.create', workspaceId, driverKind: 'codex', providerInstanceId: accountId } as const
+      const catalog = (token: string) => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}`, {
+        headers: { authorization: `Bearer ${token}` },
+      }).then(res => res.json())
+      const listed = await catalog(access.localToken)
+      expect(listed.accounts).toEqual([{ id: accountId, kind: 'codex', name: 'Fixture plan', status: 'ready', auth: 'chatgpt' }])
+      expect(JSON.stringify(listed)).not.toContain(clientId)
+      expect((await catalog(paired.token)).accounts).toEqual([])
+
+      device.send({ t: 'dispatch', envelope: { id: 'device-create', at: 2, command: pick } })
+      expect(await device.waitForRejection('device-create')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })
+      crossSite.send({ t: 'dispatch', envelope: { id: 'cross-site-create', at: 2, command: pick } })
+      expect(await crossSite.waitForRejection('cross-site-create')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })
+      const creation = await harness.engine.dispatch({ id: 'host-create', at: 3, command: pick })
+      const sessionId = derivedId('host-create')
+      const command = { type: 'session.turn.start', sessionId, text: 'fixture prompt' }
+      device.send({ t: 'dispatch', envelope: { id: 'device-turn', at: 4, command } })
+      expect(await device.waitForRejection('device-turn')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })
+      expect(launched).toHaveLength(0)
+
+      host.send({ t: 'subscribe', sessionId })
+      host.send({ t: 'dispatch', envelope: { id: 'host-turn', at: 5, command } })
+      expect(await host.waitFor('turn.completed')).toBeTruthy()
+      expect(launched).toHaveLength(1)
+      expect(await launched[0]?.chatGptPlan?.accessToken()).toBe(token)
+      expect(launched[0]?.home).toStartWith(credentialsPath)
+      const persisted = JSON.stringify([creation, db.query('SELECT payload FROM events').all(), db.query('SELECT config FROM provider_instances').all()])
+      expect(persisted).not.toContain(token)
+      expect(persisted).not.toContain('fixture-managed-refresh')
+      expect(persisted).not.toContain('fixture-managed-account')
+
+      await store.signOut(clientId)
+      expect((await catalog(access.localToken)).accounts[0].status).toBe('unauthenticated')
+      host.send({ t: 'dispatch', envelope: { id: 'host-after-disconnect', at: 6, command } })
+      expect(await host.waitFor('session.failed')).toMatchObject({ message: expect.stringContaining('Reconnect the selected ChatGPT plan') })
+      expect(launched).toHaveLength(1)
+    }
+    finally {
+      host.close()
+      device.close()
+      crossSite.close()
     }
   })
 

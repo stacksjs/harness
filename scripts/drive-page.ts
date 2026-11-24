@@ -99,7 +99,10 @@ const driver: Driver = {
 const signedOutDriver: Driver = { ...driver, kind: 'codex', async probe() { return { status: 'unauthenticated' } } }
 
 const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
-const harness = await serve({ port, databasePath, scratchDirectory, resolveDriver: kind => kind === 'codex' ? signedOutDriver : driver })
+const harness = await serve({
+  port, databasePath, scratchDirectory, chatGptCredentialDirectory: join(driveRoot, 'credentials'),
+  resolveDriver: kind => kind === 'codex' ? signedOutDriver : driver,
+})
 const baseUrl = `http://localhost:${port}`
 const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
 if (screenshotDir) mkdirSync(screenshotDir, { recursive: true })
@@ -160,6 +163,7 @@ const settingsDb = new Database(databasePath)
 const saveProvider = settingsDb.query('INSERT INTO provider_instances (id, profile_id, driver_kind, config) VALUES (?, ?, ?, ?)')
 saveProvider.run(1, providerProfileId, 'claude', '{"name":"Work"}')
 saveProvider.run(2, providerProfileId, 'claude', '{"name":"Personal"}')
+saveProvider.run(3, providerProfileId, 'codex', '{"name":"Design Review","chatGptClientId":"oaiapp_browser_fixture"}')
 settingsDb.close()
 check('adds the folder and opens its untrusted workspace', harness.engine.current.workspaces.get(workspaceId)?.trusted === false
   && !(await page.locator('[data-composer]').isVisible()))
@@ -396,6 +400,9 @@ check('login shows only for the signed-out CLI', agentRows.length === 5
   && agentRows.filter(r => r.state === 'signed out' && r.loginShown).length === 1
   && agentRows.filter(r => r.state === 'ready' && !r.loginShown).length === 4)
 await page.getByRole('list', { name: 'Project provider accounts' }).getByText('Claude Code · Personal').waitFor()
+await page.getByRole('list', { name: 'Project provider accounts' }).getByText('ChatGPT plan · Design Review').waitFor()
+check('signed-out managed account offers host reconnection independently of Codex CLI',
+  await page.getByRole('list', { name: 'Project provider accounts' }).getByText('Reconnect on host').count() === 1)
 await capture('settings-provider-accounts')
 await page.click('[data-agent-row="codex"] [data-agent-login]')
 await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })

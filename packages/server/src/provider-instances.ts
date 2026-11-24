@@ -1,19 +1,25 @@
 import type { DriverKind } from '@harness/contract'
-import type { DriverConfig } from '@harness/drivers'
+import type { ChatGptCredentialStore, DriverConfig } from '@harness/drivers'
 import { providerConfigPath } from '@harness/drivers'
 import { Database } from 'bun:sqlite'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
-export type SavedProviderLaunch = Pick<DriverConfig, 'binaryPath' | 'home'>
+export type SavedProviderLaunch = Pick<DriverConfig, 'binaryPath' | 'home'> & { chatGptClientId?: string }
+
+export function chatGptCredentialDirectory(): string {
+  return join(homedir(), '.harness', 'credentials', 'chatgpt')
+}
 
 interface ProviderRow {
   binary_path: string | null
   resolved_home: string | null
+  config: string | null
 }
 
 interface ListedProviderRow extends ProviderRow {
   id: number
   driver_kind: DriverKind
-  config: string | null
 }
 
 interface ProviderAccountInput {
@@ -21,9 +27,12 @@ interface ProviderAccountInput {
   name: string
   binaryPath?: string
   home?: string
+  chatGptClientId?: string
 }
 
 function launchConfig(row: ProviderRow, workspacePath: string): SavedProviderLaunch {
+  const chatGptClientId = providerSettings(row).chatGptClientId
+  if (typeof chatGptClientId === 'string' && /^oaiapp_[\w-]+$/u.test(chatGptClientId)) return { chatGptClientId }
   const binary = row.binary_path?.trim()
   const home = row.resolved_home?.trim()
   return {
@@ -32,15 +41,35 @@ function launchConfig(row: ProviderRow, workspacePath: string): SavedProviderLau
   }
 }
 
-function accountName(row: ListedProviderRow): string {
-  if (row.config) {
-    try {
-      const name = JSON.parse(row.config)?.name
-      if (typeof name === 'string' && name.trim()) return name.trim().slice(0, 80)
-    }
-    catch { /* Older configurations have no display name. */ }
+function providerSettings(row: ProviderRow): { name?: unknown, chatGptClientId?: unknown } {
+  try {
+    const parsed = JSON.parse(row.config ?? '{}')
+    return parsed && typeof parsed === 'object' ? parsed : {}
   }
+  catch {
+    return {}
+  }
+}
+
+function accountName(row: ListedProviderRow): string {
+  const { name } = providerSettings(row)
+  if (typeof name === 'string' && name.trim()) return name.trim().slice(0, 80)
   return `Account ${row.id}`
+}
+
+export async function providerLaunchConfig(
+  store: ChatGptCredentialStore,
+  launch: SavedProviderLaunch,
+): Promise<Pick<DriverConfig, 'home' | 'binaryPath' | 'chatGptPlan'>> {
+  const { chatGptClientId, ...native } = launch
+  if (!chatGptClientId) return native
+  return {
+    home: await store.runtimeHome(chatGptClientId),
+    chatGptPlan: {
+      connected: () => store.connected(chatGptClientId),
+      accessToken: () => store.accessToken(chatGptClientId),
+    },
+  }
 }
 
 function hasProviderTable(db: Database): boolean {
@@ -64,7 +93,7 @@ export class SavedProviderInstances {
     if (!Number.isSafeInteger(instanceId) || instanceId <= 0) return null
 
     const row = this.table()?.query<ProviderRow, [number, number, DriverKind]>(
-      `SELECT binary_path, resolved_home FROM provider_instances
+      `SELECT binary_path, resolved_home, config FROM provider_instances
        WHERE id = ? AND profile_id = ? AND driver_kind = ?`,
     ).get(instanceId, profileId, driver)
     return row ? launchConfig(row, workspacePath) : null
@@ -94,6 +123,8 @@ export function addSavedProvider(
   if (!name || name.length > 80) throw new Error('Enter an account name from 1 to 80 characters.')
   if (input.binaryPath?.includes('\0') || input.home?.includes('\0'))
     throw new Error('Provider paths cannot contain a null character.')
+  if (input.chatGptClientId && (input.kind !== 'codex' || input.home || input.binaryPath || !/^oaiapp_[\w-]+$/u.test(input.chatGptClientId)))
+    throw new Error('Managed ChatGPT requires a valid registration and its own Codex settings.')
 
   using db = new Database(databasePath, { readwrite: true })
   db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000')
@@ -113,7 +144,8 @@ export function addSavedProvider(
       WHERE profile_id = ? AND driver_kind = ? ORDER BY id
     `).all(profileId, input.kind).find(row => accountName(row).toLowerCase() === name.toLowerCase())
     if (named) {
-      if (named.binary_path === binaryPath && named.resolved_home === home) return named.id
+      if (named.binary_path === binaryPath && named.resolved_home === home
+        && providerSettings(named).chatGptClientId === input.chatGptClientId) return named.id
       throw new Error('That account name already has different launch settings.')
     }
 
@@ -123,7 +155,7 @@ export function addSavedProvider(
     const result = db.query<{ id: number }, [number, DriverKind, string, string | null, string | null]>(`
       INSERT INTO provider_instances (profile_id, driver_kind, config, status, binary_path, resolved_home)
       VALUES (?, ?, ?, 'unknown', ?, ?) RETURNING id
-    `).get(profileId, input.kind, JSON.stringify({ name }), binaryPath, home)
+    `).get(profileId, input.kind, JSON.stringify({ name, chatGptClientId: input.chatGptClientId }), binaryPath, home)
     if (!result) throw new Error('Could not save the provider account.')
     return result.id
   }).immediate()

@@ -20,6 +20,7 @@ import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { codexEnvironment } from './account-environment'
+import { managedChatGptArgs, openManagedChatGptBroker } from './chatgpt/token-broker'
 import { probeBinary } from './cli-driver'
 import { EventQueue } from './event-queue'
 
@@ -189,6 +190,8 @@ export function usageOf(tokenUsage: any): { tokensIn: number, tokensOut: number 
 
 class CodexInstance implements ProviderInstance {
   private child: ChildProcessWithoutNullStreams | null = null
+  private broker: Awaited<ReturnType<typeof openManagedChatGptBroker>> | undefined
+  private generation = 0
   private nextId = 0
   private readonly pending = new Map<number | string, (frame: Frame) => void>()
   /** Approval id → the JSON-RPC request id Codex is blocking on. */
@@ -209,11 +212,31 @@ class CodexInstance implements ProviderInstance {
   private async ensureProcess(): Promise<ChildProcessWithoutNullStreams> {
     if (this.child) return this.child
 
-    const child = spawn(this.config.binaryPath ?? 'codex', ['app-server'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: this.config.workspacePath,
-      env: codexEnvironment(this.config),
-    }) as ChildProcessWithoutNullStreams
+    const generation = this.generation
+    const plan = this.config.chatGptPlan
+    const args = ['app-server']
+    if (plan) {
+      if (!this.config.home) throw new Error('The managed ChatGPT account has no private Codex directory.')
+      const broker = await openManagedChatGptBroker(plan.accessToken)
+      if (generation !== this.generation) {
+        await broker.close()
+        throw new Error('Codex app-server stopped.')
+      }
+      this.broker = broker
+      args.unshift(...managedChatGptArgs(broker.program, broker.args))
+    }
+    let child: ChildProcessWithoutNullStreams
+    try {
+      child = spawn(this.config.binaryPath ?? 'codex', args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: this.config.workspacePath,
+        env: codexEnvironment(this.config),
+      })
+    }
+    catch {
+      await this.closeBroker()
+      throw new Error('Could not start codex app-server.')
+    }
     this.child = child
 
     const read = createLineReader(line => this.onLine(line))
@@ -229,15 +252,19 @@ class CodexInstance implements ProviderInstance {
       this.finishRequests(message)
       this.queue?.finish({ type: 'error', message })
       child.kill()
+      void this.closeBroker().catch(() => {})
     }
     child.on('exit', code => onFailure(`codex app-server exited (${code})`))
     child.on('error', () => onFailure('Could not start codex app-server.'))
     child.stdin.on('error', () => onFailure('Codex app-server closed its input.'))
 
     const initialized = await this.request('initialize', {
-      clientInfo: { name: 'harness', title: 'harness', version: '0.1.0' },
+      clientInfo: { name: 'harness', title: 'Harness', version: '0.1.0' },
     })
-    if (initialized.error) throw new Error(initialized.error.message ?? 'Could not initialize codex app-server.')
+    if (initialized.error) {
+      await this.stop()
+      throw new Error(plan ? 'Could not initialize Codex for the ChatGPT plan.' : initialized.error.message ?? 'Could not initialize codex app-server.')
+    }
     this.notify('initialized', {})
     return child
   }
@@ -245,6 +272,18 @@ class CodexInstance implements ProviderInstance {
   private finishRequests(message: string): void {
     for (const resolve of this.pending.values()) resolve({ error: { message } })
     this.pending.clear()
+  }
+
+  private async closeBroker(): Promise<void> {
+    const broker = this.broker
+    this.broker = undefined
+    await broker?.close()
+  }
+
+  private providerError(message: unknown): string {
+    if (this.config.chatGptPlan)
+      return 'The ChatGPT plan turn failed. Check the connection and selected model, then try again.'
+    return readableError(message)
   }
 
   async readAccount(): Promise<ProbeResult> {
@@ -339,7 +378,7 @@ class CodexInstance implements ProviderInstance {
         return
 
       case 'error':
-        this.turnError = readableError(frame.params?.error?.message)
+        this.turnError = this.providerError(frame.params?.error?.message)
         return
 
       case 'turn/completed': {
@@ -347,7 +386,7 @@ class CodexInstance implements ProviderInstance {
         this.turnError = null
         this.turnId = null
         this.queue?.finish(error
-          ? { type: 'error', message: readableError(error) }
+          ? { type: 'error', message: this.providerError(error) }
           : { type: 'turn-complete', ...this.usage, costMicros: 0 })
         return
       }
@@ -406,7 +445,7 @@ class CodexInstance implements ProviderInstance {
     if (!this.threadId) {
       const started = await this.request('thread/start', threadStartParams(this.config))
       if (started.error) {
-        queue.finish({ type: 'error', message: started.error.message ?? 'thread/start failed' })
+        queue.finish({ type: 'error', message: this.providerError(started.error.message ?? 'thread/start failed') })
         return
       }
       this.threadId = started.result?.thread?.id ?? null
@@ -422,7 +461,7 @@ class CodexInstance implements ProviderInstance {
       input: [{ type: 'text', text: input.text }],
     })
     if (turn.error) {
-      queue.finish({ type: 'error', message: turn.error.message ?? 'turn/start failed' })
+      queue.finish({ type: 'error', message: this.providerError(turn.error.message ?? 'turn/start failed') })
       return
     }
     this.turnId = turn.result?.turn?.id ?? null
@@ -446,6 +485,7 @@ class CodexInstance implements ProviderInstance {
   }
 
   async stop(): Promise<void> {
+    this.generation++
     // Unblock Codex on anything it is still waiting for, so it can exit rather
     // than sit on a pipe we are about to close.
     for (const id of this.approvals.values()) this.respond(id, { decision: 'cancel' })
@@ -457,6 +497,7 @@ class CodexInstance implements ProviderInstance {
     this.turnId = null
     this.finishRequests('Codex app-server stopped.')
     child?.kill()
+    await this.closeBroker()
   }
 }
 
@@ -466,6 +507,12 @@ export const CodexDriver: Driver = {
   async probe(config: DriverConfig): Promise<ProbeResult> {
     const result = await probeBinary(config.binaryPath ?? 'codex')
     if (result.status !== 'ready') return result
+
+    if (config.chatGptPlan) {
+      return await config.chatGptPlan.connected()
+        ? result
+        : { ...result, status: 'unauthenticated', message: 'Reconnect the ChatGPT plan on this host.' }
+    }
 
     const account = await new CodexInstance(config).readAccount()
     return { ...result, ...account }
