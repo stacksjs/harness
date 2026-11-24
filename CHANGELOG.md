@@ -1,5 +1,17 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.4...v0.0.5)
+
+## ✨ Features
+
+- **settings**: persist appearance before hydration ([43598fd](https://github.com/stacksjs/harness/commit/43598fd)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **threads**: start and keep sessions without a project ([6d9bbe6](https://github.com/stacksjs/harness/commit/6d9bbe6)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **threads**: search titles and messages by profile ([0f83167](https://github.com/stacksjs/harness/commit/0f83167)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.3...v0.0.4)
 
 ## ✨ Features
