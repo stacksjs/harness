@@ -29,6 +29,7 @@ export interface ViewProps {
   }>
   activeProfile: string
   draftWorkspace: ProjectSummary | null
+  draftWithoutProject: boolean
   activeSession: unknown
   /**
    * Paired devices, for the settings sheet's Access section. The token hash
@@ -70,6 +71,7 @@ export function viewProps(state: HarnessState, options: {
    */
   profileId?: number
   workspaceId?: number
+  withoutProject?: boolean
   serverUrl: string
   codecUrl?: string
   remoteEnabled?: boolean
@@ -98,7 +100,7 @@ export function viewProps(state: HarnessState, options: {
       // projection did not carry them — so every Arc space rendered blue.
       icon: profile.icon || undefined,
       tint: profile.tint || undefined,
-      workspaces: workspaces.map(w => ({
+      workspaces: workspaces.filter(w => !w.scratch).map(w => ({
         id: w.id,
         // The last path segment reads better in a tile than the absolute path.
         name: basename(w.path) || w.path,
@@ -113,7 +115,8 @@ export function viewProps(state: HarnessState, options: {
   const selectedProfile = profiles.find(p => p.id === (requestedWorkspace?.profileId ?? options.profileId))
     ?? profiles.find(p => active && p.sessions.some(session => session.id === active.id))
     ?? profiles[0]
-  const draftWorkspace = selectedProfile?.workspaces.find(w => w.id === requestedWorkspace?.id)
+  const draftWithoutProject = !active && options.withoutProject === true
+  const draftWorkspace = draftWithoutProject ? null : selectedProfile?.workspaces.find(w => w.id === requestedWorkspace?.id)
     ?? selectedProfile?.workspaces.find(w => w.id === active?.workspaceId)
     ?? selectedProfile?.workspaces.find(w => w.trusted)
     ?? selectedProfile?.workspaces[0]
@@ -129,6 +132,7 @@ export function viewProps(state: HarnessState, options: {
     remoteEnabled: options.remoteEnabled === true,
     activeProfile: String(selectedProfile?.id ?? ''),
     draftWorkspace,
+    draftWithoutProject,
     activeSession: active
       ? {
           id: active.id,
@@ -142,6 +146,7 @@ export function viewProps(state: HarnessState, options: {
           // For the terminal: a shell opens in the session's workspace, and
           // the island should not have to reverse-engineer it from the DOM.
           workspaceId: active.workspaceId,
+          scratch: state.workspaces.get(active.workspaceId)?.scratch === true,
           // Rendered server-side so a decision survives the client that raised
           // it. Previously an approval only reached whichever browser happened
           // to be connected when it fired, and the turn waited forever if that

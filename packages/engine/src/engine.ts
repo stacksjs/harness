@@ -52,7 +52,7 @@ export interface EngineOptions {
   /** Rejects commands a client is not allowed to send. Defaults to the contract's allowlist. */
   isClientAllowed?: (type: string) => boolean
   /** Resolve host inputs for a new client command. Retries use their original receipt. */
-  prepareClientCommand?: (command: Command) => Promise<Command>
+  prepareClientCommand?: (command: Command, envelope: CommandEnvelope) => Promise<Command>
 }
 
 export class Engine {
@@ -129,7 +129,7 @@ export class Engine {
     if (existing !== null)
       return { events: existing, replayed: true }
 
-    const command = prepare ? await prepare(envelope.command) : envelope.command
+    const command = prepare ? await prepare(envelope.command, envelope) : envelope.command
     const produced = this.options.reducer(this.state, command, { ...envelope, command })
     const events = await this.options.store.commitCommand({ commandId: envelope.id, at: envelope.at }, produced)
 

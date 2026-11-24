@@ -15,7 +15,7 @@
  */
 import type { Driver, ProviderEvent, ProviderInstance } from '../packages/drivers/src/types'
 import { execFileSync, execSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -43,6 +43,7 @@ process.env.PATH = `${fixtureBin}:${process.env.PATH ?? ''}`
 const driveRoot = mkdtempSync(join(tmpdir(), 'harness-page-drive-'))
 const dir = join(driveRoot, 'notes-app')
 const secondProject = join(driveRoot, 'docs-site')
+const scratchDirectory = join(driveRoot, 'scratch')
 mkdirSync(dir)
 mkdirSync(secondProject)
 writeFileSync(join(dir, 'notes.txt'), 'original\n')
@@ -73,8 +74,9 @@ const script: ProviderEvent[] = [
   { type: 'turn-complete', tokensIn: 5, tokensOut: 3, costMicros: 0 },
 ]
 const instance: ProviderInstance = {
-  async *startTurn() {
+  async *startTurn(input) {
     for (const event of script) {
+      if (event.type === 'approval-request' && input.text !== 'run the drive turn') continue
       // A beat before the first token, so the thinking indicator has a
       // deterministic window to be seen in.
       if (event.type === 'assistant-delta') await new Promise(r => setTimeout(r, 300))
@@ -86,11 +88,18 @@ const instance: ProviderInstance = {
   async respondApproval(_id, allow) { if (allow) releaseGate() },
   async stop() {},
 }
-const driver: Driver = { kind: 'claude', async probe() { return { status: 'ready' } }, async create() { return instance } }
+const driver: Driver = {
+  kind: 'claude',
+  async probe() { return { status: 'ready' } },
+  async create(config) {
+    if (config.workspacePath.startsWith(`${scratchDirectory}/`)) writeFileSync(join(config.workspacePath, 'kept.txt'), 'scratch fixture')
+    return instance
+  },
+}
 const signedOutDriver: Driver = { ...driver, kind: 'codex', async probe() { return { status: 'unauthenticated' } } }
 
 const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
-const harness = await serve({ port, databasePath, resolveDriver: kind => kind === 'codex' ? signedOutDriver : driver })
+const harness = await serve({ port, databasePath, scratchDirectory, resolveDriver: kind => kind === 'codex' ? signedOutDriver : driver })
 const baseUrl = `http://localhost:${port}`
 const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
 if (screenshotDir) mkdirSync(screenshotDir, { recursive: true })
@@ -120,6 +129,12 @@ page.on('pageerror', e => pageErrors.push(e.message))
 await page.goto(baseUrl)
 await page.setViewportSize({ width: 1280, height: 800 })
 await capture('onboarding-desktop')
+await page.locator('[data-start-without-project]').click()
+await page.waitForURL('**/?project=none')
+await page.locator('[data-composer]').waitFor({ state: 'visible', timeout: 4000 })
+check('a blank database offers a projectless draft before touching disk', harness.engine.current.profiles.size === 0 && !existsSync(scratchDirectory))
+await capture('projectless-draft-desktop')
+await page.goto(baseUrl)
 await page.locator('[data-first-project]').click()
 await page.locator('[data-project-dialog]').waitFor({ state: 'visible' })
 check('folder input receives focus and browser hides native browse', await page.locator('[data-project-path]').evaluate(el => el === document.activeElement)
@@ -455,6 +470,29 @@ check('arrow keys select the next matching thread', selectedResult === 'true')
 await threadSearch.press('Enter')
 await page.waitForURL(url => url.pathname === `/s/${sessionId}` && url.hash.startsWith('#turn-'), { timeout: 8000 })
 check('search opens the matching turn', await page.evaluate(() => Boolean(document.getElementById(location.hash.slice(1)))))
+
+await page.keyboard.press('Control+Alt+n')
+await page.waitForURL(url => url.searchParams.get('project') === 'none', { timeout: 8000 })
+check('projectless draft keeps the profile and offers its registered projects', await page.locator('[data-draft-project]').inputValue() === 'none'
+  && await page.locator('[data-draft-project] option').count() === 3)
+await capture('projectless-draft-mobile')
+await page.fill('[data-prompt]', 'write scratch fixture')
+await page.click('[data-send]')
+await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
+await page.waitForFunction(() => (document.querySelector('[data-transcript]')?.textContent ?? '').includes('done.'), undefined, { timeout: 8000 })
+const scratchSessionId = Number(new URL(page.url()).pathname.split('/').at(-1))
+const scratch = harness.engine.current.workspaces.get(scratchSessionId)
+check('the first projectless prompt uses its own scratch folder and hides Changes', Boolean(scratch?.scratch
+  && scratch.profileId === providerProfileId && readFileSync(join(scratch.path, 'kept.txt'), 'utf8') === 'scratch fixture'
+  && await page.locator('[data-diff-toggle]').count() === 0))
+await capture('projectless-thread-mobile')
+await workspaceActions.click()
+await page.getByRole('button', { name: 'Turn into project' }).click()
+await page.locator('[data-diff-toggle]').waitFor({ state: 'attached', timeout: 4000 })
+check('turning a scratch folder into a project keeps the session and files in place', Boolean(scratch
+  && !harness.engine.current.workspaces.get(scratchSessionId)?.scratch
+  && harness.engine.current.sessions.get(scratchSessionId)?.workspaceId === scratchSessionId
+  && readFileSync(join(scratch.path, 'kept.txt'), 'utf8') === 'scratch fixture'))
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

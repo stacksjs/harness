@@ -30,6 +30,7 @@ export type ClientCommand =
       isolate?: boolean
       providerInstanceId?: number
     }
+  | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string }
   | { type: 'session.turn.start', sessionId: number, text: string }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
@@ -62,6 +63,7 @@ export type ClientCommand =
   | { type: 'mcp.setEnabled', profileId: number, name: string, enabled: boolean }
   | { type: 'workspace.add', profileId: number, path: string, name?: string }
   | { type: 'workspace.register', profileId?: number, path: string, trusted: boolean }
+  | { type: 'workspace.promote', workspaceId: number }
   | { type: 'workspace.trust', workspaceId: number, trusted: boolean }
   /**
    * Withdraw a paired device's access.
@@ -81,6 +83,7 @@ export type ClientCommand =
  * authorisation to forge assistant text.
  */
 export type InternalCommand =
+  | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string }
   | { type: 'thread.message.assistant.delta', sessionId: number, turnId: number, text: string }
   | { type: 'thread.message.assistant.complete', sessionId: number, turnId: number }
   | { type: 'thread.tool.call.begin', sessionId: number, turnId: number, callId: string, toolName: string, args: unknown }
@@ -109,6 +112,7 @@ export type CommandType = Command['type']
 
 const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>([
   'session.create',
+  'session.scratch.create',
   'session.turn.start',
   'session.turn.interrupt',
   'session.approval.respond',
@@ -123,6 +127,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'profile.delete',
   'workspace.add',
   'workspace.register',
+  'workspace.promote',
   'workspace.trust',
   'device.revoke',
 ])

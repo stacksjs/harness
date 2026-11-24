@@ -134,6 +134,7 @@ export interface WorkspaceState {
   profileId: number
   path: string
   trusted: boolean
+  scratch?: boolean
 }
 
 /**
@@ -248,12 +249,19 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         profileId: p.profileId,
         path: p.path,
         trusted: false,
+        ...(p.scratch ? { scratch: true } : {}),
       })
       const profile = state.profiles.get(p.profileId)
       // Idempotent on the profile side too: replaying must not double-list a
       // workspace, and `apply` is called again on every replay.
       if (profile && !profile.workspaceIds.includes(p.workspaceId))
         profile.workspaceIds.push(p.workspaceId)
+      break
+    }
+
+    case 'workspace.promoted': {
+      const workspace = state.workspaces.get(p.workspaceId)
+      if (workspace) delete workspace.scratch
       break
     }
 

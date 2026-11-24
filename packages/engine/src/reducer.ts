@@ -261,6 +261,42 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'workspace.promote': {
+      const workspace = state.workspaces.get(command.workspaceId)
+      if (!workspace) throw new InvalidCommand('This workspace is no longer available.')
+      if (!workspace.scratch) return []
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: { type: 'workspace.promoted', workspaceId: command.workspaceId },
+      }]
+    }
+
+    case 'session.scratch.create':
+      throw new InvalidCommand('A projectless session needs a host scratch folder.')
+
+    case 'thread.scratch.create': {
+      const existingProfile = command.profileId ?? state.profiles.keys().next().value
+      const sessionId = derivedId(commandId)
+      const profileId = existingProfile ?? sessionId
+      if (existingProfile !== undefined && !state.profiles.has(existingProfile))
+        throw new InvalidCommand('This profile is no longer available.')
+      if (state.sessions.has(sessionId) || state.workspaces.has(sessionId))
+        throw new InvalidCommand('This session ID is already in use.')
+
+      const event = { sessionId: GLOBAL_SESSION_ID, commandId, at }
+      const events: AppendableEvent[] = []
+      if (existingProfile === undefined)
+        events.push({ ...event, payload: { type: 'profile.created', profileId, name: 'Projects' } })
+      events.push(
+        { ...event, payload: { type: 'workspace.added', workspaceId: sessionId, profileId, path: command.path, scratch: true } },
+        { ...event, payload: { type: 'workspace.trust-changed', workspaceId: sessionId, trusted: true } },
+        { ...event, sessionId, payload: { type: 'session.created', workspaceId: sessionId, driverKind: command.driverKind } },
+      )
+      return events
+    }
+
     case 'session.create': {
       const workspace = state.workspaces.get(command.workspaceId)
       if (!workspace)

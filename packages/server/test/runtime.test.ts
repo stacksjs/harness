@@ -164,6 +164,70 @@ afterEach(() => {
 })
 
 describe('a turn drives the provider', () => {
+  it('creates projectless threads on an empty profile and keeps separate host folders', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const scratchDirectory = join(dir, 'scratch')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    harness = await serve({
+      port,
+      databasePath,
+      scratchDirectory,
+      resolveDriver: () => ({
+        ...driver,
+        create(config) {
+          writeFileSync(join(config.workspacePath, 'kept.txt'), 'fixture')
+          return driver.create(config)
+        },
+      }),
+    })
+    const envelope = {
+      id: 'scratch-first', at: 1,
+      command: { type: 'session.scratch.create', driverKind: 'claude', label: '../write scratch file' },
+    } as const
+    const first = await harness.engine.dispatch(envelope)
+    const sessionId = derivedId(envelope.id)
+    const workspace = harness.engine.current.workspaces.get(sessionId)!
+    expect(workspace).toMatchObject({ id: sessionId, profileId: sessionId, scratch: true, trusted: true })
+    expect(workspace.path).toMatch(new RegExp(`^${RegExp.escape(scratchDirectory)}/[^/]*write-scratch-file-`))
+    expect(existsSync(scratchDirectory)).toBe(false)
+    const replayed = await harness.engine.dispatch({ ...envelope, command: { ...envelope.command, label: 'different' } })
+    expect(replayed).toEqual({ ...first, replayed: true })
+
+    const second = { ...envelope, id: 'scratch-second', command: { ...envelope.command, profileId: sessionId } }
+    await harness.engine.dispatch(second)
+    expect(harness.engine.current.workspaces.get(derivedId(second.id))?.path).not.toBe(workspace.path)
+    expect(harness.engine.current.profiles.size).toBe(1)
+    await expect(harness.engine.dispatch({
+      ...envelope,
+      id: 'client-cannot-set-host-path',
+      command: { type: 'thread.scratch.create', driverKind: 'claude', path: dir },
+    })).rejects.toThrow('not client-dispatchable')
+
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    try {
+      client.send({ t: 'subscribe', sessionId })
+      client.send({ t: 'dispatch', envelope: {
+        id: 'scratch-turn', at: 2, command: { type: 'session.turn.start', sessionId, text: 'write the fixture' },
+      } })
+      expect(await client.waitFor('turn.completed')).toBeTruthy()
+      expect(readFileSync(join(workspace.path, 'kept.txt'), 'utf8')).toBe('fixture')
+    }
+    finally {
+      client.close()
+    }
+    harness.stop()
+    harness = await serve({ port, databasePath, scratchDirectory, resolveDriver: () => driver })
+    expect(harness.engine.current.workspaces.get(sessionId)).toEqual(workspace)
+    expect(readFileSync(join(workspace.path, 'kept.txt'), 'utf8')).toBe('fixture')
+    await harness.engine.dispatch({
+      id: 'scratch-promote', at: 3, command: { type: 'workspace.promote', workspaceId: sessionId },
+    })
+    const promoted = harness.engine.current.workspaces.get(sessionId)
+    expect(promoted).toEqual({ id: sessionId, profileId: sessionId, path: workspace.path, trusted: true })
+    expect(harness.engine.current.sessions.get(sessionId)?.workspaceId).toBe(sessionId)
+    expect(readFileSync(join(workspace.path, 'kept.txt'), 'utf8')).toBe('fixture')
+  })
+
   it('uses only the selected project account for provider status and launch', async () => {
     const databasePath = join(dir, 'test.sqlite')
     const profileId = derivedId('configured-profile')

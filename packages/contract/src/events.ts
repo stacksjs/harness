@@ -80,7 +80,8 @@ export type EventPayload =
     }
   | { type: 'mcp.removed', profileId: number, name: string }
   | { type: 'mcp.enabledChanged', profileId: number, name: string, enabled: boolean }
-  | { type: 'workspace.added', workspaceId: number, profileId: number, path: string }
+  | { type: 'workspace.added', workspaceId: number, profileId: number, path: string, scratch?: boolean }
+  | { type: 'workspace.promoted', workspaceId: number }
   | { type: 'workspace.trust-changed', workspaceId: number, trusted: boolean }
   | { type: 'device.paired', deviceId: string, name: string, tokenHash: string, at: number }
   | { type: 'device.revoked', deviceId: string }
@@ -103,6 +104,7 @@ const GLOBAL_EVENT_TYPES: ReadonlySet<string> = new Set<EventType>([
   'profile.updated',
   'profile.deleted',
   'workspace.added',
+  'workspace.promoted',
   'workspace.trust-changed',
 ])
 

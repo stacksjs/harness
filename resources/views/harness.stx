@@ -16,6 +16,7 @@ export const sessions = $props.sessions || []
 export const activeProfile = $props.activeProfile || (profiles[0] && profiles[0].id) || ''
 export const activeSession = $props.activeSession || null
 export const draftProject = $props.draftWorkspace || null
+export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
 // The browser CBOR bundle. Empty when the server could not build one, which
 // costs the page its live updates but not its rendered transcript.
@@ -87,7 +88,7 @@ function toItem(session) {
 
 export const hasProfiles = profiles.length > 0
 export const turns = activeSession ? activeSession.turns : []
-export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : draftProject?.name || 'Harness'
+export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : draftProject?.name || (draftWithoutProject ? 'New session' : 'Harness')
 export const sessionState = activeSession ? activeSession.state : 'idle'
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
@@ -96,7 +97,8 @@ export const sessionProviderInstanceId = activeSession?.providerInstanceId ?? nu
 export const promptPlaceholder = activeSession ? 'Ask the agent…' : 'Type here to start a new session…'
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
-export const canCompose = Boolean(activeSession || draftProject?.trusted)
+export const activeScratchSession = activeSession?.scratch === true
+export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
 export const profileProjects = Object.fromEntries(profiles.map(profile => {
   const projects = profile.workspaces || []
   return [String(profile.id), projects.find(workspace => workspace.trusted) || projects[0] || null]
@@ -180,7 +182,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           title="This session runs in its own worktree on {{ sessionBranch }}"
         >{{ sessionBranch }}</span>
       @endif
-      @if(draftProject || activeSession)
+      @if(draftProject || activeSession || draftWithoutProject)
       <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="workspaceActionsOpen() ? 'true' : 'false'">
         <span class="inline-block size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
       </button>
@@ -190,7 +192,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           Changes sit behind a toggle rather than always-on. Reading a repository
           costs a subprocess, and most page loads never look at the diff.
         --}}
-        @if(activeSession)
+        @if(activeSession && !activeSession.scratch)
         <button
           type="button"
           data-diff-toggle
@@ -206,7 +208,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             <span data-workspace-action-label>Terminal</span>
           </button>
         @endif
-        @if(draftProject || activeSession)
+        @if(activeScratchSession)
+          <button type="button" data-promote-scratch @click="promoteScratchProject" :disabled="projectBusy()" class="px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Turn into project</button>
+        @endif
+        @if(draftProject || activeSession || draftWithoutProject)
         <button type="button" data-project-add @click="openProjectPicker" class="flex gap-1.5 items-center shrink-0 px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15" aria-label="Add project" title="Add project">
           <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
           <span>Add project</span>
@@ -272,6 +277,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
           @if(activeSession)
             <p class="text-[14px] font-medium">Start the conversation</p>
             <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Send a prompt to the agent below.</p>
+          @elseif(draftWithoutProject)
+            <h1 class="font-semibold text-[20px]">New session</h1>
+            <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Files from this session stay in a new scratch folder on the host.</p>
           @elseif(draftProject && draftProject.trusted)
             <p class="text-[16px] font-semibold">Start a session in {{ draftProject.name }}</p>
             <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Choose an agent and send your first message.</p>
@@ -283,13 +291,15 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
             <h1 class="text-[20px] font-semibold">Open a project</h1>
             <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Add a folder from the host to start working with an agent.</p>
             <button type="button" data-first-project @click="openProjectPicker" class="mt-2 px-4 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
+            <button type="button" data-start-without-project @click="startWithoutProject" class="px-3 h-9 text-[13px] underline underline-offset-4">Start without a project</button>
           @endif
-          @if(!activeSession && draftProjectChoices.length > 1)
+          @if(!activeSession && draftProjectChoices.length)
             <label class="flex gap-2 items-center mt-4 text-[12px] text-neutral-600 dark:text-neutral-300">
-              Workspace
+              Project
               <select data-draft-project @change="chooseProject" class="px-2 h-8 max-w-[190px] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-[6px] dark:border-white/20">
+                <option value="none" @if(draftWithoutProject)selected@endif>No project</option>
                 @foreach(draftProjectChoices as workspace)
-                  <option value="{{ workspace.id }}" @if(workspace.id === draftProject.id)selected@endif>{{ workspace.name }}</option>
+                  <option value="{{ workspace.id }}" @if(workspace.id === draftProject?.id)selected@endif>{{ workspace.name }}</option>
                 @endforeach
               </select>
             </label>
@@ -1098,9 +1108,33 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     }
   }
 
+  async function promoteScratchProject() {
+    if (!activeScratchSession || projectBusy()) return
+    projectBusy.set(true)
+    try {
+      await sendCommand({ type: 'workspace.promote', workspaceId: Number(activeWorkspaceId) })
+      refresh()
+    }
+    catch (error) {
+      stxAlert(error.message || 'Could not turn this folder into a project.')
+    }
+    finally {
+      projectBusy.set(false)
+    }
+  }
+
   function chooseProject(event) {
+    if (event.currentTarget.value === 'none') {
+      startWithoutProject()
+      return
+    }
     const id = Number(event.currentTarget.value)
     if (id) navigate(`/?workspace=${id}`)
+  }
+
+  function startWithoutProject() {
+    const profile = Number(activeProfile)
+    navigate(profile ? `/?profile=${profile}&project=none` : '/?project=none')
   }
 
   function openDraft(profileId) {
@@ -1245,7 +1279,12 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if (await stxConfirm(`Start a new session with ${label} in this workspace?`)) {
       try {
         const commandId = newCommandId()
-        await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), ...choice }, commandId)
+        if (activeScratchSession) {
+          await sendCommand({ type: 'session.scratch.create', profileId: Number(activeProfile), driverKind: choice.driverKind, label: '' }, commandId)
+        }
+        else {
+          await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), ...choice }, commandId)
+        }
         navigate(`/s/${derivedSessionId(commandId)}`)
       }
       catch (error) {
@@ -1651,14 +1690,20 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     // the convention every LLM surface follows. The text rides sessionStorage
     // across the navigation and sends itself on arrival.
     if (!sessionId) {
-      if (!draftProject?.trusted) return
+      if (!draftProject?.trusted && !draftWithoutProject) return
       startPending.set(true)
       const commandId = newCommandId()
       try {
         const picker = driverPickerRef.current
         if (picker?.selectedOptions[0]?.disabled) throw new Error('Choose an available agent to start this session.')
         const choice = agentChoice(picker?.value || defaultDriver())
-        await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice }, commandId)
+        if (draftWithoutProject) {
+          const profileId = Number(activeProfile) || undefined
+          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text }, commandId)
+        }
+        else {
+          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice }, commandId)
+        }
         sessionStorage.setItem('harness.pendingPrompt', text)
         navigate(`/s/${derivedSessionId(commandId)}`)
       }
@@ -1845,6 +1890,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && Number(activeProfile)) {
       event.preventDefault()
       openThreadSearch()
+      return
+    }
+    if ((event.metaKey || event.ctrlKey) && event.altKey && event.code === 'KeyN') {
+      event.preventDefault()
+      startWithoutProject()
       return
     }
     if (!(event.ctrlKey && event.key === '`')) return

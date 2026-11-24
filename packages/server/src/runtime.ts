@@ -19,6 +19,7 @@ import { resolveDriver } from '@harness/drivers'
 import { capture, restore } from './checkpoint'
 import { missingReferences, resolveForDriver } from './mcp'
 import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
+import { openScratchWorkspace } from './scratch-workspace'
 import * as worktree from './worktree'
 
 export interface RuntimeOptions {
@@ -140,6 +141,16 @@ export class ProviderRuntime {
     if (!workspacePath) {
       await this.emit({ type: 'thread.error', sessionId, message: 'session has no workspace path' })
       return null
+    }
+
+    if (workspace?.scratch) {
+      try {
+        await openScratchWorkspace(workspacePath)
+      }
+      catch {
+        await this.emit({ type: 'thread.error', sessionId, message: 'Could not open the scratch folder for this session.' })
+        return null
+      }
     }
 
     // A workspace can be renamed, unmounted, or cleaned up by the OS between

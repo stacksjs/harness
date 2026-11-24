@@ -28,7 +28,7 @@ export function searchThreads(state: HarnessState, profileId: number, query: str
     const workspace = state.workspaces.get(session.workspaceId)
     if (workspace?.profileId !== profileId) continue
     const title = threadTitle(session)
-    const project = basename(workspace.path) || workspace.path
+    const project = workspace.scratch ? 'No project' : basename(workspace.path) || workspace.path
     const thread = { id: session.id, title, project }
     if (matchesAll([title, project, session.branch].join(' '))) {
       threads.push(thread)

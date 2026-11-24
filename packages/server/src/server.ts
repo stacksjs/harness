@@ -11,8 +11,8 @@ import type { CommandEnvelope, DriverKind } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver, DriverConfig, ProbeResult } from '@harness/drivers'
 import { access as checkAccess, constants, realpath, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { isAbsolute } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { isAbsolute, join, resolve } from 'node:path'
 import { driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode } from '@harness/contract'
@@ -25,6 +25,7 @@ import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
 import { SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
+import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
 import { searchThreads } from './thread-search'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
@@ -33,6 +34,8 @@ export interface ServeOptions {
   port?: number
   hostname?: string
   databasePath?: string
+  /** Host-owned storage for projectless sessions. */
+  scratchDirectory?: string
   /** Injectable so tests bind a fake driver instead of spawning a real agent. */
   resolveDriver?: (kind: DriverKind) => Driver | null
   /**
@@ -157,16 +160,30 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
   // After the bind check, so a refused start leaves no database behind.
   const databasePath = options.databasePath ?? 'database/stacks.sqlite'
+  const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
   const savedProviders = new SavedProviderInstances(databasePath)
   const engine = new Engine({
     store,
     reducer: reduce,
-    async prepareClientCommand(command) {
+    async prepareClientCommand(command, envelope) {
+      if (command.type === 'session.scratch.create') {
+        if (!driverKinds().includes(command.driverKind)) throw new Error('Choose an available agent to start this session.')
+        return {
+          type: 'thread.scratch.create',
+          profileId: command.profileId,
+          driverKind: command.driverKind,
+          path: scratchWorkspacePath(scratchDirectory, envelope.id, command.label),
+        }
+      }
       if (command.type === 'session.create' && command.providerInstanceId !== undefined) {
         const workspace = engine.current.workspaces.get(command.workspaceId)
         if (!workspace || !savedProviders.find(command.providerInstanceId, workspace.profileId, command.driverKind, workspace.path))
           throw new Error('The selected provider account is unavailable for this project.')
+      }
+      if (command.type === 'workspace.promote') {
+        const workspace = engine.current.workspaces.get(command.workspaceId)
+        if (workspace?.scratch) await openScratchWorkspace(workspace.path)
       }
       if (command.type !== 'workspace.register') return command
       if (typeof command.trusted !== 'boolean')
@@ -515,6 +532,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           send(socket, { t: 'term-error', message: `no workspace ${frame.workspaceId}` })
           return
         }
+        if (workspace.scratch) {
+          try {
+            await openScratchWorkspace(workspace.path)
+          }
+          catch {
+            send(socket, { t: 'term-error', message: 'Could not open the scratch folder.' })
+            return
+          }
+        }
         const termId = ++lastTermId
         const cols = frame.cols ?? 80
         const rows = frame.rows ?? 24
@@ -713,12 +739,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // should not fork ten processes.
       if (url.pathname === '/drivers') {
         const workspace = engine.current.workspaces.get(Number(url.searchParams.get('workspace')))
-        const workspacePath = workspace?.trusted ? workspace.path : tmpdir()
+        const workspacePath = workspace?.trusted && !workspace.scratch ? workspace.path : tmpdir()
         const drivers = Promise.all(driverKinds().map(async kind => ({
           kind,
           ...await probeDriver(kind, { workspacePath }),
         })))
-        const accounts = workspace?.trusted
+        const accounts = workspace?.trusted && !workspace.scratch
           ? Promise.all(savedProviders.list(workspace.profileId, workspace.path).map(async ({ id, kind, name, launch }) => ({
               id,
               kind,
@@ -751,6 +777,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // space's rows rather than the client rebuilding them.
           profileId: Number(url.searchParams.get('profile')) || undefined,
           workspaceId: Number(url.searchParams.get('workspace')) || undefined,
+          withoutProject: url.searchParams.get('project') === 'none',
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,
           remoteEnabled: access !== null,
