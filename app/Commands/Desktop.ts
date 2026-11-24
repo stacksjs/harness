@@ -30,7 +30,7 @@ function resolveCraft(explicit?: string): string | null {
     join(homedir(), 'Documents/Projects/craft/packages/zig/zig-out/bin/craft'),
     join(homedir(), 'Code/Tools/craft/packages/zig/zig-out/bin/craft'),
   ].filter((c): c is string => Boolean(c))
-  return candidates.find(c => existsSync(c)) ?? null
+  return candidates.find(c => existsSync(c)) ?? Bun.which('craft')
 }
 
 export default function (cli: CLI) {

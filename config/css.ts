@@ -16,6 +16,35 @@ import { TERMINAL_CSS } from '@harness/ansi'
  */
 const HIDDEN_PIN = '[hidden] { display: none !important; }'
 
+const RESPONSIVE_SHELL = `
+[data-sidebar-toggle], [data-sidebar-scrim] { display: none; }
+[data-composer] { width: 100%; max-width: 820px; margin-inline: auto; }
+[data-transcript] > [data-turn], [data-transcript] > [data-approval] {
+  max-width: 788px; margin-inline: auto;
+}
+@media (max-width: 767px) {
+  [data-sidebar-toggle] {
+    display: grid; place-items: center; flex: 0 0 32px; height: 32px;
+    border-radius: 6px;
+  }
+  [data-harness-sidebar] { display: none; }
+  [data-harness-sidebar][data-open="true"] {
+    display: block; position: fixed; inset-block: 0; inset-inline-start: 0; z-index: 65;
+    width: min(250px, 85vw); background: var(--harness-sidebar-surface, #fafafa);
+  }
+  .dark [data-harness-sidebar] { --harness-sidebar-surface: #171717; }
+  [data-sidebar-scrim] { display: block; position: fixed; inset: 0; z-index: 64; background: rgb(0 0 0 / 45%); }
+  [data-session-state][data-state="idle"], [data-session-driver] { display: none; }
+  [data-composer] {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  [data-prompt] { grid-column: 1 / -1; }
+  [data-driver-picker] { justify-self: start; }
+  section[data-terminal] { max-height: calc(100dvh - 175px); bottom: 128px; }
+}
+`
+
 /**
  * Tool-call rows. Three states, three colours: running, succeeded, failed —
  * a tool that is still going must not look like one that finished, or a hung
@@ -53,9 +82,8 @@ const THINKING_DOTS = `
  * The terminal. One dark scheme regardless of page theme — a terminal is its
  * own surface, and shells assume a dark ground. The 16-color palette is the
  * app's token set for the t-fg-N and t-bg-N classes from `@harness/ansi`
- * (whose own rules are the preflight below this one). The toggle sits above
- * the composer bar — at the corner it sat on top of Send and swallowed its
- * clicks (caught by the page drive).
+ * (whose own rules are the preflight below this one). The toggle lives in the
+ * toolbar so it leaves space for the composer at phone widths.
  */
 const TERMINAL_PANEL = `
 .terminal-panel {
@@ -78,11 +106,8 @@ const TERMINAL_PANEL = `
   color: #d7dae0; white-space: pre;
 }
 .terminal-toggle {
-  position: fixed; right: 16px; bottom: 74px; z-index: 61;
-  width: 38px; height: 34px; border-radius: 8px;
-  background: #16181f; color: #d7dae0;
-  border: 1px solid rgb(255 255 255 / 14%);
-  font: 12px ui-monospace, monospace; cursor: pointer;
+  display: grid; place-items: center; flex: 0 0 32px; height: 32px;
+  border-radius: 6px; cursor: pointer;
 }
 /* The measuring ruler: laid out in the host's font so its box is the truth
   about cell size, but invisible and out of flow. */
@@ -101,6 +126,7 @@ export default {
   ],
   preflights: [
     { getCSS: () => HIDDEN_PIN },
+    { getCSS: () => RESPONSIVE_SHELL },
     { getCSS: () => TOOL_DOT },
     { getCSS: () => THINKING_DOTS },
     { getCSS: () => TERMINAL_PANEL },

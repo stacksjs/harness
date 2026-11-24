@@ -99,7 +99,7 @@ export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 </script>
 
-<div class="flex overflow-hidden h-screen w-screen text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-950">
+<div class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-950">
   {{--
     `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
     component's own marker, and putting it on a wrapper made two elements claim
@@ -107,7 +107,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     palette was being written to this wrapper instead of the pane — it reached
     the pane by inheritance and worked by luck.
   --}}
-  <aside class="shrink-0 w-[280px] border-black/5 border-r dark:border-white/5" data-harness-sidebar>
+  <aside id="harness-sidebar" ref="sidebarBox" tabindex="-1" aria-label="Workspace navigation" class="shrink-0 w-[250px] border-black/5 border-r dark:border-white/5" data-harness-sidebar :data-open="sidebarOpen() ? 'true' : 'false'">
     @if(hasProfiles)
       <Sidebar
         :spaces="spaces"
@@ -117,17 +117,23 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       />
     @else
       <div class="flex flex-col gap-2 items-center justify-center px-6 h-full text-center">
-        <p class="text-[13px] opacity-60">No profiles yet.</p>
-        <p class="text-[12px] opacity-40">Create one with <code>./buddy profiles:create</code></p>
+        <p class="text-[13px] text-neutral-600 dark:text-neutral-300">No profiles yet</p>
+        <button type="button" @click="openProfileModal" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Create profile</button>
       </div>
     @endif
   </aside>
+  <button type="button" data-sidebar-scrim hidden :hidden="!sidebarOpen()" @click="closeSidebar" aria-label="Close navigation"></button>
 
   <main class="flex flex-1 flex-col min-w-0">
     <header class="flex gap-3 items-center shrink-0 px-4 h-[44px] border-b border-black/5 dark:border-white/5">
-      <span class="font-medium text-[13px] truncate">{{ sessionTitle }}</span>
+      <button type="button" data-sidebar-toggle ref="sidebarToggleBox" @click="openSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
+        <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
+      </button>
+      <span class="font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
       <span
         data-session-state
+        data-state="{{ sessionState }}"
+        :data-state="uiState()"
         class="px-2 py-[2px] leading-[14px] text-[11px] rounded-full opacity-70"
         :text="uiState()"
       >{{ sessionState }}</span>
@@ -157,6 +163,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         :aria-expanded="diffOpen() ? 'true' : 'false'"
         @click="toggleDiff"
       >Changes</button>
+      @if(activeWorkspaceId)
+        <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
+          <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
+        </button>
+      @endif
       {{--
         The account corner every surface has. Until M8 gives it an account to
         show, it is the door to the settings sheet — same target as Cmd+, and
@@ -165,6 +176,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       <button
         type="button"
         data-account-button
+        ref="settingsToggleBox"
         title="Settings (⌘,)"
         aria-label="Settings"
         @click="openSettings"
@@ -204,10 +216,15 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         A blank canvas says the app is broken; an empty state says what to do.
         Typing below is the fastest path, so it is the one named first.
       --}}
-      @if(!activeSession)
-        <div data-empty-state class="flex flex-col gap-2 items-center justify-center h-full text-center">
-          <p class="text-[13px] opacity-60">No session open.</p>
-          <p class="text-[12px] opacity-40">Type below to start one, or pick a session from the sidebar.</p>
+      @if(turns.length === 0)
+        <div data-empty-state :hidden="liveTurns().length > 0" class="flex flex-col gap-2 items-center justify-center h-full text-center">
+          @if(activeSession)
+            <p class="text-[14px] font-medium">Start the conversation</p>
+            <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Send a prompt to the agent below.</p>
+          @else
+            <p class="text-[14px] font-medium">No session open</p>
+            <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Send a prompt to start a session, or open one from navigation.</p>
+          @endif
         </div>
       @endif
       @foreach(settledTurns as turn)
@@ -348,7 +365,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       </div>
     </div>
 
-    <form data-composer @submit.prevent="sendPrompt" class="flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
+    <form data-composer @submit.prevent="sendPrompt" class="grid gap-2 items-end shrink-0 p-3 border-black/5 border-t md:flex dark:border-white/5">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -359,7 +376,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         @keydown="promptKeydown"
         rows="2"
         placeholder="{{ promptPlaceholder }}"
-        class="flex-1 px-3 py-2 min-h-[40px] text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
+        class="flex-1 px-3 py-2 min-h-[40px] min-w-0 text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
       ></textarea>
       {{--
         The agent picker, where every LLM surface puts its model switch. It
@@ -425,9 +442,9 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     (craft forwards it as a `craft:settings` event) and as a page chord
     everywhere else. One setting so far: which agent a new session runs.
   --}}
-  <div data-settings-modal hidden :hidden="!settingsOpen()" @click.self="closeSettings" class="flex fixed inset-0 z-[70] items-center justify-center bg-black/40">
-    <div class="p-4 w-[360px] bg-white dark:bg-neutral-900 rounded-[10px] shadow-xl">
-      <h2 class="mb-3 font-semibold text-[14px]">Settings</h2>
+  <div data-settings-modal hidden :hidden="!settingsOpen()" @click.self="closeSettings" class="flex fixed inset-0 z-[70] items-center justify-center p-4 bg-black/40">
+    <div role="dialog" aria-modal="true" aria-labelledby="harness-settings-title" class="p-4 w-full max-w-[360px] max-h-full overflow-y-auto bg-white dark:bg-neutral-900 rounded-[10px] shadow-xl">
+      <h2 id="harness-settings-title" class="mb-3 font-semibold text-[14px]">Settings</h2>
       <label class="block mb-2 font-medium text-[13px]" for="settings-driver">Agent for new sessions</label>
       <select
         id="settings-driver"
@@ -506,7 +523,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   </div>
 
   @if(activeWorkspaceId)
-    <section data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
+    <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
       <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
         {{--
           Ten glyphs in the host's own font, laid out but invisible: the ruler
@@ -516,7 +533,6 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         <div data-terminal-screen ref="termScreenBox"></div>
       </div>
     </section>
-    <button type="button" data-terminal-toggle @click="toggleTerminal" aria-label="Toggle terminal" class="terminal-toggle">&gt;_</button>
   @endif
 </div>
 
@@ -640,6 +656,28 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 
   const diffOpen = state(false)
   const termOpen = state(false)
+  const sidebarOpen = state(false)
+  const sidebarRef = useRef('sidebarBox')
+  const sidebarToggleRef = useRef('sidebarToggleBox')
+  const promptRef = useRef('promptBox')
+  const profileNameRef = useRef('profileNameBox')
+  const driverPickerRef = useRef('driverPickerBox')
+  const settingsDriverRef = useRef('settingsDriverBox')
+  const settingsToggleRef = useRef('settingsToggleBox')
+  const transcriptRef = useRef('transcriptBox')
+  const termScreenRef = useRef('termScreenBox')
+  const termHostRef = useRef('termHostBox')
+  const termMetricRef = useRef('termMetricBox')
+
+  function openSidebar() {
+    sidebarOpen.set(true)
+    void nextTick(() => sidebarRef.current?.focus())
+  }
+
+  function closeSidebar() {
+    sidebarOpen.set(false)
+    sidebarToggleRef.current?.focus()
+  }
   // The "name this profile" form. Replaces window.prompt: the name arrives
   // through a small form the page owns, so it can be styled and cancelled
   // like everything else.
@@ -670,7 +708,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         window.craft?.window?.focus?.()
         // Someone who summoned the window deliberately should land ready to
         // type, not hunting for the input.
-        useRef('promptBox').current?.focus()
+        promptRef.current?.focus()
       })
     }
   }
@@ -802,11 +840,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     navigate(`/?profile=${encodeURIComponent(spaceId)}`)
   }, { target: document })
 
-  useEventListener('spaceAdd', () => {
+  function openProfileModal() {
     profileModalOpen.set(true)
     // Focus after the binding has shown the form.
-    requestAnimationFrame(() => useRef('profileNameBox').current?.focus())
-  }, { target: document })
+    void nextTick(() => profileNameRef.current?.focus())
+  }
+
+  useEventListener('spaceAdd', openProfileModal, { target: document })
 
   function closeProfileModal() {
     profileModalOpen.set(false)
@@ -821,7 +861,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // Each CLI's own login flow, run in the workspace terminal. The CLIs hold
   // their credentials; harness only starts the conversation.
   const LOGIN_COMMANDS = {
-    claude: 'claude /login',
+    claude: 'claude auth login',
     codex: 'codex login',
     opencode: 'opencode auth login',
     cursor: 'cursor-agent login',
@@ -909,13 +949,13 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // no session is open), then the probe results land in the labels. A prompt
   // left by type-to-start sends itself once the socket can carry it.
   requestAnimationFrame(() => {
-    const picker = useRef('driverPickerBox').current
+    const picker = driverPickerRef.current
     if (picker) picker.value = sessionDriver || defaultDriver()
     annotateDriverPickers()
 
     const pending = sessionId ? sessionStorage.getItem('harness.pendingPrompt') : null
     if (pending) {
-      const box = useRef('promptBox').current
+      const box = promptRef.current
       if (box) box.value = pending
       const trySend = () => {
         if (!liveSocket || liveSocket.readyState !== WebSocket.OPEN) {
@@ -940,18 +980,22 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     // that should say so. The server holds results for 30s, so this is a
     // cheap read, not a process fork per open.
     annotateDriverPickers()
-    requestAnimationFrame(() => {
-      const box = useRef('settingsDriverBox').current
-      if (box) box.value = defaultDriver()
+    void nextTick(() => {
+      const box = settingsDriverRef.current
+      if (box) {
+        box.value = defaultDriver()
+        box.focus()
+      }
     })
   }
 
   function closeSettings() {
     settingsOpen.set(false)
+    settingsToggleRef.current?.focus()
   }
 
   function saveDriverChoice() {
-    const box = useRef('settingsDriverBox').current
+    const box = settingsDriverRef.current
     if (box) localStorage.setItem('harness.defaultDriver', box.value)
   }
 
@@ -1039,7 +1083,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   async function createProfile() {
-    const box = useRef('profileNameBox').current
+    const box = profileNameRef.current
     const name = (box?.value ?? '').trim()
     if (!name) return
     profileModalOpen.set(false)
@@ -1140,7 +1184,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // the same flush, so the scroll waits a frame.
   function followTail() {
     requestAnimationFrame(() => {
-      const transcript = useRef('transcriptBox').current
+      const transcript = transcriptRef.current
       if (transcript) transcript.scrollTop = transcript.scrollHeight
     })
   }
@@ -1170,7 +1214,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   async function sendPrompt() {
-    const box = useRef('promptBox').current
+    const box = promptRef.current
     const text = (box?.value ?? '').trim()
     if (!text) return
 
@@ -1184,7 +1228,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
         stxAlert('This profile has no workspace yet. Add one with `./buddy harness:run --path <dir>`.')
         return
       }
-      const picker = useRef('driverPickerBox').current
+      const picker = driverPickerRef.current
       const commandId = `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
       await sendCommand({ type: 'session.create', workspaceId, driverKind: picker?.value || defaultDriver() }, commandId)
       sessionStorage.setItem('harness.pendingPrompt', text)
@@ -1239,7 +1283,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   let termRenderQueued = false
 
   function renderTerm() {
-    const screen = useRef('termScreenBox').current
+    const screen = termScreenRef.current
     if (termRenderQueued || !term || !termToHtml || !screen) return
     termRenderQueued = true
     requestAnimationFrame(() => {
@@ -1278,8 +1322,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   // font. Falls back to the classic 100x24 until the panel has laid out.
   let termMeasured = { cols: 100, rows: 24 }
   function measureTerm() {
-    const host = useRef('termHostBox').current
-    const metric = useRef('termMetricBox').current
+    const host = termHostRef.current
+    const metric = termMetricRef.current
     if (!host || !metric) return termMeasured
     const cell = metric.getBoundingClientRect()
     const box = host.getBoundingClientRect()
@@ -1299,7 +1343,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   let termObserver = null
   function watchTermSize() {
     if (termObserver || typeof ResizeObserver === 'undefined') return
-    const host = useRef('termHostBox').current
+    const host = termHostRef.current
     if (!host) return
     termObserver = new ResizeObserver(() => {
       if (termId === null) return
@@ -1322,7 +1366,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     if (!termOpen()) return
     // Focused now, not in the frame callback: keys typed right after the
     // click must land in the host (they buffer until the PTY binds).
-    useRef('termHostBox').current?.focus()
+    void nextTick(() => termHostRef.current?.focus())
     // Measured after the binding has shown the panel — a display:none box
     // measures zero — and the PTY opens at the size actually on screen.
     requestAnimationFrame(() => {
@@ -1351,6 +1395,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       else if (profileModalOpen()) {
         event.preventDefault()
         closeProfileModal()
+      }
+      else if (sidebarOpen()) {
+        event.preventDefault()
+        closeSidebar()
       }
       return
     }

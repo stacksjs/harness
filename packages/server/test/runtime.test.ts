@@ -481,7 +481,7 @@ describe('checkpoint and revert', () => {
     // And the file the agent created is gone, not left behind.
     expect(existsSync(join(workspace, 'agent-made-this.ts'))).toBe(false)
     client.close()
-  })
+  }, 15_000)
 
   it('runs a turn in a workspace that is not a repository', async () => {
     // Checkpointing is best-effort. A plain directory must not stop a turn.

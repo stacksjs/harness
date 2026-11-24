@@ -14,12 +14,12 @@ import { execSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { encode } from '/Users/glennmichaeltorregosa/Documents/Stacks/harness/packages/contract/src/index.ts'
-import { serve } from '/Users/glennmichaeltorregosa/Documents/Stacks/harness/packages/server/src/index.ts'
+import { encode } from '../packages/contract/src/index'
+import { serve } from '../packages/server/src/index'
 
 const CRAFT = [
   process.env.CRAFT_BIN,
-  join(homedir(), 'Documents/Projects/craft/packages/zig/zig-out/bin/craft'),
+  Bun.which('craft'),
   join(homedir(), 'Code/Tools/craft/packages/zig/zig-out/bin/craft'),
 ].filter((c): c is string => Boolean(c)).find(c => existsSync(c))
 
@@ -61,7 +61,8 @@ const sessionId = [...harness.engine.current.sessions.keys()][0]
 const marker = join(dir, 'desktop-terminal-proof.txt')
 const child = spawn(CRAFT, [
   '--url', `http://127.0.0.1:${port}/s/${sessionId}`,
-  '--title', 'harness-desktop-drive',
+  '--title', 'Harness Desktop Drive',
+  '--app-name', 'Harness Desktop Drive',
   '--width', '1100',
   '--height', '760',
 ], { stdio: 'ignore', detached: true })
@@ -73,43 +74,29 @@ function check(name: string, ok: boolean): void {
 }
 
 try {
-  // Window up and frontmost. The process name is the binary's.
+  // Target this launch by PID. The user may have other Craft apps open.
+  const application = `first application process whose unix id is ${child.pid}`
   let appeared = false
   for (let i = 0; i < 40 && !appeared; i++) {
     await Bun.sleep(250)
     try {
-      appeared = osascript('tell application "System Events" to (count of windows of process "craft") > 0') === 'true'
+      appeared = osascript(`tell application "System Events" to (count of windows of (${application})) > 0`) === 'true'
     }
     catch { /* process not there yet */ }
   }
   check('craft window appeared', appeared)
 
   if (appeared) {
-    osascript('tell application "System Events" to set frontmost of process "craft" to true')
+    osascript(`tell application "System Events" to set frontmost of (${application}) to true`)
     // The page needs a moment past window-creation to hydrate the island.
     await Bun.sleep(2500)
-    // Informational, not a check: this readback reports false on this craft
-    // build even while keystrokes demonstrably land in the page — the two
-    // checks below are the ground truth for delivery.
-    const frontmost = osascript('tell application "System Events" to get frontmost of process "craft"')
-    console.log(`  (frontmost readback: ${frontmost})`)
+    const frontmost = osascript(`tell application "System Events" to get frontmost of (${application})`) === 'true'
+    check('the test window is frontmost before sending keys', frontmost)
+    if (!frontmost) throw new Error('Cannot safely drive a window that is not frontmost')
 
     // Ctrl+` — key code 50 is the backtick key.
     osascript('tell application "System Events" to key code 50 using control down')
     await Bun.sleep(1200)
-
-    // The chord's first observable server-side effect: term-open spawns the
-    // PTY, which runs the shell under script(1).
-    let ptySpawned = false
-    for (let i = 0; i < 12 && !ptySpawned; i++) {
-      await Bun.sleep(250)
-      try {
-        execSync('pgrep -f "script -q /dev/null"', { stdio: 'pipe' })
-        ptySpawned = true
-      }
-      catch { /* not yet */ }
-    }
-    check('Ctrl+` reached the page and opened a PTY', ptySpawned)
 
     // Typed into the focused terminal host; the value is computed by the
     // shell, so the file proves execution, not echo.

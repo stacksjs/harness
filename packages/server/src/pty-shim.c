@@ -23,6 +23,7 @@ extern int unlockpt(int fd);
 extern char *ptsname(int fd);
 extern int open(const char *path, int flags, ...);
 extern int close(int fd);
+extern int dup2(int oldfd, int newfd);
 extern int ioctl(int fd, unsigned long request, ...);
 extern int fcntl(int fd, int cmd, ...);
 extern int waitpid(int pid, int *status, int options);
@@ -35,6 +36,7 @@ extern int execve(const char *path, char *const argv[], char *const envp[]);
 extern void _exit(int code);
 
 #define O_RDWR_L 0x0002
+#define O_NOCTTY_L 0x00020000
 #define F_SETFL_L 4
 #define WNOHANG_L 1
 
@@ -48,7 +50,9 @@ int harness_open_pty_master(void) {
 int harness_open_pty_slave(int master) {
   char *path = ptsname(master);
   if (!path) return -1;
-  return open(path, O_RDWR_L);
+  // The parent keeps this fd for resize. Only the forked shell should
+  // acquire the terminal, or closing it can send SIGHUP to Harness.
+  return open(path, O_RDWR_L | O_NOCTTY_L);
 }
 
 int harness_set_winsize(int fd, int cols, int rows, unsigned long request) {
@@ -81,11 +85,17 @@ int harness_spawn_on_pty(int master, const char *shell, const char *cwd, char *c
   (void)setsid_flag;
   char *slave_path = ptsname(master);
   if (!slave_path) return -1;
-  int slave = open(slave_path, O_RDWR_L);
+  int slave = open(slave_path, O_RDWR_L | O_NOCTTY_L);
   if (slave < 0) return -1;
   int pid = fork();
   if (pid == 0) {
-    login_tty(slave);
+    if (login_tty(slave) != 0) {
+      // A host can deny a controlling terminal. Keep the shell's standard
+      // streams on the PTY even there, never on Harness's own descriptors.
+      if (dup2(slave, 0) < 0 || dup2(slave, 1) < 0 || dup2(slave, 2) < 0)
+        _exit(126);
+      if (slave > 2) close(slave);
+    }
     close(master);
     if (cwd && cwd[0]) chdir(cwd);
     char *argv[2];

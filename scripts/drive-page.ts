@@ -15,8 +15,8 @@
  */
 import type { Driver, ProviderEvent, ProviderInstance } from '../packages/drivers/src/types'
 import { execSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium } from 'playwright-core'
@@ -28,6 +28,16 @@ function check(name: string, ok: boolean): void {
   checks.push([name, ok])
   console.log(`${ok ? '✓' : '✗'} ${name}`)
 }
+
+// Use a stable shell with no user startup files. The provider command exercises
+// terminal input without starting an actual sign-in on the developer's machine.
+const fixtureBin = mkdtempSync(join(tmpdir(), 'harness-page-bin-'))
+const fixtureShell = join(fixtureBin, 'harness-test-shell')
+writeFileSync(join(fixtureBin, 'codex'), '#!/bin/sh\nprintf "Codex test sign-in\\n"\n', { mode: 0o755 })
+writeFileSync(fixtureShell, '#!/bin/sh\nprintf "Harness test terminal\\n"\nexec /bin/sh -i\n', { mode: 0o755 })
+process.env.SHELL = fixtureShell
+process.env.ENV = ''
+process.env.PATH = `${fixtureBin}:${process.env.PATH ?? ''}`
 
 // --- workspace: a real repo with an uncommitted change, so the diff has content
 const dir = mkdtempSync(join(tmpdir(), 'harness-page-drive-'))
@@ -93,9 +103,7 @@ await Bun.sleep(300)
 const sessionId = [...harness.engine.current.sessions.keys()][0]
 
 // --- browser
-const executablePath = process.env.PLAYWRIGHT_CHROMIUM
-  ?? join(homedir(), 'Library/Caches/ms-playwright/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing')
-const browser = await chromium.launch({ executablePath, headless: true })
+const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM, headless: true })
 const page = await browser.newPage()
 
 // A stub of craft's menu bridge, present before any page script runs: the
@@ -105,8 +113,19 @@ await page.addInitScript(() => {
   ;(window as any).craft = { menu: { set: (options: unknown) => { (window as any).__menuSet = options } } }
 })
 page.on('dialog', async d => d.accept())
-page.on('pageerror', e => console.log('PAGEERROR:', String(e).slice(0, 200)))
+const pageErrors: string[] = []
+page.on('pageerror', e => pageErrors.push(e.message))
 await page.goto(`http://localhost:${port}/s/${sessionId}`)
+await page.setViewportSize({ width: 390, height: 844 })
+await page.locator('[data-sidebar-toggle]').click()
+await page.waitForFunction(() => document.querySelector('[data-harness-sidebar]')?.getAttribute('data-open') === 'true')
+await page.keyboard.press('Escape')
+check('mobile closes navigation and returns focus to its toggle', await page.locator('[data-sidebar-toggle]').evaluate(el => el === document.activeElement))
+check('mobile composer controls fit the viewport', await page.locator('[data-send]').evaluate((el) => {
+  const rect = el.getBoundingClientRect()
+  return rect.left >= 0 && rect.right <= window.innerWidth
+}))
+await page.setViewportSize({ width: 1280, height: 800 })
 
 // 1. Composer: type a prompt, send, watch the turn stream in — with the
 // thinking dots holding the gap before the first token.
@@ -144,6 +163,7 @@ check('diff panel lists the changed file', true)
 
 // 4. Terminal: unchanged coverage.
 await page.click('[data-terminal-toggle]')
+await page.waitForFunction(() => document.querySelector('[data-terminal-screen]')?.textContent?.includes('Harness test terminal'), undefined, { timeout: 8000 })
 await page.keyboard.type('echo "d-$((40+4))"')
 await page.keyboard.press('Enter')
 const termOk = await page.waitForFunction(() => (document.querySelector('[data-terminal]')?.textContent ?? '').includes('d-44'), undefined, { timeout: 10000 }).then(() => true).catch(() => false)
@@ -227,10 +247,7 @@ check('the account icon opens settings', true)
 await page.keyboard.press('Escape')
 
 // 13. The Agents section: each CLI's live status, and a Log in button that
-// runs the CLI's own login flow in the workspace terminal. codex is the safe
-// row to click — not installed on the machines that run this drive, so the
-// shell answers "command not found" instead of starting a real OAuth flow,
-// while still proving the whole path: close settings, open terminal, type.
+// runs the CLI's login flow against the fixture executable in the terminal.
 await page.click('[data-account-button]')
 await page.waitForFunction(() => document.querySelector('[data-agent-row="claude"] [data-agent-state]')?.textContent === 'ready', undefined, { timeout: 4000 })
 const agentRows = await page.evaluate(() => [...document.querySelectorAll('[data-agent-row]')].map(row => ({
@@ -241,8 +258,8 @@ check('the agents section reports all five CLIs', agentRows.length === 5 && agen
 await page.click('[data-agent-row="codex"] [data-agent-login]')
 await page.waitForFunction(() => document.querySelector('[data-settings-modal]')?.hasAttribute('hidden') === true, undefined, { timeout: 4000 })
 await page.waitForFunction(() => document.querySelector('[data-terminal]')?.hasAttribute('hidden') === false, undefined, { timeout: 4000 })
-await page.waitForFunction(() => (document.querySelector('[data-terminal-screen]')?.textContent ?? '').includes('codex login'), undefined, { timeout: 8000 })
-check('Log in opens the terminal and types the login command', true)
+await page.waitForFunction(() => (document.querySelector('[data-terminal-screen]')?.textContent ?? '').includes('Codex test sign-in'), undefined, { timeout: 8000 })
+check('Log in opens the terminal and runs the fixture login command', true)
 
 // 14. The desktop menu bar: the island declares it through craft's bridge
 // (stubbed above), with an Edit menu of role items — the roles are what make
@@ -266,7 +283,17 @@ await page.waitForFunction(() => document.querySelector('[data-settings-modal]')
 check('a menu action routes to the page handler', true)
 await page.keyboard.press('Escape')
 
-await page.screenshot({ path: join(import.meta.dir, 'page-drive.png') })
+const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
+if (screenshotDir) {
+  mkdirSync(screenshotDir, { recursive: true })
+  await page.screenshot({ path: join(screenshotDir, 'workspace-desktop.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.screenshot({ path: join(screenshotDir, 'workspace-mobile.png') })
+  await page.locator('[data-account-button]').click()
+  await page.screenshot({ path: join(screenshotDir, 'settings-mobile.png') })
+}
+check('browser reported no script errors', pageErrors.length === 0)
+for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()
 harness.stop()
 

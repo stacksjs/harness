@@ -59,6 +59,7 @@ export default {
   // The one shared head (stx-standards §4.8): pages refine it, nothing
   // hand-writes <title> or <meta> tags in markup.
   app: {
+    colorMode: { initialMode: 'system' },
     head: {
       title: 'harness',
       meta: [
