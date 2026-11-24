@@ -9,10 +9,8 @@ import { schema } from '@stacksjs/validation'
  * result instead of running it again — which for "start a turn" is the
  * difference between one agent run and two.
  *
- * Written *after* the events it accounts for. A crash in between leaves the
- * command looking un-run so it is retried; the reverse ordering would risk a
- * command recorded as done whose effects never landed, and a lost retry is far
- * easier to recover from than a silently skipped command.
+ * Committed in the same SQLite transaction as the events it accounts for.
+ * A failed commit leaves neither the events nor the receipt behind.
  */
 export default defineModel({
   name: 'CommandReceipt',

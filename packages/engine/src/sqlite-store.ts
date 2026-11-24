@@ -11,12 +11,11 @@
 import type { EventPayload, HarnessEvent } from '@harness/contract'
 import { Database } from 'bun:sqlite'
 import { GLOBAL_SESSION_ID } from '@harness/contract'
-import type { AppendableEvent, CommandReceipt, EngineStore } from './store'
+import type { AppendableEvent, CommandIdentity, EngineStore } from './store'
 
 interface EventRow {
   session_id: number | null
   seq: number
-  type: string
   payload: string
   command_id: string
   at: number | null
@@ -37,6 +36,16 @@ function fromColumn(sessionId: number | null): number {
   return sessionId ?? GLOBAL_SESSION_ID
 }
 
+function fromRow(row: EventRow): HarnessEvent {
+  return {
+    seq: row.seq,
+    sessionId: fromColumn(row.session_id),
+    commandId: row.command_id,
+    at: row.at ?? 0,
+    payload: JSON.parse(row.payload) as EventPayload,
+  }
+}
+
 export class SqliteStore implements EngineStore {
   private db: Database
 
@@ -53,9 +62,7 @@ export class SqliteStore implements EngineStore {
     this.db.close()
   }
 
-  async append(events: AppendableEvent[]): Promise<HarnessEvent[]> {
-    if (events.length === 0) return []
-
+  private appendEvents(events: AppendableEvent[]): HarnessEvent[] {
     // `IS` rather than `=` so the global stream (session_id NULL) gets its own
     // running sequence instead of matching nothing and restarting at 1 forever.
     const nextSeq = this.db.prepare<{ next: number }, [number | null]>(
@@ -68,33 +75,29 @@ export class SqliteStore implements EngineStore {
 
     const out: HarnessEvent[] = []
 
-    // One transaction for the whole batch. A command's events are all-or-nothing
-    // — half a command in the log is a state no projection knows how to fold.
-    this.db.transaction(() => {
-      for (const event of events) {
-        const column = toColumn(event.sessionId)
-        const seq = nextSeq.get(column)?.next ?? 1
-        // `turnId` is denormalised out of the payload so the column can be
-        // filtered on without parsing every row's JSON.
-        const turnId = (event.payload as { turnId?: number }).turnId ?? null
-        insert.run(
-          column,
-          turnId,
-          seq,
-          event.payload.type,
-          JSON.stringify(event.payload),
-          event.commandId,
-          event.at,
-        )
-        out.push({
-          seq,
-          sessionId: event.sessionId,
-          commandId: event.commandId,
-          at: event.at,
-          payload: event.payload,
-        })
-      }
-    })()
+    for (const event of events) {
+      const column = toColumn(event.sessionId)
+      const seq = nextSeq.get(column)?.next ?? 1
+      // `turnId` is denormalised out of the payload so the column can be
+      // filtered on without parsing every row's JSON.
+      const turnId = (event.payload as { turnId?: number }).turnId ?? null
+      insert.run(
+        column,
+        turnId,
+        seq,
+        event.payload.type,
+        JSON.stringify(event.payload),
+        event.commandId,
+        event.at,
+      )
+      out.push({
+        seq,
+        sessionId: event.sessionId,
+        commandId: event.commandId,
+        at: event.at,
+        payload: event.payload,
+      })
+    }
 
     return out
   }
@@ -102,17 +105,11 @@ export class SqliteStore implements EngineStore {
   async read(sessionId: number, sinceSeq = 0): Promise<HarnessEvent[]> {
     const rows = this.db
       .prepare<EventRow, [number | null, number]>(
-        'SELECT session_id, seq, type, payload, command_id, at FROM events WHERE session_id IS ? AND seq > ? ORDER BY seq ASC',
+        'SELECT session_id, seq, payload, command_id, at FROM events WHERE session_id IS ? AND seq > ? ORDER BY seq ASC',
       )
       .all(toColumn(sessionId), sinceSeq)
 
-    return rows.map(row => ({
-      seq: row.seq,
-      sessionId: fromColumn(row.session_id),
-      commandId: row.command_id,
-      at: row.at ?? 0,
-      payload: JSON.parse(row.payload) as EventPayload,
-    }))
+    return rows.map(fromRow)
   }
 
   /**
@@ -125,17 +122,11 @@ export class SqliteStore implements EngineStore {
   async readAll(): Promise<HarnessEvent[]> {
     const rows = this.db
       .prepare<EventRow, []>(
-        'SELECT session_id, seq, type, payload, command_id, at FROM events ORDER BY id ASC',
+        'SELECT session_id, seq, payload, command_id, at FROM events ORDER BY id ASC',
       )
       .all()
 
-    return rows.map(row => ({
-      seq: row.seq,
-      sessionId: fromColumn(row.session_id),
-      commandId: row.command_id,
-      at: row.at ?? 0,
-      payload: JSON.parse(row.payload) as EventPayload,
-    }))
+    return rows.map(fromRow)
   }
 
   async sessionIds(): Promise<number[]> {
@@ -147,26 +138,37 @@ export class SqliteStore implements EngineStore {
     return rows.map(row => fromColumn(row.session_id))
   }
 
-  async receipt(commandId: string): Promise<CommandReceipt | null> {
-    const row = this.db
-      .prepare<{ command_id: string, seqs: string, at: number }, [string]>(
-        'SELECT command_id, seqs, at FROM command_receipts WHERE command_id = ?',
-      )
-      .get(commandId)
-    if (!row) return null
-    return { commandId: row.command_id, seqs: JSON.parse(row.seqs) as number[], at: row.at }
+  async commitCommand(command: CommandIdentity, events: AppendableEvent[]): Promise<HarnessEvent[]> {
+    return this.db.transaction(() => {
+      const committed = events.length > 0 ? this.appendEvents(events) : []
+      this.db.prepare(
+        `INSERT INTO command_receipts (command_id, seqs, at, created_at, updated_at, uuid)
+         VALUES (?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
+      ).run(command.commandId, JSON.stringify(committed.map(event => event.seq)), command.at)
+      return committed
+    }).immediate()
   }
 
-  async putReceipt(receipt: CommandReceipt): Promise<void> {
-    // `OR IGNORE` rather than `OR REPLACE`: two racing retries of the same
-    // command must leave the first receipt intact. Replacing would rewrite the
-    // recorded sequence numbers, and a client comparing them would see its
-    // command's result change under it.
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO command_receipts (command_id, seqs, at, created_at, updated_at, uuid)
-        VALUES (?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
-      )
-      .run(receipt.commandId, JSON.stringify(receipt.seqs), receipt.at)
+  async readCommand(commandId: string): Promise<HarnessEvent[] | null> {
+    const receipt = this.db.prepare('SELECT 1 FROM command_receipts WHERE command_id = ?').get(commandId)
+    if (!receipt) return null
+
+    return this.db.prepare<EventRow, [string]>(
+      'SELECT session_id, seq, payload, command_id, at FROM events WHERE command_id = ? ORDER BY id ASC',
+    ).all(commandId).map(fromRow)
+  }
+
+  async recoverReceipts(): Promise<void> {
+    // Older servers could stop after appending a batch and before recording
+    // its receipt. The committed events are still authoritative.
+    this.db.exec(`
+      INSERT INTO command_receipts (command_id, seqs, at, created_at, updated_at, uuid)
+      SELECT command_id, json_group_array(seq ORDER BY id), COALESCE(MIN(at), 0),
+        datetime('now'), datetime('now'), lower(hex(randomblob(16)))
+      FROM events
+      WHERE command_id IS NOT NULL AND command_id != ''
+        AND NOT EXISTS (SELECT 1 FROM command_receipts WHERE command_receipts.command_id = events.command_id)
+      GROUP BY command_id
+    `)
   }
 }

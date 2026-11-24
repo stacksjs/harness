@@ -4,7 +4,7 @@
  * The engine is written against this rather than against the ORM so its
  * ordering and idempotency rules can be tested without a database, and so the
  * durable implementation can change without touching the rules. Production
- * binds the Stacks ORM; tests bind the in-memory store below.
+ * uses SQLite; tests can use the in-memory store below.
  */
 
 import type { EventPayload, HarnessEvent } from '@harness/contract'
@@ -16,22 +16,24 @@ export interface AppendableEvent {
   payload: EventPayload
 }
 
-export interface CommandReceipt {
+export interface CommandIdentity {
   commandId: string
-  /** Sequence numbers this command produced, so a retry can return them. */
-  seqs: number[]
   at: number
 }
 
+export interface CommandReceipt extends CommandIdentity {
+  seqs: number[]
+}
+
 export interface EngineStore {
-  /**
-   * Append events and return them with their assigned sequence numbers.
-   *
-   * Called only from inside the queue, so it may assume it is the sole writer
-   * — but it still assigns `seq` itself, because the sequence is per session
-   * and the engine handles many sessions.
-   */
-  append: (events: AppendableEvent[]) => Promise<HarnessEvent[]>
+  /** Commit the assigned events and the receipt together, including for a no-op. */
+  commitCommand: (command: CommandIdentity, events: AppendableEvent[]) => Promise<HarnessEvent[]>
+
+  /** Return the events in append order, or null if the command has not committed. */
+  readCommand: (commandId: string) => Promise<HarnessEvent[] | null>
+
+  /** Restore receipts for events from before command commits were atomic. */
+  recoverReceipts: () => Promise<void>
 
   /** All events for a session, ascending by seq. */
   read: (sessionId: number, sinceSeq?: number) => Promise<HarnessEvent[]>
@@ -49,9 +51,6 @@ export interface EngineStore {
    * things were written.
    */
   readAll: () => Promise<HarnessEvent[]>
-
-  receipt: (commandId: string) => Promise<CommandReceipt | null>
-  putReceipt: (receipt: CommandReceipt) => Promise<void>
 }
 
 /**
@@ -65,9 +64,9 @@ export class MemoryStore implements EngineStore {
   private events = new Map<number, HarnessEvent[]>()
   /** Append order, which is the log's only total order. */
   private appended: HarnessEvent[] = []
-  private receipts = new Map<string, CommandReceipt>()
+  private receipts = new Map<string, HarnessEvent[]>()
 
-  async append(events: AppendableEvent[]): Promise<HarnessEvent[]> {
+  append(events: AppendableEvent[]): HarnessEvent[] {
     const out: HarnessEvent[] = []
     for (const event of events) {
       const log = this.events.get(event.sessionId) ?? []
@@ -87,6 +86,30 @@ export class MemoryStore implements EngineStore {
     return out
   }
 
+  async commitCommand(command: CommandIdentity, events: AppendableEvent[]): Promise<HarnessEvent[]> {
+    if (this.receipts.has(command.commandId))
+      throw new Error(`Command already committed: ${command.commandId}`)
+    const committed = this.append(events)
+    this.receipts.set(command.commandId, committed)
+    return committed
+  }
+
+  async readCommand(commandId: string): Promise<HarnessEvent[] | null> {
+    return this.receipts.get(commandId)?.slice() ?? null
+  }
+
+  async recoverReceipts(): Promise<void> {
+    const missing = new Map<string, HarnessEvent[]>()
+    for (const event of this.appended) {
+      if (this.receipts.has(event.commandId)) continue
+      const events = missing.get(event.commandId) ?? []
+      events.push(event)
+      missing.set(event.commandId, events)
+    }
+    for (const [commandId, events] of missing)
+      this.receipts.set(commandId, events)
+  }
+
   async read(sessionId: number, sinceSeq = 0): Promise<HarnessEvent[]> {
     return (this.events.get(sessionId) ?? []).filter(event => event.seq > sinceSeq)
   }
@@ -97,13 +120,5 @@ export class MemoryStore implements EngineStore {
 
   async readAll(): Promise<HarnessEvent[]> {
     return [...this.appended]
-  }
-
-  async receipt(commandId: string): Promise<CommandReceipt | null> {
-    return this.receipts.get(commandId) ?? null
-  }
-
-  async putReceipt(receipt: CommandReceipt): Promise<void> {
-    this.receipts.set(receipt.commandId, receipt)
   }
 }

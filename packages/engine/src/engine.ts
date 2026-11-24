@@ -74,6 +74,7 @@ export class Engine {
    */
   async hydrate(): Promise<void> {
     const state = emptyState()
+    await this.options.store.recoverReceipts()
     // One pass in append order, not session by session.
     //
     // `seq` is per session, so concatenating per-session reads replays a
@@ -122,35 +123,14 @@ export class Engine {
     if (!this.booted)
       throw new CommandRejected('engine has not hydrated; call hydrate() before dispatching')
 
-    const existing = await this.options.store.receipt(envelope.id)
-    if (existing) {
-      // The command already ran. Return what it produced rather than running it
-      // again — this is the whole point of the receipt.
-      const events: HarnessEvent[] = []
-      for (const sessionId of await this.options.store.sessionIds()) {
-        for (const event of await this.options.store.read(sessionId)) {
-          if (event.commandId === envelope.id) events.push(event)
-        }
-      }
-      events.sort((a, b) => a.seq - b.seq)
-      return { events, replayed: true }
-    }
+    const existing = await this.options.store.readCommand(envelope.id)
+    if (existing !== null)
+      return { events: existing, replayed: true }
 
     const produced = this.options.reducer(this.state, envelope.command, envelope)
-    const events = produced.length > 0 ? await this.options.store.append(produced) : []
+    const events = await this.options.store.commitCommand({ commandId: envelope.id, at: envelope.at }, produced)
 
     for (const event of events) apply(this.state, event)
-
-    // The receipt is written after the events, so a crash between the two
-    // leaves the command looking un-run and it is retried. Writing the receipt
-    // first would risk the opposite — a command recorded as done whose effects
-    // never landed — and a lost retry is far easier to recover from than a
-    // silently skipped command.
-    await this.options.store.putReceipt({
-      commandId: envelope.id,
-      seqs: events.map(event => event.seq),
-      at: envelope.at,
-    })
 
     return { events, replayed: false }
   }
