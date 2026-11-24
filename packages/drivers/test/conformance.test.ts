@@ -81,6 +81,15 @@ describe('conformance suite', () => {
     expect(failing(report)).toContain('the turn ends with exactly one terminal event')
   })
 
+  it('fails a ready provider that reports a provider error instead of answering', async () => {
+    const report = await runConformance(fakeDriver({ events: [
+      { type: 'session-bound', providerSessionId: 'ps-1' },
+      { type: 'error', message: 'fixture model unavailable' },
+    ] }), WORKSPACE)
+    expect(report.passed).toBe(false)
+    expect(failing(report)).toEqual(['a ready provider completes the sample turn with a reply'])
+  })
+
   it('catches two terminal events', async () => {
     const report = await runConformance(fakeDriver({
       events: [

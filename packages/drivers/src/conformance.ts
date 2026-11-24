@@ -152,6 +152,12 @@ export async function runConformance(driver: Driver, workspacePath: string): Pro
     ))
 
     const complete = events.find(e => e.type === 'turn-complete')
+    cases.push(check(
+      'a ready provider completes the sample turn with a reply',
+      'A signed-in CLI can still reject its selected model or fail to return an answer.',
+      Boolean(complete && events.some(e => e.type === 'assistant-delta' && e.text.trim())),
+      terminal.some(e => e.type === 'error') ? 'provider reported an error' : undefined,
+    ))
     if (complete && complete.type === 'turn-complete') {
       cases.push(check(
         'reports non-negative usage',
