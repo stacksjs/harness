@@ -71,7 +71,7 @@ export type ResolvedMcpServer =
 export interface DriverConfig {
   /** Absolute path the agent runs against. */
   workspacePath: string
-  /** HOME override, so two profiles can hold two accounts. */
+  /** Provider account directory. Claude uses CLAUDE_CONFIG_DIR and keeps the host HOME. */
   home?: string
   binaryPath?: string
   model?: string

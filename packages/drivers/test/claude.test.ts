@@ -1,8 +1,17 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { DriverKind } from '@harness/contract'
 import { describe, expect, it } from 'bun:test'
-import { translate } from '../src/claude'
+import { claudeAuthStatus, translate } from '../src/claude'
 import { driverKinds, resolveDriver } from '../src/registry'
+
+describe('Claude account detection', () => {
+  it('only treats an explicit lack of credentials as signed out', () => {
+    expect(claudeAuthStatus({ apiProvider: 'firstParty', tokenSource: 'none', apiKeySource: 'none' })).toBe('unauthenticated')
+    expect(claudeAuthStatus({ tokenSource: 'none', apiKeySource: 'environment' })).toBe('authenticated')
+    expect(claudeAuthStatus({ tokenSource: 'none', subscriptionType: 'pro' })).toBe('authenticated')
+    expect(claudeAuthStatus({ apiProvider: 'bedrock', tokenSource: 'none' })).toBe('authenticated')
+  })
+})
 
 /**
  * Every driver ships a recorded-transcript fake so its bugs are reproducible

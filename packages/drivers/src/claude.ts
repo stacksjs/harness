@@ -14,9 +14,49 @@
  * stops at this boundary on purpose.
  */
 
-import type { CanUseTool, Options, PermissionResult, Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { AccountInfo, CanUseTool, Options, PermissionResult, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import process from 'node:process'
 import { query } from '@anthropic-ai/claude-agent-sdk'
+
+function claudeEnvironment(config: DriverConfig): NodeJS.ProcessEnv {
+  const homePath = config.home?.trim()
+  if (!homePath) return process.env
+
+  const expanded = homePath === '~' || homePath.startsWith('~/') || homePath.startsWith('~\\')
+    ? join(homedir(), homePath.slice(2))
+    : homePath
+  return {
+    ...process.env,
+    // Changing HOME hides macOS Keychain credentials; use CLAUDE_CONFIG_DIR to keep login access.
+    CLAUDE_CONFIG_DIR: resolve(config.workspacePath, expanded),
+  }
+}
+
+// Adapted from apps/server/src/provider/ClaudeProvider.ts at T3 Code
+// 902d369808c5c30ae9b178c6c6f86587b8f4f336. See T3CODE-LICENSE.md.
+function hasApiKey(apiKeySource: string | undefined): boolean {
+  return Boolean(apiKeySource) && apiKeySource !== 'none'
+}
+
+export function claudeAuthStatus(account: AccountInfo): 'authenticated' | 'unauthenticated' {
+  if (account.apiProvider !== undefined && account.apiProvider !== 'firstParty') {
+    return 'authenticated'
+  }
+  if (account.tokenSource !== 'none') return 'authenticated'
+  return hasApiKey(account.apiKeySource) || account.email || account.subscriptionType
+    ? 'authenticated'
+    : 'unauthenticated'
+}
+
+function waitForAbortSignal(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true })
+  })
+}
 
 /** USD per token → integer micro-USD, so summing turns can't drift on floats. */
 function toMicros(usd: number): number {
@@ -86,7 +126,7 @@ class ClaudeInstance implements ProviderInstance {
     // `resume` continues the provider's own conversation. Without it every turn
     // starts a fresh Claude Code session and the agent forgets the last one.
     if (providerSessionId) options.resume = providerSessionId
-    if (this.config.home) options.env = { ...process.env, HOME: this.config.home }
+    options.env = claudeEnvironment(this.config)
     return options
   }
 
@@ -256,43 +296,53 @@ export function translate(message: SDKMessage): ProviderEvent[] {
 export const ClaudeDriver: Driver = {
   kind: 'claude',
 
-  /**
-   * Probe by running one trivial turn.
-   *
-   * More expensive than reading `--version`, but it is the only check that
-   * distinguishes installed-and-authenticated from installed-but-logged-out —
-   * and that distinction is exactly what the UI has to show.
-   */
+  /** Read the same Claude account used by the SDK without sending a prompt. */
   async probe(config: DriverConfig): Promise<ProbeResult> {
+    const abort = new AbortController()
+    const deadline = setTimeout(() => abort.abort(), 25_000)
+    let run: Query | undefined
     try {
-      const run = query({
-        prompt: 'Reply with the single word: ok',
+      run = query({
+        // Keep IPC open for initialization without yielding a user message.
+        // eslint-disable-next-line require-yield
+        prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
+          await waitForAbortSignal(abort.signal)
+        })(),
         options: {
+          abortController: abort,
           cwd: config.workspacePath,
-          maxTurns: 1,
-          ...(config.binaryPath ? { pathToClaudeCodeExecutable: config.binaryPath } : {}),
-          ...(config.home ? { env: { ...process.env, HOME: config.home } } : {}),
+          pathToClaudeCodeExecutable: config.binaryPath,
+          persistSession: false,
+          settings: { disableAllHooks: true },
+          allowedTools: [],
+          strictMcpConfig: true,
+          mcpServers: {},
+          env: {
+            ...claudeEnvironment(config),
+            ENABLE_CLAUDEAI_MCP_SERVERS: 'false',
+            CLAUDE_CODE_AUTO_CONNECT_IDE: '0',
+            CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL: '1',
+          },
         },
       })
 
-      for await (const message of run as AsyncIterable<SDKMessage>) {
-        if (message.type === 'assistant' && message.error) {
-          const status = message.error === 'authentication_failed' || message.error === 'oauth_org_not_allowed'
-            ? 'unauthenticated'
-            : 'failed'
-          return { status, message: message.error }
-        }
-        if (message.type === 'result')
-          return { status: 'success' === message.subtype ? 'ready' : 'failed' }
-      }
-      return { status: 'failed', message: 'the probe produced no result' }
+      const { account } = await run.initializationResult()
+      if (claudeAuthStatus(account) === 'unauthenticated')
+        return { status: 'unauthenticated', message: 'Run `claude auth login` on this machine.' }
+      return { status: 'ready' }
     }
     catch (error) {
+      if (abort.signal.aborted)
+        return { status: 'failed', message: 'Claude Code did not report account status within 25 seconds.' }
       const message = error instanceof Error ? error.message : String(error)
-      // A missing binary is `unavailable`, not `failed`: nothing is broken,
-      // the CLI simply is not installed, and the UI should say so.
-      const missing = /ENOENT|not found|no such file/i.test(message)
-      return { status: missing ? 'unavailable' : 'failed', message }
+      if (/ENOENT|not found|no such file/i.test(message))
+        return { status: 'unavailable', message: 'Claude Code executable was not found.' }
+      return { status: 'failed', message: 'Claude Code failed to initialize while checking account status.' }
+    }
+    finally {
+      clearTimeout(deadline)
+      abort.abort()
+      run?.close()
     }
   },
 
