@@ -115,7 +115,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     palette was being written to this wrapper instead of the pane — it reached
     the pane by inheritance and worked by luck.
   --}}
-  <aside id="harness-sidebar" ref="sidebarBox" tabindex="-1" aria-label="Workspace navigation" class="shrink-0 w-[250px] border-black/5 border-r dark:border-white/5" data-harness-sidebar :data-open="sidebarOpen() ? 'true' : 'false'">
+  <aside id="harness-sidebar" ref="sidebarBox" tabindex="-1" aria-label="Workspace navigation" class="shrink-0 border-black/5 border-r dark:border-white/5" data-harness-sidebar :data-open="sidebarOpen() ? 'true' : 'false'" :style="'--harness-sidebar-width: ' + sidebarWidth() + 'px'">
     @if(hasProfiles)
       <Sidebar
         :spaces="spaces"
@@ -131,13 +131,30 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     @endif
   </aside>
   <button type="button" data-sidebar-scrim hidden :hidden="!sidebarOpen()" @click="closeSidebar" aria-label="Close navigation"></button>
+  <div
+    data-sidebar-resize
+    role="separator"
+    tabindex="0"
+    aria-label="Resize workspace navigation"
+    aria-controls="harness-sidebar"
+    aria-orientation="vertical"
+    aria-valuemin="192"
+    aria-valuemax="416"
+    aria-valuenow="250"
+    :aria-valuenow="String(sidebarWidth())"
+    @keydown="resizeSidebarByKey"
+    @pointerdown="beginSidebarResize"
+    @pointermove="moveSidebarResize"
+    @pointerup="endSidebarResize"
+    @pointercancel="cancelSidebarResize"
+  ></div>
 
   <main class="flex flex-1 flex-col min-w-0">
-    <header class="flex gap-3 items-center shrink-0 px-4 h-[44px] border-b border-black/5 dark:border-white/5">
+    <header data-workspace-header class="flex relative gap-3 items-center shrink-0 px-4 h-[44px] border-b border-black/5 dark:border-white/5">
       <button type="button" data-sidebar-toggle ref="sidebarToggleBox" @click="openSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
         <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
       </button>
-      <span class="font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+      <span data-workspace-title class="min-w-0 font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
       @if(activeSession)
       <span
         data-session-state
@@ -157,34 +174,44 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       --}}
       @if(sessionBranch)
         <span
+          data-workspace-branch
           class="px-[6px] py-[1px] font-mono leading-[15px] text-[11px] truncate border border-black/10 rounded-[5px] dark:border-white/15 opacity-70"
           title="This session runs in its own worktree on {{ sessionBranch }}"
         >{{ sessionBranch }}</span>
       @endif
-      {{--
-        Changes sit behind a toggle rather than always-on. Reading a repository
-        costs a subprocess, and most page loads never look at the diff.
-      --}}
-      @if(activeSession)
-      <button
-        type="button"
-        data-diff-toggle
-        class="ml-auto px-2 py-[3px] text-[12px] border border-black/10 rounded-[6px] dark:border-white/15"
-        aria-expanded="false"
-        :aria-expanded="diffOpen() ? 'true' : 'false'"
-        @click="toggleDiff"
-      >Changes</button>
-      @endif
-      @if(activeWorkspaceId)
-        <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
-          <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
-        </button>
-      @endif
       @if(draftProject || activeSession)
-      <button type="button" data-project-add @click="openProjectPicker" class="flex gap-1.5 items-center shrink-0 px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15" aria-label="Add project" title="Add project">
-        <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
-        <span class="hidden sm:inline">Add project</span>
+      <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="workspaceActionsOpen() ? 'true' : 'false'">
+        <span class="inline-block size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
       </button>
+      <button type="button" data-workspace-actions-scrim hidden tabindex="-1" :hidden="!workspaceActionsOpen()" @click="closeWorkspaceActions" aria-label="Close workspace actions"></button>
+      <div id="harness-workspace-actions" data-workspace-actions :data-open="workspaceActionsOpen() ? 'true' : 'false'">
+        {{--
+          Changes sit behind a toggle rather than always-on. Reading a repository
+          costs a subprocess, and most page loads never look at the diff.
+        --}}
+        @if(activeSession)
+        <button
+          type="button"
+          data-diff-toggle
+          class="px-2 py-[3px] text-[12px] border border-black/10 rounded-[6px] dark:border-white/15"
+          aria-expanded="false"
+          :aria-expanded="diffOpen() ? 'true' : 'false'"
+          @click="toggleDiff"
+        ><span data-workspace-action-label class="size-4 i-hugeicons-file-02" aria-hidden="true"></span>Changes</button>
+        @endif
+        @if(activeWorkspaceId)
+          <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
+            <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
+            <span data-workspace-action-label>Terminal</span>
+          </button>
+        @endif
+        @if(draftProject || activeSession)
+        <button type="button" data-project-add @click="openProjectPicker" class="flex gap-1.5 items-center shrink-0 px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15" aria-label="Add project" title="Add project">
+          <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
+          <span>Add project</span>
+        </button>
+        @endif
+      </div>
       @endif
       {{--
         The account corner every surface has. Until M8 gives it an account to
@@ -728,6 +755,11 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const projectPath = useRef('projectPathBox')
   const projectTrust = useRef('projectTrustBox')
   const sidebarOpen = state(false)
+  const storedSidebarWidth = useLocalStorage('harness.sidebarWidth', 250)
+  const sidebarWidth = state(boundedSidebarWidth(storedSidebarWidth()))
+  let sidebarDrag = null
+  const workspaceActionsOpen = state(false)
+  const workspaceActionsToggle = useRef('workspaceActionsToggleBox')
   const sidebarRef = useRef('sidebarBox')
   const sidebarToggleRef = useRef('sidebarToggleBox')
   const promptRef = useRef('promptBox')
@@ -741,6 +773,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   const termMetricRef = useRef('termMetricBox')
 
   function openSidebar() {
+    workspaceActionsOpen.set(false)
     sidebarOpen.set(true)
     void nextTick(() => sidebarRef.current?.focus())
   }
@@ -749,6 +782,60 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
     sidebarOpen.set(false)
     sidebarToggleRef.current?.focus()
   }
+
+  function boundedSidebarWidth(width) {
+    return Number.isFinite(width) ? Math.min(416, Math.max(192, Math.round(width))) : 250
+  }
+
+  function resizeSidebarByKey(event) {
+    const step = event.shiftKey ? 40 : 12
+    const widths = {
+      ArrowLeft: sidebarWidth() - step,
+      ArrowRight: sidebarWidth() + step,
+      Home: 192,
+      End: 416,
+    }
+    if (!Object.hasOwn(widths, event.key)) return
+    event.preventDefault()
+    const width = boundedSidebarWidth(widths[event.key])
+    sidebarWidth.set(width)
+    storedSidebarWidth.set(width)
+  }
+
+  function beginSidebarResize(event) {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.currentTarget.focus()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    sidebarDrag = { pointerId: event.pointerId, x: event.clientX, width: sidebarWidth() }
+  }
+
+  function moveSidebarResize(event) {
+    if (sidebarDrag?.pointerId !== event.pointerId) return
+    sidebarWidth.set(boundedSidebarWidth(sidebarDrag.width + event.clientX - sidebarDrag.x))
+  }
+
+  function endSidebarResize(event) {
+    if (sidebarDrag?.pointerId !== event.pointerId) return
+    storedSidebarWidth.set(sidebarWidth())
+    sidebarDrag = null
+  }
+
+  function cancelSidebarResize(event) {
+    if (sidebarDrag?.pointerId !== event.pointerId) return
+    sidebarWidth.set(sidebarDrag.width)
+    sidebarDrag = null
+  }
+  function toggleWorkspaceActions() {
+    workspaceActionsOpen.update(open => !open)
+  }
+
+  function closeWorkspaceActions() {
+    if (!workspaceActionsOpen()) return
+    workspaceActionsOpen.set(false)
+    workspaceActionsToggle.current?.focus()
+  }
+
   // The "name this profile" form. Replaces window.prompt: the name arrives
   // through a small form the page owns, so it can be styled and cancelled
   // like everything else.
@@ -888,7 +975,8 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   function openProjectPicker(event) {
     const dialog = projectDialog.current
     if (!dialog || dialog.open) return
-    projectPickerTrigger = event?.currentTarget ?? null
+    projectPickerTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget ?? null
+    workspaceActionsOpen.set(false)
     projectError.set('')
     if (projectPath.current) projectPath.current.value = ''
     if (projectTrust.current) projectTrust.current.checked = false
@@ -1124,6 +1212,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   function openSettings() {
+    workspaceActionsOpen.set(false)
     settingsOpen.set(true)
     // Re-probe on open: someone who just logged in comes back to a sheet
     // that should say so. The server holds results for 30s, so this is a
@@ -1312,6 +1401,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   function toggleDiff() {
+    closeWorkspaceActions()
     diffOpen.update(open => !open)
     if (diffOpen() && sessionId) loadDiff()
   }
@@ -1526,6 +1616,7 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
   }
 
   function toggleTerminal() {
+    closeWorkspaceActions()
     // No workspace, no shell to open — the panel is not even rendered.
     if (!Number(activeWorkspaceId)) return
     termOpen.update(open => !open)
@@ -1562,6 +1653,10 @@ export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
       else if (profileModalOpen()) {
         event.preventDefault()
         closeProfileModal()
+      }
+      else if (workspaceActionsOpen()) {
+        event.preventDefault()
+        closeWorkspaceActions()
       }
       else if (sidebarOpen()) {
         event.preventDefault()

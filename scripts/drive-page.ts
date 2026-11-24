@@ -167,6 +167,16 @@ await page.addInitScript((folder) => {
 page.on('dialog', async d => d.accept())
 await page.goto(`${baseUrl}/s/${sessionId}`)
 await page.setViewportSize({ width: 390, height: 844 })
+const workspaceActions = page.locator('[data-workspace-actions-toggle]')
+check('mobile keeps the thread title visible and hides contextual actions', await page.locator('[data-workspace-title]').isVisible()
+  && !(await page.locator('[data-diff-toggle]').isVisible()))
+await workspaceActions.click()
+check('mobile workspace actions expose Changes and Terminal', await page.locator('[data-diff-toggle]').isVisible()
+  && await page.locator('[data-terminal-toggle]').isVisible())
+await capture('workspace-actions-mobile')
+await page.keyboard.press('Escape')
+check('Escape closes workspace actions and restores focus', await workspaceActions.getAttribute('aria-expanded') === 'false'
+  && await workspaceActions.evaluate(el => el === document.activeElement))
 await page.locator('[data-sidebar-toggle]').click()
 await page.waitForFunction(() => document.querySelector('[data-harness-sidebar]')?.getAttribute('data-open') === 'true')
 await page.keyboard.press('Escape')
@@ -176,6 +186,22 @@ check('mobile composer controls fit the viewport', await page.locator('[data-sen
   return rect.left >= 0 && rect.right <= window.innerWidth
 }))
 await page.setViewportSize({ width: 1280, height: 800 })
+const sidebarResize = page.locator('[data-sidebar-resize]')
+await sidebarResize.press('ArrowRight')
+await page.waitForFunction(() => document.querySelector('[data-sidebar-resize]')?.getAttribute('aria-valuenow') === '262')
+check('keyboard resizing expands desktop navigation', (await page.locator('[data-harness-sidebar]').boundingBox())?.width === 262)
+const resizeHandle = await sidebarResize.boundingBox()
+if (!resizeHandle) throw new Error('Expected a visible desktop sidebar resize handle.')
+const resizeX = resizeHandle.x + resizeHandle.width / 2
+const resizeY = resizeHandle.y + resizeHandle.height / 2
+await page.mouse.move(resizeX, resizeY)
+await page.mouse.down()
+await page.mouse.move(resizeX + 32, resizeY, { steps: 4 })
+await page.mouse.up()
+await page.waitForFunction(() => document.querySelector('[data-sidebar-resize]')?.getAttribute('aria-valuenow') === '294')
+await page.reload()
+await page.waitForFunction(() => document.querySelector('[data-sidebar-resize]')?.getAttribute('aria-valuenow') === '294')
+check('desktop navigation restores its dragged width after reload', (await page.locator('[data-harness-sidebar]').boundingBox())?.width === 294)
 
 // 1. Composer: type a prompt, send, watch the turn stream in — with the
 // thinking dots holding the gap before the first token.
@@ -285,6 +311,7 @@ check('switching drivers starts a fresh session with the new agent', sessionsAft
 const emptyStateShown = await page.evaluate(() => document.querySelector('[data-empty-state]') !== null)
 check('no-session page shows the empty state', emptyStateShown)
 await page.setViewportSize({ width: 390, height: 844 })
+await workspaceActions.click()
 await page.locator('[data-project-add]').click()
 await page.locator('[data-project-browse]').click()
 check('native Browse fills the selected host folder', await page.locator('[data-project-path]').inputValue() === secondProject)
