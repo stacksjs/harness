@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.7...v0.0.8)
+
+## ✨ Features
+
+- **chat**: support structured provider questions ([9d3e3a9](https://github.com/stacksjs/harness/commit/9d3e3a9)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.6...v0.0.7)
 
 ## ✨ Features
