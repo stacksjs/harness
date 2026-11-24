@@ -1,5 +1,135 @@
 # Stacks Changelog
 
+## v0.0.1
+
+## ✨ Features
+
+- **auth**: probe Codex accounts through the app server ([d51ef72](https://github.com/stacksjs/harness/commit/d51ef72)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#12](https://github.com/stacksjs/harness/issues/12))
+- **auth**: use Claude Code account initialization for status ([9873180](https://github.com/stacksjs/harness/commit/9873180)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#12](https://github.com/stacksjs/harness/issues/12))
+- **desktop**: craft v0.0.77 — --app-name retires the symlink trick, frames persist ([5fd60a6](https://github.com/stacksjs/harness/commit/5fd60a6)) _(by glennmichael123 <gtorregosa@gmail.com>)_ ([#50](https://github.com/stacksjs/harness/issues/50), [#52](https://github.com/stacksjs/harness/issues/52), [#49](https://github.com/stacksjs/harness/issues/49), [#48](https://github.com/stacksjs/harness/issues/48), [#47](https://github.com/stacksjs/harness/issues/47))
+- **desktop**: a real menu bar — declared by the page, built native by craft ([516714c](https://github.com/stacksjs/harness/commit/516714c)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **settings**: agent accounts — live status rows and a Log in that types for you ([5abddaa](https://github.com/stacksjs/harness/commit/5abddaa)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **transcript**: thinking dots hold the gap before the first token ([875fa21](https://github.com/stacksjs/harness/commit/875fa21)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **header**: the account corner — a person icon that opens settings ([ed9af0f](https://github.com/stacksjs/harness/commit/ed9af0f)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **composer**: the agent picker lives in the chatbox, with live driver status ([d69b3ed](https://github.com/stacksjs/harness/commit/d69b3ed)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **settings**: paired-device management in the sheet, and M8 scopes accounts ([63e1e07](https://github.com/stacksjs/harness/commit/63e1e07)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **desktop**: the app answers to its own name, and Cmd+, means settings ([2998d7b](https://github.com/stacksjs/harness/commit/2998d7b)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **ci**: enforce the §11 performance budgets, measured against a real server ([1557f44](https://github.com/stacksjs/harness/commit/1557f44)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **drivers**: opencode verified live, and ACP usage reaches the totals ([81748f9](https://github.com/stacksjs/harness/commit/81748f9)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **pty**: a real PTY via runtime-compiled C — live resize lands, M6 closes ([f23a6b4](https://github.com/stacksjs/harness/commit/f23a6b4)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **terminal**: Ctrl+` toggles the terminal, and a desktop drive to prove it ([95cd764](https://github.com/stacksjs/harness/commit/95cd764)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **terminal**: the web surface panel over the ANSI grid ([fe3f7c4](https://github.com/stacksjs/harness/commit/fe3f7c4)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **terminal**: a real PTY over the socket, local-only ([bc12343](https://github.com/stacksjs/harness/commit/bc12343)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **ansi**: the emulator core M6's terminals were blocked on ([8d5bc4b](https://github.com/stacksjs/harness/commit/8d5bc4b)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **drivers**: grok over the ACP client — every provider has a transport ([13d4c40](https://github.com/stacksjs/harness/commit/13d4c40)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **drivers**: opencode over the ACP client — the bet §7 made pays out ([4a9912c](https://github.com/stacksjs/harness/commit/4a9912c)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **drivers**: the ACP client, and cursor live over it ([cd63a99](https://github.com/stacksjs/harness/commit/cd63a99)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **worktree**: give worktrees back when a session goes away ([c412719](https://github.com/stacksjs/harness/commit/c412719)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#10](https://github.com/stacksjs/harness/issues/10))
+- **server**: reach harness from outside the network, over a tunnel ([e48b487](https://github.com/stacksjs/harness/commit/e48b487)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **server**: authentication and device pairing, so a phone can drive harness ([6a70f90](https://github.com/stacksjs/harness/commit/6a70f90)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **mcp**: per-profile MCP servers, with secrets referenced rather than stored ([c084d1c](https://github.com/stacksjs/harness/commit/c084d1c)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **git**: a worktree and a branch per session ([7a9e822](https://github.com/stacksjs/harness/commit/7a9e822)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **diff**: attribute changes to the session, not the working tree ([3a1e89a](https://github.com/stacksjs/harness/commit/3a1e89a)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#6](https://github.com/stacksjs/harness/issues/6))
+- **checkpoint**: undo a turn ([367edf1](https://github.com/stacksjs/harness/commit/367edf1)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **desktop**: register a global shortcut to summon harness ([17be4ce](https://github.com/stacksjs/harness/commit/17be4ce)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **profiles**: make a profile's colour real, end to end ([859f187](https://github.com/stacksjs/harness/commit/859f187)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: stop a running agent, and wire the sidebar's dead buttons ([15fcb9c](https://github.com/stacksjs/harness/commit/15fcb9c)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: add the diff view ([2f86bec](https://github.com/stacksjs/harness/commit/2f86bec)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: show what the agent actually did ([182fcfa](https://github.com/stacksjs/harness/commit/182fcfa)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: wire the composer and the approval buttons ([cf84689](https://github.com/stacksjs/harness/commit/cf84689)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **drivers**: add conformance suite, codex transport, and driver doctor ([7964f81](https://github.com/stacksjs/harness/commit/7964f81)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **desktop**: tray, detached launch, and the M4 budgets measured ([82ae0ca](https://github.com/stacksjs/harness/commit/82ae0ca)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **desktop**: a Craft window over the harness server, and a native probe ([17407d7](https://github.com/stacksjs/harness/commit/17407d7)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: SSR shell, routes and the projection→view mapping ([d92807c](https://github.com/stacksjs/harness/commit/d92807c)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **runtime**: wire the driver into the server — M2 complete ([bb33b06](https://github.com/stacksjs/harness/commit/bb33b06)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **drivers**: the Claude driver, over the Claude Agent SDK ([d42f2aa](https://github.com/stacksjs/harness/commit/d42f2aa)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **client**: connection supervisor with resume-from-cursor ([7122781](https://github.com/stacksjs/harness/commit/7122781)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **server**: harness:serve — HTTP and a CBOR websocket over the engine ([2f9fd4c](https://github.com/stacksjs/harness/commit/2f9fd4c)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **engine**: event-sourced session engine, contract and data model ([5e7678e](https://github.com/stacksjs/harness/commit/5e7678e)) _(by Chris <chrisbreuer93@gmail.com>)_
+- scaffold the harness app on Stacks ([7f4a700](https://github.com/stacksjs/harness/commit/7f4a700)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🐛 Bug Fixes
+
+- **release**: align Harness workspace lockfiles ([b6d157f](https://github.com/stacksjs/harness/commit/b6d157f)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#12](https://github.com/stacksjs/harness/issues/12))
+- **ui**: restore workspace controls and add narrow-screen navigation ([93d5c9f](https://github.com/stacksjs/harness/commit/93d5c9f)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#12](https://github.com/stacksjs/harness/issues/12))
+- **desktop**: speak craft v0.0.67's menu contract — set() takes {menus} ([3a6d5ab](https://github.com/stacksjs/harness/commit/3a6d5ab)) _(by glennmichael123 <gtorregosa@gmail.com>)_ ([#27](https://github.com/stacksjs/harness/issues/27), [#29](https://github.com/stacksjs/harness/issues/29))
+- **ui**: the empty page says what to do, and typing there does it ([67b441f](https://github.com/stacksjs/harness/commit/67b441f)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **desktop**: Esc closes the open sheet instead of beeping ([320f212](https://github.com/stacksjs/harness/commit/320f212)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **defaults**: put the framework views back the way they were ([60016ec](https://github.com/stacksjs/harness/commit/60016ec)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **pty**: the shell owns its terminal on both platforms, and Linux drops TinyCC ([f166261](https://github.com/stacksjs/harness/commit/f166261)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **views**: the render path now reads config/ui.ts, and pages get a shell ([0733e0b](https://github.com/stacksjs/harness/commit/0733e0b)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **types**: nine errors a vacuously green typecheck was hiding ([ffd5708](https://github.com/stacksjs/harness/commit/ffd5708)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **tests**: a green suite, by deleting the tests that could never run ([a21677a](https://github.com/stacksjs/harness/commit/a21677a)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **cli**: dispatch through the running server, not behind its back ([e97de8b](https://github.com/stacksjs/harness/commit/e97de8b)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **server**: a stuck approval no longer strands a turn ([f80f0c5](https://github.com/stacksjs/harness/commit/f80f0c5)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#8](https://github.com/stacksjs/harness/issues/8))
+- **engine**: replay the log in the order it was written ([0feed5e](https://github.com/stacksjs/harness/commit/0feed5e)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: stop squatting on stx's sidebar marker, and drop empty sections ([6c335a8](https://github.com/stacksjs/harness/commit/6c335a8)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: make the live surface actually work in a browser, and stop re-sending 190KB per request ([dd6cf24](https://github.com/stacksjs/harness/commit/dd6cf24)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **drivers**: treat a failed claude result as a failure, and let a session pick its model ([44fdd6b](https://github.com/stacksjs/harness/commit/44fdd6b)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **web**: resolve library components from src, not dist — the Arc sidebar renders ([a5ef4f2](https://github.com/stacksjs/harness/commit/a5ef4f2)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ⚡ Performance Improvements
+
+- **server**: render cache keyed by state revision — a poll pays the render once ([75482a4](https://github.com/stacksjs/harness/commit/75482a4)) _(by glennmichael123 <gtorregosa@gmail.com>)_ ([#11](https://github.com/stacksjs/harness/issues/11))
+- **web**: defer spaces beyond the active one's neighbours ([0e13e42](https://github.com/stacksjs/harness/commit/0e13e42)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **desktop**: measure cold start in-process, and record that page weight was not the lever ([5037ab4](https://github.com/stacksjs/harness/commit/5037ab4)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ♻️ Code Refactoring
+
+- **styles**: harness.stx sheds its style block into typed crosswind preflights ([fec506d](https://github.com/stacksjs/harness/commit/fec506d)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **views**: stx timers, dialogs and navigation replace the window built-ins ([ab1753d](https://github.com/stacksjs/harness/commit/ab1753d)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **views**: the island drives the page through refs, handlers and signals ([0dfaed6](https://github.com/stacksjs/harness/commit/0dfaed6)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **views**: transcript and diff render through bindings, not createElement ([f968a52](https://github.com/stacksjs/harness/commit/f968a52)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **views**: the island is a client script now ([fbbf769](https://github.com/stacksjs/harness/commit/fbbf769)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **terminal**: server-rendered panel, no JS-injected DOM or CSS ([a488694](https://github.com/stacksjs/harness/commit/a488694)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+
+## 📝 Documentation
+
+- **plan**: re-baseline the cold-start budget on measured WebKit floor ([c7ddb2d](https://github.com/stacksjs/harness/commit/c7ddb2d)) _(by glennmichael123 <gtorregosa@gmail.com>)_ ([#5](https://github.com/stacksjs/harness/issues/5))
+- **plan**: the terminal browser run happened, and passed ([1b665b6](https://github.com/stacksjs/harness/commit/1b665b6)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **plan**: note the qrx fixes, and why pairing still types a code ([11025b3](https://github.com/stacksjs/harness/commit/11025b3)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **plan**: codex is verified live, end to end ([3e96feb](https://github.com/stacksjs/harness/commit/3e96feb)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **plan**: mark M3 complete ([21df392](https://github.com/stacksjs/harness/commit/21df392)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **plan**: record the craft, zig-gc and zig-js work as §10.10–10.13 ([dd5edfb](https://github.com/stacksjs/harness/commit/dd5edfb)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **plan**: decompose the 665ms cold start against an 88-byte control page ([240e4b2](https://github.com/stacksjs/harness/commit/240e4b2)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **plan**: the 10k-line transcript budget holds, which settles the SSR-first risk ([b2abfef](https://github.com/stacksjs/harness/commit/b2abfef)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **plan**: record M5 results — conformance suite, codex transport, and what is still open ([e0938d6](https://github.com/stacksjs/harness/commit/e0938d6)) _(by Chris <chrisbreuer93@gmail.com>)_
+- M1 complete, and the framework bugs it surfaced ([a431623](https://github.com/stacksjs/harness/commit/a431623)) _(by Chris <chrisbreuer93@gmail.com>)_
+- mark M0 complete ([aad113a](https://github.com/stacksjs/harness/commit/aad113a)) _(by Chris <chrisbreuer93@gmail.com>)_
+- plan the harness agent control surface ([c5ead20](https://github.com/stacksjs/harness/commit/c5ead20)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ✅ Tests
+
+- **desktop**: the terminal proven in a live craft window ([746dc0e](https://github.com/stacksjs/harness/commit/746dc0e)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **drive**: the page drive — composer, approval, diff, terminal ([9d1cfb6](https://github.com/stacksjs/harness/commit/9d1cfb6)) _(by glennmichael123 <gtorregosa@gmail.com>)_ ([#7](https://github.com/stacksjs/harness/issues/7))
+
+## 💚 Continuous Integration
+
+- wire the three §14 promises CI never kept ([e920f39](https://github.com/stacksjs/harness/commit/e920f39)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **test**: run the package suites CI has never run ([ed14a63](https://github.com/stacksjs/harness/commit/ed14a63)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **conformance**: the nightly half of §13, against a real agent ([63b26a0](https://github.com/stacksjs/harness/commit/63b26a0)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+
+## 🔧 Chores
+
+- **deps**: upgrade Harness to Stacks 0.75.674 and stx 0.2.932 ([b45e802](https://github.com/stacksjs/harness/commit/b45e802)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#12](https://github.com/stacksjs/harness/issues/12))
+- **css**: rename config/crosswind.ts to config/css.ts ([d8f417e](https://github.com/stacksjs/harness/commit/d8f417e)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: stx and components 0.2.231 → 0.2.929 ([e93f301](https://github.com/stacksjs/harness/commit/e93f301)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: stx and components 0.2.188 → 0.2.231 ([570e8a8](https://github.com/stacksjs/harness/commit/570e8a8)) _(by glennmichael123 <gtorregosa@gmail.com>)_ ([#1945](https://github.com/stacksjs/harness/issues/1945))
+- **deps**: stx and components to 0.2.188 ([3ac37c4](https://github.com/stacksjs/harness/commit/3ac37c4)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **stx**: topology pinned, types and robots landed, strict stays warn-only on purpose ([8a9706c](https://github.com/stacksjs/harness/commit/8a9706c)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **stx**: strict mode on, warn-only, now that the config can reach it ([59f418d](https://github.com/stacksjs/harness/commit/59f418d)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **stx**: the quick-wins sweep from the standards audit ([2df1d83](https://github.com/stacksjs/harness/commit/2df1d83)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: record the ansi workspace in the lockfile ([5a05447](https://github.com/stacksjs/harness/commit/5a05447)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: drop the duplicate pickier entry ([3040424](https://github.com/stacksjs/harness/commit/3040424)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: pickier 0.1.50, which fixes the link-fragment false positives ([19f3754](https://github.com/stacksjs/harness/commit/19f3754)) _(by Chris <chrisbreuer93@gmail.com>)_ ([#9](https://github.com/stacksjs/harness/issues/9))
+- **deps**: pin @stacksjs/components for deferred sidebar spaces ([10ecf77](https://github.com/stacksjs/harness/commit/10ecf77)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **deps**: link @harness/client into the workspace ([d192368](https://github.com/stacksjs/harness/commit/d192368)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+- _glennmichael123 <gtorregosa@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/stacks/compare/v0.70.303...v0.70.304)
 
 ## ✨ Features
