@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.6...v0.0.7)
+
+## ✨ Features
+
+- **chat**: stream Markdown and recover tool approvals ([4d28650](https://github.com/stacksjs/harness/commit/4d28650)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.5...v0.0.6)
 
 ## ✨ Features

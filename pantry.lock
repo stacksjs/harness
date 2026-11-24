@@ -65,7 +65,8 @@
         "@harness/contract": "workspace:*",
         "@harness/engine": "workspace:*",
         "@stacksjs/stx": "*",
-        "localtunnels": "0.2.12"
+        "localtunnels": "0.2.12",
+        "markdown-it": "^15.0.3"
       }
     },
     "storage/framework": {
