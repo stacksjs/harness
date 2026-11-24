@@ -43,7 +43,8 @@ markdown.renderer.rules.image = (tokens, index) => escapeTranscriptText(tokens[i
 
 function codeBlock(code: string, language = ''): string {
   const label = language ? escapeTranscriptText(language) : 'Code'
-  return `<div class="transcript-code" data-wrap="true"><div class="transcript-code-bar"><span>${label}</span><div class="transcript-code-actions"><button type="button" data-wrap-code aria-pressed="true">Wrap lines</button><button type="button" data-copy-code>Copy code</button></div></div><pre tabindex="0"><code>${escapeTranscriptText(code)}</code></pre></div>\n`
+  const languageValue = /^[\w#+.-]+$/u.test(language) ? ` data-code-language="${language.toLowerCase()}"` : ''
+  return `<div class="transcript-code" data-wrap="true"><div class="transcript-code-bar"><span>${label}</span><div class="transcript-code-actions"><button type="button" data-wrap-code aria-pressed="true">Wrap lines</button><button type="button" data-copy-code>Copy code</button></div></div><pre tabindex="0"><code${languageValue}>${escapeTranscriptText(code)}</code></pre></div>\n`
 }
 
 markdown.renderer.rules.fence = (tokens, index) => {
@@ -85,15 +86,43 @@ function retainCodeWrapOverrides(response: Element, nextContent: DocumentFragmen
   })
 }
 
+// Leave existing code text nodes connected as the same fence grows. Replacing
+// those nodes would collapse an in-progress selection and clear CSS highlights.
+function appendCodeGrowth(previous: ChildNode, next: ChildNode): boolean {
+  if (!(previous instanceof Element) || !(next instanceof Element)
+    || !previous.matches('.transcript-code') || !next.matches('.transcript-code')
+    || previous.getAttribute('data-wrap') !== next.getAttribute('data-wrap')
+    || !previous.firstChild?.isEqualNode(next.firstChild)) return false
+  const oldCode = previous.querySelector('pre > code')
+  const newCode = next.querySelector('pre > code')
+  const oldText = oldCode?.textContent ?? ''
+  if (!oldCode || !newCode?.textContent?.startsWith(oldText)) return false
+  if (oldText.length === newCode.textContent.length) return true
+
+  let consumed = oldText.length
+  for (const child of newCode.childNodes) {
+    if (child instanceof Text && consumed) {
+      if (child.length > consumed) oldCode.append(child.data.slice(consumed))
+      consumed = Math.max(0, consumed - child.length)
+    }
+    else if (!consumed) {
+      oldCode.append(child.cloneNode(true))
+    }
+  }
+  return true
+}
+
 /** Keep the unchanged leading blocks and replace only the changed tail. */
 export function updateTranscriptMarkdown(response: Element, source: string): void {
   const template = response.ownerDocument.createElement('template')
   template.innerHTML = renderTranscriptMarkdown(source)
   if (responsesWithWrapOverrides.has(response)) retainCodeWrapOverrides(response, template.content)
   let previous = response.firstChild
-  while (previous && template.content.firstChild?.isEqualNode(previous)) {
-    template.content.firstChild.remove()
+  let next = template.content.firstChild
+  while (previous && next && (next.isEqualNode(previous) || appendCodeGrowth(previous, next))) {
+    next.remove()
     previous = previous.nextSibling
+    next = template.content.firstChild
   }
   while (previous) {
     const next = previous.nextSibling

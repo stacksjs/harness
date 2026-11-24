@@ -58,6 +58,19 @@ const TRANSCRIPT_MARKDOWN = `
 .transcript-code[data-wrap="true"] pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 `
 
+const syntaxColors = { getCSS: () => `
+.transcript-code code::highlight(harness-syntax-comment) { color: #585e69; }
+.transcript-code code::highlight(harness-syntax-keyword) { color: #7d3077; }
+.transcript-code code::highlight(harness-syntax-name) { color: #25518c; }
+.transcript-code code::highlight(harness-syntax-string) { color: #276248; }
+.transcript-code code::highlight(harness-syntax-value) { color: #854514; }
+.dark .transcript-code code::highlight(harness-syntax-comment) { color: #a3aab5; }
+.dark .transcript-code code::highlight(harness-syntax-keyword) { color: #e2a0de; }
+.dark .transcript-code code::highlight(harness-syntax-name) { color: #a2c5f9; }
+.dark .transcript-code code::highlight(harness-syntax-string) { color: #9fddba; }
+.dark .transcript-code code::highlight(harness-syntax-value) { color: #e9b78d; }
+` }
+
 const RESPONSIVE_SHELL = `
 [data-sidebar-toggle], [data-sidebar-scrim], [data-workspace-actions-toggle],
 [data-workspace-actions-scrim], [data-workspace-action-label] { display: none; }
@@ -226,6 +239,7 @@ export default {
     { getCSS: () => HIDDEN_PIN },
     { getCSS: () => RESPONSIVE_SHELL },
     { getCSS: () => TRANSCRIPT_MARKDOWN },
+    syntaxColors,
     { getCSS: () => TOOL_DOT },
     { getCSS: () => THINKING_DOTS },
     { getCSS: () => TERMINAL_PANEL },

@@ -7,7 +7,7 @@ it('renders prose, tables and open fences using the same renderer for streaming 
   expect(html).toContain('<strong>Passed</strong>')
   expect(html).toContain('<td>Build</td>')
   expect(html).toContain('data-copy-code>Copy code')
-  expect(html).toContain('<code>const size = 2 &lt; 3\n</code>')
+  expect(html).toContain('<code data-code-language="ts">const size = 2 &lt; 3\n</code>')
 })
 
 it('renders model content without active HTML, external image loading or arbitrary local paths', () => {

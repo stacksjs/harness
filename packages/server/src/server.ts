@@ -23,6 +23,7 @@ import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from '.
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff } from './diff'
 import { buildClientCodec } from './client-bundle'
+import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -755,6 +756,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
       // Shared page assets. Checked before the page routes because their
       // paths are fixed and a render must never shadow them.
+      if (url.pathname === TRANSCRIPT_HIGHLIGHT_WORKER) return respondTranscriptHighlightWorker(request)
       const asset = respondStxAsset(url.pathname) ?? assetCache.respond(url.pathname)
       if (asset) return asset
 

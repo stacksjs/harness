@@ -1726,13 +1726,20 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       if (!transcript) return
       for (const turnId of changedResponses) {
         const response = transcript.querySelector(`[data-turn="${turnId}"] [data-response]`)
-        if (response) updateMarkdown(response, responseByTurn.get(turnId))
+        if (response) {
+          updateMarkdown(response, responseByTurn.get(turnId))
+          transcriptHighlighter?.update(response)
+        }
       }
       changedResponses.clear()
       if (followingTranscript()) transcript.scrollTop = transcript.scrollHeight
     })
   }
-  onDestroy(() => cancelAnimationFrame(transcriptFrame))
+  let transcriptHighlighter
+  onDestroy(() => {
+    cancelAnimationFrame(transcriptFrame)
+    transcriptHighlighter?.stop()
+  })
 
   function updateClientTurn(turnId, change) {
     liveTurns.update(turns => turns.map(turn => turn.id === turnId ? change(turn) : turn))
@@ -2084,7 +2091,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, useTranscriptControl, closeTranscriptMenu } = await import(codecUrl)
+    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
@@ -2106,6 +2113,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }))
 
     const transcript = transcriptRef.current
+    if (transcript) {
+      transcriptHighlighter = createTranscriptHighlighter(transcript)
+      transcriptHighlighter?.update(transcript)
+    }
     const liveResponse = transcript?.querySelector('[data-live-response]')
     if (liveResponse) {
       responseByTurn.set(initialResponseTurn, JSON.parse(liveResponse.getAttribute('data-response-source') || '""'))

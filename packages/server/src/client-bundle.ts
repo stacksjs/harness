@@ -29,6 +29,7 @@ export { Terminal, toHtml } from '@harness/ansi'
 export { updateTranscriptMarkdown } from './packages/server/src/transcript-markdown'
 export { sendBrowserCommand } from './packages/server/src/browser-command'
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
+export { createTranscriptHighlighter } from './packages/server/src/browser-transcript-highlight'
 export { createQuestionForm } from './packages/server/src/browser-questions'`
 
 let cached: ExternalizedAsset | null = null

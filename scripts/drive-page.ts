@@ -94,7 +94,7 @@ const instance: ProviderInstance = {
       yield { type: 'assistant-delta', text: '| Check | Result |\n| --- | --- |\n| Type check | Passed |\n| Formatting | Passed |\n\n' }
       yield { type: 'assistant-delta', text: '\x60\x60\x60ts\nconst line = "' + 'sample-'.repeat(80) + '"\n' }
       await markdownControlsGate.promise
-      yield { type: 'assistant-delta', text: 'const next = 1\n\x60\x60\x60\n\nChecks recorded.' }
+      yield { type: 'assistant-delta', text: 'const next = 1\n\x60\x60\x60\n\n\x60\x60\x60fixture-unknown-language\n<em>Plain fixture</em>\n\x60\x60\x60\n\nChecks recorded.' }
       yield { type: 'turn-complete', tokensIn: 2, tokensOut: 3, costMicros: 0 }
       return
     }
@@ -769,9 +769,39 @@ check('code wraps within the phone layout by default', await wrap.getAttribute('
 await wrap.click()
 check('turning wrap off gives the code its own horizontal scroll', await wrap.getAttribute('aria-pressed') === 'false'
   && await previewCode.evaluate(element => element.scrollWidth > element.clientWidth))
+const streamingCode = controlsTurn.locator('code[data-code-language="ts"]')
+await page.waitForFunction(() => {
+  const code = [...document.querySelectorAll('code[data-code-language="ts"]')].at(-1)
+  return [...(CSS.highlights.get('harness-syntax-keyword') ?? [])].some(range => code?.contains(range.startContainer))
+})
+check('TypeScript keywords are highlighted while the provider is still streaming', await streamingCode.evaluate((code) => {
+  const keyword = [...(CSS.highlights.get('harness-syntax-keyword') ?? [])].find(candidate => code.contains(candidate.startContainer))
+  if (!keyword || String(keyword) !== 'const') return false
+  const selection = document.getSelection()
+  selection?.removeAllRanges()
+  selection?.addRange((keyword as Range).cloneRange())
+  return selection?.toString() === 'const'
+}))
 markdownControlsGate.resolve()
 await controlsTurn.getByText('Checks recorded.', { exact: true }).waitFor()
-check('code wrap choice survives a streamed update', await wrap.getAttribute('aria-pressed') === 'false')
+check('code wrap choice survives a streamed update', await wrap.first().getAttribute('aria-pressed') === 'false')
+check('streaming retains a selected code token', await streamingCode.evaluate(code =>
+  document.getSelection()?.toString() === 'const' && code.contains(document.getSelection()?.anchorNode ?? null)))
+await page.waitForFunction(() => {
+  const code = [...document.querySelectorAll('code[data-code-language="ts"]')].at(-1)
+  return [...(CSS.highlights.get('harness-syntax-value') ?? [])].some(range =>
+    code?.contains(range.startContainer) && String(range) === '1')
+})
+check('later tokens are highlighted without re-rendering the existing selection', await streamingCode.evaluate((code) => {
+  const selection = document.getSelection()
+  const preserved = selection?.toString() === 'const' && code.contains(selection.anchorNode)
+  selection?.removeAllRanges()
+  return preserved
+}))
+const unknownCode = controlsTurn.locator('code[data-code-language="fixture-unknown-language"]')
+check('unrecognized languages retain escaped plain text', await unknownCode.evaluate(code =>
+  code.textContent === '<em>Plain fixture</em>\n' && code.querySelector('em') === null))
+await capture('transcript-syntax-mobile')
 const tableCopy = controlsTurn.locator('.transcript-table-actions summary')
 await tableCopy.click()
 await capture('transcript-table-copy-mobile')
@@ -795,6 +825,8 @@ if (screenshotDir) {
   await page.setViewportSize({ width: 1280, height: 800 })
   await tableCopy.click()
   await capture('transcript-table-copy-desktop')
+  await tableCopy.click()
+  await capture('transcript-syntax-desktop')
 }
 
 check('browser reported no script errors', pageErrors.length === 0)
