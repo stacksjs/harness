@@ -655,10 +655,26 @@ check('terminal restores scrollback and the running shell on reload', true)
 if (screenshotDir) {
   for (const [width, height] of workspaceViewports) {
     await page.setViewportSize({ width, height })
+    await page.waitForFunction(() => {
+      const host = document.querySelector('[data-terminal-host]')
+      return host && host.scrollHeight - host.clientHeight - host.scrollTop < 25
+    })
     await capture(`terminal-reconnected-${width}`)
   }
 }
 await page.setViewportSize({ width: 1280, height: 720 })
+await page.keyboard.type('for i in $(seq 1 35); do echo "history-$i"; done')
+await page.keyboard.press('Enter')
+await waitForTerminalLine('history-35')
+const terminalHost = page.locator('[data-terminal-host]')
+await page.keyboard.press('Control+Shift+Home')
+await page.keyboard.type('echo "latest-$((40+5))"')
+await page.keyboard.press('Enter')
+await waitForTerminalLine('latest-45')
+check('terminal preserves the reading position when new output arrives', await terminalHost.evaluate(host => host.scrollTop === 0))
+await page.keyboard.press('Control+Shift+End')
+check('terminal history shortcut returns to the newest output', await terminalHost.evaluate(host =>
+  host.scrollHeight - host.clientHeight - host.scrollTop < 25))
 await page.keyboard.type('exit')
 await page.keyboard.press('Enter')
 const restartTerminal = page.getByRole('button', { name: 'Restart terminal' })
@@ -669,6 +685,7 @@ await page.waitForFunction(() => document.activeElement?.matches('[data-terminal
 check('an exited terminal can be restarted from its pane', !await restartTerminal.isVisible())
 await page.getByRole('button', { name: 'End terminal session' }).click()
 await phoneTerminal.waitFor({ state: 'hidden' })
+await page.waitForFunction(() => document.activeElement?.matches('[data-header-terminal]'))
 await page.click('[data-terminal-toggle]')
 await waitForTerminalLine('Harness test terminal')
 check('ending a terminal clears its scrollback before the next launch', !(await terminalScreen.textContent())?.includes('still-44'))

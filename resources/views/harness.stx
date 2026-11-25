@@ -312,7 +312,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           </button>
         @endif
         @if(activeWorkspaceId)
-          <button type="button" data-header-pane data-header-terminal @click="toggleTerminal" aria-label="Open terminal" title="Terminal" aria-controls="harness-terminal" :aria-expanded="termOpen() ? 'true' : 'false'" class="harness-icon-button">
+          <button type="button" data-header-pane data-header-terminal ref="termHeaderToggle" @click="toggleTerminal" aria-label="Open terminal" title="Terminal" aria-controls="harness-terminal" :aria-expanded="termOpen() ? 'true' : 'false'" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
           </button>
         @endif
@@ -665,7 +665,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </div>
       </div>
       <p data-terminal-error role="alert" hidden :hidden="!terminalError()" :text="terminalError()" class="px-3 py-2 text-red-300 text-sm"></p>
-      <div data-terminal-host ref="termHostBox" aria-label="Terminal input and output" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
+      <div data-terminal-host ref="termHostBox" aria-label="Terminal input and output" @keydown="termKeydown" @paste="termPaste" @scroll="trackTerminalPosition" tabindex="0" class="terminal-host">
         {{--
           Ten glyphs in the host's own font, laid out but invisible: the ruler
           the island measures to turn pixels into columns and rows.
@@ -1801,6 +1801,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   const termScreenRef = useRef('termScreenBox')
   const termHostRef = useRef('termHostBox')
+  const termHeaderToggle = useRef('termHeaderToggle')
   const termMetricRef = useRef('termMetricBox')
 
   function toggleSidebar() {
@@ -3336,12 +3337,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // ── Terminal (M6): a shell in the session's workspace ─────────────────
   // The server owns the PTY and streams bytes as term-data frames; the page
   // renders them through @harness/ansi's grid and sends keystrokes back
-  // whole. Local-only by server policy, so a paired phone sees the button do
-  // nothing beyond the refusal notice.
+  // whole. The same host-privilege check applies to opening and reattaching.
   let term = null
   let termId = null
   let termToHtml = null
   let termRenderQueued = false
+  let termFollowing = true
   let terminalOpening = false
   const terminalLabel = state('Terminal')
   const terminalError = state('')
@@ -3351,6 +3352,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const terminalAttached = state(false)
   const terminalStatus = derived(() => terminalReconnecting() ? 'Reconnecting…' : terminalActivity())
 
+  function trackTerminalPosition(event) {
+    const { scrollHeight, clientHeight, scrollTop } = event.currentTarget
+    termFollowing = scrollHeight - clientHeight - scrollTop < 25
+  }
+
   function renderTerm() {
     const screen = termScreenRef.current
     if (termRenderQueued || !term || !termToHtml || !screen) return
@@ -3359,9 +3365,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       termRenderQueued = false
       if (!term) return
       const scroller = screen.parentElement
-      const following = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 25
       screen.innerHTML = termToHtml(term.snapshot())
-      if (following || term.onAltScreen) scroller.scrollTop = scroller.scrollHeight
+      if (termFollowing || term.onAltScreen) scroller.scrollTop = scroller.scrollHeight
     })
   }
 
@@ -3442,6 +3447,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   let terminalTrigger = null
 
+  function restoreTerminalFocus() {
+    const trigger = terminalTrigger?.getClientRects().length ? terminalTrigger : termHeaderToggle.current
+    trigger?.focus()
+    terminalTrigger = null
+  }
+
   function showTerminalProcess() {
     if (!termOpen() || !sessionOnline()) return
     if (termId === null && !terminalOpening && !terminalError()) {
@@ -3472,6 +3483,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (termId !== null && !sendFrame({ t: 'term-close', termId })) return
     termId = null
     term = null
+    termFollowing = true
     termPendingInput = ''
     terminalSession.set(null)
     terminalAttached.set(false)
@@ -3481,7 +3493,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     terminalError.set('')
     terminalActivity.set('')
     termOpen.set(false)
-    terminalTrigger?.focus()
+    restoreTerminalFocus()
   }
 
   function toggleTerminal(event) {
@@ -3497,8 +3509,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     if (termOpen()) {
       termOpen.set(false)
-      terminalTrigger?.focus()
-      terminalTrigger = null
+      restoreTerminalFocus()
       return
     }
     terminalTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current
