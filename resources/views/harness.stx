@@ -32,7 +32,7 @@ export const initialFollowUps = activeSession?.followUps || { entries: [], held:
 const pendingApproval = initialApprovals[0]
 
 // One space per profile. `pinned` is the favourite-repos tile grid; the
-// sections are the profile's sessions, split by whether they are live.
+// sections group the profile's threads by their current navigation state.
 //
 // Only the active space and its immediate neighbours render their rows. Every
 // space used to, which cost ~9.5ms of server render each — 175ms at fourteen
@@ -61,36 +61,44 @@ export const spaces = profiles.map((profile, index) => ({
     icon: 'i-hugeicons-folder-01',
     href: `/?workspace=${workspace.id}`,
   })),
-  // Only groups that have something in them. An empty "Active" heading with
-  // nothing under it is noise, and with most profiles idle it was showing on
-  // almost every space.
-  sections: [
-    {
-      id: `active-${profile.id}`,
-      label: 'Working',
-      items: (profile.sessions || []).filter(isActiveThread).map(toItem),
-    },
-    {
-      id: `recent-${profile.id}`,
-      label: 'Settled',
-      items: (profile.sessions || []).filter(session => !isActiveThread(session)).map(toItem),
-    },
-  ].filter(section => section.items.length > 0),
+  sections: threadSections(profile),
   clear: { id: 'clear', label: 'Clear' },
 }))
 
+function threadSections(profile) {
+  const recent = (profile.sessions || []).filter(session => !session.navigation?.archivedAt).reverse()
+  const collect = (id, label, rows) => ({ id: id + '-' + profile.id, label, items: rows.map(toItem) })
+  const snoozed = recent.filter(session => session.navigation?.snoozedUntil)
+  const visible = recent.filter(session => !session.navigation?.snoozedUntil)
+  const pinned = visible.filter(session => session.navigation?.pinnedOrder != null)
+    .sort((a, b) => a.navigation.pinnedOrder - b.navigation.pinnedOrder)
+  const unpinned = visible.filter(session => session.navigation?.pinnedOrder == null)
+  const active = unpinned.filter(session => !session.navigation?.settledAt && session.state !== 'stopped')
+  const settled = unpinned.filter(session => session.navigation?.settledAt || session.state === 'stopped')
+    .sort((a, b) => (b.navigation?.settledAt ?? 0) - (a.navigation?.settledAt ?? 0))
+  return [
+    collect('pinned', 'Pinned', pinned),
+    collect('active', 'Active', active.filter(session => session.state !== 'running')),
+    collect('working', 'Working', active.filter(session => session.state === 'running')),
+    collect('snoozed', 'Snoozed', snoozed.sort((a, b) => a.navigation.snoozedUntil - b.navigation.snoozedUntil)),
+    collect('settled', 'Settled', settled),
+  ].filter(section => section.items.length)
+}
+
 function toItem(session) {
+  const waiting = session.state === 'awaiting-approval' || session.state === 'awaiting-input'
   return {
     id: String(session.id),
-    label: session.title || `Session ${session.id}`,
-    icon: 'i-hugeicons-message-01',
+    label: session.title,
+    icon: waiting ? 'i-hugeicons-help-circle' : session.state === 'running' ? 'i-hugeicons-loading-03' : 'i-hugeicons-message-01',
     href: `/s/${session.id}`,
   }
 }
 
-function isActiveThread(session) {
-  return session.state === 'running' || session.state === 'awaiting-approval' || session.state === 'awaiting-input'
-}
+export const initialNavigation = activeSession?.navigation || {}
+export const archivedThreads = (profiles.find(profile => String(profile.id) === String(activeProfile))?.sessions || [])
+  .filter(session => session.navigation?.archivedAt)
+  .sort((a, b) => b.navigation.archivedAt - a.navigation.archivedAt)
 
 export const hasProfiles = profiles.length > 0
 export const turns = activeSession ? activeSession.turns : []
@@ -208,7 +216,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <span data-workspace-project class="min-w-0 text-xs text-neutral-600 dark:text-neutral-400 truncate" title="{{ workspaceName }}">{{ workspaceName }}</span>
           <span class="text-neutral-400" aria-hidden="true">/</span>
         @endif
-        <span data-workspace-title class="min-w-0 font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+        @if(activeSession)
+          <button type="button" data-workspace-title data-thread-actions-trigger ref="threadActionsTriggerBox" @click="openThreadActions" aria-haspopup="dialog" aria-controls="harness-thread-actions" :aria-expanded="threadActionsOpen()" :title="currentThreadTitle()" class="flex gap-1 items-center min-w-0 font-medium text-start text-[13px] rounded-md">
+            <span class="min-w-0 truncate" :text="currentThreadTitle()">{{ sessionTitle }}</span>
+            <span class="shrink-0 inline-block size-3 i-hugeicons-arrow-down-01 text-neutral-500" aria-hidden="true"></span>
+          </button>
+        @else
+          <span data-workspace-title class="min-w-0 font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+        @endif
       </div>
       @if(activeSession)
       <span
@@ -478,11 +493,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
     </div>
 
+    @if(activeSession)
+      <div data-thread-archived @if(!initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().archivedAt" class="mx-auto mb-3 px-3 py-2 flex gap-2 items-center text-sm border border-black/10 rounded-md dark:border-white/15">
+        <span>Archived thread</span>
+        <button type="button" @click="organizeThread('restore')" :disabled="threadActionBusy()" class="font-medium underline">Restore thread</button>
+      </div>
+    @endif
+
     @includeWhen(activeSession, '../partials/harness-approval-card')
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(canCompose)
-    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
+    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt)hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt)" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -617,6 +639,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     </div>
   </main>
 
+  @if(activeSession)
+    @include('../partials/harness-thread-actions')
+  @endif
+
   <dialog data-thread-search ref="threadSearchDialogBox" aria-labelledby="thread-search-heading" @cancel="cancelThreadSearch" @click.self="closeThreadSearch" class="mb-auto mt-8 mx-auto p-0 md:mt-auto text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[12px] dark:border-white/15 shadow-xl">
     <div class="p-4">
       <div class="flex items-center justify-between mb-3">
@@ -707,6 +733,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <button type="button" @click="jumpToSettings('appearance')">Appearance</button>
         <button type="button" @click="jumpToSettings('agents')">Agents</button>
         <button type="button" @click="jumpToSettings('access')">Access</button>
+        <button type="button" @click="jumpToSettings('archive')">Archive</button>
       </nav>
       <div data-settings-panel>
       <div class="mb-3 pb-3 border-b border-black/10 dark:border-white/10">
@@ -794,6 +821,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <p class="mb-3 text-[12px] opacity-60">Pairing needs the server started with <code>--remote</code>.</p>
       @endif
 
+      <h3 data-settings-section="archive" tabindex="-1" class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Archived threads</h3>
+      @if(archivedThreads.length)
+        <ul data-archived-threads class="my-0 list-none">
+          @foreach(archivedThreads as archived)
+            <li class="flex gap-3 items-center mb-2 text-[13px]" data-archived-thread="{{ archived.id }}">
+              <a href="/s/{{ archived.id }}" class="flex-1 min-w-0 truncate">{{ archived.title }}</a>
+              <button type="button" @click="organizeThread('restore', {}, {{ archived.id }})" :disabled="threadActionBusy()" class="font-medium underline">Restore</button>
+            </li>
+          @endforeach
+        </ul>
+      @else
+        <p class="mb-3 text-[12px] text-neutral-600 dark:text-neutral-300">No archived threads in this profile.</p>
+      @endif
       </div>
     </div>
   </dialog>
@@ -935,6 +975,87 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const runningTurnId = state(initialResponseTurn)
   const steerableTurn = state(initialSteerable ? initialResponseTurn : 0)
   const canSteer = derived(() => sessionOnline() && uiState() === 'running' && steerableTurn() !== 0 && steerableTurn() === runningTurnId())
+  const currentThreadTitle = state(sessionTitle)
+  const threadNavigation = state(initialNavigation)
+  const threadActionsOpen = state(false)
+  const threadActionForm = state('')
+  const threadActionBusy = state(false)
+  const threadActionError = state('')
+  const threadTitleDraft = state('')
+  const threadActionsDialog = useRef('threadActionsDialogBox')
+  const threadActionsTrigger = useRef('threadActionsTriggerBox')
+  const threadWakeTime = useRef('threadWakeTimeBox')
+  const threadTitleEdit = useRef('threadTitleEditBox')
+
+  function positionThreadActions() {
+    const trigger = threadActionsTrigger.current
+    const dialog = threadActionsDialog.current
+    if (!trigger || !dialog?.open) return
+    const anchor = trigger.getBoundingClientRect()
+    const viewport = dialog.ownerDocument.documentElement.clientWidth
+    const width = dialog.getBoundingClientRect().width
+    dialog.style.setProperty('--thread-menu-top', anchor.bottom + 5 + 'px')
+    dialog.style.setProperty('--thread-menu-left', Math.max(8, Math.min(anchor.left, viewport - width - 8)) + 'px')
+  }
+
+  function openThreadActions() {
+    const dialog = threadActionsDialog.current
+    if (!dialog || dialog.open) return
+    threadTitleDraft.set(currentThreadTitle())
+    threadActionError.set('')
+    threadActionForm.set('')
+    dialog.showModal()
+    threadActionsOpen.set(true)
+    positionThreadActions()
+  }
+
+  function closeThreadActions(event) {
+    event?.preventDefault()
+    threadActionsDialog.current?.close()
+    threadActionsOpen.set(false)
+    threadActionsTrigger.current?.focus()
+  }
+
+  function openThreadActionForm(form) {
+    if (threadActionForm() === form) {
+      threadActionForm.set('')
+      return
+    }
+    threadActionError.set('')
+    threadActionForm.set(form)
+    if (form === 'rename') void nextTick(() => threadTitleEdit.current?.select())
+  }
+
+  useEventListener('resize', positionThreadActions)
+
+  async function organizeThread(action, fields = {}, target = sessionId) {
+    if (!target || threadActionBusy()) return
+    threadActionBusy.set(true)
+    threadActionError.set('')
+    try {
+      await sendCommand({ type: 'session.organize', sessionId: target, action, ...fields })
+      refresh()
+    }
+    catch (error) {
+      if (threadActionsDialog.current?.open) threadActionError.set(error.message)
+      else stxAlert(error.message)
+      threadActionBusy.set(false)
+    }
+  }
+
+  function renameThread() {
+    void organizeThread('rename', { title: threadTitleDraft() })
+  }
+
+  function snoozeThread(hours) {
+    const until = hours ? Date.now() + hours * 60 * 60 * 1000 : Date.parse(threadWakeTime.current?.value ?? '')
+    if (!Number.isFinite(until) || until <= Date.now()) {
+      threadActionError.set('Choose a wake time in the future.')
+      return
+    }
+    void organizeThread('snooze', { until })
+  }
+
   const uiBusy = derived(() => uiState() === 'running' || uiState() === 'awaiting-approval' || uiState() === 'awaiting-input')
   const showResume = derived(() => Boolean(sessionId && !uiBusy() && followUps().held && followUps().entries.length && !steeringPending() && followUps().entries[0]?.steeringIssue !== 'uncertain' && !composerText().trim() && !editingFollowUp()))
   const showSend = derived(() => !showResume() && Boolean(!uiBusy() || composerText().trim() || editingFollowUp()))
@@ -2318,7 +2439,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // desktop window the menu item usually claims the chord first and arrives
   // as `craft:settings` instead.
   useEventListener('keydown', (event) => {
-    if (projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open) return
+    if (projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open || threadActionsDialog.current?.open) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.
@@ -2389,7 +2510,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
+    const { applyFollowUpEvent, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
@@ -2482,11 +2603,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         if (editing && !updatedQueue.entries.some(entry => entry.id === editing.id)) followUpActions()?.endEdit(true)
         paintTranscript(updateTranscriptMarkdown)
       }
+      if (payload.type === 'session.navigation-changed') {
+        threadNavigation.update(previous => ({ ...previous, ...payload.changes }))
+        if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
+      }
       if (payload.type === 'turn.started') {
         // Only the user's half opens a new exchange; the assistant's turn is
         // the reply within it.
         if (payload.role === 'user') {
           responseByTurn.set(payload.turnId, '')
+          if (payload.turnId === 1) currentThreadTitle.set(threadDisplayTitle(threadNavigation().title, payload.text))
+          if (threadNavigation().settledAt || threadNavigation().snoozedUntil)
+            threadNavigation.update(previous => ({ ...previous, settledAt: null, snoozedUntil: null }))
           steerableTurn.set(0)
           runningTurnId.set(payload.turnId)
           liveTurns.update(turns => [...turns, {

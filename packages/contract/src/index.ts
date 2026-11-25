@@ -29,3 +29,6 @@ export type { QuestionAttachment } from './input'
 
 export { applyFollowUpEvent } from './follow-ups'
 export type { FollowUpQueue, QueuedFollowUp, SteeringOutcome } from './follow-ups'
+
+export { maximumThreadSnooze, pinOrder, threadDisplayTitle } from './thread-navigation'
+export type { ThreadNavigation, ThreadOrganizationAction } from './thread-navigation'

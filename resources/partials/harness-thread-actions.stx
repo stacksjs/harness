@@ -1,0 +1,54 @@
+<dialog id="harness-thread-actions" ref="threadActionsDialogBox" aria-labelledby="harness-thread-actions-title" @cancel="closeThreadActions" @click.self="closeThreadActions()" class="m-0 p-0 overflow-auto text-neutral-900 bg-white border border-black/15 rounded-lg shadow-xl dark:text-neutral-100 dark:bg-neutral-900 dark:border-white/15">
+  <div class="p-1">
+    <h2 id="harness-thread-actions-title" class="sr-only">Thread actions</h2>
+    <p role="alert" class="px-2 py-1 text-sm text-red-700 dark:text-red-300" :hidden="!threadActionError()" :text="threadActionError()"></p>
+    <button type="button" data-thread-action :hidden="!threadNavigation().archivedAt" @click="organizeThread('restore')" :disabled="threadActionBusy()">
+      <span class="i-hugeicons-archive-02" aria-hidden="true"></span>Restore thread
+    </button>
+    <div :hidden="Boolean(threadNavigation().archivedAt)">
+      <button type="button" data-thread-action :hidden="threadNavigation().pinnedOrder != null || Boolean(threadNavigation().settledAt || threadNavigation().snoozedUntil)" @click="organizeThread('pin')" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-pin" aria-hidden="true"></span>Pin thread
+      </button>
+      <button type="button" data-thread-action :hidden="threadNavigation().pinnedOrder == null" @click="organizeThread('unpin')" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-pin-off" aria-hidden="true"></span>Unpin thread
+      </button>
+      <button type="button" data-thread-action :hidden="threadNavigation().pinnedOrder == null || Boolean(threadNavigation().snoozedUntil)" @click="organizeThread('move-pin', { direction: 'up' })" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-arrow-up-01" aria-hidden="true"></span>Move up
+      </button>
+      <button type="button" data-thread-action :hidden="threadNavigation().pinnedOrder == null || Boolean(threadNavigation().snoozedUntil)" @click="organizeThread('move-pin', { direction: 'down' })" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-arrow-down-01" aria-hidden="true"></span>Move down
+      </button>
+      <button type="button" data-thread-action :hidden="Boolean(threadNavigation().settledAt)" @click="organizeThread('settle')" :disabled="threadActionBusy() || uiBusy()">
+        <span class="i-hugeicons-checkmark-circle-02" aria-hidden="true"></span>Settle thread
+      </button>
+      <button type="button" data-thread-action :hidden="!threadNavigation().settledAt" @click="organizeThread('unsettle')" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-undo-02" aria-hidden="true"></span>Un-settle thread
+      </button>
+      <button type="button" data-thread-action :hidden="!threadNavigation().snoozedUntil" @click="organizeThread('wake')" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-alarm-clock" aria-hidden="true"></span>Wake thread
+      </button>
+      <button type="button" data-thread-action :hidden="Boolean(threadNavigation().snoozedUntil)" :aria-expanded="threadActionForm() === 'snooze'" aria-controls="thread-snooze-form" @click="openThreadActionForm('snooze')" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-clock-01" aria-hidden="true"></span>Snooze
+      </button>
+      <form id="thread-snooze-form" :hidden="threadActionForm() !== 'snooze'" @submit.prevent="snoozeThread()" class="grid gap-2 p-2">
+        <button type="button" @click="snoozeThread(1)" :disabled="threadActionBusy()" class="px-2 py-1 text-sm text-start border border-black/15 rounded-md dark:border-white/20">For one hour</button>
+        <label for="thread-wake-time" class="text-xs font-medium">Custom wake time</label>
+        <input id="thread-wake-time" type="datetime-local" ref="threadWakeTimeBox" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
+        <button type="submit" :disabled="threadActionBusy()" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Set wake time</button>
+      </form>
+      <button type="button" data-thread-action :aria-expanded="threadActionForm() === 'rename'" aria-controls="thread-rename-form" @click="openThreadActionForm('rename')" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-pencil-edit-02" aria-hidden="true"></span>Rename thread
+      </button>
+      <form id="thread-rename-form" :hidden="threadActionForm() !== 'rename'" @submit.prevent="renameThread()" class="grid gap-2 p-2">
+        <label for="thread-title-edit" class="text-xs font-medium">Title</label>
+        <input id="thread-title-edit" name="title" ref="threadTitleEditBox" :value="threadTitleDraft()" @input="threadTitleDraft.set($event.target.value)" maxlength="120" required class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
+        <button type="submit" :disabled="threadActionBusy()" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Rename</button>
+      </form>
+      <div data-thread-actions-divider class="mt-1 pt-1 border-t border-black/10 dark:border-white/15">
+        <button type="button" data-thread-action @click="organizeThread('archive')" :disabled="threadActionBusy() || uiBusy()">
+          <span class="i-hugeicons-archive-01" aria-hidden="true"></span>Archive thread
+        </button>
+      </div>
+    </div>
+  </div>
+</dialog>

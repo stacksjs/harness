@@ -91,6 +91,65 @@ describe('Engine — the M1 exit criterion', () => {
   })
 })
 
+describe('Thread navigation', () => {
+  it('keeps pin order, archives and restores a seen thread across replay', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const first = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    const second = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    await engine.dispatch(first)
+    await engine.dispatch(second)
+    const firstId = derivedId(first.id)
+    const secondId = derivedId(second.id)
+    const organize = (sessionId: number, action: 'pin' | 'archive' | 'restore' | 'settle') =>
+      envelope({ type: 'session.organize', sessionId, action })
+
+    const rename = envelope({ type: 'session.organize', sessionId: firstId, action: 'rename', title: '  Release review ' })
+    await engine.dispatch(rename)
+    expect((await engine.dispatch(rename)).replayed).toBe(true)
+    await Promise.all([engine.dispatch(organize(firstId, 'pin')), engine.dispatch(organize(secondId, 'pin'))])
+    const swap = await engine.dispatch(envelope({ type: 'session.organize', sessionId: secondId, action: 'move-pin', direction: 'up' }))
+    expect(swap.events.map(event => event.sessionId)).toEqual([secondId, firstId])
+    const archive = organize(firstId, 'archive')
+    await engine.dispatch(archive)
+    await expect(engine.dispatch(envelope({ type: 'session.turn.start', sessionId: firstId, text: 'Blocked' }))).rejects.toThrow('Restore this thread')
+
+    const restarted = new Engine({ store, reducer: reduce })
+    await restarted.hydrate()
+    expect(restarted.current.sessions.get(firstId)?.navigation).toEqual({
+      title: 'Release review', pinnedOrder: 2, archivedAt: archive.at,
+    })
+    expect(restarted.current.sessions.get(secondId)?.navigation?.pinnedOrder).toBe(1)
+    await restarted.dispatch(organize(firstId, 'restore'))
+    expect(restarted.current.sessions.get(firstId)?.navigation?.pinnedOrder).toBe(2)
+    await restarted.dispatch(organize(firstId, 'settle'))
+    expect(restarted.current.sessions.get(firstId)?.navigation?.pinnedOrder).toBeNull()
+  })
+
+  it('rejects stale wake events and wakes early when the agent requests a decision', async () => {
+    const { engine } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const create = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    await engine.dispatch(create)
+    const sessionId = derivedId(create.id)
+    await engine.dispatch(envelope({ type: 'session.turn.start', sessionId, text: 'Work in the background' }))
+    const oldWake = clock + 100
+    const newWake = clock + 200
+    await engine.dispatch(envelope({ type: 'session.organize', sessionId, action: 'snooze', until: oldWake }))
+    await engine.dispatch(envelope({ type: 'session.organize', sessionId, action: 'snooze', until: newWake }))
+    const stale = envelope({ type: 'thread.snooze.elapsed', sessionId, until: oldWake })
+    await expect(engine.dispatch({ ...stale, at: oldWake })).rejects.toThrow(CommandRejected)
+    expect((await engine.dispatchInternal({ ...stale, at: oldWake })).events).toEqual([])
+    expect(engine.current.sessions.get(sessionId)?.navigation?.snoozedUntil).toBe(newWake)
+
+    await engine.dispatchInternal(envelope({
+      type: 'thread.approval.request', sessionId, requestId: 'approval-1', toolName: 'Fixture', args: {},
+    }))
+    expect(engine.current.sessions.get(sessionId)?.navigation?.snoozedUntil).toBeNull()
+    expect(engine.current.sessions.get(sessionId)?.state).toBe('awaiting-approval')
+  })
+})
+
 describe('Engine — idempotency', () => {
   it('does not re-run a command with a receipt', async () => {
     const { engine } = await bootedEngine()

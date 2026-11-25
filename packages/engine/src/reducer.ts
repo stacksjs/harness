@@ -6,8 +6,8 @@
  * identical state rather than a similar one.
  */
 
-import type { Command, CommandEnvelope, EventPayload } from '@harness/contract'
-import { GLOBAL_SESSION_ID, inputResponseValues, validInputAnswers } from '@harness/contract'
+import type { Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
+import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, validInputAnswers } from '@harness/contract'
 import { isTurnActive } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -47,6 +47,64 @@ function turnStarted(session: SessionState, text: string, queuedId?: string): Ev
   return {
     type: 'turn.started', turnId: session.turns.length + 1, role: 'user', text,
     ...(queuedId ? { queuedId } : {}),
+  }
+}
+
+function organizeThread(state: HarnessState, command: Extract<Command, { type: 'session.organize' }>, envelope: CommandEnvelope): AppendableEvent[] {
+  const session = state.sessions.get(command.sessionId)
+  if (!session) throw new InvalidCommand('This thread no longer exists.')
+  const { archivedAt, settledAt, snoozedUntil, pinnedOrder } = session.navigation ?? {}
+  const { id: commandId, at } = envelope
+  const change = (changes: Partial<ThreadNavigation>, sessionId = session.id): AppendableEvent => ({
+    sessionId, commandId, at, payload: { type: 'session.navigation-changed', changes },
+  })
+
+  if (archivedAt && command.action !== 'restore')
+    throw new InvalidCommand('Restore this thread before changing it.')
+  switch (command.action) {
+    case 'rename': {
+      const title = typeof command.title === 'string' ? command.title.trim() : ''
+      if (!title || title.length > 120) throw new InvalidCommand('Enter a title of 1 to 120 characters.')
+      return title === session.navigation?.title ? [] : [change({ title })]
+    }
+    case 'pin':
+    case 'move-pin': {
+      if (settledAt || snoozedUntil) throw new InvalidCommand('Bring this thread back to active work before pinning it.')
+      const profileId = state.workspaces.get(session.workspaceId)?.profileId
+      const pins = [...state.sessions.values()].filter(candidate => candidate.navigation?.pinnedOrder != null
+        && state.workspaces.get(candidate.workspaceId)?.profileId === profileId)
+      if (command.action === 'pin') {
+        if (pinnedOrder != null) return []
+        const lastPin = pins.reduce((order, pin) => Math.max(order, pin.navigation!.pinnedOrder!), 0)
+        return [change({ pinnedOrder: lastPin + 1 })]
+      }
+      if (pinnedOrder == null || !('direction' in command) || (command.direction !== 'up' && command.direction !== 'down'))
+        throw new InvalidCommand('Choose a direction for a pinned thread.')
+      const visiblePins = pins.filter(candidate => !candidate.navigation?.archivedAt && !candidate.navigation?.snoozedUntil).sort(pinOrder)
+      const index = visiblePins.findIndex(candidate => candidate.id === session.id)
+      const neighbor = visiblePins[index + (command.direction === 'up' ? -1 : 1)]
+      return neighbor ? [change({ pinnedOrder: neighbor.navigation!.pinnedOrder! }), change({ pinnedOrder }, neighbor.id)] : []
+    }
+    case 'unpin':
+      return pinnedOrder == null ? [] : [change({ pinnedOrder: null })]
+    case 'settle':
+      if (isTurnActive(session.state)) throw new InvalidCommand('Wait for the turn to finish before settling.')
+      return settledAt ? [] : [change({ settledAt: at, pinnedOrder: null, snoozedUntil: null })]
+    case 'unsettle':
+      return settledAt ? [change({ settledAt: null })] : []
+    case 'archive':
+      if (isTurnActive(session.state)) throw new InvalidCommand('Wait for the turn to finish before archiving.')
+      return [change({ archivedAt: at })]
+    case 'restore':
+      return archivedAt ? [change({ archivedAt: null })] : []
+    case 'snooze':
+      if (!Number.isSafeInteger(command.until) || command.until <= at || command.until - at > maximumThreadSnooze)
+        throw new InvalidCommand('Choose a wake time within the next year.')
+      return [change({ snoozedUntil: command.until })]
+    case 'wake':
+      return snoozedUntil ? [change({ snoozedUntil: null, settledAt: null })] : []
+    default:
+      throw new InvalidCommand('Unknown thread action.')
   }
 }
 
@@ -413,10 +471,21 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'session.organize':
+      return organizeThread(state, command, envelope)
+
+    case 'thread.snooze.elapsed': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session?.navigation?.snoozedUntil || session.navigation.snoozedUntil !== command.until || command.until > at) return []
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'session.navigation-changed', changes: { snoozedUntil: null, settledAt: null } } }]
+    }
+
     case 'session.turn.start': {
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      if (session.navigation?.archivedAt)
+        throw new InvalidCommand('Restore this thread before sending a message.')
       if (isTurnActive(session.state))
         throw new InvalidCommand('a turn is already running')
       if (session.state === 'stopped')
@@ -437,6 +506,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const emit = (payload: EventPayload): AppendableEvent[] => [{ sessionId: session.id, commandId, at, payload }]
       const entries = session.followUps.entries
       if (command.type === 'session.queue.add') {
+        if (session.navigation?.archivedAt)
+          throw new InvalidCommand('Restore this thread before queuing a message.')
         if (!state.workspaces.get(session.workspaceId)?.trusted)
           throw new InvalidCommand('Trust this workspace before queuing a message.')
         return emit({ type: 'queue.added', entry: { id: commandId, text: followUpText(command.text) } })
@@ -515,6 +586,11 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const automatic = command.type === 'thread.queue.advance'
       const session = state.sessions.get(command.sessionId)
       if (automatic && (!session || session.followUps.held || !session.followUps.entries.length)) return []
+      if (session?.navigation?.archivedAt) {
+        if (automatic) return []
+        throw new InvalidCommand('Restore this thread before sending a message.')
+      }
+      if (automatic && (session?.navigation?.settledAt || session?.navigation?.snoozedUntil)) return []
       if (!session || session.state === 'stopped' || isTurnActive(session.state)) {
         if (automatic) return []
         throw new InvalidCommand('Wait for the current turn to finish before sending this message.')

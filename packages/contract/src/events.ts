@@ -9,6 +9,7 @@
 import type { ApprovalDecision, ApprovalScope, ConnectorApproval, DriverKind } from './commands'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
+import type { ThreadNavigation } from './thread-navigation'
 
 export interface EventBase {
   /** Monotonic per session, starting at 1. Assigned inside the command queue. */
@@ -22,6 +23,7 @@ export interface EventBase {
 export type EventPayload =
   | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, isolate?: boolean }
   | { type: 'session.stopped' }
+  | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation> }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
   | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string }

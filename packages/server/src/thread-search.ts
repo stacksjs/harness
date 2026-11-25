@@ -1,4 +1,5 @@
 import type { HarnessState, SessionState } from '@harness/engine'
+import { threadDisplayTitle } from '@harness/contract'
 import { basename } from 'node:path'
 
 interface ThreadSearchMatch {
@@ -12,7 +13,7 @@ interface ThreadSearchMatch {
 const RESULT_LIMIT = 24
 
 export function threadTitle(session: SessionState): string {
-  return session.turns[0]?.prompt?.slice(0, 60) ?? 'New session'
+  return threadDisplayTitle(session.navigation?.title, session.turns[0]?.prompt)
 }
 
 export function searchThreads(state: HarnessState, profileId: number, query: string): ThreadSearchMatch[] {
@@ -26,7 +27,7 @@ export function searchThreads(state: HarnessState, profileId: number, query: str
 
   for (const session of [...state.sessions.values()].reverse()) {
     const workspace = state.workspaces.get(session.workspaceId)
-    if (workspace?.profileId !== profileId) continue
+    if (workspace?.profileId !== profileId || session.navigation?.archivedAt) continue
     const title = threadTitle(session)
     const project = workspace.scratch ? 'No project' : basename(workspace.path) || workspace.path
     const thread = { id: session.id, title, project }

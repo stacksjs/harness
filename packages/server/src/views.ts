@@ -7,6 +7,7 @@
  * has run.
  */
 
+import type { ThreadNavigation } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -26,7 +27,7 @@ export interface ViewProps {
     icon?: string
     tint?: string
     workspaces: ProjectSummary[]
-    sessions: Array<{ id: number, title: string, state: string }>
+    sessions: Array<{ id: number, title: string, state: string, navigation?: ThreadNavigation }>
   }>
   activeProfile: string
   draftWorkspace: ProjectSummary | null
@@ -95,6 +96,7 @@ export function viewProps(state: HarnessState, options: {
         // derived id is a hash, and a hash is not a name.
         title: threadTitle(session),
         state: session.state,
+        ...(session.navigation && { navigation: session.navigation }),
       }))
 
     return {
@@ -141,6 +143,7 @@ export function viewProps(state: HarnessState, options: {
       ? {
           id: active.id,
           title: threadTitle(active),
+          navigation: active.navigation,
           state: active.state,
           // Which agent this session runs — shown in the header and preselected
           // in the composer's picker, so switching has a visible ground truth.

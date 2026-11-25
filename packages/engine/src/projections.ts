@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, QuestionAttachment } from '@harness/contract'
+import type { ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
 import { applyFollowUpEvent } from '@harness/contract'
 
@@ -28,6 +28,7 @@ export interface SessionState {
   providerSessionId: string
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastSeq: number
+  navigation?: ThreadNavigation
   turns: TurnState[]
   followUps: FollowUpQueue
   /** Oldest first, so the newest revert target is the last one. */
@@ -335,6 +336,12 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       })
       break
 
+    case 'session.navigation-changed': {
+      const session = state.sessions.get(event.sessionId)
+      if (session) session.navigation = { ...session.navigation, ...p.changes }
+      break
+    }
+
     case 'session.provider-bound': {
       const session = state.sessions.get(event.sessionId)
       if (session) session.providerSessionId = p.providerSessionId
@@ -354,6 +361,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session) break
       const active = session.turns.at(-1)
       if (active?.status === 'running') active.status = 'failed'
+      if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'failed'
       clearTurnRequests(session)
       break
@@ -363,6 +371,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'running'
+      if (session.navigation?.settledAt || session.navigation?.snoozedUntil) {
+        session.navigation.settledAt = null
+        session.navigation.snoozedUntil = null
+      }
       clearTurnRequests(session)
       session.turns.push({
         id: p.turnId,
@@ -486,6 +498,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) t.status = 'failed'
       session.state = 'idle'
+      if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       clearTurnRequests(session)
       break
     }
@@ -493,6 +506,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
     case 'approval.requested': {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
+      if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'awaiting-approval'
       session.pendingApprovals.push({ approvalId: p.approvalId, toolName: p.toolName, ...(p.connector ? { connector: p.connector } : {}) })
       break
@@ -520,6 +534,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       }
       activeTurn.inputRequests ??= []
       activeTurn.inputRequests.push(request)
+      if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.pendingInputs.push(request)
       syncTurnWaitingState(session)
       break
@@ -530,6 +545,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session || !isTurnActive(session.state)) break
       const index = session.pendingInputs.findIndex(request => request.requestId === p.requestId && request.turnId === p.turnId)
       if (index === -1) break
+      if (p.outcome === 'answered' && session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.pendingInputs[index]!.outcome = p.outcome
       if (p.attachments?.length) session.pendingInputs[index]!.attachments = p.attachments
       session.pendingInputs.splice(index, 1)

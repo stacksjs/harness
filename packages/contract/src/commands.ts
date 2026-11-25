@@ -10,6 +10,7 @@
 
 import type { SteeringOutcome } from './follow-ups'
 import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
+import type { ThreadOrganizationAction } from './thread-navigation'
 
 export type DriverKind = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok'
 
@@ -57,6 +58,7 @@ export type ClientCommand =
   | ({ type: 'session.input.respond', sessionId: number, requestId: string } & InputResponse)
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
   | { type: 'session.stop', sessionId: number }
+  | ({ type: 'session.organize', sessionId: number } & ThreadOrganizationAction)
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
   | { type: 'profile.update', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
   | { type: 'profile.delete', profileId: number }
@@ -103,6 +105,7 @@ export type ClientCommand =
  * authorisation to forge assistant text.
  */
 export type InternalCommand =
+  | { type: 'thread.snooze.elapsed', sessionId: number, until: number }
   | { type: 'thread.steer.ready', sessionId: number, turnId: number }
   | { type: 'thread.steer.settle', sessionId: number, id: string, requestId: string, outcome: SteeringOutcome }
   | { type: 'thread.queue.advance', sessionId: number }
@@ -155,6 +158,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'mcp.remove',
   'mcp.setEnabled',
   'session.stop',
+  'session.organize',
   'profile.create',
   'profile.update',
   'profile.delete',

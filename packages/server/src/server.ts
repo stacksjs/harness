@@ -479,6 +479,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }
       }
 
+      if (event.payload.type === 'session.navigation-changed' && 'snoozedUntil' in event.payload.changes)
+        scheduleThreadWake()
+
       for (const socket of sockets) {
         if (event.sessionId !== 0 && !socket.data.subscriptions.has(event.sessionId)) continue
         const buffered = socket.data.catchingUp.get(event.sessionId)
@@ -495,6 +498,45 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   let closing = false
+  let wakeTimer: ReturnType<typeof setTimeout> | undefined
+  let wakingThreads = false
+
+  function scheduleThreadWake(minimumDelay = 0): void {
+    if (wakingThreads || closing) return
+    clearTimeout(wakeTimer)
+    let earliest = Infinity
+    for (const session of engine.current.sessions.values())
+      earliest = Math.min(earliest, session.navigation?.snoozedUntil ?? Infinity)
+    if (!Number.isFinite(earliest)) return
+    wakeTimer = setTimeout(() => void wakeThreads(), Math.max(minimumDelay, Math.min(2_147_483_647, earliest - Date.now())))
+  }
+
+  async function wakeThreads(): Promise<void> {
+    if (closing) return
+    wakingThreads = true
+    let retryDelay = 0
+    try {
+      const at = Date.now()
+      for (const session of engine.current.sessions.values()) {
+        const until = session.navigation?.snoozedUntil
+        if (until == null || until > at || closing) continue
+        const result = await engine.dispatchInternal({
+          id: `thread-wake_${crypto.randomUUID()}`, at,
+          command: { type: 'thread.snooze.elapsed', sessionId: session.id, until },
+        })
+        if (!closing) broadcast(result.events)
+      }
+    }
+    catch (error) {
+      if (!closing) console.warn('[thread wake] Could not wake a snoozed thread.', error)
+      retryDelay = 1000
+    }
+    finally {
+      wakingThreads = false
+      scheduleThreadWake(retryDelay)
+    }
+  }
+
   const turnExecutions = new Map<number, Promise<void>>()
 
   function startAcceptedTurn(events: HarnessEvent[]): void {
@@ -739,11 +781,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return
 
       case 'dispatch': {
-        const envelope = frame.envelope
-        if (!envelope?.id || !envelope.command?.type) {
+        const received = frame.envelope
+        if (!received?.id || !received.command?.type) {
           send(socket, { t: 'protocol-error', message: 'dispatch requires an envelope with id and command' })
           return
         }
+        const envelope = received.command.type === 'session.organize' ? { ...received, at: Date.now() } : received
         // Read before dispatching: a deleted profile takes its sessions with
         // it, and their worktree paths go with them.
         const doomed = envelope.command.type === 'profile.delete'
@@ -1120,6 +1163,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
   }
 
+  scheduleThreadWake()
   return {
     server,
     engine,
@@ -1129,6 +1173,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     markWindowSpawned: () => { windowSpawnedAt = Date.now() },
     stop: () => {
       closing = true
+      clearTimeout(wakeTimer)
       void tunnel?.close()
       void runtime.stopAll()
       server.stop(true)

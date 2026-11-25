@@ -194,6 +194,24 @@ const RESPONSIVE_SHELL = `
 [data-diff]:not([hidden]) { margin-block-start: 5px; max-height: min(56dvh, 30rem); }
 [data-project-dialog]::backdrop, [data-settings-modal]::backdrop,
 [data-thread-search]::backdrop { background: rgb(0 0 0 / 45%); }
+#harness-thread-actions {
+  position: fixed; inset: auto; top: var(--thread-menu-top, 44px); left: var(--thread-menu-left, 8px);
+  width: min(14rem, calc(100% - 16px)); max-height: calc(100dvh - var(--thread-menu-top, 44px) - 8px);
+}
+#harness-thread-actions::backdrop { background: transparent; }
+[data-thread-action]:not([hidden]) {
+  display: flex; gap: 8px; align-items: center; width: 100%; min-height: 30px;
+  padding-inline: 8px; text-align: start; border-radius: 4px; font-size: 13px;
+}
+[data-thread-action] > span { display: inline-block; width: 14px; height: 14px; flex-shrink: 0; opacity: .65; }
+[data-thread-action]:hover:not(:disabled), [data-thread-action]:focus-visible {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+[data-thread-action]:disabled { opacity: .5; }
+@media (pointer: coarse) {
+  [data-thread-action]:not([hidden]), #harness-thread-actions form button { min-height: 44px; }
+}
+#harness-thread-actions [hidden] { display: none; }
 [data-project-dialog] { width: min(480px, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); }
 [data-settings-modal] { width: min(640px, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); }
 [data-settings-shell] {

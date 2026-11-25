@@ -1007,6 +1007,34 @@ describe('queued follow-up delivery', () => {
   })
 })
 
+describe('thread wake scheduling', () => {
+  it('replays a snooze and wakes it once after a host restart', async () => {
+    const options = { port, databasePath: join(dir, 'test.sqlite') }
+    harness = await serve(options)
+    const endpoint = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(endpoint)
+    const { sessionId } = await bootstrap(first)
+    const until = Date.now() + 800
+    first.send({
+      t: 'dispatch',
+      envelope: { id: 'restart-snooze', at: 1, command: { type: 'session.organize', sessionId, action: 'snooze', until } },
+    })
+    expect(await first.waitForDispatch('restart-snooze')).toMatchObject({ t: 'dispatched', replayed: false })
+    first.close()
+    harness.stop()
+
+    harness = await serve(options)
+    const second = await Client.connect(endpoint)
+    second.send({ t: 'subscribe', sessionId })
+    expect(await second.waitFor('session.navigation-changed', 3000, payload => payload.changes.snoozedUntil === until)).toBeTruthy()
+    expect(await second.waitFor('session.navigation-changed', 3000, payload => payload.changes.snoozedUntil === null)).toBeTruthy()
+    expect(second.payloads('session.navigation-changed')).toHaveLength(2)
+    expect(harness.engine.current.sessions.get(sessionId)?.navigation?.snoozedUntil).toBeNull()
+    expect(harness.engine.current.sessions.get(sessionId)?.turns).toHaveLength(0)
+    second.close()
+  })
+})
+
 describe('a restart does not strand a turn', () => {
   it('interrupts a turn that was running when the process stopped', async () => {
     // A turn only runs because a provider instance is running it, and those die
