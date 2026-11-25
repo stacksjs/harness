@@ -195,7 +195,7 @@ const RESPONSIVE_SHELL = `
 }
 .harness-response-action:hover { background: var(--workspace-hover); }
 .harness-response-action:disabled { opacity: .55; }
-[data-fork-banner] { width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter))); border-top: 1px solid var(--workspace-line); }
+[data-fork-banner] { max-width: var(--workspace-content); justify-content: center; border-top: 1px solid var(--workspace-line); }
 @media (pointer: coarse) { .harness-response-action:not([hidden]) { min-height: 44px; } }
 [data-session-error] { width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter))); }
 [data-composer] {

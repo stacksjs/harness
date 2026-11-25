@@ -409,6 +409,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             >Revert this turn</button>
           @endif
         </article>
+        @includeWhen(initialFork?.sourceTurnId === turn.id, '../partials/harness-fork-lineage')
       @endforeach
 
       @if(liveTurn)
@@ -486,6 +487,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             >Revert this turn</button>
           @endif
         </article>
+        @includeWhen(initialFork?.sourceTurnId === liveTurn.id, '../partials/harness-fork-lineage')
       @endif
 
       {{--
@@ -558,12 +560,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
     @endif
 
-    @if(initialFork)
-      <div data-fork-banner class="mx-auto mb-2 flex flex-wrap gap-2 items-center px-3 py-2 text-xs">
-        <a data-fork-source href="/s/{{ initialFork.sourceSessionId }}#turn-{{ initialFork.sourceTurnId }}" class="underline underline-offset-4">Source response</a>
-        <span role="status" :text="forkStatusText()">{{ initialFork.state === 'pending' ? 'Creating fork…' : initialFork.state === 'failed' ? initialFork.error : 'Forked conversation' }}</span>
-      </div>
-    @endif
     @if(canCompose)
     <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
       {{--

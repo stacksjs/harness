@@ -1954,6 +1954,9 @@ check('a follow-up continues on the new native thread and leaves the source unch
   fixtureCodexTurns.find(turn => turn.text === 'Continue only in the fork.')?.providerSessionId === 'ps-drive-fork'
   && harness.engine.current.sessions.get(forkId)?.providerSessionId === 'ps-drive-fork'
   && !harness.engine.current.sessions.get(sourceId)?.turns.some(turn => turn.prompt === 'Continue only in the fork.'))
+check('the fork source stays attached to the copied response after continuation', await forkBanner.evaluate(marker =>
+  marker.previousElementSibling?.getAttribute('data-turn') === '1'
+  && Boolean(marker.compareDocumentPosition(document.querySelector('[data-turn="2"]')!) & Node.DOCUMENT_POSITION_FOLLOWING)))
 await page.setViewportSize({ width: 1280, height: 800 })
 await capture('fork-continued-desktop')
 check('browser reported no script errors', pageErrors.length === 0)
