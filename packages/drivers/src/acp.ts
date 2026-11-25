@@ -379,6 +379,7 @@ class AcpInstance implements ProviderInstance {
 
   private async run(input: StartTurnInput, queue: EventQueue): Promise<void> {
     await this.ensureProcess()
+    if (queue.closed || this.queue !== queue) return
 
     // Resume the provider's own session when we have one, so a restarted server
     // continues the conversation instead of starting a stranger.
@@ -390,6 +391,11 @@ class AcpInstance implements ProviderInstance {
         mcpServers: mcpServersParam(this.config.mcpServers),
       })
       this.replaying = false
+      if (queue.closed || this.queue !== queue) return
+      if (loaded.error && input.requireResume) {
+        queue.finish({ type: 'resume-unavailable' })
+        return
+      }
       // A session the agent has forgotten (pruned, or another machine's) must
       // not take the turn down — falling through starts a fresh one.
       if (!loaded.error) this.sessionId = input.providerSessionId
@@ -400,6 +406,7 @@ class AcpInstance implements ProviderInstance {
         cwd: this.config.workspacePath,
         mcpServers: mcpServersParam(this.config.mcpServers),
       })
+      if (queue.closed || this.queue !== queue) return
       if (created.error) {
         queue.finish({ type: 'error', message: readableAcpError(created.error) })
         return
@@ -425,9 +432,11 @@ class AcpInstance implements ProviderInstance {
   }
 
   async interrupt(): Promise<void> {
-    // No session, no process, nothing to stop — the user pressing stop just as
-    // a turn lands is a race, not an error.
-    if (!this.child || !this.sessionId) return
+    if (!this.sessionId) {
+      if (this.queue && !this.queue.closed) await this.stop()
+      return
+    }
+    if (!this.child) return
     // A notification, not a request: the answer is the running prompt resolving
     // with `stopReason: 'cancelled'`.
     this.notify('session/cancel', { sessionId: this.sessionId })

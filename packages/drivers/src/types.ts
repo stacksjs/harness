@@ -20,6 +20,8 @@ import type { ApprovalChoice, CodexTurnOptions, CodexTurnSelection, ConnectorApp
  * that does not map here belongs in the driver, not leaked upward.
  */
 export type ProviderEvent =
+  /** The provider refused to resume before receiving history or the user request. */
+  | { type: 'resume-unavailable' }
   | { type: 'session-bound', providerSessionId: string }
   | { type: 'steering-ready' }
   | { type: 'assistant-delta', text: string }
@@ -67,10 +69,12 @@ export interface HistoricalContext {
 export interface StartTurnInput {
   text: string
   codexSelection?: CodexTurnSelection
-  /** Attributed history for a fresh native conversation. */
+  /** Attributed history for a native conversation. */
   historicalContext?: HistoricalContext
   /** Provider's own session id, when resuming rather than starting fresh. */
   providerSessionId?: string
+  /** A failed resume must settle before any prompt is sent to a different conversation. */
+  requireResume?: boolean
 }
 
 export interface ForkInput {

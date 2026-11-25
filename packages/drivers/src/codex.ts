@@ -564,8 +564,8 @@ class CodexInstance implements ProviderInstance {
   }
 
   private async run(input: StartTurnInput, queue: EventQueue): Promise<void> {
-    if (input.historicalContext && (this.threadId || input.providerSessionId))
-      throw new Error('Saved context requires a fresh Codex conversation.')
+    if (input.historicalContext && this.threadId && this.threadId !== input.providerSessionId)
+      throw new Error('The saved history belongs to a different Codex conversation.')
 
     await this.ensureProcess()
     if (queue.closed || this.queue !== queue) return
@@ -586,6 +586,10 @@ class CodexInstance implements ProviderInstance {
       }
       if (queue.closed || this.queue !== queue) return
       if (resumed.error || resumed.result?.thread?.id !== threadId) {
+        if (input.requireResume) {
+          queue.finish({ type: 'resume-unavailable' })
+          return
+        }
         const detail = resumed.error && !this.config.chatGptPlan ? ` ${this.providerError(resumed.error.message)}` : ''
         queue.finish({ type: 'error', message: `Codex could not resume this conversation. Check the selected account and retry, or use New thread to start separately.${detail}` })
         return

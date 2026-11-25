@@ -163,6 +163,7 @@ export type InternalCommand =
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number }
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
   | { type: 'thread.session.set', sessionId: number, providerSessionId: string }
+  | { type: 'thread.handoff.claim', sessionId: number, turnId: number, providerSessionId: string }
   | { type: 'thread.error', sessionId: number, message: string, turnId?: number }
   /**
    * Record a device that completed pairing.

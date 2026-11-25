@@ -225,6 +225,94 @@ describe('fork recovery', () => {
 })
 
 describe('provider handoff', () => {
+  it.each(['resumed', 'missing', 'ambiguous'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
+    const databasePath = join(dir, 'test.sqlite')
+    {
+      using db = new Database(databasePath)
+      db.exec('CREATE TABLE provider_instances (id INTEGER PRIMARY KEY, profile_id INTEGER, driver_kind TEXT, binary_path TEXT, resolved_home TEXT, config TEXT)')
+      db.query("INSERT INTO provider_instances VALUES (7, ?, 'claude', NULL, '/fixture/alternate', NULL)").run(derivedId('c_p'))
+    }
+    const calls: Array<{ home?: string, input: StartTurnInput }> = []
+    const { driver } = fakeDriver([])
+    const resolveDriver = () => ({
+      ...driver,
+      async create(config: DriverConfig) {
+        return {
+          ...await driver.create(config),
+          async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+            calls.push({ home: config.home, input })
+            if (input.requireResume && outcome !== 'resumed') {
+              if (outcome === 'missing') yield { type: 'resume-unavailable' }
+              else yield { type: 'error', message: 'The provider disconnected during the return.' }
+              return
+            }
+            if (!input.providerSessionId) {
+              const providerSessionId = config.home ? 'alternate-native' : calls.length === 1 ? 'original-native' : 'replacement-native'
+              yield { type: 'session-bound', providerSessionId }
+            }
+            yield { type: 'assistant-delta', text: config.home ? 'The alternate response.' : 'The original response.' }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+        }
+      },
+    })
+    harness = await serve({ port, databasePath, resolveDriver })
+    let client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    const send = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 10, command } })
+    const tell = (id: string, text: string) => send(id, { type: 'session.turn.start', sessionId, text })
+    const completed = (turnId: number) => client.waitFor('turn.completed', 3000, event => event.turnId === turnId)
+    const restart = async () => {
+      client.close()
+      harness.stop()
+      harness = await serve({ port, databasePath, resolveDriver })
+      client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      client.send({ t: 'subscribe', sessionId })
+    }
+    try {
+      tell('return-original', 'The original request.')
+      expect(await completed(1)).toMatchObject({ turnId: 1 })
+      send('return-depart', { type: 'session.handoff', sessionId, afterTurnId: 1, driverKind: 'claude', providerInstanceId: 7, text: 'The alternate request.' })
+      expect(await completed(2)).toMatchObject({ turnId: 2 })
+      expect(calls[1]).toMatchObject({ home: '/fixture/alternate', input: { text: expect.stringContaining('The original response.') } })
+      expect(calls[1]?.input.providerSessionId).toBeUndefined()
+
+      await restart()
+      send('return-to-original', { type: 'session.handoff', sessionId, afterTurnId: 2, driverKind: 'claude', text: 'Return to the original account.' })
+      if (outcome === 'ambiguous') {
+        expect(await client.waitFor('session.failed')).toMatchObject({ message: 'The provider disconnected during the return.' })
+        expect(calls).toHaveLength(3)
+        await restart()
+        tell('return-retry', 'Retry on the original account.')
+        expect(await completed(4)).toMatchObject({ turnId: 4 })
+      }
+      else {
+        expect(await completed(3)).toMatchObject({ turnId: 3 })
+      }
+
+      expect(calls[2]?.home).toBeUndefined()
+      expect(calls[2]?.input.providerSessionId).toBe('original-native')
+      expect(calls[2]?.input.requireResume).toBe(true)
+      expect(calls[2]?.input.text).toContain('The alternate response.')
+      expect(calls[2]?.input.text).not.toContain('The original response.')
+      if (outcome === 'resumed') {
+        expect(calls).toHaveLength(3)
+        expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe('original-native')
+      }
+      else {
+        expect(calls).toHaveLength(4)
+        expect(calls[3]?.input.providerSessionId).toBeUndefined()
+        expect(calls[3]?.input.text).toContain('The original response.')
+        expect(calls[3]?.input.text).toContain('The alternate response.')
+        expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe('replacement-native')
+        expect(harness.engine.current.sessions.get(sessionId)?.turns).toHaveLength(outcome === 'missing' ? 3 : 4)
+      }
+    }
+    finally {
+      client.close()
+    }
+  })
+
   it('replays a switch once and retries uncertain delivery in a fresh conversation after restart', async () => {
     const databasePath = join(dir, 'test.sqlite')
     const inputs: StartTurnInput[] = []

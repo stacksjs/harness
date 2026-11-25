@@ -27,6 +27,8 @@ export interface SessionState {
   model: string
   codexTurnOptions?: CodexTurnOptions
   providerSessionId: string
+  /** Last confirmed native conversation and coverage for each provider account. */
+  providerConversations?: Record<string, { providerSessionId: string, throughTurnId: number }>
   handoff?: { afterTurnId: number, pending: boolean }
   fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', error?: string }
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
@@ -191,6 +193,19 @@ export interface HarnessState {
 
 export function emptyState(): HarnessState {
   return { sessions: new Map(), profiles: new Map(), workspaces: new Map(), devices: new Map(), settings: hostSettings() }
+}
+
+/** A native conversation belongs to one selected account within this Harness thread. */
+function providerConversationKey(session: Pick<SessionState, 'driverKind' | 'providerInstanceId'>): string {
+  return session.providerInstanceId === undefined ? session.driverKind : `${session.driverKind}:${session.providerInstanceId}`
+}
+
+export function providerConversation(session: SessionState) {
+  return session.providerConversations?.[providerConversationKey(session)]
+}
+
+function forgetProviderConversation(session: SessionState): void {
+  if (session.providerConversations) delete session.providerConversations[providerConversationKey(session)]
 }
 
 export function isTurnActive(state: SessionState['state']): boolean {
@@ -389,6 +404,12 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (session?.fork?.state === 'pending') {
         session.providerSessionId = p.providerSessionId
+        session.providerConversations = {
+          [providerConversationKey(session)]: {
+            providerSessionId: p.providerSessionId,
+            throughTurnId: session.fork.turnId,
+          },
+        }
         session.fork.state = 'ready'
       }
       break
@@ -411,7 +432,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
     case 'session.provider-bound': {
       const session = state.sessions.get(event.sessionId)
-      if (session) session.providerSessionId = p.providerSessionId
+      if (session) {
+        if (session.providerSessionId !== p.providerSessionId) forgetProviderConversation(session)
+        session.providerSessionId = p.providerSessionId
+      }
       break
     }
 
@@ -427,7 +451,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       const active = session.turns.at(-1)
-      if (active?.status === 'running') active.status = 'failed'
+      if (active?.status === 'running') {
+        active.status = 'failed'
+        if (session.providerSessionId) forgetProviderConversation(session)
+      }
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'failed'
       session.lastError = p.message
@@ -564,6 +591,13 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'complete'
+        if (session.providerSessionId) {
+          session.providerConversations ??= {}
+          session.providerConversations[providerConversationKey(session)] = {
+            providerSessionId: session.providerSessionId,
+            throughTurnId: t.id,
+          }
+        }
         if (session.handoff && p.turnId > session.handoff.afterTurnId) session.handoff.pending = false
         if (p.providerTurnId) t.providerTurnId = p.providerTurnId
         t.tokensIn = p.tokensIn
@@ -578,7 +612,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       const t = turn(session, p.turnId)
-      if (t) t.status = 'interrupted'
+      if (t) {
+        t.status = 'interrupted'
+        if (session.providerSessionId) forgetProviderConversation(session)
+      }
       session.state = 'idle'
       // Nothing is waiting on a decision once the turn is gone.
       clearTurnRequests(session)
@@ -589,7 +626,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       const t = turn(session, p.turnId)
-      if (t) t.status = 'failed'
+      if (t) {
+        t.status = 'failed'
+        if (session.providerSessionId) forgetProviderConversation(session)
+      }
       session.state = 'idle'
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       clearTurnRequests(session)

@@ -68,7 +68,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 })
 
 describe('codex provider handoff', () => {
-  it.each(['native', 'legacy', 'ambiguous', 'stopped'] as const)('starts the new request correctly with %s history delivery', async (mode) => {
+  it.each(['native', 'legacy', 'ambiguous', 'stopped', 'resumed', 'resume-missing'] as const)('starts the new request correctly with %s history delivery', async (mode) => {
     const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-handoff-'))
     const binaryPath = join(workspacePath, 'codex-fixture')
     try {
@@ -82,6 +82,10 @@ for await (const line of createInterface({ input: process.stdin })) {
   appendFileSync('requests.log', JSON.stringify({ method, params }) + '\\n')
   const respond = payload => console.log(JSON.stringify({ id, ...payload }))
   if (method === 'thread/start') respond({ result: { thread: { id: 'new-native-thread' } } })
+  else if (method === 'thread/resume') {
+    if (mode === 'resume-missing') respond({ error: { code: -32602 } })
+    else respond({ result: { thread: { id: params.threadId } } })
+  }
   else if (method === 'thread/inject_items') {
     if (mode === 'legacy') respond({ error: { code: -32601 } })
     else if (mode === 'ambiguous') respond({ error: { code: -32603 } })
@@ -93,16 +97,23 @@ for await (const line of createInterface({ input: process.stdin })) {
 `, { mode: 0o755 })
       const instance = await CodexDriver.create({ binaryPath, workspacePath })
       try {
+        const returning = mode === 'resumed' || mode === 'resume-missing'
         const input: StartTurnInput = {
           text: 'The current request stays separate.',
+          ...(returning ? { providerSessionId: 'original-native-thread', requireResume: true } : {}),
           historicalContext: {
             items: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Original assistant response.' }] }],
             inlinePrompt: 'Previous response.\n\nThe current request stays separate.',
           },
         }
         const events = instance.startTurn(input)[Symbol.asyncIterator]()
-        expect((await events.next()).value).toEqual({ type: 'session-bound', providerSessionId: 'new-native-thread' })
-        if (mode === 'stopped') {
+        if (!returning)
+          expect((await events.next()).value).toEqual({ type: 'session-bound', providerSessionId: 'new-native-thread' })
+        if (mode === 'resume-missing') {
+          expect((await events.next()).value).toEqual({ type: 'resume-unavailable' })
+          expect((await events.next()).done).toBe(true)
+        }
+        else if (mode === 'stopped') {
           const log = Bun.file(join(workspacePath, 'requests.log'))
           for (let attempt = 0; attempt < 100 && !(await log.text()).includes('thread/inject_items'); attempt++) await Bun.sleep(10)
           await instance.interrupt()
@@ -115,10 +126,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         else expect((await events.next()).value).toEqual({ type: 'steering-ready' })
         const requests = readFileSync(join(workspacePath, 'requests.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
         expect(requests.map(request => request.method)).toEqual([
-          'initialize', 'thread/start', 'thread/inject_items', ...(mode === 'ambiguous' || mode === 'stopped' ? [] : ['turn/start']),
+          'initialize', returning ? 'thread/resume' : 'thread/start',
+          ...(mode === 'resume-missing' ? [] : ['thread/inject_items']),
+          ...(mode === 'ambiguous' || mode === 'stopped' || mode === 'resume-missing' ? [] : ['turn/start']),
         ])
-        expect(requests[2]?.params).toEqual({ threadId: 'new-native-thread', items: input.historicalContext?.items })
-        if (mode === 'native' || mode === 'legacy') expect(requests[3]?.params.input).toEqual([{ type: 'text', text: mode === 'legacy' ? input.historicalContext?.inlinePrompt : input.text }])
+        if (mode !== 'resume-missing')
+          expect(requests[2]?.params).toEqual({ threadId: input.providerSessionId ?? 'new-native-thread', items: input.historicalContext?.items })
+        if (mode === 'native' || mode === 'legacy' || mode === 'resumed') expect(requests[3]?.params.input).toEqual([{ type: 'text', text: mode === 'legacy' ? input.historicalContext?.inlinePrompt : input.text }])
       }
       finally {
         await instance.stop()

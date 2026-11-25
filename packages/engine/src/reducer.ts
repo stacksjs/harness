@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
-import { isTurnActive, modelFavoriteIndex } from './projections'
+import { isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
 
@@ -980,6 +980,22 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           decision,
           scope,
         },
+      }]
+    }
+
+    case 'thread.handoff.claim': {
+      const session = state.sessions.get(command.sessionId)
+      const turn = session?.turns.at(-1)
+      if (!session || !session.handoff?.pending || session.providerSessionId
+        || turn?.id !== command.turnId || turn.status !== 'running'
+        || providerConversation(session)?.providerSessionId !== command.providerSessionId
+        || !state.workspaces.get(session.workspaceId)?.trusted)
+        throw new InvalidCommand('The saved provider conversation is no longer available for this turn.')
+      return [{
+        sessionId: session.id,
+        commandId,
+        at,
+        payload: { type: 'session.provider-bound', providerSessionId: command.providerSessionId },
       }]
     }
 

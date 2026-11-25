@@ -2000,6 +2000,34 @@ check('the provider switch boundary survives a page reload', await page.locator(
 await capture('handoff-completed-phone')
 await page.setViewportSize({ width: 1280, height: 800 })
 await capture('handoff-completed-desktop')
+await page.setViewportSize({ width: 390, height: 844 })
+await handoffPicker.click()
+await handoffDialog.getByRole('combobox', { name: 'Search models' }).fill('Fixture Fast Catalog fixture')
+await handoffDialog.getByRole('button', { name: /^Fixture Fast.*Codex.*Catalog fixture$/ }).click()
+await handoffDialog.getByRole('button', { name: 'Done' }).click()
+const returnPrompt = 'Return to the original Codex account.'
+await page.locator('[data-prompt]').fill(returnPrompt)
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await capture(`handoff-return-staged-${width}`)
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+}
+await page.locator('[data-send]').click()
+const returned = page.locator('[data-turn]').filter({ hasText: returnPrompt })
+await returned.locator('[data-provider-switch]').getByText('Continued with Codex').waitFor()
+await returned.getByText('I received the saved context.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const resumedInput = fixtureCodexTurns.at(-1)
+check('returning to a named account resumes its native conversation with only the missing history',
+  resumedInput?.providerSessionId === 'ps-drive' && resumedInput.requireResume === true
+  && resumedInput.text.includes('Continue the Codex work with Claude.')
+  && !resumedInput.text.includes('Queue with the fast model.')
+  && resumedInput.text.endsWith(returnPrompt)
+  && harness.engine.current.sessions.get(sourceId)?.providerInstanceId === 4
+  && new URL(page.url()).pathname === `/s/${sourceId}`)
+await capture('handoff-return-completed-phone')
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

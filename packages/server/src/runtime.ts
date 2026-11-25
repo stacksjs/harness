@@ -17,6 +17,7 @@ import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
+import { providerConversation } from '@harness/engine'
 import { capture, restore } from './checkpoint'
 import { historicalContext } from './handoff'
 import { missingReferences, resolveForDriver } from './mcp'
@@ -262,17 +263,19 @@ export class ProviderRuntime {
    */
   async runTurn(sessionId: number, turnId: number, text: string): Promise<void> {
     const session = this.options.engine.current.sessions.get(sessionId)
-    if (!session) return
+    if (!session || session.turns.at(-1)?.id !== turnId || session.turns.at(-1)?.status !== 'running') return
 
     if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted) {
       await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Trust this workspace before sending a message.' })
       return
     }
 
+    const handoff = session.handoff?.pending ? session.handoff : undefined
+    const returning = handoff && !session.providerSessionId ? providerConversation(session) : undefined
     let history: ReturnType<typeof historicalContext>
-    if (session.handoff?.pending) {
+    if (handoff) {
       try {
-        history = historicalContext(session.turns, session.handoff.afterTurnId, text)
+        history = historicalContext(session.turns, handoff.afterTurnId, text, returning?.throughTurnId)
         // A failed handoff can have bound a native session and consumed some
         // context. Retry with a fresh conversation to avoid inserting it twice.
         await this.stopSession(sessionId)
@@ -301,16 +304,19 @@ export class ProviderRuntime {
     // is worse than none, because it looks like a safe point and is not. It
     // costs one `git add -A` against a temporary index, and it is skipped
     // silently for a workspace that is not a repository.
-    await this.captureCheckpoint(sessionId, turnId, 'turn-start')
+    if (!session.checkpoints.some(checkpoint => checkpoint.kind === 'turn-start' && checkpoint.turnId === turnId))
+      await this.captureCheckpoint(sessionId, turnId, 'turn-start')
     if (running.abandoned || running.interrupted || running.turnId !== turnId) return
 
-    if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted) {
-      delete running.turnId
-      await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Trust this workspace before sending a message.' })
-      return
-    }
-
     try {
+      if (returning) {
+        // Consume the saved binding before any provider can import history. A
+        // crash or an uncertain transfer can only retry with a fresh session.
+        await this.record({ type: 'thread.handoff.claim', sessionId, turnId, providerSessionId: returning.providerSessionId })
+        if (running.abandoned || running.interrupted || running.turnId !== turnId) return
+      }
+      if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted)
+        throw new Error('Trust this workspace before sending a message.')
       const nativeHistory = running.instance.acceptsHistoricalContext ? history : undefined
       for await (const event of running.instance.startTurn({
         text: nativeHistory ? text : history?.inlinePrompt ?? text,
@@ -320,6 +326,7 @@ export class ProviderRuntime {
         // undefined, so an empty string must not be passed through as a resume
         // target.
         providerSessionId: running.providerSessionId ?? (session.providerSessionId || undefined),
+        ...(returning ? { requireResume: true } : {}),
       })) {
         // A stopped session's remaining events are dropped rather than logged:
         // appending to a session the user has torn down writes history nobody
@@ -327,6 +334,21 @@ export class ProviderRuntime {
         if (running.abandoned || running.turnId !== turnId) break
 
         switch (event.type) {
+          case 'resume-unavailable':
+            if (running.interrupted) return
+            if (!returning) throw new Error('The provider could not reopen the conversation.')
+            // Resume ended before the provider accepted either history or the
+            // request. A fresh attempt can include the entire saved history.
+            await this.record({ type: 'thread.session.set', sessionId, providerSessionId: '' })
+            try {
+              await this.stopSession(sessionId)
+            }
+            catch {
+              await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Could not close the previous provider connection. Send again to retry.' })
+              return
+            }
+            return this.runTurn(sessionId, turnId, text)
+
           case 'session-bound':
             running.providerSessionId = event.providerSessionId
             await this.emit({

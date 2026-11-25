@@ -198,6 +198,10 @@ export class ClaudeInstance implements ProviderInstance {
       run = query({ prompt: input.text, options: this.options(queue, input.providerSessionId) })
       this.running = run
       for await (const message of run as AsyncIterable<SDKMessage>) {
+        if (input.requireResume && 'session_id' in message && message.session_id !== bound) {
+          queue.finish({ type: 'error', message: 'Claude Code opened a different conversation. Send again to continue in a fresh conversation.' })
+          return
+        }
         if (!bound && 'session_id' in message && message.session_id) {
           bound = message.session_id
           queue.push({ type: 'session-bound', providerSessionId: message.session_id })

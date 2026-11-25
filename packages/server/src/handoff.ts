@@ -17,10 +17,11 @@ function responseItem(role: 'user' | 'assistant', text: string): HistoricalConte
 }
 
 /** Keep prior messages attributable and separate from the new request. */
-export function historicalContext(turns: readonly TurnState[], beforeTurn: number, text: string): HistoricalContext | undefined {
+export function historicalContext(turns: readonly TurnState[], beforeTurn: number, text: string, throughTurn = 0): HistoricalContext | undefined {
   const items: HistoricalItem[] = []
   for (const turn of turns) {
     if (turn.id > beforeTurn) break
+    if (turn.id <= throughTurn) continue
     if (turn.prompt) items.push({ turn: turn.id, role: 'user', text: turn.prompt })
     for (const message of turn.steered ?? []) items.push({ turn: turn.id, role: 'user', text: message.text })
     for (const call of turn.toolCalls) {
