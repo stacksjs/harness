@@ -1900,7 +1900,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function revealPickerAccount() {
-    draftPickerAccounts.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const list = draftPickerAccounts.current
+    const selected = list?.querySelector('[aria-pressed="true"]')
+    if (!selected) return
+    const selection = selected.getBoundingClientRect()
+    const bounds = list.getBoundingClientRect()
+    const left = bounds.left + list.clientLeft
+    const top = bounds.top + list.clientTop
+    const right = left + list.clientWidth
+    const bottom = top + list.clientHeight
+    // Keep scrolling inside the account list as the dialog changes layout.
+    // WebKit can otherwise scroll the wider dialog when resizing a focused picker.
+    if (selection.left < left) list.scrollLeft += selection.left - left
+    else if (selection.right > right) list.scrollLeft += selection.right - right
+    if (selection.top < top) list.scrollTop += selection.top - top
+    else if (selection.bottom > bottom) list.scrollTop += selection.bottom - bottom
   }
 
   function updatePickerQuery(event) {

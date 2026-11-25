@@ -1577,13 +1577,20 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
     return !!box && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight
   }, undefined, { timeout: 2000 }).then(() => true, () => false)
   check(`the model picker stays within the ${width}×${height} viewport`, fitted)
+  if (width <= 390) {
+    const accountVisible = await page.waitForFunction(() => {
+      const strip = document.querySelector('[data-draft-model-accounts]')
+      const account = strip?.querySelector('[data-draft-model-account][aria-pressed="true"]')
+      if (!strip || !account) return false
+      const bounds = strip.getBoundingClientRect()
+      const selected = account.getBoundingClientRect()
+      const left = bounds.left + strip.clientLeft
+      return selected.left >= left - 1 && selected.right <= left + strip.clientWidth + 1
+    }, undefined, { timeout: 2000 }).then(() => true, () => false)
+    check(`the selected named account is visible at ${width}px`, accountVisible)
+  }
   await capture(`model-picker-${width}x${height}`)
 }
-check('the selected named account is visible in the phone account strip', await draftDialog.evaluate(dialog => {
-  const accounts = dialog.querySelector('[data-draft-model-accounts]')?.getBoundingClientRect()
-  const selected = dialog.querySelector('[data-draft-model-account][aria-pressed="true"]')?.getBoundingClientRect()
-  return !!accounts && !!selected && selected.left >= accounts.left - 1 && selected.right <= accounts.right + 1
-}))
 await page.setViewportSize({ width: 360, height: 470 })
 check('the model search and dismissal stay reachable in a short phone viewport',
   await draftDialog.evaluate(dialog => {
