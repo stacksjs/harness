@@ -18,6 +18,7 @@ import { existsSync } from 'node:fs'
 import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
 import { capture, restore } from './checkpoint'
+import { handoffPrompt } from './handoff'
 import { missingReferences, resolveForDriver } from './mcp'
 import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
 import { providerLaunchConfig } from './provider-instances'
@@ -268,6 +269,22 @@ export class ProviderRuntime {
       return
     }
 
+    let prompt = text
+    if (session.handoff?.pending) {
+      try {
+        prompt = handoffPrompt(session.turns, session.handoff.afterTurnId, text)
+        // A failed handoff can have bound a native session and consumed some
+        // context. Retry with a fresh conversation to avoid inserting it twice.
+        await this.stopSession(sessionId)
+        if (session.providerSessionId) await this.record({ type: 'thread.session.set', sessionId, providerSessionId: '' })
+      }
+      catch (error) {
+        await this.emit({ type: 'thread.error', sessionId, turnId, message: error instanceof Error ? error.message : 'Could not prepare the provider handoff.' })
+        return
+      }
+    }
+
+    if (session.turns.at(-1)?.id !== turnId || session.turns.at(-1)?.status !== 'running') return
     const running = await this.instanceFor(sessionId, session.driverKind)
     if (!running) return
 
@@ -295,7 +312,7 @@ export class ProviderRuntime {
 
     try {
       for await (const event of running.instance.startTurn({
-        text,
+        text: prompt,
         codexSelection: session.turns.at(-1)?.codexSelection,
         // The projection stores '' for "not bound yet"; the driver wants
         // undefined, so an empty string must not be passed through as a resume

@@ -204,6 +204,7 @@ export function viewProps(state: HarnessState, options: {
           model: active.model,
           codexTurnOptions: active.codexTurnOptions,
           providerInstanceId: active.providerInstanceId,
+          handoffBoundary: active.handoff?.afterTurnId ?? 0,
           lastSeq: active.lastSeq,
           // For the terminal: a shell opens in the session's workspace, and
           // the island should not have to reverse-engineer it from the DOM.
@@ -224,6 +225,7 @@ export function viewProps(state: HarnessState, options: {
             prompt: turn.prompt,
             response: turn.response,
             status: turn.status,
+            switchedProvider: turn.switchedProvider,
             modelChange: turn.modelChanged && turn.codexSelection ? codexSelectionLabel(turn.codexSelection) : undefined,
             steerable: turn.steerable === true,
             steered: turn.steered ?? [],

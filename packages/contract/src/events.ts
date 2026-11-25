@@ -35,7 +35,8 @@ export type EventPayload =
   | { type: 'session.provider-bound', providerSessionId: string }
   | { type: 'session.fork-finished', providerSessionId: string }
   | { type: 'session.fork-failed', message: string }
-  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean }
+  | { type: 'session.provider-switched', afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions }
+  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind }
   | { type: 'queue.added', entry: QueuedFollowUp }
   | { type: 'queue.edited', id: string, text: string }
   | { type: 'queue.removed', id: string }

@@ -197,8 +197,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           ...(command.codexTurnOptions === undefined ? {} : { codexTurnOptions: command.codexTurnOptions }),
         }
       }
-      if (command.type === 'session.create' && command.providerInstanceId !== undefined) {
-        const workspace = engine.current.workspaces.get(command.workspaceId)
+      if (command.type === 'session.handoff' && !driverKinds().includes(command.driverKind))
+        throw new Error('Choose an available provider.')
+      if ((command.type === 'session.create' || command.type === 'session.handoff') && command.providerInstanceId !== undefined) {
+        const workspaceId = command.type === 'session.create' ? command.workspaceId : engine.current.sessions.get(command.sessionId)?.workspaceId
+        const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
         if (!workspace || !savedProviders.find(command.providerInstanceId, workspace.profileId, command.driverKind, workspace.path))
           throw new Error('The selected provider account is unavailable for this project.')
       }
@@ -632,7 +635,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (created) void runtime.forkSession(created.sessionId)
       return
     }
-    if (command.type === 'session.turn.start' || command.type === 'session.queue.send') {
+    if (command.type === 'session.turn.start' || command.type === 'session.handoff' || command.type === 'session.queue.send') {
       startAcceptedTurn(result.events)
       return
     }
@@ -827,10 +830,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }
           if (!socket.data.canUseHostPrivileges) {
             const session = 'sessionId' in command ? engine.current.sessions.get(command.sessionId) : undefined
-            const selection = command.type === 'session.create' ? command : session
-            if (selection?.providerInstanceId !== undefined) {
-              const workspace = engine.current.workspaces.get(selection.workspaceId)
-              const launch = workspace && savedProviders.find(selection.providerInstanceId, workspace.profileId, selection.driverKind, workspace.path)
+            const workspaceId = command.type === 'session.create' ? command.workspaceId : session?.workspaceId
+            const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
+            const selections = command.type === 'session.handoff' ? [session, command] : [command.type === 'session.create' ? command : session]
+            for (const selection of selections) {
+              if (!workspace || selection?.providerInstanceId === undefined) continue
+              const launch = savedProviders.find(selection.providerInstanceId, workspace.profileId, selection.driverKind, workspace.path)
               if (launch?.chatGptClientId) throw new Error('This ChatGPT plan is available only on the Harness host.')
             }
           }

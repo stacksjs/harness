@@ -73,7 +73,7 @@ function requestedCodexSelection(session: SessionState, selection: CodexTurnSele
   return { model, ...codexTurnOptions }
 }
 
-function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string): EventPayload {
+function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string): Extract<EventPayload, { type: 'turn.started' }> {
   const selection = codexSelection ?? (session.driverKind === 'codex' && session.model
     ? { model: session.model, ...session.codexTurnOptions } : undefined)
   const modelChanged = selection && session.turns.length > 0 && (selection.model !== session.model
@@ -480,7 +480,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const source = state.sessions.get(command.sessionId)
       const turn = source?.turns.find(turn => turn.id === command.turnId)
       if (!source || source.driverKind !== 'codex' || !source.providerSessionId || source.navigation?.archivedAt
-        || turn?.status !== 'complete' || !turn.response.trim())
+        || turn?.status !== 'complete' || !turn.response.trim() || turn.id <= (source.handoff?.afterTurnId ?? 0))
         throw new InvalidCommand('Choose a completed response in an available Codex conversation.')
       if (!state.workspaces.get(source.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before forking a conversation.')
@@ -603,6 +603,41 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session?.navigation?.snoozedUntil || session.navigation.snoozedUntil !== command.until || command.until > at) return []
       return [{ sessionId: session.id, commandId, at, payload: { type: 'session.navigation-changed', changes: { snoozedUntil: null, settledAt: null } } }]
+    }
+
+    case 'session.handoff': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session || session.state === 'stopped' || session.navigation?.archivedAt
+        || (session.fork && session.fork.state !== 'ready'))
+        throw new InvalidCommand('This thread is unavailable for a provider switch.')
+      if (!state.workspaces.get(session.workspaceId)?.trusted)
+        throw new InvalidCommand('Trust this workspace before switching providers.')
+      if (isTurnActive(session.state) || session.followUps.entries.length)
+        throw new InvalidCommand('Finish the current turn and queued messages before switching providers.')
+      if (command.afterTurnId !== (session.turns.at(-1)?.id ?? 0))
+        throw new InvalidCommand('This conversation changed on another device. Review the latest turn and send again.')
+      if (command.driverKind === session.driverKind && command.providerInstanceId === session.providerInstanceId
+        && (command.driverKind === 'codex' || (command.model ?? '') === session.model))
+        throw new InvalidCommand('Choose another provider, account, or model.')
+      if (typeof command.text !== 'string' || !command.text.trim())
+        throw new InvalidCommand('Enter a message to switch providers.')
+      if (command.model !== undefined && (typeof command.model !== 'string' || !command.model.trim() || command.model.length > 200))
+        throw new InvalidCommand('Choose a valid model for this conversation.')
+      const model = sessionModel(command)
+      const event = { sessionId: session.id, commandId, at }
+      return [
+        { ...event, payload: {
+          type: 'session.provider-switched',
+          afterTurnId: command.afterTurnId,
+          driverKind: command.driverKind,
+          ...(command.providerInstanceId === undefined ? {} : { providerInstanceId: command.providerInstanceId }),
+          ...model,
+        } },
+        { ...event, payload: {
+          ...turnStarted({ ...session, driverKind: command.driverKind, model: model.model ?? '', codexTurnOptions: model.codexTurnOptions }, command.text),
+          switchedProvider: command.driverKind,
+        } },
+      ]
     }
 
     case 'session.turn.start': {

@@ -71,6 +71,7 @@ export type ClientCommand =
     }
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'session.fork', sessionId: number, turnId: number }
+  | { type: 'session.handoff', sessionId: number, afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, text: string }
   | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
@@ -182,6 +183,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'session.scratch.create',
   'session.turn.start',
   'session.fork',
+  'session.handoff',
   'session.turn.interrupt',
   'session.turn.steer',
   'session.queue.add',

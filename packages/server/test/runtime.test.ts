@@ -1,5 +1,5 @@
 import type { Command, InputAnswer } from '@harness/contract'
-import type { Driver, DriverConfig, ProviderEvent, ProviderInstance } from '@harness/drivers'
+import type { Driver, DriverConfig, ProviderEvent, ProviderInstance, StartTurnInput } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -217,6 +217,77 @@ describe('fork recovery', () => {
       expect(await client.waitForDispatch('fork-rejected-turn')).toMatchObject({ t: 'rejected' })
       expect(harness.engine.current.sessions.get(sessionId)?.turns[0]?.response).toBe('First answer')
       expect(providerResolutions).toBe(0)
+    }
+    finally {
+      client.close()
+    }
+  })
+})
+
+describe('provider handoff', () => {
+  it('replays a switch once and retries uncertain delivery in a fresh conversation after restart', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const inputs: StartTurnInput[] = []
+    const { driver } = fakeDriver([])
+    const resolveDriver = (kind: Driver['kind']): Driver => ({
+      ...driver,
+      kind,
+      async create(config) {
+        return {
+          ...await driver.create(config),
+          async *startTurn(input) {
+            const attempt = inputs.push(input)
+            if (attempt === 1) {
+              yield { type: 'session-bound', providerSessionId: 'source-account-native-id' }
+              yield { type: 'assistant-delta', text: 'The original answer.' }
+            }
+            if (attempt === 2) {
+              yield { type: 'session-bound', providerSessionId: 'ambiguous-target-native-id' }
+              yield { type: 'error', message: 'The provider disconnected.' }
+              return
+            }
+            if (attempt === 3) yield { type: 'session-bound', providerSessionId: 'replacement-native-id' }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+        }
+      },
+    })
+    harness = await serve({ port, databasePath, resolveDriver })
+    let client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    const send = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 10, command } })
+    try {
+      send('original-message', { type: 'session.turn.start', sessionId, text: 'The original request.' })
+      expect(await client.waitFor('turn.completed')).toMatchObject({ turnId: 1 })
+      const switchProvider = { type: 'session.handoff', sessionId, afterTurnId: 1, driverKind: 'codex', text: 'Continue elsewhere.' } as const
+      send('stale-switch', { ...switchProvider, afterTurnId: 0 })
+      expect(await client.waitForRejection('stale-switch')).toMatchObject({ message: expect.stringContaining('another device') })
+      send('handoff-switch', switchProvider)
+      expect(await client.waitFor('session.provider-switched')).toMatchObject({ afterTurnId: 1, driverKind: 'codex' })
+      expect(await client.waitFor('session.failed')).toMatchObject({ message: 'The provider disconnected.' })
+      expect(inputs[1]?.providerSessionId).toBeUndefined()
+      expect(inputs[1]?.text).toContain('The original answer.')
+      expect(inputs[1]?.text).toEndWith('New user request:\nContinue elsewhere.')
+
+      client.close()
+      harness.stop()
+      harness = await serve({ port, databasePath, resolveDriver })
+      client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      client.send({ t: 'subscribe', sessionId })
+      send('handoff-switch', switchProvider)
+      expect(await client.waitForDispatch('handoff-switch')).toMatchObject({ t: 'dispatched', replayed: true })
+      expect(inputs).toHaveLength(2)
+      send('handoff-retry', { type: 'session.turn.start', sessionId, text: 'Retry the continuation.' })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 3)).toMatchObject({ turnId: 3 })
+      expect(inputs[2]?.providerSessionId).toBeUndefined()
+      expect(inputs[2]?.text).toContain('The original request.')
+      expect(inputs[2]?.text).not.toContain('Continue elsewhere.')
+      send('handoff-follow-up', { type: 'session.turn.start', sessionId, text: 'Follow up without repeating context.' })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 4)).toMatchObject({ turnId: 4 })
+      expect(inputs[3]).toMatchObject({ text: 'Follow up without repeating context.', providerSessionId: 'replacement-native-id' })
+      expect(harness.engine.current.sessions.get(sessionId)?.turns.map(turn => turn.prompt)).toEqual([
+        'The original request.', 'Continue elsewhere.', 'Retry the continuation.', 'Follow up without repeating context.',
+      ])
     }
     finally {
       client.close()

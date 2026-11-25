@@ -130,6 +130,10 @@ export const sessionDriver = activeSession ? (activeSession.driverKind || '') : 
 export const sessionProviderInstanceId = activeSession?.providerInstanceId ?? null
 export const promptPlaceholder = 'Message the agent…'
 export const activeSessionId = activeSession ? activeSession.id : 0
+const providerNames = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
+export const providerDisplayName = kind => providerNames[kind] || kind
+export const initialSessionModel = activeSession?.model || ''
+export const initialHandoffBoundary = activeSession?.handoffBoundary || 0
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialFork = activeSession?.fork || null
 export const initialCodexSelection = activeCodex && activeSession.model
@@ -275,7 +279,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @endif
       {{-- Which agent answers in this session — the composer picker's ground truth. --}}
       @if(sessionDriver)
-        <span data-session-driver class="px-[6px] py-[1px] leading-[15px] text-[11px] border border-black/10 rounded-[5px] dark:border-white/15 opacity-70">{{ sessionDriver }}</span>
+        <span data-session-driver :text="currentDriver()" class="px-[6px] py-[1px] leading-[15px] text-[11px] border border-black/10 rounded-[5px] dark:border-white/15 opacity-70">{{ sessionDriver }}</span>
       @endif
       {{--
         An isolated session edits its own checkout, not the workspace. Saying
@@ -354,6 +358,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @endif
       @foreach(settledTurns as turn)
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}" id="turn-{{ turn.id }}">
+          @if(turn.switchedProvider)<p data-provider-switch class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Continued with {{ providerDisplayName(turn.switchedProvider) }}</p>@endif
           @if(turn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ turn.modelChange }}</p>@endif
           <div class="sr-only">You</div>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
@@ -386,9 +391,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           @endforeach
           @if(turn.response)<div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>@endif
           <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
-          @if(activeCodex && turn.status === 'complete' && turn.response)
+          @if(turn.status === 'complete' && turn.response)
             <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
-              @click="forkResponse({{ turn.id }})" :disabled="forkingResponseId() !== 0" :hidden="!canForkResponse()" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+              @click="forkResponse({{ turn.id }})" :disabled="forkingResponseId() !== 0" @if(!activeCodex || turn.id <= initialHandoffBoundary)hidden@endif :hidden="!canForkResponse({{ turn.id }})" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
                 <span>Fork</span>
             </button>
           @endif
@@ -416,6 +421,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
       @if(liveTurn)
         <article class="mb-5" data-turn="{{ liveTurn.id }}" id="turn-{{ liveTurn.id }}" data-live>
+          @if(liveTurn.switchedProvider)<p data-provider-switch class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Continued with {{ providerDisplayName(liveTurn.switchedProvider) }}</p>@endif
           @if(liveTurn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ liveTurn.modelChange }}</p>@endif
           <div class="sr-only">You</div>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
@@ -463,13 +469,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || uiState() !== 'running' || runningTurnId() !== initialResponseTurn" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           @endif
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
-          @if(activeCodex)
             <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
               @click="forkResponse({{ liveTurn.id }})" :disabled="forkingResponseId() !== 0"
-              @if(!initialSsrForkable)hidden@endif :hidden="!canForkResponse() || !ssrForkable()" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+              @if(!initialSsrForkable || !activeCodex || liveTurn.id <= initialHandoffBoundary)hidden@endif :hidden="!canForkResponse({{ liveTurn.id }}) || !ssrForkable()" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
                 <span>Fork</span>
             </button>
-          @endif
           {{--
             The newest turn is the one people most want to undo, and it was the
             only one without the button because it is not in `settledTurns`.
@@ -501,6 +505,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       --}}
       <template :for="turn in liveTurns" :key="turn.id">
         <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
+          <p data-provider-switch hidden :hidden="!turn.providerSwitch" :text="turn.providerSwitch" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300"></p>
           <p data-model-change :hidden="!turn.modelChange" :text="turn.modelChange ? 'Switched to ' + turn.modelChange : ''" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300"></p>
           <div class="sr-only">You</div>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
@@ -523,13 +528,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           {{-- Until the first token: dots, not a label over blank space. --}}
           <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || uiState() !== 'running' || runningTurnId() !== turn.id" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           <div class="transcript-markdown" data-response></div>
-          @if(activeCodex)
             <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
               @click="forkResponse(turn.id)" :disabled="forkingResponseId() !== 0"
-              hidden :hidden="!canForkResponse() || !turn.completed || !turn.hasResponse" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+              hidden :hidden="!canForkResponse(turn.id) || !turn.completed || !turn.hasResponse" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
                 <span>Fork</span>
             </button>
-          @endif
         </article>
       </template>
 
@@ -584,16 +587,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         :placeholder="composerPlaceholder()"
         class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
+      <p data-handoff-hint role="status" hidden :hidden="!pendingProviderSwitch()" :text="handoffHint()" class="text-neutral-600 text-xs dark:text-neutral-300"></p>
       <div data-composer-toolbar>
         <div data-composer-provider-controls>
-        @if(activeSessionId && !activeCodex)
-        @include('../partials/harness-driver-picker')
-        @else
         @include('../partials/harness-model-picker')
-        @endif
         </div>
         <div data-composer-actions class="flex flex-wrap gap-2 justify-end">
-          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :hidden="!showSend()" :disabled="!composerText().trim() || startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :hidden="!showSend()" :disabled="!composerText().trim() || startPending() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
             <span data-send-text :text="sendLabel()">Send</span>
           </button>
@@ -1081,11 +1081,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const forkError = state(initialFork?.error || '')
   const forkStatusText = derived(() => forkStatus() === 'pending' ? 'Creating fork…'
     : forkStatus() === 'failed' ? forkError() : 'Forked conversation')
-  function canForkResponse() {
-    return activeCodex && forkStatus() === 'ready' && !threadNavigation().archivedAt
+  function canForkResponse(turnId) {
+    return currentDriver() === 'codex' && turnId > handoffBoundary() && forkStatus() === 'ready' && !threadNavigation().archivedAt
   }
   async function forkResponse(turnId) {
-    if (!canForkResponse() || forkingResponseId()) return
+    if (!canForkResponse(turnId) || forkingResponseId()) return
     forkingResponseId.set(turnId)
     const commandId = newCommandId()
     try {
@@ -1274,6 +1274,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const showSend = derived(() => !showResume() && Boolean(!uiBusy() || composerText().trim() || editingFollowUp()))
   const sendLabel = derived(() => {
     if (editingFollowUp()) return 'Save edit'
+    if (pendingProviderSwitch()) return 'Send'
     if (canSteerDraft() && followUpPreference() === 'steer') return 'Steer'
     return sessionId && (uiBusy() || !sessionOnline()) ? 'Queue' : 'Send'
   })
@@ -1361,7 +1362,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const sidebarToggleRef = useRef('sidebarToggleBox')
   const promptRef = useRef('promptBox')
   const profileNameRef = useRef('profileNameBox')
-  const driverPickerRef = useRef('driverPickerBox')
   const settingsDriverRef = useRef('settingsDriverBox')
   const settingsDialogRef = useRef('settingsDialogBox')
   const settingsPanel = useRef('settingsPanelBox')
@@ -1958,16 +1958,28 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const modelFavorites = state([])
   let modelFavoritesRevision = 0
   let providerCatalogRequest = 0
-  const activeDriverValue = sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`
+  const activeDriverValue = state(sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`)
+  const currentDriver = derived(() => activeDriverValue().split(':')[0])
+  const handoffBoundary = state(initialHandoffBoundary)
   const appliedCodexSelection = state(initialCodexSelection)
-  const draftProvider = state(activeCodex ? activeDriverValue : defaultDriver())
-  const draftModel = state(initialCodexSelection?.model || '')
+  const activeModel = state(initialSessionModel)
+  const draftProvider = state(activeSessionId ? activeDriverValue() : defaultDriver())
+  const draftModel = state(initialSessionModel)
   const draftEffort = state(initialCodexSelection?.effort || '')
   const draftSpeed = state(initialCodexSelection?.serviceTier || '')
-  const composerProviders = derived(() => [...defaultProviders(), ...providerAccounts()]
-    .filter(account => !activeCodex || account.value === activeDriverValue))
+  const composerProviders = derived(() => [...defaultProviders(), ...providerAccounts()])
+  const pendingProviderSwitch = derived(() => Boolean(sessionId && (draftProvider() !== activeDriverValue()
+    || (currentDriver() !== 'codex' && draftModel() !== activeModel()))))
+  const handoffBlocked = derived(() => pendingProviderSwitch() && !editingFollowUp() && (uiBusy() || !sessionOnline() || Boolean(followUps().entries.length) || Boolean(localFollowUps()?.length)))
+  const handoffHint = derived(() => {
+    if (!pendingProviderSwitch()) return ''
+    if (!sessionOnline()) return 'Reconnect to switch providers.'
+    if (handoffBlocked()) return 'Finish the current turn and queued messages to switch providers.'
+    return 'Continue with ' + draftPickerLabel() + ' using recent context.'
+  })
+  const draftIsCodex = derived(() => draftProvider().split(':')[0] === 'codex')
   function draftCodexSelection() {
-    if (!activeCodex || !draftModel()) return undefined
+    if (!draftIsCodex() || !draftModel()) return undefined
     return {
       model: draftModel(),
       ...(draftEffort() ? { effort: draftEffort() } : {}),
@@ -1986,7 +1998,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     draftSpeed.set(typeof selection.serviceTier === 'string' ? selection.serviceTier : '')
   }
   function canSteerDraft() {
-    return canSteer() && matchesActiveCodexSelection(draftCodexSelection())
+    return !pendingProviderSwitch() && canSteer() && matchesActiveCodexSelection(draftCodexSelection())
   }
   const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
   const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
@@ -1996,7 +2008,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const speed = model?.speedTiers.find(tier => tier.id === draftSpeed())?.name
     return model ? [model.name, effort ? pickerEffortLabel(effort) : '', speed].filter(Boolean).join(' · ')
       : draftModel() ? [draftModel(), effort ? pickerEffortLabel(effort) : '', draftSpeed()].filter(Boolean).join(' · ')
-        : selectedDraftAccount()?.name || DRIVER_LABELS[sessionDriver || draftProvider()]
+        : selectedDraftAccount()?.name || DRIVER_LABELS[draftProvider().split(':')[0]]
   })
 
   const draftPickerTrigger = useRef('draftPickerTriggerBox')
@@ -2025,7 +2037,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const favoriteKeys = pickerFavoriteKeys()
     const accounts = composerProviders().filter(account => account.status === 'ready' && (favoritesOnly || search.length || account.value === pickerAccount()))
     return accounts.flatMap(account => {
-      const rows = favoritesOnly || activeCodex ? account.models || [] : [{ id: '', name: 'Provider default' }, ...(account.models || [])]
+      const rows = favoritesOnly || (sessionId && currentDriver() === 'codex' && account.value === activeDriverValue()) ? account.models || [] : [{ id: '', name: 'Provider default' }, ...(account.models || [])]
       return rows.filter(model => {
         if (favoritesOnly && !favoriteKeys.has(`${account.value}/${model.id}`)) return false
         const text = `${model.name} ${model.id} ${account.name}`.toLowerCase()
@@ -2037,21 +2049,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (providerCatalog() === 'failed') return 'Could not load provider accounts.'
     if (providerCatalog() === 'loading') return 'Checking provider accounts…'
     if (pickerAccount() === 'favorites' && !pickerQuery().trim()) return 'No favorite models available.'
-    if (!pickerQuery().trim() && !pickerResults().length) return activeCodex ? 'No models are available for this account.' : 'Choose an available account.'
+    if (!pickerQuery().trim() && !pickerResults().length) return 'No models are available for this account.'
     return 'No matching models'
   })
 
   const pickerEfforts = derived(() => {
     const model = pickerOptionModel()
-    return (model?.reasoningEfforts || []).filter(effort => !activeCodex || effort !== model?.defaultReasoningEffort)
+    return (model?.reasoningEfforts || []).filter(effort => !sessionId || effort !== model?.defaultReasoningEffort)
   })
 
   function pickerUsesDefaultEffort() {
-    return !draftEffort() || (activeCodex && draftEffort() === pickerOptionModel()?.defaultReasoningEffort)
+    return !draftEffort() || (sessionId && draftEffort() === pickerOptionModel()?.defaultReasoningEffort)
   }
 
   function chooseDefaultEffort() {
-    draftEffort.set(activeCodex ? pickerOptionModel()?.defaultReasoningEffort || '' : '')
+    draftEffort.set(sessionId ? pickerOptionModel()?.defaultReasoningEffort || '' : '')
   }
 
   function pickerEffortLabel(effort) {
@@ -2089,7 +2101,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.id === draftModel())))
     draftPickerOpen.set(true)
     dialog.showModal()
-    if (activeCodex || providerCatalog() === 'ready') void annotateDriverPickers()
+    void annotateDriverPickers()
     void nextTick(() => {
       positionDraftPicker()
       if (event?.pointerType !== 'touch') draftPickerSearch.current?.focus()
@@ -2182,10 +2194,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (draftProvider() !== result.account || draftModel() !== result.id) {
       draftProvider.set(result.account)
       draftModel.set(result.id)
-      draftEffort.set(activeCodex ? selectedDraftModel()?.defaultReasoningEffort || '' : '')
+      draftEffort.set(sessionId ? selectedDraftModel()?.defaultReasoningEffort || '' : '')
       draftSpeed.set('')
     }
-    if (!activeCodex && !result.account.includes(':')) localStorage.setItem('harness.defaultDriver', result.account)
+    if (!sessionId && !result.account.includes(':')) localStorage.setItem('harness.defaultDriver', result.account)
     if (pickerAccount() !== 'favorites') browsePickerAccount(result.account)
     pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.key === result.key)))
     if (!pickerOptionModel()) closeDraftPicker()
@@ -2235,7 +2247,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const request = ++providerCatalogRequest
     if (!defaultProviders().length) providerCatalog.set('loading')
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
-    const modelsQuery = canCompose && (!activeSessionId || (activeCodex && draftPickerOpen())) ? '&models=1' : ''
+    const modelsQuery = canCompose && (!activeSessionId || draftPickerOpen()) ? '&models=1' : ''
     const favoritesRevision = modelFavoritesRevision
     const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`)
       .then(response => response.ok ? response.json() : null).catch(() => null)
@@ -2246,11 +2258,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     const { drivers, accounts = [], favorites = [] } = catalog
     if (modelsQuery && favoritesRevision === modelFavoritesRevision) modelFavorites.set(favorites)
-    if (sessionProviderInstanceId !== null && !accounts.some(account => account.id === sessionProviderInstanceId)) {
-      accounts.push({ id: sessionProviderInstanceId, kind: sessionDriver, name: 'Saved account', status: 'deleted' })
+    const selected = agentChoice(activeDriverValue())
+    if (selected.providerInstanceId !== undefined && !accounts.some(account => account.id === selected.providerInstanceId)) {
+      accounts.push({ id: selected.providerInstanceId, kind: selected.driverKind, name: 'Saved account', status: 'deleted' })
     }
-    const picker = driverPickerRef.current
-    const selection = picker?.value || activeDriverValue || defaultDriver()
     defaultProviders.set(drivers.map(info => ({
       ...info, value: info.kind, name: DRIVER_LABELS[info.kind] || info.kind,
       stateText: driverStateLabel(info.status, info.version),
@@ -2264,25 +2275,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       const name = `${provider} · ${account.name}`
       return { ...account, name, stateText, label: `${name} · ${stateText}`, value: `${account.kind}:${account.id}` }
     }))
-    void nextTick(() => {
-      if (picker) picker.value = selection
-    })
     providerCatalog.set('ready')
     if (draftPickerOpen()) void nextTick(positionDraftPicker)
     for (const info of drivers) {
       const stateText = driverStateLabel(info.status, info.version)
-      for (const boxName of ['driverPickerBox', 'settingsDriverBox']) {
-        const option = useRef(boxName).current?.querySelector(`option[value="${info.kind}"]`)
-        if (!option) continue
+      const option = settingsDriverRef.current?.querySelector(`option[value="${info.kind}"]`)
+      if (option) {
         const label = DRIVER_LABELS[info.kind] ?? info.kind
-        if (info.status === 'ready') {
-          option.disabled = false
-          option.textContent = info.version ? `${label} · ${info.version}` : label
-        }
-        else {
-          option.disabled = true
-          option.textContent = `${label} · ${stateText}`
-        }
+        option.disabled = info.status !== 'ready'
+        option.textContent = info.status === 'ready' && !info.version ? label : `${label} · ${info.status === 'ready' ? info.version : stateText}`
       }
 
       // Use the CLI's login action only when the default account is signed out.
@@ -2314,49 +2315,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     termSend(`${command}\r`)
   }
 
-  // Switching agents mid-session gets a new session rather than a silent
-  // handover: a different CLI cannot resume this conversation, so the honest
-  // move is a fresh start in the same workspace, said out loud.
-  async function driverPicked(event) {
-    const picker = event.currentTarget
-    const value = picker.value
-    const choice = agentChoice(value)
-    if (!activeSessionId) {
-      if (choice.providerInstanceId === undefined) void updateSettings({ defaultDriver: choice.driverKind })
-      return
-    }
-    if (value === activeDriverValue) return
-    if (activeCodex) closeDraftPicker()
-    const label = providerAccounts().find(account => account.value === value)?.name || DRIVER_LABELS[choice.driverKind]
-    if (await stxConfirm(`Start a new session with ${label} in this workspace?`)) {
-      try {
-        const commandId = newCommandId()
-        if (activeScratchSession) {
-          await sendCommand({ type: 'session.scratch.create', profileId: Number(activeProfile), driverKind: choice.driverKind, label: '' }, commandId)
-        }
-        else {
-          await sendCommand({ type: 'session.create', workspaceId: Number(activeWorkspaceId), ...choice }, commandId)
-        }
-        navigate(`/s/${derivedSessionId(commandId)}`)
-      }
-      catch (error) {
-        picker.value = activeDriverValue
-        stxAlert(error.message)
-      }
-    }
-    else {
-      picker.value = activeDriverValue
-    }
-  }
-
-  // After mount: the picker shows this session's driver (or the default when
-  // no session is open), then the probe results land in the labels. A prompt
-  // left by type-to-start sends itself once the socket can carry it.
   requestAnimationFrame(() => {
-    const picker = driverPickerRef.current
-    if (picker) picker.value = activeDriverValue || defaultDriver()
     annotateDriverPickers()
-
     restorePrompt()
   })
 
@@ -2836,12 +2796,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     const { value: text, selectionStart: start, selectionEnd: end, selectionDirection: direction } = box
     const codexSelection = draftCodexSelection()
+    const provider = pendingProviderSwitch() ? draftProvider() : undefined
+    const model = provider ? draftModel() : undefined
+    const sameSelection = previous?.provider === provider && previous?.model === model && sameCodexSelection(previous?.codexSelection, codexSelection)
     if (previous?.text === text && previous.start === start && previous.end === end && previous.direction === direction
-      && sameCodexSelection(previous.codexSelection, codexSelection)) return
+      && sameSelection) return
     composerDraft.set({
       text, start, end, direction,
       ...(codexSelection ? { codexSelection } : {}),
-      ...(previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
+      ...(provider ? { provider, model } : {}),
+      ...(sameSelection && previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
     })
   }
 
@@ -2854,7 +2818,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (first) pendingFirstPrompt.set(null)
     const current = typeof saved?.text === 'string' ? saved : first
     if (!current?.text) return
-    if (activeCodex && typeof current.codexSelection?.model === 'string') showDraftCodexSelection(current.codexSelection)
+    if (sessionId && typeof current.provider === 'string' && KNOWN_DRIVERS.includes(agentChoice(current.provider).driverKind)) {
+      draftProvider.set(current.provider)
+      draftModel.set(typeof current.model === 'string' ? current.model : '')
+    }
+    if (draftIsCodex() && typeof current.codexSelection?.model === 'string') showDraftCodexSelection(current.codexSelection)
     box.value = current.text
     const start = Number.isInteger(current.start) ? current.start : box.value.length
     const end = Number.isInteger(current.end) ? current.end : start
@@ -2867,7 +2835,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
-    if (!text || startPending()) return
+    if (!text || startPending() || handoffBlocked()) return
     const editing = editingFollowUp()
     if (editing) {
       startPending.set(true)
@@ -2885,6 +2853,29 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (draft) composerDraft.set({ ...draft, commandId })
 
     const codexSelection = draftCodexSelection()
+    if (pendingProviderSwitch()) {
+      startPending.set(true)
+      try {
+        const choice = agentChoice(draftProvider())
+        const model = draftModel() ? { model: draftModel() } : {}
+        const { model: _model, ...options } = codexSelection ?? {}
+        await sendCommand({ type: 'session.handoff', sessionId, afterTurnId: runningTurnId(), text, ...choice, ...model,
+          ...(codexSelection ? { codexTurnOptions: options } : {}) }, commandId)
+        if (box.value === raw) {
+          box.value = ''
+          composerText.set('')
+          composerDraft.set(null)
+        }
+      }
+      catch (error) {
+        stxAlert(error.message || 'Could not switch providers. Your draft is still here.')
+      }
+      finally {
+        startPending.set(false)
+      }
+      return
+    }
+
     if (canSteerDraft() && mode === 'steer') {
       if (steeringPending()) return
       startPending.set(true)
@@ -3464,6 +3455,20 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         forkError.set(payload.message)
         forkStatus.set('failed')
       }
+      if (payload.type === 'session.provider-switched') {
+        const previous = activeDriverValue()
+        const target = payload.providerInstanceId === undefined ? payload.driverKind : `${payload.driverKind}:${payload.providerInstanceId}`
+        const followsActive = draftProvider() === previous && !pendingProviderSwitch()
+        activeDriverValue.set(target)
+        activeModel.set(payload.model || '')
+        handoffBoundary.set(payload.afterTurnId)
+        if (followsActive || draftProvider() === target) {
+          draftProvider.set(target)
+          showDraftCodexSelection({ model: payload.model || '', ...payload.codexTurnOptions })
+        }
+        appliedCodexSelection.set(payload.driverKind === 'codex' && payload.model
+          ? { model: payload.model, ...payload.codexTurnOptions } : null)
+      }
       if (payload.type === 'turn.started') {
         sessionError.set('')
         if (payload.codexSelection) {
@@ -3483,6 +3488,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
             prompt: payload.text ?? '',
+            providerSwitch: payload.switchedProvider ? 'Continued with ' + DRIVER_LABELS[payload.switchedProvider] : '',
             modelChange: payload.modelChanged && payload.codexSelection ? codexSelectionLabel(payload.codexSelection) : '',
             tools: [],
             inputRequests: [],

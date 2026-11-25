@@ -74,6 +74,7 @@ const connectorGate = Promise.withResolvers<void>()
 const connectorWithdrawal = Promise.withResolvers<void>()
 const followUpGate = Promise.withResolvers<void>()
 const followUpDelivery: string[] = []
+const fixtureHandoffs: StartTurnInput[] = []
 let releaseSteering: (() => void) | undefined
 const steeringCalls: string[] = []
 let connectorScope: string | undefined
@@ -88,6 +89,13 @@ const script: ProviderEvent[] = [
 ]
 const instance: ProviderInstance = {
   async *startTurn(input) {
+    if (input.text.startsWith('Saved conversation from another provider.')) {
+      fixtureHandoffs.push(input)
+      yield { type: 'session-bound', providerSessionId: `handoff-fixture-${fixtureHandoffs.length}` }
+      yield { type: 'assistant-delta', text: 'I received the saved context.' }
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     if (input.text === 'exercise active steering') {
       const { promise, resolve } = Promise.withResolvers<void>()
       releaseSteering = resolve
@@ -760,23 +768,33 @@ check('settings scope splits host preferences from this browser',
   hostReset
   && await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('harness.')).some(key => key.includes('defaultDriver'))) === false)
 
-// 10. The composer's agent picker: preselected with the session's driver,
-// backed by live probes, and switching offers a fresh session honestly.
+// 10. A named account can continue a thread without discarding its history.
 const pickerState = await page.evaluate(async () => ({
-  value: (document.querySelector('[data-driver-picker]') as HTMLSelectElement | null)?.value,
   headerChip: document.querySelector('[data-session-driver]')?.textContent,
   probes: await fetch('/drivers').then(r => r.json()),
 }))
-check('picker shows the session driver', pickerState.value === 'claude' && pickerState.headerChip === 'claude')
+check('header shows the session driver', pickerState.headerChip === 'claude')
 check('driver probes answer for every kind', pickerState.probes.drivers.length === 5
   && pickerState.probes.drivers.every((d: any) => d.status === (d.kind === 'codex' ? 'unauthenticated' : 'ready')))
-await page.selectOption('[data-driver-picker]', 'claude:1')
-await page.click('[role="alertdialog"] button:has-text("OK")')
-await page.waitForURL(url => url.pathname.startsWith('/s/') && url.pathname !== `/s/${sessionId}`, { timeout: 8000 })
-await page.waitForFunction(() => (document.querySelector('[data-driver-picker]') as HTMLSelectElement)?.value === 'claude:1')
-const sessionsAfterSwitch = [...harness.engine.current.sessions.values()]
-check('switching accounts starts a fresh session with the selected account', sessionsAfterSwitch.length === 2
-  && sessionsAfterSwitch.some(s => s.driverKind === 'claude' && s.providerInstanceId === 1))
+const sessionCountBeforeHandoff = harness.engine.current.sessions.size
+const handoffDialog = page.getByRole('dialog', { name: 'Agent and model' })
+const handoffPicker = page.locator('[data-model-picker-trigger]')
+await handoffPicker.click()
+await handoffDialog.getByRole('button', { name: /Claude Code.*Personal/ }).click()
+await handoffDialog.getByRole('button', { name: 'Provider default', exact: true }).click()
+await page.locator('[data-handoff-hint]').waitFor()
+check('picking a different account stages the selection', harness.engine.current.sessions.get(sessionId)?.providerInstanceId === undefined)
+await page.locator('[data-prompt]').fill('Continue with my named account.')
+await page.reload()
+await page.locator('[data-handoff-hint]').waitFor()
+await page.locator('[data-send]').click()
+await page.getByText('I received the saved context.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+check('sending the staged switch keeps the URL and opens a fresh provider conversation', new URL(page.url()).pathname === `/s/${sessionId}`
+  && harness.engine.current.sessions.size === sessionCountBeforeHandoff
+  && harness.engine.current.sessions.get(sessionId)?.providerInstanceId === 2
+  && harness.engine.current.sessions.get(sessionId)?.providerSessionId === 'handoff-fixture-1'
+  && fixtureHandoffs[0]?.providerSessionId === undefined && fixtureHandoffs[0]?.text.includes('run the drive turn'))
 
 // 11. Type-to-start: on a page with no session open, the empty state shows
 // and a typed prompt creates a session, navigates to it, and sends itself.
@@ -797,7 +815,7 @@ await page.waitForURL(url => {
 })
 const secondWorkspaceId = [...harness.engine.current.workspaces.keys()].find(id => id !== workspaceId)!
 check('adding a trusted second folder selects it without creating a session', harness.engine.current.workspaces.get(secondWorkspaceId)?.trusted === true
-  && harness.engine.current.sessions.size === 2)
+  && harness.engine.current.sessions.size === sessionCountBeforeHandoff)
 await page.locator('[data-draft-project]').selectOption(String(workspaceId))
 await page.waitForURL(`**/?workspace=${workspaceId}`)
 await page.locator('[data-draft-project]').selectOption(String(secondWorkspaceId))
@@ -812,7 +830,7 @@ await page.click('[data-send]')
 await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
 await page.waitForFunction(() => (document.body.textContent ?? '').includes('typed with no session open'), undefined, { timeout: 8000 })
 const newSessionId = Number(new URL(page.url()).pathname.split('/').at(-1))
-check('type-to-start delivers the prompt in the selected workspace', harness.engine.current.sessions.size === 3
+check('type-to-start delivers the prompt in the selected workspace', harness.engine.current.sessions.size === sessionCountBeforeHandoff + 1
   && harness.engine.current.sessions.get(newSessionId)?.workspaceId === secondWorkspaceId
   && harness.engine.current.sessions.get(newSessionId)?.providerInstanceId === 2)
 
@@ -1852,8 +1870,8 @@ await page.setViewportSize({ width: 1280, height: 800 })
 await activePicker.click()
 await draftDialog.getByRole('button', { name: 'Fixture Balanced', exact: true }).click()
 await draftDialog.getByRole('button', { name: 'Low', exact: true }).click()
-check('the active picker stays scoped to the existing named account',
-  await draftDialog.locator('[data-draft-model-account]').count() === 2)
+check('the active picker retains the named account and exposes alternate providers',
+  await draftDialog.locator('[data-draft-model-account]').count() > 2)
 check('the desktop picker opens alongside the composer without covering the sidebar', await draftDialog.evaluate(dialog => {
   const sidebar = document.querySelector('[data-harness-sidebar]')?.getBoundingClientRect()
   const trigger = document.querySelector('[data-model-picker-trigger]')?.getBoundingClientRect()
@@ -1899,23 +1917,6 @@ check('a queued model change survives reload and runs with the saved options',
   switchedInput?.providerSessionId === 'ps-drive' && switchedInput.codexSelection?.model === 'fixture-fast'
   && switchedInput.codexSelection.effort === 'high' && switchedInput.codexSelection.serviceTier === 'fast')
 await capture('active-codex-queued-transition')
-await activePicker.click()
-const otherAgent = draftDialog.getByRole('combobox', { name: 'Start with another agent or account' })
-await otherAgent.locator('option[value="claude:1"]').waitFor({ state: 'attached' })
-await otherAgent.selectOption('claude:1')
-const switchConfirm = page.getByRole('alertdialog')
-await switchConfirm.getByRole('button', { name: 'Cancel', exact: true }).click()
-await switchConfirm.waitFor({ state: 'hidden' })
-check('cancelling an account change leaves the original conversation open', Number(new URL(page.url()).pathname.split('/').at(-1)) === catalogSession?.id)
-await activePicker.click()
-check('the account picker restores the original selection on cancel', await otherAgent.inputValue() === 'codex:4')
-await otherAgent.selectOption('claude:1')
-await switchConfirm.getByRole('button', { name: 'OK', exact: true }).click()
-await page.waitForURL(url => url.pathname.startsWith('/s/') && url.pathname !== `/s/${catalogSession?.id}`)
-const alternateThread = harness.engine.current.sessions.get(Number(new URL(page.url()).pathname.split('/').at(-1)))
-check('an explicit account change can start its own thread from the model picker',
-  alternateThread?.driverKind === 'claude' && alternateThread.providerInstanceId === 1
-  && harness.engine.current.sessions.get(catalogSession!.id)?.providerSessionId === 'ps-drive')
 const sourceId = catalogSession!.id
 await page.setViewportSize({ width: 1280, height: 800 })
 await page.goto(`${baseUrl}/s/${sourceId}`)
@@ -1969,6 +1970,36 @@ await sourceResponseLink.click()
 await page.waitForURL(url => url.pathname === `/s/${sourceId}` && url.hash === '#turn-1')
 check('the source link returns to the originating response', await page.locator('[data-turn="1"]').isVisible()
   && !(await page.getByText('Continue only in the fork.', { exact: true }).count()))
+await page.goto(`${baseUrl}/s/${sourceId}`)
+await page.setViewportSize({ width: 390, height: 844 })
+await handoffPicker.click()
+await handoffDialog.getByRole('combobox', { name: 'Search models' }).fill('Claude Personal')
+await handoffDialog.getByRole('button', { name: /Provider default.*Claude Code.*Personal/ }).waitFor()
+await capture('handoff-picker-phone')
+await handoffDialog.getByRole('button', { name: /Provider default.*Claude Code.*Personal/ }).click()
+await page.locator('[data-handoff-hint]').waitFor()
+await page.locator('[data-prompt]').fill('Continue the Codex work with Claude.')
+await capture('handoff-staged-phone')
+const previousTurnCount = harness.engine.current.sessions.get(sourceId)!.turns.length
+await page.locator('[data-send]').click()
+const handedOff = page.locator('[data-turn]').filter({ hasText: 'Continue the Codex work with Claude.' })
+await handedOff.locator('[data-provider-switch]').getByText('Continued with Claude Code').waitFor()
+await handedOff.getByText('I received the saved context.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const context = fixtureHandoffs.at(-1)
+check('the cross-provider continuation transfers attributed history and keeps the new request separate',
+  context?.providerSessionId === undefined && context?.text.includes('\"role\":\"assistant\"')
+  && context?.text.includes('Queue with the fast model.') && context?.text.endsWith('New user request:\nContinue the Codex work with Claude.')
+  && harness.engine.current.sessions.get(sourceId)?.turns.length === previousTurnCount + 1)
+check('switching the source keeps the fork on its own Codex conversation', harness.engine.current.sessions.get(forkId)?.providerSessionId === 'ps-drive-fork')
+await page.reload()
+await handedOff.locator('[data-provider-switch]').getByText('Continued with Claude Code').waitFor()
+check('the provider switch boundary survives a page reload', await page.locator('[data-session-driver]').textContent() === 'claude'
+  && await handedOff.locator('[data-user-prompt]').textContent() === 'Continue the Codex work with Claude.'
+  && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+await capture('handoff-completed-phone')
+await page.setViewportSize({ width: 1280, height: 800 })
+await capture('handoff-completed-desktop')
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

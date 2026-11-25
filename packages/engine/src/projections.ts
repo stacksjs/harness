@@ -27,6 +27,7 @@ export interface SessionState {
   model: string
   codexTurnOptions?: CodexTurnOptions
   providerSessionId: string
+  handoff?: { afterTurnId: number, pending: boolean }
   fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', error?: string }
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
@@ -99,6 +100,7 @@ export interface TurnState {
   codexSelection?: CodexTurnSelection
   providerTurnId?: string
   modelChanged?: boolean
+  switchedProvider?: DriverKind
   /** What the user asked. Set once, at `turn.started`. */
   prompt: string
   steerable?: boolean
@@ -366,6 +368,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         providerSessionId: '',
         ...(fork ? {
           fork: { ...fork, state: 'pending' },
+          ...(source?.handoff ? { handoff: { ...source.handoff, pending: false } } : {}),
           navigation: { title: threadDisplayTitle(source?.navigation?.title, source?.turns[0]?.prompt) + ' fork' },
         } : {}),
         state: 'idle',
@@ -432,6 +435,20 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       break
     }
 
+    case 'session.provider-switched': {
+      const session = state.sessions.get(event.sessionId)
+      if (!session) break
+      session.driverKind = p.driverKind
+      if (p.providerInstanceId === undefined) delete session.providerInstanceId
+      else session.providerInstanceId = p.providerInstanceId
+      session.model = p.model ?? ''
+      if (p.codexTurnOptions === undefined) delete session.codexTurnOptions
+      else session.codexTurnOptions = p.codexTurnOptions
+      session.providerSessionId = ''
+      session.handoff = { afterTurnId: p.afterTurnId, pending: true }
+      break
+    }
+
     case 'turn.started': {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
@@ -454,6 +471,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         prompt: p.text ?? '',
         ...(p.codexSelection ? { codexSelection: p.codexSelection } : {}),
         ...(p.modelChanged ? { modelChanged: true } : {}),
+        ...(p.switchedProvider ? { switchedProvider: p.switchedProvider } : {}),
         response: '',
         toolCalls: [],
         tokensIn: 0,
@@ -546,6 +564,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'complete'
+        if (session.handoff && p.turnId > session.handoff.afterTurnId) session.handoff.pending = false
         if (p.providerTurnId) t.providerTurnId = p.providerTurnId
         t.tokensIn = p.tokensIn
         t.tokensOut = p.tokensOut

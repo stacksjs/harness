@@ -58,10 +58,6 @@
       </fieldset>
     </section>
     <footer data-draft-model-footer>
-      @if(activeCodex)
-        <span data-draft-model-new-thread aria-hidden="true">New thread with</span>
-        @include('../partials/harness-driver-picker')
-      @endif
       <button type="button" @click="closeDraftPicker">Done</button>
     </footer>
   </div>
