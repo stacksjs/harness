@@ -190,6 +190,12 @@ export function viewProps(state: HarnessState, options: {
           id: active.id,
           title: threadTitle(active),
           navigation: active.navigation,
+          fork: active.fork ? {
+            sourceSessionId: active.fork.sessionId,
+            sourceTurnId: active.fork.turnId,
+            state: active.fork.state,
+            error: active.fork.error,
+          } : undefined,
           state: active.state,
           lastError: active.state === 'failed' ? active.lastError : undefined,
           // Which agent this session runs — shown in the header and preselected

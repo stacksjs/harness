@@ -1,4 +1,4 @@
-import type { InputAnswer } from '@harness/contract'
+import type { Command, InputAnswer } from '@harness/contract'
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
@@ -176,6 +176,52 @@ afterEach(() => {
   try { harness.stop() }
   catch { /* already stopped */ }
   rmSync(dir, { recursive: true, force: true })
+})
+
+describe('fork recovery', () => {
+  it('marks an interrupted fork and refuses to start a fresh provider conversation after restart', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    let providerResolutions = 0
+    const resolveDriver = () => {
+      providerResolutions++
+      return null
+    }
+    harness = await serve({ port, databasePath, resolveDriver })
+    const append = (id: string, command: Command) => harness.engine.dispatch({ id, at: 1, command })
+    const internal = (id: string, command: Command) => harness.engine.dispatchInternal({ id, at: 1, command })
+    const profileId = derivedId('fork-profile')
+    const workspaceId = derivedId('fork-workspace')
+    const sessionId = derivedId('fork-source')
+    await append('fork-profile', { type: 'profile.create', name: 'Local' })
+    await append('fork-workspace', { type: 'workspace.add', profileId, path: dir })
+    await append('fork-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+    await append('fork-source', { type: 'session.create', workspaceId, driverKind: 'codex' })
+    await internal('fork-source-bound', { type: 'thread.session.set', sessionId, providerSessionId: 'native-source' })
+    await append('fork-prompt', { type: 'session.turn.start', sessionId, text: 'First message' })
+    await internal('fork-answer', { type: 'thread.message.assistant.delta', sessionId, turnId: 1, text: 'First answer' })
+    await internal('fork-complete', { type: 'thread.turn.complete', sessionId, turnId: 1, tokensIn: 1, tokensOut: 1, cost: 0 })
+    await append('fork-pending', { type: 'session.fork', sessionId, turnId: 1 })
+    const targetId = derivedId('fork-pending')
+    expect(harness.engine.current.sessions.get(targetId)?.fork?.state).toBe('pending')
+
+    harness.stop()
+    harness = await serve({ port, databasePath, resolveDriver })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    try {
+      client.send({ t: 'dispatch', envelope: { id: 'fork-pending', at: 1, command: { type: 'session.fork', sessionId, turnId: 1 } } })
+      expect(await client.waitForDispatch('fork-pending')).toMatchObject({ t: 'dispatched', replayed: true })
+      expect(harness.engine.current.sessions.get(targetId)).toMatchObject({
+        providerSessionId: '', fork: { state: 'failed', error: expect.stringContaining('host restarted') },
+      })
+      client.send({ t: 'dispatch', envelope: { id: 'fork-rejected-turn', at: 2, command: { type: 'session.turn.start', sessionId: targetId, text: 'Do not create a provider session' } } })
+      expect(await client.waitForDispatch('fork-rejected-turn')).toMatchObject({ t: 'rejected' })
+      expect(harness.engine.current.sessions.get(sessionId)?.turns[0]?.response).toBe('First answer')
+      expect(providerResolutions).toBe(0)
+    }
+    finally {
+      client.close()
+    }
+  })
 })
 
 describe('a turn drives the provider', () => {

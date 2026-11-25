@@ -70,6 +70,51 @@ describe('Engine — the M1 exit criterion', () => {
     expect(restarted.current.profiles.get(derivedId(otherProfile.id))?.modelFavorites).toBeUndefined()
   })
 
+  it('replays a fork at the selected response with a separate, verified provider binding', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const created = envelope({ type: 'session.create', workspaceId, driverKind: 'codex', providerInstanceId: 8, model: 'initial' })
+    await engine.dispatch(created)
+    const source = derivedId(created.id)
+    await engine.dispatchInternal(envelope({ type: 'thread.session.set', sessionId: source, providerSessionId: 'native-source' }))
+    for (const turnId of [1, 2]) {
+      await engine.dispatch(envelope({ type: 'session.turn.start', sessionId: source, text: `Prompt ${turnId}`, codexSelection: { model: `model-${turnId}` } }))
+      await engine.dispatchInternal(envelope({ type: 'thread.message.assistant.delta', sessionId: source, turnId, text: `Response ${turnId}` }))
+      await engine.dispatchInternal(envelope({ type: 'thread.turn.complete', sessionId: source, turnId, tokensIn: 0, tokensOut: 0, cost: 0, providerTurnId: `native-turn-${turnId}` }))
+    }
+    const request = envelope({ type: 'session.fork', sessionId: source, turnId: 1 })
+    const target = derivedId(request.id)
+    await engine.dispatch(request)
+    expect((await engine.dispatch(request)).replayed).toBe(true)
+    expect(engine.current.sessions.get(target)?.fork?.state).toBe('pending')
+    await expect(engine.dispatch(envelope({ type: 'session.turn.start', sessionId: target, text: 'resume too early' }))).rejects.toThrow('must finish')
+    await expect(engine.dispatchInternal(envelope({ type: 'thread.fork.finished', sessionId: target, providerSessionId: 'native-source' }))).rejects.toThrow('separate')
+    await engine.dispatchInternal(envelope({ type: 'thread.fork.finished', sessionId: target, providerSessionId: 'native-fork' }))
+    const restarted = new Engine({ store, reducer: reduce })
+    await restarted.hydrate()
+    expect(restarted.current.sessions.get(target)).toMatchObject({
+      fork: { state: 'ready', sessionId: source, turnId: 1 },
+      providerInstanceId: 8, providerSessionId: 'native-fork', model: 'model-1',
+      turns: [{ response: 'Response 1', providerTurnId: 'native-turn-1' }],
+    })
+    expect(restarted.current.sessions.get(source)?.turns.map(turn => turn.response)).toEqual(['Response 1', 'Response 2'])
+    await restarted.dispatch(envelope({ type: 'session.turn.start', sessionId: target, text: 'Continue here' }))
+    expect(restarted.current.sessions.get(source)?.turns[1]?.prompt).toBe('Prompt 2')
+    expect(restarted.current.sessions.get(target)?.turns[1]?.prompt).toBe('Continue here')
+
+    const cancelled = envelope({ type: 'session.fork', sessionId: source, turnId: 1 })
+    const cancelledId = derivedId(cancelled.id)
+    await restarted.dispatch(cancelled)
+    await restarted.dispatch(envelope({ type: 'session.stop', sessionId: cancelledId }))
+    const late = await restarted.dispatchInternal(envelope({
+      type: 'thread.fork.finished', sessionId: cancelledId, providerSessionId: 'late-native-fork',
+    }))
+    expect(late.events).toHaveLength(0)
+    expect(restarted.current.sessions.get(cancelledId)).toMatchObject({
+      state: 'stopped', providerSessionId: '', fork: { state: 'failed', error: expect.stringContaining('stopped') },
+    })
+  })
+
   it('replays its log to an identical state', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)

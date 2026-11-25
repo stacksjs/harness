@@ -13,7 +13,7 @@
  * defaults to playwright's cached build; point PLAYWRIGHT_CHROMIUM elsewhere
  * if yours lives somewhere else.
  */
-import type { Driver, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
+import type { Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
@@ -219,6 +219,8 @@ const driver: Driver = {
 }
 let fixtureCodexReady = false
 const fixtureCodexTurns: StartTurnInput[] = []
+const fixtureCodexForks: ForkInput[] = []
+const releaseCodexFork = Promise.withResolvers<void>()
 let fixtureCodexLaunchModel: string | undefined
 let fixtureCodexLaunchOptions: { effort?: string, serviceTier?: string } | undefined
 const codexDriver: Driver = {
@@ -243,9 +245,18 @@ const codexDriver: Driver = {
     const created = await driver.create(config)
     return {
       ...created,
-      startTurn(input) {
-        fixtureCodexTurns.push(input)
-        return created.startTurn(input)
+      async *startTurn(input) {
+        const sequence = fixtureCodexTurns.push(input)
+        for await (const event of created.startTurn(input)) {
+          if (event.type === 'session-bound' && input.providerSessionId) continue
+          if (event.type === 'turn-complete') yield { ...event, providerTurnId: `fixture-turn-${sequence}` }
+          else yield event
+        }
+      },
+      async fork(input) {
+        fixtureCodexForks.push(input)
+        await releaseCodexFork.promise
+        return 'ps-drive-fork'
       },
     }
   },
@@ -1905,6 +1916,46 @@ const alternateThread = harness.engine.current.sessions.get(Number(new URL(page.
 check('an explicit account change can start its own thread from the model picker',
   alternateThread?.driverKind === 'claude' && alternateThread.providerInstanceId === 1
   && harness.engine.current.sessions.get(catalogSession!.id)?.providerSessionId === 'ps-drive')
+const sourceId = catalogSession!.id
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.goto(`${baseUrl}/s/${sourceId}`)
+const firstReply = page.locator('[data-turn="1"]')
+const forkButton = firstReply.getByRole('button', { name: 'Fork from this response' })
+await forkButton.scrollIntoViewIfNeeded()
+await capture('fork-source-desktop')
+await forkButton.click()
+await page.waitForURL(url => url.pathname.startsWith('/s/') && url.pathname !== `/s/${sourceId}`)
+const forkId = Number(new URL(page.url()).pathname.split('/').at(-1))
+const forkBanner = page.locator('[data-fork-banner]')
+await forkBanner.getByText('Creating fork…').waitFor()
+check('the fork waits for provider verification before exposing the composer', !(await page.locator('[data-composer]').isVisible()))
+await page.reload()
+await forkBanner.getByText('Creating fork…').waitFor()
+releaseCodexFork.resolve()
+await forkBanner.getByText('Forked conversation').waitFor()
+await page.locator('[data-composer]').waitFor()
+check('the fork contains only the selected transcript prefix', await page.locator('[data-turn]').count() === 1
+  && await firstReply.getByText('Thinking… done.').isVisible()
+  && await forkBanner.getByRole('link', { name: 'Source response' }).getAttribute('href') === `/s/${sourceId}#turn-1`)
+check('the host forks once with the native response boundary and preserves the source', fixtureCodexForks.length === 1
+  && fixtureCodexForks[0]?.providerSessionId === 'ps-drive'
+  && fixtureCodexForks[0]?.providerTurnId === harness.engine.current.sessions.get(sourceId)?.turns[0]?.providerTurnId
+  && Boolean(fixtureCodexForks[0]?.providerTurnId)
+  && (harness.engine.current.sessions.get(sourceId)?.turns.length ?? 0) > 1)
+await page.setViewportSize({ width: 390, height: 844 })
+check('the phone fork controls stay visible and fit the workspace', await page.evaluate(() =>
+  document.documentElement.scrollWidth === innerWidth && !!document.querySelector('[data-fork-source]')?.getClientRects().length))
+await capture('fork-ready-phone')
+await page.locator('[data-prompt]').fill('Continue only in the fork.')
+await page.locator('[data-send]').click()
+await page.locator('[data-turn="2"]').getByText('Continue only in the fork.').waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+check('a follow-up continues on the new native thread and leaves the source unchanged',
+  fixtureCodexTurns.find(turn => turn.text === 'Continue only in the fork.')?.providerSessionId === 'ps-drive-fork'
+  && harness.engine.current.sessions.get(forkId)?.providerSessionId === 'ps-drive-fork'
+  && !harness.engine.current.sessions.get(sourceId)?.turns.some(turn => turn.prompt === 'Continue only in the fork.'))
+await page.setViewportSize({ width: 1280, height: 800 })
+await capture('fork-continued-desktop')
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

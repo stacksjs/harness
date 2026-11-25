@@ -29,7 +29,7 @@ export type ProviderEvent =
   | { type: 'approval-cancelled', requestId: string }
   | { type: 'input-request', requestId: string, questions: InputQuestion[] }
   | { type: 'input-cancelled', requestId: string }
-  | { type: 'turn-complete', tokensIn: number, tokensOut: number, costMicros: number }
+  | { type: 'turn-complete', tokensIn: number, tokensOut: number, costMicros: number, providerTurnId?: string }
   | { type: 'error', message: string }
 
 export interface ProviderModel {
@@ -62,9 +62,18 @@ export interface StartTurnInput {
   providerSessionId?: string
 }
 
+export interface ForkInput {
+  providerSessionId: string
+  providerTurnId?: string
+  prompt: string
+  response: string
+}
+
 export interface ProviderInstance {
   /** Stream one turn. Ends when the provider says the turn is over. */
   startTurn: (input: StartTurnInput) => AsyncIterable<ProviderEvent>
+  /** Create a separate conversation through the selected response. */
+  fork?: (input: ForkInput) => Promise<string>
   /** Stop the running turn. Safe to call when nothing is running. */
   interrupt: () => Promise<void>
   /** Send a follow-up to the currently streaming provider turn. */

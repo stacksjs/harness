@@ -21,12 +21,20 @@ export interface EventBase {
   at: number
 }
 
+export interface ForkSource {
+  sessionId: number
+  turnId: number
+  providerSessionId: string
+}
+
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, forkFrom?: ForkSource }
   | { type: 'session.stopped' }
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation> }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
+  | { type: 'session.fork-finished', providerSessionId: string }
+  | { type: 'session.fork-failed', message: string }
   | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean }
   | { type: 'queue.added', entry: QueuedFollowUp }
   | { type: 'queue.edited', id: string, text: string }
@@ -36,7 +44,7 @@ export type EventPayload =
   | { type: 'turn.steering-ready', turnId: number }
   | { type: 'turn.steer.requested', turnId: number, id: string, requestId: string, text: string }
   | { type: 'turn.steer.resolved', turnId: number, id: string, outcome: SteeringOutcome, text: string }
-  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number }
+  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string }
   | { type: 'turn.interrupted', turnId: number }
   | { type: 'turn.failed', turnId: number, message: string }
   | { type: 'assistant.delta', turnId: number, text: string }

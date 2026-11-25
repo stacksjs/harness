@@ -131,6 +131,7 @@ export const sessionProviderInstanceId = activeSession?.providerInstanceId ?? nu
 export const promptPlaceholder = 'Message the agent…'
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
+export const initialFork = activeSession?.fork || null
 export const initialCodexSelection = activeCodex && activeSession.model
   ? { model: activeSession.model, ...activeSession.codexTurnOptions } : null
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
@@ -150,6 +151,7 @@ export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 export const initialHasResponse = Boolean(liveTurn?.response)
 export const initialResponseTurn = liveTurn?.id || 0
+export const initialSsrForkable = Boolean(liveTurn?.status === 'complete' && liveTurn.response)
 export const initialSteerable = liveTurn?.steerable === true
 export const initialInputActivity = liveTurn?.inputRequests || []
 </script>
@@ -384,6 +386,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           @endforeach
           @if(turn.response)<div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>@endif
           <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
+          @if(activeCodex && turn.status === 'complete' && turn.response)
+            <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
+              @click="forkResponse({{ turn.id }})" :disabled="forkingResponseId() !== 0" :hidden="!canForkResponse()" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+                <span>Fork</span>
+            </button>
+          @endif
           {{--
             Undo this turn. Only offered where a snapshot exists: a workspace
             that is not a repository has nothing to revert to, and a disabled
@@ -452,6 +460,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || uiState() !== 'running' || runningTurnId() !== initialResponseTurn" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           @endif
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
+          @if(activeCodex)
+            <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
+              @click="forkResponse({{ liveTurn.id }})" :disabled="forkingResponseId() !== 0"
+              @if(!initialSsrForkable)hidden@endif :hidden="!canForkResponse() || !ssrForkable()" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+                <span>Fork</span>
+            </button>
+          @endif
           {{--
             The newest turn is the one people most want to undo, and it was the
             only one without the button because it is not in `settledTurns`.
@@ -502,6 +517,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           {{-- Until the first token: dots, not a label over blank space. --}}
           <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || uiState() !== 'running' || runningTurnId() !== turn.id" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           <div class="transcript-markdown" data-response></div>
+          @if(activeCodex)
+            <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
+              @click="forkResponse(turn.id)" :disabled="forkingResponseId() !== 0"
+              hidden :hidden="!canForkResponse() || !turn.completed || !turn.hasResponse" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+                <span>Fork</span>
+            </button>
+          @endif
         </article>
       </template>
 
@@ -536,8 +558,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
     @endif
 
+    @if(initialFork)
+      <div data-fork-banner class="mx-auto mb-2 flex flex-wrap gap-2 items-center px-3 py-2 text-xs">
+        <a data-fork-source href="/s/{{ initialFork.sourceSessionId }}#turn-{{ initialFork.sourceTurnId }}" class="underline underline-offset-4">Source response</a>
+        <span role="status" :text="forkStatusText()">{{ initialFork.state === 'pending' ? 'Creating fork…' : initialFork.state === 'failed' ? initialFork.error : 'Forked conversation' }}</span>
+      </div>
+    @endif
     @if(canCompose)
-    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt)hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt)" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
+    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -1047,6 +1075,30 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const diffPatch = state('')
 
   const sessionId = Number(activeSessionId) || 0
+  const forkingResponseId = state(0)
+  const ssrForkable = state(initialSsrForkable)
+  const forkStatus = state(initialFork?.state || 'ready')
+  const forkError = state(initialFork?.error || '')
+  const forkStatusText = derived(() => forkStatus() === 'pending' ? 'Creating fork…'
+    : forkStatus() === 'failed' ? forkError() : 'Forked conversation')
+  function canForkResponse() {
+    return activeCodex && forkStatus() === 'ready' && !threadNavigation().archivedAt
+  }
+  async function forkResponse(turnId) {
+    if (!canForkResponse() || forkingResponseId()) return
+    forkingResponseId.set(turnId)
+    const commandId = newCommandId()
+    try {
+      await sendCommand({ type: 'session.fork', sessionId, turnId }, commandId)
+      navigate(`/s/${derivedSessionId(commandId)}`)
+    }
+    catch (error) {
+      stxAlert(error.message || 'Could not fork this response.')
+    }
+    finally {
+      forkingResponseId.set(0)
+    }
+  }
   const promptScope = sessionId ? `session:${sessionId}`
     : draftProject ? `project:${draftProject.id}` : 'projectless'
   const composerDraft = useLocalStorage(`harness.composer.v1:${activeProfile || 0}:${promptScope}`, null, {
@@ -3407,6 +3459,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         threadNavigation.update(previous => ({ ...previous, ...payload.changes }))
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
       }
+      if (payload.type === 'session.fork-finished') forkStatus.set('ready')
+      if (payload.type === 'session.fork-failed') {
+        forkError.set(payload.message)
+        forkStatus.set('failed')
+      }
       if (payload.type === 'turn.started') {
         sessionError.set('')
         if (payload.codexSelection) {
@@ -3491,6 +3548,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
+        if (payload.type === 'turn.completed') {
+          if (payload.turnId === initialResponseTurn) ssrForkable.set(ssrHasResponse())
+          else updateClientTurn(payload.turnId, turn => ({ ...turn, completed: true }))
+        }
         batch(() => {
           setSessionState('idle')
           closeConnectorOptions()

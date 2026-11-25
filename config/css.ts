@@ -189,6 +189,14 @@ const RESPONSIVE_SHELL = `
 [data-transcript]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
 [data-transcript] > :is([data-turn], [data-follow-ups]) { max-width: var(--workspace-content); margin-inline: auto; }
 [data-user-prompt] { background: var(--workspace-hover); }
+.harness-response-action:not([hidden]) {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 32px;
+  margin-block-start: 6px; padding-inline: 7px; border-radius: 6px; font-size: 12px;
+}
+.harness-response-action:hover { background: var(--workspace-hover); }
+.harness-response-action:disabled { opacity: .55; }
+[data-fork-banner] { width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter))); border-top: 1px solid var(--workspace-line); }
+@media (pointer: coarse) { .harness-response-action:not([hidden]) { min-height: 44px; } }
 [data-session-error] { width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter))); }
 [data-composer] {
   box-sizing: border-box;

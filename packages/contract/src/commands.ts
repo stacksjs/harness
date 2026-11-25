@@ -70,6 +70,7 @@ export type ClientCommand =
       providerInstanceId?: number
     }
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
+  | { type: 'session.fork', sessionId: number, turnId: number }
   | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
@@ -154,7 +155,9 @@ export type InternalCommand =
   | { type: 'thread.input.request', sessionId: number, turnId: number, questions: InputQuestion[] }
   | { type: 'thread.input.cancel', sessionId: number, requestId: string }
   | ({ type: 'thread.input.answer', sessionId: number, requestId: string, attachments: QuestionAttachment[] } & InputResponse)
-  | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number }
+  | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string }
+  | { type: 'thread.fork.finished', sessionId: number, providerSessionId: string }
+  | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number }
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
@@ -178,6 +181,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'session.create',
   'session.scratch.create',
   'session.turn.start',
+  'session.fork',
   'session.turn.interrupt',
   'session.turn.steer',
   'session.queue.add',

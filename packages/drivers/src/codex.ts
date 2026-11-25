@@ -16,7 +16,7 @@
  * from, which is how a harness session survives a server restart.
  */
 
-import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
+import type { Driver, DriverConfig, ForkInput, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
 import type { ApprovalChoice, InputAnswer, SteeringOutcome } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
@@ -37,6 +37,24 @@ interface Frame {
   result?: any
   error?: { code?: number, message?: string }
   transportError?: boolean
+}
+
+interface CodexHistoryTurn {
+  id: string
+  status?: string
+  items?: Array<{ type?: string, text?: string, content?: Array<{ type?: string, text?: string }> }>
+}
+
+function historyTurns(value: unknown): value is CodexHistoryTurn[] {
+  return Array.isArray(value) && value.every(turn => typeof turn?.id === 'string' && turn.id.length > 0)
+}
+
+function matchesResponse(turn: CodexHistoryTurn, input: ForkInput): boolean {
+  if (turn.status !== 'completed' || !Array.isArray(turn.items)) return false
+  const prompt = turn.items.filter(item => item.type === 'userMessage')
+    .flatMap(item => item.content ?? []).filter(item => item.type === 'text').map(item => item.text).join('')
+  const response = turn.items.filter(item => item.type === 'agentMessage').map(item => item.text).join('')
+  return prompt.trim() === input.prompt.trim() && response.trim() === input.response.trim()
 }
 
 /**
@@ -481,10 +499,11 @@ class CodexInstance implements ProviderInstance {
         this.cancelMcpConsents()
         const error = this.turnError ?? frame.params?.turn?.error?.message
         this.turnError = null
+        const providerTurnId = frame.params?.turn?.id ?? this.turnId
         this.turnId = null
         this.queue?.finish(error
           ? { type: 'error', message: this.providerError(error) }
-          : { type: 'turn-complete', ...this.usage, costMicros: 0 })
+          : { type: 'turn-complete', ...this.usage, costMicros: 0, ...(typeof providerTurnId === 'string' && providerTurnId ? { providerTurnId } : {}) })
         return
       }
 
@@ -599,6 +618,67 @@ class CodexInstance implements ProviderInstance {
     if (queue.closed || this.queue !== queue) return
     this.turnId = turn.result?.turn?.id ?? null
     if (this.turnId) queue.push({ type: 'steering-ready' })
+  }
+
+  /** Return newest first. Older servers return the full history from thread/read. */
+  private async forkHistory(threadId: string, stopAt?: string): Promise<CodexHistoryTurn[]> {
+    const turns: CodexHistoryTurn[] = []
+    const cursors = new Set<string>()
+    let cursor: string | undefined
+    do {
+      const page = await this.request('thread/turns/list', {
+        threadId, limit: 100, sortDirection: 'desc', itemsView: stopAt ? 'notLoaded' : 'full',
+        ...(cursor ? { cursor } : {}),
+      }, 10_000)
+      if (page.error || !historyTurns(page.result?.data)) {
+        if (cursor) throw new Error('Codex could not read the complete conversation history.')
+        const read = await this.request('thread/read', { threadId, includeTurns: true }, 15_000)
+        if (read.error || read.result?.thread?.id !== threadId || !historyTurns(read.result.thread.turns))
+          throw new Error('Codex could not read this conversation history. Check the selected account and retry.')
+        return read.result.thread.turns.toReversed()
+      }
+      turns.push(...page.result.data)
+      if (stopAt && turns.some(turn => turn.id === stopAt)) return turns
+      cursor = typeof page.result.nextCursor === 'string' ? page.result.nextCursor : undefined
+      if (cursor && cursors.has(cursor)) throw new Error('Codex returned a repeated history page.')
+      if (cursor) cursors.add(cursor)
+    } while (cursor)
+    return turns
+  }
+
+  async fork(input: ForkInput): Promise<string> {
+    if (this.threadId) throw new Error('This Codex instance already owns a conversation.')
+    await this.ensureProcess()
+    let boundary = input.providerTurnId
+    if (!boundary) {
+      const matches = (await this.forkHistory(input.providerSessionId)).filter(turn => matchesResponse(turn, input))
+      if (matches.length !== 1) throw new Error('Codex could not identify this response in the saved conversation.')
+      boundary = matches[0]!.id
+    }
+    const reply = await this.request('thread/fork', {
+      ...threadStartParams(this.config), threadId: input.providerSessionId, lastTurnId: boundary, excludeTurns: true,
+    }, 20_000)
+    const threadId = reply.result?.thread?.id
+    if (reply.error || typeof threadId !== 'string' || !threadId || threadId === input.providerSessionId)
+      throw new Error('Codex could not create a separate fork. Check the selected account and retry from the source response.')
+    try {
+      const history = await this.forkHistory(threadId, boundary)
+      const extra = history.findIndex(turn => turn.id === boundary)
+      if (extra < 0) throw new Error('The selected response was missing from the Codex fork.')
+      if (extra > 0) {
+        // Older Codex ignores lastTurnId. Trim only the destination, then
+        // prove that its newest native turn is the selected response.
+        const trimmed = await this.request('thread/rollback', { threadId, numTurns: extra }, 20_000)
+        if (trimmed.error || (await this.forkHistory(threadId, boundary))[0]?.id !== boundary)
+          throw new Error('Codex could not verify the fork at the selected response.')
+      }
+    }
+    catch (error) {
+      await this.request('thread/archive', { threadId }, 5_000)
+      throw error
+    }
+    this.threadId = threadId
+    return threadId
   }
 
   async steer(text: string): Promise<SteeringOutcome> {

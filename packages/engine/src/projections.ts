@@ -6,9 +6,9 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
-import { acceptedSettings, applyFollowUpEvent, hostSettings } from '@harness/contract'
+import { acceptedSettings, applyFollowUpEvent, hostSettings, threadDisplayTitle } from '@harness/contract'
 
 export interface InputRequestState {
   attachments?: QuestionAttachment[]
@@ -27,6 +27,7 @@ export interface SessionState {
   model: string
   codexTurnOptions?: CodexTurnOptions
   providerSessionId: string
+  fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', error?: string }
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
   lastSeq: number
@@ -96,6 +97,7 @@ export interface TurnState {
   role: 'user' | 'assistant'
   status: 'pending' | 'running' | 'complete' | 'interrupted' | 'failed'
   codexSelection?: CodexTurnSelection
+  providerTurnId?: string
   modelChanged?: boolean
   /** What the user asked. Set once, at `turn.started`. */
   prompt: string
@@ -346,7 +348,14 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       break
     }
 
-    case 'session.created':
+    case 'session.created': {
+      const fork = p.forkFrom
+      const source = fork && state.sessions.get(fork.sessionId)
+      const copied = source && fork ? structuredClone(source.turns.filter(turn => turn.id <= fork.turnId)) : []
+      for (const turn of copied) {
+        // Attachments are retained by the source session and its access route.
+        for (const request of turn.inputRequests ?? []) delete request.attachments
+      }
       state.sessions.set(event.sessionId, {
         id: event.sessionId,
         workspaceId: p.workspaceId,
@@ -355,9 +364,13 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         model: p.model ?? '',
         ...(p.codexTurnOptions ? { codexTurnOptions: p.codexTurnOptions } : {}),
         providerSessionId: '',
+        ...(fork ? {
+          fork: { ...fork, state: 'pending' },
+          navigation: { title: threadDisplayTitle(source?.navigation?.title, source?.turns[0]?.prompt) + ' fork' },
+        } : {}),
         state: 'idle',
         lastSeq: 0,
-        turns: [],
+        turns: copied,
         followUps: { entries: [], held: false },
         checkpoints: [],
         pendingApprovals: [],
@@ -367,6 +380,25 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         branch: '',
       })
       break
+    }
+
+    case 'session.fork-finished': {
+      const session = state.sessions.get(event.sessionId)
+      if (session?.fork?.state === 'pending') {
+        session.providerSessionId = p.providerSessionId
+        session.fork.state = 'ready'
+      }
+      break
+    }
+
+    case 'session.fork-failed': {
+      const session = state.sessions.get(event.sessionId)
+      if (session?.fork?.state === 'pending') {
+        session.fork.state = 'failed'
+        session.fork.error = p.message
+      }
+      break
+    }
 
     case 'session.navigation-changed': {
       const session = state.sessions.get(event.sessionId)
@@ -514,6 +546,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'complete'
+        if (p.providerTurnId) t.providerTurnId = p.providerTurnId
         t.tokensIn = p.tokensIn
         t.tokensOut = p.tokensOut
         t.cost = p.cost

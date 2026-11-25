@@ -84,11 +84,15 @@ export class ProviderRuntime {
     return { id: commandId('prov'), at: this.now(), command }
   }
 
+  private async record(command: CommandEnvelope['command']): Promise<void> {
+    const result = await this.options.engine.dispatchInternal(this.envelope(command))
+    if (result.events.length > 0) this.options.onEvents?.(result.events)
+  }
+
   /** Dispatch a provider-originated command, swallowing rejections. */
   private async emit(command: CommandEnvelope['command']): Promise<void> {
     try {
-      const result = await this.options.engine.dispatchInternal(this.envelope(command))
-      if (result.events.length > 0) this.options.onEvents?.(result.events)
+      await this.record(command)
     }
     catch {
       // A reducer that refuses a provider event (a late completion on an
@@ -395,6 +399,7 @@ export class ProviderRuntime {
               tokensIn: event.tokensIn,
               tokensOut: event.tokensOut,
               cost: event.costMicros,
+              ...(event.providerTurnId ? { providerTurnId: event.providerTurnId } : {}),
             })
             break
 
@@ -446,6 +451,44 @@ export class ProviderRuntime {
     catch {}
   }
 
+  async forkSession(sessionId: number): Promise<void> {
+    const session = this.options.engine.current.sessions.get(sessionId)
+    const fork = session?.fork
+    const turn = session?.turns.at(-1)
+    if (!session || fork?.state !== 'pending' || !turn) return
+    try {
+      if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted)
+        throw new Error('Trust the workspace before creating this fork.')
+      const running = await this.instanceFor(sessionId, session.driverKind)
+      if (!running?.instance.fork)
+        throw new Error('Start the fork again from the source response once its Codex account is available.')
+      const current = this.options.engine.current.sessions.get(sessionId)
+      if (current?.fork?.state !== 'pending' || current.navigation?.archivedAt
+        || !this.options.engine.current.workspaces.get(current.workspaceId)?.trusted)
+        throw new Error('The fork was interrupted. Return to the source response to try again.')
+      const providerSessionId = await running.instance.fork({
+        providerSessionId: fork.providerSessionId,
+        providerTurnId: turn.providerTurnId,
+        prompt: turn.prompt,
+        response: turn.response,
+      })
+      if (!providerSessionId || providerSessionId === fork.providerSessionId)
+        throw new Error('Codex returned the source conversation for this fork.')
+      if (running.abandoned) throw new Error('The fork was interrupted. Return to the source response to try again.')
+      // A fork is a saved provider conversation. Release the setup process
+      // before publishing readiness, since another client can send at once.
+      await this.stopSession(sessionId)
+      await this.record({ type: 'thread.fork.finished', sessionId, providerSessionId })
+    }
+    catch (error) {
+      await this.emit({
+        type: 'thread.fork.failed', sessionId,
+        message: error instanceof Error ? error.message : 'Codex could not finish the fork. Try again from the source response.',
+      })
+      await this.stopSession(sessionId).catch(() => {})
+    }
+  }
+
   /**
    * Give an isolated session its own checkout, once.
    *
@@ -459,9 +502,10 @@ export class ProviderRuntime {
     const session = state.sessions.get(sessionId)
     if (!session?.isolate || session.worktreePath) return true
 
-    const repository = this.options.workspacePath
+    const forkCheckout = session.fork && state.sessions.get(session.fork.sessionId)?.worktreePath
+    const repository = forkCheckout || (this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
-      : repositoryPath(state, sessionId)
+      : repositoryPath(state, sessionId))
     if (!repository || !existsSync(repository)) return true
 
     // Clears a registration left by a crash, which is otherwise enough to make

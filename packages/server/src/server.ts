@@ -289,6 +289,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // Recorded as an interruption rather than quietly rewritten, so the log says
   // what happened.
   for (const session of engine.current.sessions.values()) {
+    if (session.fork?.state === 'pending') {
+      await engine.dispatchInternal({
+        id: `boot_fork_${session.id}`,
+        at: Date.now(),
+        command: { type: 'thread.fork.failed', sessionId: session.id, message: 'The host restarted while creating this fork. Return to the source response to try again.' },
+      })
+    }
     for (const entry of session.followUps.entries) {
       if (!entry.steering) continue
       await engine.dispatchInternal({
@@ -620,6 +627,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return
     }
 
+    if (command.type === 'session.fork') {
+      const created = result.events.find(event => event.payload.type === 'session.created')
+      if (created) void runtime.forkSession(created.sessionId)
+      return
+    }
     if (command.type === 'session.turn.start' || command.type === 'session.queue.send') {
       startAcceptedTurn(result.events)
       return

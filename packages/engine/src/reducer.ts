@@ -476,6 +476,51 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'session.fork': {
+      const source = state.sessions.get(command.sessionId)
+      const turn = source?.turns.find(turn => turn.id === command.turnId)
+      if (!source || source.driverKind !== 'codex' || !source.providerSessionId || source.navigation?.archivedAt
+        || turn?.status !== 'complete' || !turn.response.trim())
+        throw new InvalidCommand('Choose a completed response in an available Codex conversation.')
+      if (!state.workspaces.get(source.workspaceId)?.trusted)
+        throw new InvalidCommand('Trust this workspace before forking a conversation.')
+
+      const sessionId = derivedId(commandId)
+      if (state.sessions.has(sessionId)) throw new InvalidCommand('This fork ID is already in use.')
+      const model = turn.codexSelection?.model ?? source.model
+      const options = turn.codexSelection
+        ? { effort: turn.codexSelection.effort, serviceTier: turn.codexSelection.serviceTier }
+        : source.codexTurnOptions
+      return [{
+        sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'session.created',
+          workspaceId: source.workspaceId,
+          driverKind: source.driverKind,
+          ...(source.providerInstanceId !== undefined ? { providerInstanceId: source.providerInstanceId } : {}),
+          ...sessionModel({ driverKind: source.driverKind, model, codexTurnOptions: options }),
+          ...(source.isolate ? { isolate: true } : {}),
+          forkFrom: { sessionId: source.id, turnId: turn.id, providerSessionId: source.providerSessionId },
+        },
+      }]
+    }
+
+    case 'thread.fork.finished':
+    case 'thread.fork.failed': {
+      const session = state.sessions.get(command.sessionId)
+      if (session?.fork?.state !== 'pending') return []
+      if (command.type === 'thread.fork.finished') {
+        if (!command.providerSessionId || command.providerSessionId === session.fork.providerSessionId)
+          throw new InvalidCommand('The fork must have a separate provider conversation.')
+        if (!state.workspaces.get(session.workspaceId)?.trusted || session.navigation?.archivedAt)
+          throw new InvalidCommand('The fork was interrupted. Restore access to the thread and retry from the source response.')
+        return [{ sessionId: session.id, commandId, at, payload: { type: 'session.fork-finished', providerSessionId: command.providerSessionId } }]
+      }
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'session.fork-failed', message: command.message } }]
+    }
+
     case 'thread.worktree.set': {
       if (!state.sessions.has(command.sessionId))
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
@@ -564,6 +609,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      if (session.fork && session.fork.state !== 'ready')
+        throw new InvalidCommand('This fork must finish before it can accept messages.')
       if (session.navigation?.archivedAt)
         throw new InvalidCommand('Restore this thread before sending a message.')
       if (isTurnActive(session.state))
@@ -586,6 +633,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const emit = (payload: EventPayload): AppendableEvent[] => [{ sessionId: session.id, commandId, at, payload }]
       const entries = session.followUps.entries
       if (command.type === 'session.queue.add') {
+        if (session.fork && session.fork.state !== 'ready')
+          throw new InvalidCommand('This fork must finish before it can accept messages.')
         if (session.navigation?.archivedAt)
           throw new InvalidCommand('Restore this thread before queuing a message.')
         if (!state.workspaces.get(session.workspaceId)?.trusted)
@@ -671,6 +720,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const automatic = command.type === 'thread.queue.advance'
       const session = state.sessions.get(command.sessionId)
       if (automatic && (!session || session.followUps.held || !session.followUps.entries.length)) return []
+      if (session?.fork && session.fork.state !== 'ready') {
+        if (automatic) return []
+        throw new InvalidCommand('This fork must finish before it can accept messages.')
+      }
       if (session?.navigation?.archivedAt) {
         if (automatic) return []
         throw new InvalidCommand('Restore this thread before sending a message.')
@@ -726,11 +779,16 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
       if (session.state === 'stopped') return []
-      return [{
+      const stopped: AppendableEvent = {
         sessionId: command.sessionId,
         commandId,
         at,
         payload: { type: 'session.stopped' },
+      }
+      if (session.fork?.state !== 'pending') return [stopped]
+      return [stopped, {
+        sessionId: session.id, commandId, at,
+        payload: { type: 'session.fork-failed', message: 'The fork was stopped. Return to the source response to try again.' },
       }]
     }
 
@@ -807,6 +865,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           tokensIn: command.tokensIn,
           tokensOut: command.tokensOut,
           cost: command.cost,
+          ...(command.providerTurnId ? { providerTurnId: command.providerTurnId } : {}),
         },
       }]
     }

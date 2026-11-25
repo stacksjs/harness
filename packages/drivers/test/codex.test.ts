@@ -66,6 +66,81 @@ for await (const line of createInterface({ input: process.stdin })) {
   })
 })
 
+describe('codex response fork', () => {
+  it.each(['bounded', 'rollback', 'legacy', 'missing'] as const)('verifies the fork boundary with %s history', async (mode) => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-fork-'))
+    const binaryPath = join(workspacePath, 'codex-fixture')
+    try {
+      writeFileSync(binaryPath, `#!${process.execPath}
+import { appendFileSync } from 'node:fs'
+import { createInterface } from 'node:readline'
+const mode = ${JSON.stringify(mode)}
+const selected = { id: 'selected-turn', status: 'completed', items: [
+  { type: 'userMessage', content: [{ type: 'text', text: 'Selected prompt' }] },
+  { type: 'agentMessage', text: 'Selected response' },
+] }
+const tail = { id: 'tail-turn', status: 'completed', items: [] }
+let history = mode === 'bounded' ? [selected] : mode === 'missing' ? [tail] : [tail, selected]
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined) continue
+  appendFileSync('requests.log', JSON.stringify({ method, params }) + '\\n')
+  const result = payload => console.log(JSON.stringify({ id, result: payload }))
+  const unsupported = () => console.log(JSON.stringify({ id, error: { code: -32601 } }))
+  if (method === 'thread/fork') result({ thread: { id: 'native-fork' } })
+  else if (method === 'thread/turns/list') {
+    if (mode === 'legacy') unsupported()
+    else result({ data: history, nextCursor: null })
+  }
+  else if (method === 'thread/read') {
+    result({ thread: { id: params.threadId, turns: params.threadId === 'native-source' ? [selected, tail] : [...history].reverse() } })
+  }
+  else if (method === 'thread/rollback') {
+    if (params.threadId !== 'native-fork') process.exit(1)
+    history = history.slice(params.numTurns)
+    result({ thread: { id: 'native-fork' } })
+  }
+  else if (method === 'turn/start') result({ turn: { id: 'following-turn' } })
+  else result({})
+}
+`, { mode: 0o755 })
+      const instance = await CodexDriver.create({ binaryPath, workspacePath })
+      try {
+        const fork = instance.fork!({
+          providerSessionId: 'native-source',
+          ...(mode === 'legacy' ? {} : { providerTurnId: 'selected-turn' }),
+          prompt: 'Selected prompt',
+          response: 'Selected response',
+        })
+        if (mode === 'missing') await expect(fork).rejects.toThrow('missing from the Codex fork')
+        else {
+          expect(await fork).toBe('native-fork')
+          const stream = instance.startTurn({ text: 'Continue the fork', providerSessionId: 'native-fork' })
+          expect((await stream[Symbol.asyncIterator]().next()).value).toEqual({ type: 'steering-ready' })
+        }
+        const requests = readFileSync(join(workspacePath, 'requests.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+        expect(requests.find(request => request.method === 'thread/fork')?.params)
+          .toMatchObject({ threadId: 'native-source', lastTurnId: 'selected-turn', excludeTurns: true })
+        const rollback = requests.find(request => request.method === 'thread/rollback')
+        if (mode === 'rollback' || mode === 'legacy') expect(rollback?.params).toEqual({ threadId: 'native-fork', numTurns: 1 })
+        else expect(rollback).toBeUndefined()
+        const archive = requests.find(request => request.method === 'thread/archive')
+        if (mode === 'missing') expect(archive?.params).toEqual({ threadId: 'native-fork' })
+        else {
+          expect(archive).toBeUndefined()
+          expect(requests.find(request => request.method === 'turn/start')?.params.threadId).toBe('native-fork')
+        }
+      }
+      finally {
+        await instance.stop()
+      }
+    }
+    finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('codex account detection', () => {
   it('probes app-server from the same account directory used to run Codex', async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-account-'))
