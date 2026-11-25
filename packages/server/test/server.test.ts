@@ -1,5 +1,5 @@
 import type { HarnessServer } from '../src/server'
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -473,7 +473,7 @@ describe('terminals over the socket', () => {
     client.send({ t: 'term-open', workspaceId, cols: 60, rows: 12 })
     const opened = await client.until('term-opened')
     expect(opened.termId).toBeGreaterThan(0)
-    expect(opened).toMatchObject({ workspaceId, cols: 60, rows: 12 })
+    expect(opened).toMatchObject({ workspaceId, cols: 60, rows: 12, shell: 'system' })
 
     // A marker computed by the shell, so matching it proves execution rather
     // than the terminal echoing our own input back.
@@ -488,6 +488,31 @@ describe('terminals over the socket', () => {
 
     client.send({ t: 'term-close', termId: opened.termId })
     client.close()
+  })
+
+  it('reports a missing Den shell and recovers after switching back to the system shell', async () => {
+    const lookup = Bun.which
+    const executable = spyOn(Bun, 'which').mockImplementation((name, options) => name === 'den' ? null : lookup(name, options))
+    try {
+      const client = await TestClient.connect(url())
+      await client.until('ready')
+      const workspaceId = await openWorkspace(client)
+      const chooseShell = async (terminalShell: 'den' | 'system') => {
+        client.send({ t: 'dispatch', envelope: {
+          id: 'shell-' + terminalShell, at: 3, command: { type: 'settings.update', changes: { terminalShell } },
+        } })
+        await client.until('dispatched')
+        client.send({ t: 'term-open', workspaceId })
+      }
+      await chooseShell('den')
+      expect((await client.until('term-error')).message).toContain('Den was not found')
+      await chooseShell('system')
+      expect(await client.until('term-opened')).toMatchObject({ shell: 'system' })
+      client.close()
+    }
+    finally {
+      executable.mockRestore()
+    }
   })
 
   it('drops input for a terminal that is already gone', async () => {

@@ -16,7 +16,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { ChatGptCredentialStore, driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
-import { Pty } from './pty'
+import { findDenShell, Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
 import { Engine, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
@@ -711,6 +711,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           send(socket, { t: 'term-error', message: `no workspace ${frame.workspaceId}` })
           return
         }
+        const shellKind = engine.current.settings.terminalShell
+        const shell = shellKind === 'den' ? findDenShell() : undefined
+        if (shell === null) {
+          send(socket, { t: 'term-error', message: 'Den was not found on this host. Install Den or choose System shell in Settings.' })
+          return
+        }
         if (workspace.scratch) {
           try {
             await openScratchWorkspace(workspace.path)
@@ -723,14 +729,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const termId = ++lastTermId
         const cols = frame.cols ?? 80
         const rows = frame.rows ?? 24
-        const pty = new Pty({ cwd: workspace.path, cols, rows })
+        const pty = new Pty({ cwd: workspace.path, cols, rows, shell, denIntegration: shellKind === 'den' })
         socket.data.terminals.set(termId, pty)
         pty.onData(chunk => send(socket, { t: 'term-data', termId, data: chunk }))
         pty.onExit((code) => {
           socket.data.terminals.delete(termId)
           send(socket, { t: 'term-exit', termId, code })
         })
-        send(socket, { t: 'term-opened', termId, workspaceId: frame.workspaceId, cols, rows })
+        send(socket, { t: 'term-opened', termId, workspaceId: frame.workspaceId, cols, rows, shell: shellKind })
         return
       }
 

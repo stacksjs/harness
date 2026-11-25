@@ -29,7 +29,8 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { delimiter, join } from 'node:path'
 import process from 'node:process'
 
 export interface PtyOptions {
@@ -39,6 +40,25 @@ export interface PtyOptions {
   rows: number
   /** Defaults to the user's shell, then to a sane per-platform fallback. */
   shell?: string
+  /** Ask Den to send prompt and command metadata. */
+  denIntegration?: boolean
+}
+
+export function findDenShell(): string | null {
+  const installPaths = [
+    join(homedir(), '.local', 'bin'),
+    ...(process.platform === 'darwin' ? ['/opt/homebrew/bin', '/usr/local/bin'] : []),
+  ]
+  return Bun.which('den') ?? Bun.which('den', { PATH: installPaths.join(delimiter) })
+}
+
+function shellEnvironment(shell: string, denIntegration?: boolean) {
+  return {
+    ...process.env,
+    SHELL: shell,
+    TERM: 'xterm-256color',
+    ...(denIntegration && { DEN_SHELL_INTEGRATION: '1' }),
+  }
 }
 
 interface PtyBackend {
@@ -262,7 +282,7 @@ class NativePty implements PtyBackend {
     const shell = options.shell ?? process.env.SHELL ?? (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash')
     // The child gets the server's whole environment with TERM pinned; the
     // buffers must stay referenced across the call, which the locals do.
-    const envStrings = Object.entries({ ...process.env, TERM: 'xterm-256color' })
+    const envStrings = Object.entries(shellEnvironment(shell, options.denIntegration))
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => cstr(`${key}=${String(value)}`))
     const envArr = new BigUint64Array([...envStrings.map(b => BigInt(native.ptr(b))), 0n])
@@ -371,8 +391,7 @@ class ScriptPty implements PtyBackend {
       // only `sh` would orphan `script` and the live shell under it.
       detached: true,
       env: {
-        ...process.env,
-        TERM: 'xterm-256color',
+        ...shellEnvironment(shell, options.denIntegration),
         COLUMNS: String(options.cols),
         LINES: String(options.rows),
       },

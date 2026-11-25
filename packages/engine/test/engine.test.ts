@@ -353,10 +353,10 @@ describe('Engine — the client/internal boundary', () => {
 describe('Host settings', () => {
   it('records only what changed and replays to the same state', async () => {
     const { engine, store } = await bootedEngine()
-    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue' })
+    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system' })
 
     await engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'queue' } }))
-    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue' })
+    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue', terminalShell: 'system' })
 
     // `followUpBehavior` was already queue, so the log records the one field
     // that moved. Restating the rest would make the log unable to answer what
@@ -375,7 +375,7 @@ describe('Host settings', () => {
       .rejects.toThrow(/changes nothing/)
     // Unknown keys and unusable values are dropped, which leaves nothing to
     // record rather than a settings row with a field no build understands.
-    await expect(engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'emacs', nonsense: 1 } as never })))
+    await expect(engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'emacs', terminalShell: '/bin/bash', nonsense: 1 } as never })))
       .rejects.toThrow(/changes nothing/)
     expect(engine.current.settings.defaultDriver).toBe('claude')
   })
@@ -390,7 +390,7 @@ describe('Host settings', () => {
       at: clock,
       payload: { type: 'settings.updated', changes: { defaultDriver: 'retired-agent', followUpBehavior: 'steer' } as never },
     }], emptyState())
-    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer' })
+    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer', terminalShell: 'system' })
   })
 })
 

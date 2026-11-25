@@ -75,6 +75,8 @@ export interface TerminalOptions {
   convertEol?: boolean
 }
 
+type ShellPhase = 'unavailable' | 'prompt' | 'ready' | 'running'
+
 export class Terminal {
   private _cols: number
   private _rows: number
@@ -97,6 +99,10 @@ export class Terminal {
   private csiParams = ''
   private csiPrivate = false
   private oscEscape = false
+  private oscData = ''
+  private bracketedPaste = false
+  private shellPhase: ShellPhase = 'unavailable'
+  private lastExitStatus: number | null = null
 
   /** The main buffer, parked while the alternate screen is active. */
   private savedMain: { grid: Cell[][], x: number, y: number } | null = null
@@ -116,6 +122,15 @@ export class Terminal {
 
   get rows(): number {
     return this._rows
+  }
+
+  formatPaste(text: string): string {
+    if (!text || !this.bracketedPaste) return text
+    return '\x1B[200~' + text.replaceAll('\x1B[201~', '') + '\x1B[201~'
+  }
+
+  get shellActivity(): { phase: ShellPhase, lastExitStatus: number | null } {
+    return { phase: this.shellPhase, lastExitStatus: this.lastExitStatus }
   }
 
   get onAltScreen(): boolean {
@@ -194,6 +209,7 @@ export class Terminal {
         else if (ch === ']') {
           this.state = ParseState.Osc
           this.oscEscape = false
+          this.oscData = ''
         }
         else if (ch === '(' || ch === ')') {
           this.state = ParseState.Charset
@@ -229,22 +245,36 @@ export class Terminal {
         return
 
       case ParseState.Osc:
-        // Terminated by BEL or ST (ESC \). Titles and hyperlinks are metadata
-        // a transcript does not model.
-        if (ch === '\x07') {
+        if (ch === '\x07' || (this.oscEscape && ch === '\\')) {
           this.state = ParseState.Ground
+          this.applyShellMarker()
         }
         else if (ch === '\x1b') {
           this.oscEscape = true
         }
-        else if (this.oscEscape) {
-          this.state = ch === '\\' ? ParseState.Ground : ParseState.Osc
+        else {
+          // Keep just enough bytes for OSC 133. Discard the rest of long
+          // titles and other operating system commands.
+          if (this.oscData.length < 32) this.oscData += (this.oscEscape ? '\x1b' : '') + ch
           this.oscEscape = false
         }
         return
 
       case ParseState.Charset:
         this.state = ParseState.Ground
+    }
+  }
+
+  private applyShellMarker(): void {
+    if (this.oscData === '133;A') this.shellPhase = 'prompt'
+    else if (this.oscData === '133;B') this.shellPhase = 'ready'
+    else if (this.oscData === '133;C') this.shellPhase = 'running'
+    else {
+      const result = /^133;D(?:;(-?\d{1,10}))?$/.exec(this.oscData)
+      if (result) {
+        this.shellPhase = 'prompt'
+        if (result[1] !== undefined) this.lastExitStatus = Number(result[1])
+      }
     }
   }
 
@@ -310,10 +340,13 @@ export class Terminal {
       Number.isNaN(params[index]) || params[index] === undefined ? fallback : params[index]
 
     if (this.csiPrivate) {
-      // 1049 (and its older halves 47/1047) is the alternate screen; 25 is
-      // cursor visibility, which a grid snapshot has no use for.
-      if (final === 'h' && (p(0, 0) === 1049 || p(0, 0) === 47 || p(0, 0) === 1047)) this.enterAlt()
-      if (final === 'l' && (p(0, 0) === 1049 || p(0, 0) === 47 || p(0, 0) === 1047)) this.exitAlt()
+      if (final !== 'h' && final !== 'l') return
+      if (params.includes(2004)) this.bracketedPaste = final === 'h'
+      // 1049 and its older variants select the alternate screen.
+      if (params.some(mode => mode === 1049 || mode === 47 || mode === 1047)) {
+        if (final === 'h') this.enterAlt()
+        else this.exitAlt()
+      }
       return
     }
 

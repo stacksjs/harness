@@ -1065,9 +1065,9 @@ describe('host settings belong to the host', () => {
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
 
     const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
-    first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer' } } } })
+    first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' } } } })
     expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' })
 
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
@@ -1087,13 +1087,14 @@ describe('host settings belong to the host', () => {
       process.chdir(previousCwd)
     }
     expect(page).toMatch(/defaultDriver\\?["']\s*:\s*\\?["']codex/)
+    expect(page).toMatch(/terminalShell\\?["']\s*:\s*\\?["']den/)
     first.close()
     harness.stop()
 
     // The setting is in the log, so a fresh process over the same database
     // still has it.
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' })
     harness.stop()
 
     // A different host, which is a different log: independent by construction
@@ -1101,7 +1102,7 @@ describe('host settings belong to the host', () => {
     const otherDatabase = join(dir, 'other.sqlite')
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system' })
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {

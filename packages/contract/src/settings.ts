@@ -17,12 +17,15 @@
 import type { DriverKind } from './commands'
 
 export type FollowUpBehavior = 'queue' | 'steer'
+export type TerminalShell = 'system' | 'den'
 
 export interface HostSettings {
   /** The agent a new thread starts with, unless the composer overrides it. */
   defaultDriver: DriverKind
   /** Whether a message sent during a turn joins the queue or steers the turn. */
   followUpBehavior: FollowUpBehavior
+  /** Shell for new local terminals. */
+  terminalShell: TerminalShell
 }
 
 const DRIVER_KINDS: readonly DriverKind[] = ['claude', 'codex', 'cursor', 'opencode', 'grok']
@@ -31,6 +34,7 @@ const FOLLOW_UP_BEHAVIORS: readonly FollowUpBehavior[] = ['queue', 'steer']
 export const defaultHostSettings: Readonly<HostSettings> = Object.freeze({
   defaultDriver: 'claude',
   followUpBehavior: 'queue',
+  terminalShell: 'system',
 })
 
 /** A fresh, mutable copy of the defaults. */
@@ -55,6 +59,8 @@ export function acceptedSettings(changes: unknown): Partial<HostSettings> {
     accepted.defaultDriver = source.defaultDriver as DriverKind
   if (FOLLOW_UP_BEHAVIORS.includes(source.followUpBehavior as FollowUpBehavior))
     accepted.followUpBehavior = source.followUpBehavior as FollowUpBehavior
+  if (source.terminalShell === 'system' || source.terminalShell === 'den')
+    accepted.terminalShell = source.terminalShell
   return accepted
 }
 

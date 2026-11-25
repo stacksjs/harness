@@ -20,7 +20,7 @@ export const settingsSections = $props.settingsSections || []
 // The keyboard registry, with both platform spellings of every default chord.
 export const keybindings = $props.keybindings || []
 // Settings this host owns, shared by every client connected to it.
-export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue' }
+export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system' }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -596,12 +596,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @if(activeWorkspaceId)
     <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
       <div data-terminal-toolbar>
-        <span>Terminal</span>
-        <button type="button" aria-label="Close terminal" title="Close terminal" @click="toggleTerminal" class="harness-icon-button">
-          <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
-        </button>
+        <span :text="terminalLabel()">Terminal</span>
+        <div class="flex gap-1 items-center">
+          <span data-terminal-activity role="status" hidden :hidden="!terminalActivity()" :text="terminalActivity()" class="px-2 text-xs"></span>
+          <button type="button" data-terminal-restart hidden :hidden="!terminalExited() && !terminalError()" :disabled="!sessionOnline()" @click="restartTerminal" class="px-2 h-8 text-xs rounded-md">Restart terminal</button>
+          <button type="button" aria-label="Close terminal" title="Close terminal" @click="toggleTerminal" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+          </button>
+        </div>
       </div>
-      <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
+      <p data-terminal-error role="alert" hidden :hidden="!terminalError()" :text="terminalError()" class="px-3 py-2 text-red-300 text-sm"></p>
+      <div data-terminal-host ref="termHostBox" aria-label="Terminal input and output" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
         {{--
           Ten glyphs in the host's own font, laid out but invisible: the ruler
           the island measures to turn pixels into columns and rows.
@@ -842,7 +847,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <option value="steer">Steer the active turn</option>
           </select>
         </div>
+        <div data-settings-field>
+          <label for="settings-terminal-shell">Terminal shell</label>
+          <select id="settings-terminal-shell" :value="settings().terminalShell" @change="setTerminalShell" class="px-2 text-[13px] bg-transparent border border-black/10 rounded-md dark:border-white/15">
+            <option value="system">System shell</option>
+            <option value="den">Den</option>
+          </select>
+        </div>
       </div>
+      <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">New terminals use the selected shell. Den must be installed on this host.</p>
       <p data-host-settings-note class="mt-3 mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">These apply to every client of this host. Appearance and keyboard shortcuts stay with this browser.</p>
       <p data-settings-error role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
       </section>
@@ -2486,6 +2499,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (box) void updateSettings({ defaultDriver: box.value })
   }
 
+  function setTerminalShell(event) {
+    void updateSettings({ terminalShell: event.currentTarget.value })
+  }
+
   // The desktop app menu's Settings… item (Cmd+,): craft evaluates this
   // event into the page, so the menu opens the same modal the chord does.
   useEventListener('craft:settings', openSettings, { target: window })
@@ -3036,6 +3053,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   let termId = null
   let termToHtml = null
   let termRenderQueued = false
+  let terminalOpening = false
+  const terminalLabel = state('Terminal')
+  const terminalError = state('')
+  const terminalExited = state(false)
+  const terminalActivity = state('')
 
   function renderTerm() {
     const screen = termScreenRef.current
@@ -3043,9 +3065,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     termRenderQueued = true
     requestAnimationFrame(() => {
       termRenderQueued = false
+      if (!term) return
       screen.innerHTML = termToHtml(term.snapshot())
       screen.parentElement.scrollTop = screen.parentElement.scrollHeight
     })
+  }
+
+  function updateTerminalActivity() {
+    const { phase, lastExitStatus } = term.shellActivity
+    if (phase === 'running') terminalActivity.set('Running')
+    else if (phase === 'ready') terminalActivity.set(lastExitStatus ? `Exit ${lastExitStatus}` : 'Ready')
   }
 
   // Named keys → the bytes a terminal expects. Anything printable goes as-is.
@@ -3115,6 +3144,27 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   let terminalTrigger = null
 
+  function showTerminalProcess() {
+    if (!termOpen()) return
+    if (termId === null && term === null && !terminalOpening) {
+      const { cols, rows } = measureTerm()
+      terminalOpening = sendFrame({ t: 'term-open', workspaceId: Number(activeWorkspaceId) || 0, cols, rows })
+      if (!terminalOpening) terminalError.set('The terminal could not connect to this host.')
+    }
+    else resizeTerminal()
+    watchTermSize()
+  }
+
+  function restartTerminal() {
+    if (termId !== null || terminalOpening) return
+    term = null
+    if (termScreenRef.current) termScreenRef.current.textContent = ''
+    terminalExited.set(false)
+    terminalError.set('')
+    termHostRef.current?.focus()
+    showTerminalProcess()
+  }
+
   function toggleTerminal(event) {
     // No workspace, no shell to open.
     if (!Number(activeWorkspaceId)) return
@@ -3136,20 +3186,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       : event?.currentTarget ?? termHostRef.current?.ownerDocument.activeElement
     closeWorkspaceActions()
     termOpen.set(true)
+    terminalError.set('')
     // Focused now, not in the frame callback: keys typed right after the
     // click must land in the host (they buffer until the PTY binds).
     void nextTick(() => termHostRef.current?.focus())
     // Measured after the binding has shown the panel — a display:none box
     // measures zero — and the PTY opens at the size actually on screen.
-    requestAnimationFrame(() => {
-      if (!termOpen()) return
-      if (termId === null && term === null) {
-        const { cols, rows } = measureTerm()
-        sendFrame({ t: 'term-open', workspaceId: Number(activeWorkspaceId) || 0, cols, rows })
-      }
-      else resizeTerminal()
-      watchTermSize()
-    })
+    requestAnimationFrame(showTerminalProcess)
   }
 
   // Window chords. Which chord runs which command comes from the keyboard
@@ -3224,6 +3267,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function termKeydown(event) {
     if (event.metaKey) return
+    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') return
+    if (terminalExited() || terminalError()) return
     // The toggle chord belongs to the window handler, not the shell — asked
     // of the registry, so rebinding it moves both halves at once.
     if (matchedCommand(event) === 'terminal.toggle') return
@@ -3245,7 +3290,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function termPaste(event) {
     event.preventDefault()
-    termSend(event.clipboardData.getData('text'))
+    const text = event.clipboardData?.getData('text/plain')
+    if (text && termId !== null && term) termSend(term.formatPaste(text))
   }
 
   // The page speaks CBOR to the socket, so it needs the same codec the server
@@ -3309,6 +3355,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
     function onMessage(frame) {
       if (frame?.t === 'term-opened') {
+        terminalOpening = false
+        terminalExited.set(false)
+        terminalActivity.set('')
+        terminalLabel.set(frame.shell === 'den' ? 'Den terminal' : 'Terminal')
         termId = frame.termId
         term = new Terminal({ cols: frame.cols, rows: frame.rows })
         resizeTerminal()
@@ -3322,6 +3372,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       if (frame?.t === 'term-data') {
         if (frame.termId === termId && term) {
           term.write(frame.data)
+          updateTerminalActivity()
           renderTerm()
         }
         return
@@ -3331,12 +3382,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           term.write(`\r\n[exited${frame.code === null ? '' : ` (${frame.code})`}]`)
           renderTerm()
           termId = null
+          terminalExited.set(true)
+          terminalActivity.set('')
         }
         return
       }
       if (frame?.t === 'term-error') {
-        // The one the server sends a paired phone: terminals are local-only.
-        stxAlert(frame.message)
+        terminalOpening = false
+        termPendingInput = ''
+        terminalError.set(frame.message)
         return
       }
       if (frame?.t !== 'event' || frame.event.sessionId !== sessionId || frame.event.seq <= cursor) return
@@ -3496,10 +3550,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         sessionOnline.set(online)
         sessionConnecting.set(false)
         if (online) void followUpActions()?.flush()
-        else if (termId && term) {
-          term.write('\r\n[connection closed]')
+        else if (terminalOpening || termId !== null) {
+          terminalOpening = false
           termId = null
-          renderTerm()
+          termPendingInput = ''
+          terminalExited.set(true)
+          terminalActivity.set('')
+          if (term) {
+            term.write('\r\n[connection closed]')
+            renderTerm()
+          }
+          else terminalError.set('The host disconnected before the terminal opened.')
         }
       },
     })

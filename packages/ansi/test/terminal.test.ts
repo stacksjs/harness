@@ -14,6 +14,34 @@ function term(cols = 20, rows = 5): Terminal {
   return new Terminal({ cols, rows })
 }
 
+it('honors bracketed paste modes emitted in separate PTY frames', () => {
+  const terminal = term()
+  const text = 'echo first\necho second'
+  expect(terminal.formatPaste(text)).toBe(text)
+  terminal.write('\x1B[?25;20')
+  terminal.write('04h')
+  expect(terminal.formatPaste(text)).toBe(`\x1B[200~${text}\x1B[201~`)
+  expect(terminal.formatPaste('one\x1B[201~two')).toBe('\x1B[200~onetwo\x1B[201~')
+  expect(terminal.formatPaste('')).toBe('')
+  terminal.write('\x1B[?2004l')
+  expect(terminal.formatPaste(text)).toBe(text)
+})
+
+it('tracks OSC 133 only as display state, through split terminators and unrelated OSC', () => {
+  const terminal = term()
+  terminal.write('\x1b]133;A\x1b\\❯ \x1b]133;B\x1b')
+  expect(terminal.shellActivity.phase).toBe('prompt')
+  terminal.write('\\')
+  expect(terminal.shellActivity).toEqual({ phase: 'ready', lastExitStatus: null })
+  terminal.write('\x1b]133;C\x07\x1b]0;' + 'title'.repeat(100) + '\x07')
+  expect(terminal.shellActivity.phase).toBe('running')
+  terminal.write('\x1b]133;D;1\x07\x1b]133;A\x07\x1b]133;B\x07')
+  expect(terminal.shellActivity).toEqual({ phase: 'ready', lastExitStatus: 1 })
+  terminal.write('\x1b]133;D;invalid\x07')
+  expect(terminal.shellActivity.lastExitStatus).toBe(1)
+  expect(terminal.toText()).toBe('❯')
+})
+
 describe('printing and wrap', () => {
   it('prints text at the cursor', () => {
     const t = term()
