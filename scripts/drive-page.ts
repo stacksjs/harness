@@ -376,7 +376,8 @@ await page.locator('[data-workspace-layout][data-details-open="false"]').waitFor
 await workspaceActions.click()
 await desktopChanges.waitFor()
 check('workspace detail visibility survives reload and can be restored', await desktopChanges.isVisible())
-for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+const workspaceViewports = [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]
+for (const [width, height] of workspaceViewports) {
   await page.setViewportSize({ width, height })
   check(`workspace header and composer fit at ${width}×${height}`, await page.evaluate(() => {
     const elements = ['[data-workspace-header]', '[data-composer]', '[data-send]']
@@ -1136,7 +1137,7 @@ catch (error) {
   throw error
 }
 if (screenshotDir) {
-  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  for (const [width, height] of workspaceViewports) {
     await page.setViewportSize({ width, height })
     await sendNow.scrollIntoViewIfNeeded()
     await capture(`steering-queued-${width}x${height}`)
@@ -1155,6 +1156,11 @@ check('the original turn retains its steer after a reload', await originalTurn.l
 await page.keyboard.press('Control+,')
 await page.locator('#settings-follow-up').selectOption('steer')
 await page.keyboard.press('Escape')
+await promptBox.focus()
+await promptBox.press('Control+f')
+const liveFind = page.getByRole('search', { name: 'Find in thread' })
+await liveFind.getByRole('searchbox').fill('Steer directly from the composer.')
+await liveFind.getByText('0/0', { exact: true }).waitFor()
 await promptBox.fill('Steer directly from the composer.')
 await page.getByRole('button', { name: 'Steer', exact: true }).click()
 try {
@@ -1164,6 +1170,11 @@ catch (error) {
   console.error('Direct steer:', steeringCalls, await originalTurn.innerText(), pageErrors)
   throw error
 }
+await liveFind.getByText('1/1', { exact: true }).waitFor()
+check('find updates when an in-flight transcript receives a message', true)
+await liveFind.getByRole('button', { name: 'Close find' }).click()
+check('the find shortcut restores the composer focus when closed',
+  await promptBox.evaluate(input => document.activeElement === input))
 await promptBox.fill('Queue using the opposite shortcut.')
 await promptBox.press('Control+Enter')
 const oppositeQueuedRow = followUpRows.filter({ hasText: 'Queue using the opposite shortcut.' })
@@ -1269,6 +1280,56 @@ await page.locator('[data-thread-archived]').waitFor({ state: 'hidden' })
 await page.locator('[data-composer]').waitFor()
 await pinnedThreads.getByText('Parity release review', { exact: true }).waitFor()
 check('search omits an archived thread and settings restores it to its old pin', true)
+
+const conversationFind = page.getByRole('search', { name: 'Find in thread' })
+const conversationQuery = conversationFind.getByRole('searchbox', { name: 'Find in thread' })
+const findCount = conversationFind.locator('[data-find-counter]')
+await threadActionsTrigger.click()
+await threadActions.getByRole('button', { name: 'Find in thread', exact: true }).click()
+await conversationQuery.waitFor()
+check('Find in thread opens from the title menu and focuses its input',
+  await conversationQuery.evaluate(input => input === document.activeElement))
+await conversationQuery.fill('ACTIVE STEERING')
+await conversationFind.getByText('1/2', { exact: true }).waitFor()
+check('the first result clears the find bar', await page.evaluate(() => {
+  const bar = document.querySelector('[data-transcript-find]')?.getBoundingClientRect()
+  const ranges = CSS.highlights?.get('harness-find-current')
+  const active = ranges && [...ranges][0]?.getBoundingClientRect()
+    || document.querySelector('[data-find-current]')?.getBoundingClientRect()
+  return Boolean(bar && active && active.top >= bar.bottom)
+}))
+await conversationQuery.press('Enter')
+await conversationFind.getByText('2/2', { exact: true }).waitFor()
+await conversationFind.getByRole('button', { name: 'Next match' }).click()
+await conversationFind.getByText('1/2', { exact: true }).waitFor()
+await conversationQuery.press('Shift+Enter')
+await conversationFind.getByText('2/2', { exact: true }).waitFor()
+check('find counts the prompt and assistant match and wraps in both directions', true)
+check('find paints the active result without changing text selection', await page.evaluate(() => {
+  const selected = getSelection()?.toString() ?? ''
+  return selected.length === 0 && (CSS.highlights?.get('harness-find-current')?.size === 1
+    || Boolean(document.querySelector('[data-find-current]')))
+}))
+for (const [width, height] of workspaceViewports) {
+  await page.setViewportSize({ width: width!, height: height! })
+  check(`find controls fit at ${width}×${height}`, await conversationFind.evaluate(bar => {
+    const bounds = bar.getBoundingClientRect()
+    return bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
+  }))
+  await capture(`find-in-thread-${width}x${height}`)
+}
+await conversationQuery.fill('[not a regular expression')
+await conversationFind.getByText('0/0', { exact: true }).waitFor()
+check('unmatched literal punctuation disables navigation',
+  await conversationFind.getByRole('button', { name: 'Previous match' }).isDisabled())
+await conversationQuery.press('Escape')
+await conversationFind.waitFor({ state: 'hidden' })
+check('closing find restores focus and removes its highlights',
+  await threadActionsTrigger.evaluate(button => button === document.activeElement && !CSS.highlights?.has('harness-find-current')))
+await page.keyboard.press('Control+f')
+await conversationQuery.waitFor()
+check('Control+F reopens find with cleared results', await findCount.textContent() === '')
+await conversationFind.getByRole('button', { name: 'Close find' }).click()
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

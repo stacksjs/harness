@@ -2,6 +2,9 @@
   <div class="p-1">
     <h2 id="harness-thread-actions-title" class="sr-only">Thread actions</h2>
     <p role="alert" class="px-2 py-1 text-sm text-red-700 dark:text-red-300" :hidden="!threadActionError()" :text="threadActionError()"></p>
+    <button type="button" data-thread-action @click="findFromThreadActions" aria-keyshortcuts="Meta+F Control+F">
+      <span class="i-hugeicons-search-list-02" aria-hidden="true"></span>Find in thread
+    </button>
     <button type="button" data-thread-action :hidden="!threadNavigation().archivedAt" @click="organizeThread('restore')" :disabled="threadActionBusy()">
       <span class="i-hugeicons-archive-02" aria-hidden="true"></span>Restore thread
     </button>

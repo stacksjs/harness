@@ -1,0 +1,7 @@
+<div data-transcript-find role="search" aria-label="Find in thread" hidden :hidden="!transcriptFindOpen()" class="flex absolute gap-1 items-center p-1 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-lg dark:border-white/15 shadow-md">
+  <input ref="transcriptFindInputBox" type="search" placeholder="Find in thread" aria-label="Find in thread" :value="transcriptFindQuery()" @input="findTranscriptText" @compositionend="findTranscriptText" @keydown="transcriptFindKeydown" autocomplete="off" spellcheck="false" maxlength="200" class="flex-1 px-2 py-1 min-w-0 text-sm bg-transparent rounded-md" />
+  <span data-find-counter role="status" class="shrink-0 min-w-[32px] tabular-nums text-center text-xs" :text="transcriptFindStatus()"></span>
+  <button type="button" aria-label="Previous match" @click="stepTranscriptFind(-1)" :disabled="!transcriptFindCount()" class="harness-icon-button"><span class="inline-block size-4 i-hugeicons-arrow-up-01" aria-hidden="true"></span></button>
+  <button type="button" aria-label="Next match" @click="stepTranscriptFind(1)" :disabled="!transcriptFindCount()" class="harness-icon-button"><span class="inline-block size-4 i-hugeicons-arrow-down-01" aria-hidden="true"></span></button>
+  <button type="button" aria-label="Close find" @click="closeTranscriptFind" class="harness-icon-button"><span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span></button>
+</div>

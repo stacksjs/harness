@@ -31,6 +31,7 @@ export { sendBrowserCommand } from './packages/server/src/browser-command'
 export { createFollowUpActions } from './packages/server/src/browser-follow-ups'
 export { createSessionSocket } from './packages/server/src/browser-session-socket'
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
+export { createTranscriptFinder } from './packages/server/src/browser-transcript-find'
 export { createTranscriptHighlighter } from './packages/server/src/browser-transcript-highlight'
 export { createQuestionForm, paintQuestionFiles } from './packages/server/src/browser-questions'`
 

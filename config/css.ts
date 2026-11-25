@@ -56,6 +56,12 @@ const TRANSCRIPT_MARKDOWN = `
 .transcript-code-bar button[aria-pressed="true"] { background: rgb(127 127 127 / 12%); }
 .transcript-code pre { overflow: auto; padding: 9px 11px; white-space: pre; tab-size: 2; }
 .transcript-code[data-wrap="true"] pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-transcript-find] { z-index: 5; inset-inline-end: 12px; inset-block-start: 8px; width: min(330px, calc(100% - 24px)); }
+[data-transcript-find] button:disabled { opacity: .4; }
+[data-find-current] { outline: 2px solid #d89016; outline-offset: 2px; border-radius: 4px; }
+::highlight(harness-find-result) { color: #261601; background: #f9dc89; }
+::highlight(harness-find-current) { color: #1f1308; background: #f1a84f; }
+
 `
 
 const syntaxColors = { getCSS: () => `

@@ -285,8 +285,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       you actually scroll. The live tail hydrates eagerly — it is the only part
       the socket writes to.
     --}}
-    <div class="relative flex-1 min-h-0 min-w-0">
-    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto px-4 py-3 h-full min-w-0">
+    <div data-transcript-viewport :style="transcriptFindOpen() ? '--harness-transcript-top: 56px' : ''" class="relative flex-1 min-h-0 min-w-0">
+    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto px-4 pt-[var(--harness-transcript-top,12px)] pb-3 h-full min-w-0">
       {{--
         A blank canvas says the app is broken; an empty state says what to do.
         Typing below is the fastest path, so it is the one named first.
@@ -332,7 +332,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           @foreach(turn.steered as message)
             <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
               <div class="mb-1 font-medium text-[12px] text-neutral-600 dark:text-neutral-400">You followed up</div>
-              <div class="break-words text-[13px] whitespace-pre-wrap">{{ message.text }}</div>
+              <div data-steering-text class="break-words text-[13px] whitespace-pre-wrap">{{ message.text }}</div>
             </div>
           @endforeach
           {{--
@@ -385,7 +385,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             @foreach(liveTurn.steered as message)
               <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
                 <div class="mb-1 font-medium text-[12px] text-neutral-600 dark:text-neutral-400">You followed up</div>
-                <div class="break-words text-[13px] whitespace-pre-wrap">{{ message.text }}</div>
+                <div data-steering-text class="break-words text-[13px] whitespace-pre-wrap">{{ message.text }}</div>
               </div>
             @endforeach
           </div>
@@ -488,6 +488,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @includeWhen(activeSession, '../partials/harness-follow-ups')
     </div>
     @if(activeSession)
+      @include('../partials/harness-transcript-find')
       <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="absolute bottom-3 inset-e-4 px-3 h-9 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full shadow-sm dark:border-white/20">Jump to latest</button>
       <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
     @endif
@@ -1151,6 +1152,71 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return id === undefined ? undefined : `thread-search-result-${id}`
   })
   const transcriptRef = useRef('transcriptBox')
+  const transcriptFindInput = useRef('transcriptFindInputBox')
+  const transcriptFindOpen = state(false)
+  const transcriptFindQuery = state('')
+  const transcriptFindIndex = state(-1)
+  const transcriptFindCount = state(0)
+  const transcriptFindStatus = derived(() => transcriptFindQuery().trim()
+    ? (transcriptFindIndex() + 1) + '/' + transcriptFindCount()
+    : '')
+  let transcriptFinder = null
+  let transcriptFindTrigger = null
+
+  function openTranscriptFind(trigger) {
+    if (!sessionId) return
+    if (!transcriptFindOpen()) {
+      transcriptFindTrigger = trigger?.matches?.('input, textarea, button, a[href], [tabindex]') ? trigger : threadActionsTrigger.current
+      transcriptFindOpen.set(true)
+    }
+    void nextTick(() => {
+      transcriptFindInput.current?.focus()
+      transcriptFindInput.current?.select()
+    })
+  }
+
+  function findFromThreadActions() {
+    closeThreadActions()
+    openTranscriptFind()
+  }
+
+  async function findTranscriptText(event) {
+    if (event.isComposing) return
+    const query = event.currentTarget.value
+    transcriptFindQuery.set(query)
+    if (!codecUrl || !transcriptRef.current) return
+    const { createTranscriptFinder } = await import(codecUrl)
+    if (!transcriptFindOpen() || query !== transcriptFindQuery()) return
+    transcriptFinder ??= createTranscriptFinder(transcriptRef.current, (index, count) => {
+      transcriptFindIndex.set(index)
+      transcriptFindCount.set(count)
+    })
+    transcriptFinder.search(query)
+  }
+
+  function stepTranscriptFind(direction) {
+    transcriptFinder?.step(direction)
+  }
+
+  function closeTranscriptFind() {
+    transcriptFinder?.close()
+    transcriptFinder = null
+    transcriptFindOpen.set(false)
+    transcriptFindQuery.set('')
+    transcriptFindIndex.set(-1)
+    transcriptFindCount.set(0)
+    transcriptFindTrigger?.focus()
+    transcriptFindTrigger = null
+  }
+
+  function transcriptFindKeydown(event) {
+    if (event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return
+    event.preventDefault()
+    stepTranscriptFind(event.shiftKey ? -1 : 1)
+  }
+
+  onDestroy(() => transcriptFinder?.close())
+
   const termScreenRef = useRef('termScreenBox')
   const termHostRef = useRef('termHostBox')
   const termMetricRef = useRef('termMetricBox')
@@ -2444,7 +2510,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.
     if (event.key === 'Escape') {
-      if (profileModalOpen()) {
+      if (transcriptFindOpen()) {
+        event.preventDefault()
+        closeTranscriptFind()
+      }
+      else if (profileModalOpen()) {
         event.preventDefault()
         closeProfileModal()
       }
@@ -2456,6 +2526,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         event.preventDefault()
         closeSidebar()
       }
+      return
+    }
+    if (sessionId && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.code === 'KeyF') {
+      event.preventDefault()
+      openTranscriptFind(event.target)
       return
     }
     if ((event.metaKey || event.ctrlKey) && event.key === ',') {
