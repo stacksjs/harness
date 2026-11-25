@@ -439,4 +439,4 @@ The macOS arm64 v0.1.11 executable returned 63 distinct help pages. The global o
 | `t3 up` | `--base-dir`, `--connect`, `--headless`, `--lan`, `--yes` | [P25](https://github.com/stacksjs/harness/issues/36), [P26](https://github.com/stacksjs/harness/issues/37), [P33](https://github.com/stacksjs/harness/issues/43) |
 | `t3 update` | `--allow-downgrade`, `--base-dir`, `--channel`, `--yes` | [P29](https://github.com/stacksjs/harness/issues/3), [P30](https://github.com/stacksjs/harness/issues/40), [P33](https://github.com/stacksjs/harness/issues/43) |
 
-Flag combinations, native bridge methods, provider variants, and end-to-end execution remain open in [P01](https://github.com/stacksjs/harness/issues/13).
+Flag combinations, provider variants, and end-to-end execution remain open in [P01](https://github.com/stacksjs/harness/issues/13).

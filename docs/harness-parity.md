@@ -2,7 +2,7 @@
 
 Canonical backlog and release evidence live in [Harness #12](https://github.com/stacksjs/harness/issues/12). The source baseline is [T3 Code `431da7f`](https://github.com/pingdotgg/t3code/tree/431da7f4e55b82b386e68a9f32c543fac2efedf5). Use [v0.1.11](https://github.com/pingdotgg/t3code/releases/tag/v0.1.11) for released behavior and the pin for main-only changes.
 
-The [reference file inventory](t3-code-reference-index.md) maps route, guide, mobile, and contract files to their tickets. The [transport and CLI inventory](t3-code-transport-index.md) lists the corresponding HTTP and RPC declarations and CLI families.
+The [reference file inventory](t3-code-reference-index.md) maps route, guide, mobile, and contract files to their tickets. The [transport and CLI inventory](t3-code-transport-index.md) lists HTTP and RPC declarations and CLI families. The [native inventory](t3-code-native-index.md) covers mobile registrations, bridge methods, and desktop menu accelerators.
 
 Each workflow needs a reference reproduction, exact Harness steps and expected state, supported surfaces and provider variants, and links to test output, commit, and applicable captures. Use `missing`, `partial`, `implemented`, `verified`, or `blocked`. Evidence from fixtures and live runs is recorded separately.
 
