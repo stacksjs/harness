@@ -1,5 +1,19 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.25...v0.0.26)
+
+## ✨ Features
+
+- **codex**: switch models in an existing conversation ([2b1d671](https://github.com/stacksjs/harness/commit/2b1d671)) _(by Chris)_
+
+## 🔧 Chores
+
+- **deps**: upgrade Stacks and stx with Buddy ([df04661](https://github.com/stacksjs/harness/commit/df04661)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.24...v0.0.25)
 
 ## ✨ Features
