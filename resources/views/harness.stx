@@ -15,6 +15,8 @@ export const profiles = $props.profiles || []
 export const sessions = $props.sessions || []
 export const activeProfile = $props.activeProfile || (profiles[0] && profiles[0].id) || ''
 export const activeSession = $props.activeSession || null
+export const initialSettingsSection = $props.settingsSection || ''
+export const settingsSections = $props.settingsSections || []
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -724,23 +726,31 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     (craft forwards it as a `craft:settings` event) and as a page chord
     everywhere else.
   --}}
-  <dialog data-settings-modal ref="settingsDialogBox" aria-labelledby="harness-settings-title" @click.self="closeSettings" @cancel="cancelSettings" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[10px] dark:border-white/15 shadow-xl">
+  <dialog data-settings-modal ref="settingsDialogBox" aria-labelledby="harness-settings-title" @click.self="closeSettings" @cancel="cancelSettings" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 dark:border-white/15 shadow-xl">
     <div data-settings-shell>
-      <header data-settings-header class="flex gap-2 items-center justify-between">
-        <h2 id="harness-settings-title" class="font-semibold text-base">Settings</h2>
-        <button type="button" @click="closeSettings" class="px-3 h-8 text-xs border border-black/15 rounded-md dark:border-white/20">Done</button>
-      </header>
       <nav data-settings-navigation aria-label="Settings sections">
-        <button type="button" @click="jumpToSettings('appearance')">Appearance</button>
-        <button type="button" @click="jumpToSettings('agents')">Agents</button>
-        <button type="button" @click="jumpToSettings('access')">Access</button>
-        <button type="button" @click="jumpToSettings('archive')">Archive</button>
+        @foreach(settingsSections as section)
+          <button type="button" data-settings-target="{{ section.id }}" aria-label="{{ section.label }}" title="{{ section.label }}" :aria-current="settingsSelection() === '{{ section.id }}' ? 'page' : null" @click="jumpToSettings('{{ section.id }}')">
+            <span class="inline-block size-4 {{ section.icon }}" aria-hidden="true"></span>
+            <span data-settings-tab-label>{{ section.label }}</span>
+          </button>
+        @endforeach
       </nav>
-      <div data-settings-panel>
-      <div class="mb-3 pb-3 border-b border-black/10 dark:border-white/10">
-        <h3 data-settings-section="appearance" tabindex="-1" class="mb-2 font-medium text-[13px]">Appearance</h3>
+      <header data-settings-header class="flex gap-2 items-center">
+        <h2 id="harness-settings-title" class="text-sm text-neutral-600 dark:text-neutral-400">Settings</h2>
+        <span aria-hidden="true" class="text-neutral-400">/</span>
+        <span data-settings-breadcrumb class="flex-1 min-w-0 font-medium text-sm truncate" :text="settingsSelectionLabel()"></span>
+        <button type="button" @click="closeSettings" aria-label="Close settings" title="Close settings" class="harness-icon-button">
+          <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </header>
+      <div data-settings-panel ref="settingsPanelBox">
+      <section :hidden="settingsSelection() !== 'appearance'" data-settings-pane>
+        <h3 data-settings-section="appearance" tabindex="-1">Appearance</h3>
         <AppearancePicker v-model:value="appearancePreference" label="Appearance" :options="[{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'auto', label: 'System' }]" />
-      </div>
+      </section>
+      <section :hidden="settingsSelection() !== 'general'" data-settings-pane>
+      <h3 data-settings-section="general" tabindex="-1">General</h3>
       <label class="block mb-2 font-medium text-[13px]" for="settings-driver">Agent for new sessions</label>
       <select
         id="settings-driver"
@@ -759,7 +769,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="queue">Queue for the next turn</option>
         <option value="steer">Steer the active turn</option>
       </select>
-      <h3 data-settings-section="agents" tabindex="-1" class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Agents</h3>
+      </section>
+      <section :hidden="settingsSelection() !== 'providers'" data-settings-pane>
+      <h3 data-settings-section="providers" tabindex="-1">Providers</h3>
       {{--
         One row per agent CLI, filled by the same `/drivers` probe that
         annotates the pickers. "Log in" runs the CLI's own login flow in the
@@ -799,7 +811,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </li>
       </ul>
 
-      <h3 data-settings-section="access" tabindex="-1" class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Access</h3>
+      </section>
+      <section :hidden="settingsSelection() !== 'access'" data-settings-pane>
+      <h3 data-settings-section="access" tabindex="-1">Access</h3>
       @if(devices.length)
         <ul class="mb-2">
           @foreach(devices as device)
@@ -822,7 +836,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <p class="mb-3 text-[12px] opacity-60">Pairing needs the server started with <code>--remote</code>.</p>
       @endif
 
-      <h3 data-settings-section="archive" tabindex="-1" class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Archived threads</h3>
+      </section>
+      <section :hidden="settingsSelection() !== 'archived'" data-settings-pane>
+      <h3 data-settings-section="archived" tabindex="-1">Archived threads</h3>
       @if(archivedThreads.length)
         <ul data-archived-threads class="my-0 list-none">
           @foreach(archivedThreads as archived)
@@ -835,6 +851,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @else
         <p class="mb-3 text-[12px] text-neutral-600 dark:text-neutral-300">No archived threads in this profile.</p>
       @endif
+      </section>
       </div>
     </div>
   </dialog>
@@ -1130,6 +1147,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const driverPickerRef = useRef('driverPickerBox')
   const settingsDriverRef = useRef('settingsDriverBox')
   const settingsDialogRef = useRef('settingsDialogBox')
+  const settingsPanel = useRef('settingsPanelBox')
+  const settingsSelection = state(initialSettingsSection || 'general')
+  const settingsSelectionLabel = derived(() => settingsSections.find(section => section.id === settingsSelection())?.label || 'General')
   const colorMode = useColorMode()
   const appearancePreference = state(colorMode.preference)
   const unsubscribeAppearance = colorMode.subscribe((_mode, preference) => appearancePreference.set(preference))
@@ -1726,42 +1746,73 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   let settingsTrigger = null
 
-  function openSettings(event) {
+  function settingsLocation() {
+    return codecUrl ? import(codecUrl).catch(() => undefined) : Promise.resolve(undefined)
+  }
+
+  function focusSettingsHeading() {
+    void nextTick(() => {
+      if (settingsPanel.current) settingsPanel.current.scrollTop = 0
+      const heading = settingsDialogRef.current?.querySelector(`[data-settings-section="${settingsSelection()}"]`)
+      heading?.focus({ preventScroll: true })
+    })
+  }
+
+  function openSettings(event, section = 'general', updateLocation = true) {
     const dialog = settingsDialogRef.current
     if (!dialog || dialog.open) return
     settingsTrigger = event?.currentTarget?.matches?.('[data-account-button]') ? event.currentTarget : null
     workspaceActionsOpen.set(false)
+    settingsSelection.set(section)
     dialog.showModal()
-    // Re-probe on open: someone who just logged in comes back to a sheet
-    // that should say so. The server holds results for 30s, so this is a
-    // cheap read, not a process fork per open.
+    if (updateLocation)
+      void settingsLocation().then(location => dialog.open && location?.showSettingsSection(section))
     annotateDriverPickers()
-    void nextTick(() => {
-      const box = settingsDriverRef.current
-      if (box) {
-        box.value = defaultDriver()
-        box.focus()
-      }
-    })
+    const box = settingsDriverRef.current
+    if (box) box.value = defaultDriver()
+    focusSettingsHeading()
   }
 
   function jumpToSettings(section) {
-    const heading = settingsDialogRef.current?.querySelector(`[data-settings-section="${section}"]`)
-    if (!heading) return
-    heading.scrollIntoView({ block: 'start' })
-    heading.focus({ preventScroll: true })
+    settingsSelection.set(section)
+    void settingsLocation().then(location => settingsDialogRef.current?.open && settingsSelection() === section && location?.showSettingsSection(section))
+    focusSettingsHeading()
   }
 
-  function closeSettings() {
+  function hideSettings() {
     settingsDialogRef.current?.close()
     settingsTrigger?.focus()
     settingsTrigger = null
+  }
+
+  function closeSettings() {
+    hideSettings()
+    void settingsLocation().then(location => location?.leaveSettings())
   }
 
   function cancelSettings(event) {
     event.preventDefault()
     closeSettings()
   }
+
+  useEventListener('popstate', () => {
+    void settingsLocation().then((location) => {
+      const section = location?.currentSettingsSection()
+      if (!section) {
+        if (settingsDialogRef.current?.open) hideSettings()
+        return
+      }
+      if (!settingsDialogRef.current?.open) openSettings(undefined, section, false)
+      else {
+        settingsSelection.set(section)
+        focusSettingsHeading()
+      }
+    })
+  })
+
+  onMount(() => {
+    if (initialSettingsSection) openSettings(undefined, initialSettingsSection, false)
+  })
 
   let threadSearchTimer = null
   let threadSearchRequest = null

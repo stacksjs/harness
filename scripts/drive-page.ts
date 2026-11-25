@@ -464,11 +464,14 @@ await page.setViewportSize({ width: 1280, height: 720 })
 // 9. Settings: the Cmd+, chord opens the modal, the driver choice persists,
 // and the desktop menu's `craft:settings` event reaches the same modal.
 const settingsDialog = page.getByRole('dialog', { name: 'Settings' })
+const settingsReturn = page.url()
 await page.keyboard.press('Meta+,')
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
-check('Cmd+, opens the settings modal', true)
+await page.waitForURL(url => url.pathname === '/settings/general')
+check('Cmd+, opens the settings modal at its General route', true)
 await page.selectOption('#settings-driver', 'opencode')
-await page.locator('[data-settings-modal]').getByRole('button', { name: 'Done' }).click()
+await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+await page.waitForURL(settingsReturn)
 const storedDriver = await page.evaluate(() => localStorage.getItem('harness.defaultDriver'))
 check('driver choice persists', storedDriver === 'opencode')
 await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:settings')))
@@ -479,12 +482,32 @@ const accessSection = await page.evaluate(() => document.querySelector('[data-se
 check('settings shows the access section honestly', accessSection.includes('No devices are paired') && accessSection.includes('--remote'))
 const settingsNavigation = settingsDialog.getByRole('navigation', { name: 'Settings sections' })
 await settingsNavigation.getByRole('button', { name: 'Access' }).click()
+await page.waitForURL(url => url.pathname === '/settings/access')
 check('settings navigation moves keyboard focus to the selected section',
   await settingsDialog.getByRole('heading', { name: 'Access' }).evaluate(heading => document.activeElement === heading))
 
 await page.keyboard.press('Escape')
 await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
-check('Esc closes the settings modal', true)
+await page.waitForURL(settingsReturn)
+check('Esc closes settings and returns to its workspace URL', true)
+await page.goForward()
+await settingsDialog.getByRole('heading', { name: 'Access' }).waitFor()
+check('browser Forward reopens the actual settings section', new URL(page.url()).pathname === '/settings/access')
+await page.goBack()
+await settingsDialog.waitFor({ state: 'hidden' })
+await page.waitForURL(settingsReturn)
+check('browser Back closes settings at the original thread URL', true)
+const settingsDeepLink = await browserContext.newPage()
+const deepLink = new URL('/settings', baseUrl)
+deepLink.searchParams.set('from', new URL(settingsReturn).pathname)
+await settingsDeepLink.goto(deepLink.href)
+const directSettings = settingsDeepLink.getByRole('dialog', { name: 'Settings' })
+await directSettings.getByRole('heading', { name: 'General', exact: true }).waitFor()
+check('a direct settings URL opens its modal and canonicalizes the index',
+  new URL(settingsDeepLink.url()).pathname === '/settings/general')
+await directSettings.getByRole('button', { name: 'Close settings' }).click()
+await settingsDeepLink.waitForURL(url => url.pathname === new URL(settingsReturn).pathname)
+await settingsDeepLink.close()
 await page.evaluate(() => localStorage.removeItem('harness.defaultDriver'))
 
 // 10. The composer's agent picker: preselected with the session's driver,
@@ -554,9 +577,10 @@ await page.keyboard.press('Escape')
 await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
 check('closing settings returns focus to its trigger', await page.locator('[data-account-button]:visible').evaluate(button => document.activeElement === button))
 
-// 13. The Agents section: each CLI's live status, and a Log in button that
-// runs the CLI's login flow against the fixture executable in the terminal.
+// 13. The Providers section: each CLI's live status and native login.
 await page.click('[data-account-button]:visible')
+await settingsNavigation.getByRole('button', { name: 'Providers' }).click()
+await page.waitForURL(url => url.pathname === '/settings/providers')
 await page.waitForFunction(() => document.querySelector('[data-agent-row="claude"] [data-agent-state]')?.textContent === 'ready', undefined, { timeout: 4000 })
 const agentRows = await page.evaluate(() => [...document.querySelectorAll('[data-agent-row]')].map(row => ({
   state: row.querySelector('[data-agent-state]')?.textContent,
@@ -596,6 +620,8 @@ check(
 await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:menu:action', { detail: { id: 'settings' } })))
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('a menu action routes to the page handler', true)
+await settingsNavigation.getByRole('button', { name: 'Appearance' }).click()
+await page.waitForURL(url => url.pathname === '/settings/appearance')
 const appearancePicker = settingsDialog.getByRole('radiogroup', { name: 'Appearance' })
 const systemAppearance = appearancePicker.getByRole('radio', { name: 'System' })
 await systemAppearance.waitFor({ timeout: 4000 })
@@ -627,20 +653,34 @@ check('an invalid stored appearance falls back to the system', await prePaintPag
 await prePaintPage.close()
 
 await page.reload()
-await page.locator('[data-account-button]:visible').click()
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
-check('appearance selection survives reload', await appearancePicker.getByRole('radio', { name: manualLabel }).getAttribute('aria-checked') === 'true')
+await appearancePicker.waitFor()
+check('appearance route and selection survive reload', await appearancePicker.getByRole('radio', { name: manualLabel }).getAttribute('aria-checked') === 'true')
 await appearancePicker.getByRole('radio', { name: manualLabel }).press('End')
 await page.waitForFunction(scheme => document.documentElement.classList.contains('dark') === (scheme === 'dark'), colorScheme)
 check('keyboard selection returns Craft to its inherited appearance', await systemAppearance.getAttribute('aria-checked') === 'true'
   && await page.evaluate(() => (window as any).__windowAppearance === 'system'))
 await page.keyboard.press('Escape')
+await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
+await page.waitForURL(url => !url.pathname.startsWith('/settings'))
 
 if (screenshotDir) {
   await capture('workspace-desktop')
   await page.setViewportSize({ width: 390, height: 844 })
   await capture('workspace-mobile')
   await page.locator('[data-account-button]:visible').click()
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width: width!, height: height! })
+    check(`settings and its navigation fit at ${width}×${height}`, await settingsDialog.evaluate(dialog => {
+      const bounds = dialog.getBoundingClientRect()
+      const pane = dialog.querySelector('[data-settings-panel]')
+      const navigation = dialog.querySelector('[data-settings-navigation]')
+      return Boolean(pane && navigation && bounds.left >= 0 && bounds.right <= innerWidth
+        && bounds.bottom <= innerHeight && pane.scrollWidth <= pane.clientWidth + 1
+        && navigation.scrollWidth <= navigation.clientWidth + 1)
+    }))
+    await capture(`settings-general-${width}x${height}`)
+  }
   await capture('settings-mobile')
   await page.keyboard.press('Escape')
   await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
@@ -1276,6 +1316,9 @@ const archivedThread = settingsDialog.locator(`[data-archived-thread="${steerSes
 await archivedThread.getByRole('link', { name: 'Parity release review' }).waitFor()
 await capture('thread-archive-settings')
 await archivedThread.getByRole('button', { name: 'Restore', exact: true }).click()
+await archivedThread.waitFor({ state: 'hidden' })
+await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+await page.waitForURL(url => url.pathname === `/s/${steerSessionId}`)
 await page.locator('[data-thread-archived]').waitFor({ state: 'hidden' })
 await page.locator('[data-composer]').waitFor()
 await pinnedThreads.getByText('Parity release review', { exact: true }).waitFor()

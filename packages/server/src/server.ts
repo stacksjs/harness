@@ -28,6 +28,7 @@ import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from '.
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
+import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
@@ -1032,7 +1033,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // The web surface. Rendered from the in-memory projection — no query
       // runs, so the shell paints immediately — and cached against the state
       // revision, so only the first request after a state change renders.
-      if (url.pathname === '/' || url.pathname.startsWith('/s/')) {
+      const settings = settingsSection(url.pathname)
+      if (settings === 'general' && url.pathname !== '/settings/general')
+        return new Response(null, { status: 307, headers: { location: '/settings/general' + url.search } })
+      if (url.pathname === '/' || url.pathname.startsWith('/s/') || settings) {
+        const workspaceUrl = settings ? new URL(workspaceReturn(url.searchParams.get('from')), url.origin) : url
         // The socket URL embedded in the page depends on both host and scheme.
         const cacheKey = `${url.pathname}${url.search}|${url.origin}|${stateRev}`
         const cached = renderCache.get(cacheKey)
@@ -1041,17 +1046,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             headers: { 'content-type': 'text/html; charset=utf-8', 'x-render-cache': 'hit' },
           })
         }
-        const sessionId = url.pathname.startsWith('/s/')
-          ? Number(url.pathname.slice(3)) || undefined
+        const sessionId = workspaceUrl.pathname.startsWith('/s/')
+          ? Number(workspaceUrl.pathname.slice(3)) || undefined
           : undefined
         return renderHarnessView(viewProps(engine.current, {
           sessionId,
           // `?profile=` opens the sidebar on a given space. Swiping past the
           // active space's neighbours lands here, so the server renders that
           // space's rows rather than the client rebuilding them.
-          profileId: Number(url.searchParams.get('profile')) || undefined,
-          workspaceId: Number(url.searchParams.get('workspace')) || undefined,
-          withoutProject: url.searchParams.get('project') === 'none',
+          profileId: Number(workspaceUrl.searchParams.get('profile')) || undefined,
+          workspaceId: Number(workspaceUrl.searchParams.get('workspace')) || undefined,
+          withoutProject: workspaceUrl.searchParams.get('project') === 'none',
+          settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,
           remoteEnabled: access !== null,

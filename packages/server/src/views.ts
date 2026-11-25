@@ -11,6 +11,8 @@ import type { ThreadNavigation } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { settingsSections } from './settings-location'
+import type { SettingsSection } from './settings-location'
 import { threadTitle } from './thread-search'
 import { escapeTranscriptText } from './transcript-markdown'
 
@@ -43,6 +45,8 @@ export interface ViewProps {
   devices: Array<{ id: string, name: string, pairedAt: number }>
   /** Whether this server accepts paired devices, which gates the pairing UI. */
   remoteEnabled: boolean
+  settingsSection: SettingsSection | null
+  settingsSections: typeof settingsSections
   serverUrl: string
   /** URL of the browser CBOR bundle, or '' when it could not be built. */
   codecUrl: string
@@ -80,6 +84,7 @@ export function viewProps(state: HarnessState, options: {
   serverUrl: string
   codecUrl?: string
   remoteEnabled?: boolean
+  settingsSection?: SettingsSection
 }): ViewProps {
   const profiles = [...state.profiles.values()].map((profile) => {
     const workspaces = profile.workspaceIds
@@ -136,6 +141,8 @@ export function viewProps(state: HarnessState, options: {
       pairedAt: device.pairedAt,
     })),
     remoteEnabled: options.remoteEnabled === true,
+    settingsSection: options.settingsSection ?? null,
+    settingsSections,
     activeProfile: String(selectedProfile?.id ?? ''),
     draftWorkspace,
     draftWithoutProject,
