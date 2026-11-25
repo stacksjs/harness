@@ -104,6 +104,10 @@ const instance: ProviderInstance = {
       yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
       return
     }
+    if (input.text === 'exercise provider resume rejection') {
+      yield { type: 'error', message: 'Codex could not resume this conversation. Check the selected account and retry. <div data-error-injection>' }
+      return
+    }
     if (input.text.startsWith('Follow-up fixture:')) {
       followUpDelivery.push(input.text)
       yield { type: 'assistant-delta', text: 'Received the queued message.' }
@@ -1667,6 +1671,33 @@ check('a new thread launches with the selected account, model and turn options',
   catalogSession?.providerInstanceId === 4 && catalogSession.model === 'fixture-fast' && fixtureCodexLaunchModel === 'fixture-fast'
   && catalogSession.codexTurnOptions?.effort === 'high' && catalogSession.codexTurnOptions.serviceTier === 'fast'
   && fixtureCodexLaunchOptions?.effort === 'high' && fixtureCodexLaunchOptions.serviceTier === 'fast')
+
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+await page.locator('[data-prompt]').fill('exercise provider resume rejection')
+await page.locator('[data-send]').click()
+const providerError = page.locator('[data-session-error]')
+await providerError.waitFor()
+check('resume errors give a recovery action in the active thread', await providerError.evaluate(element =>
+  element.getAttribute('role') === 'alert' && element.textContent?.includes('Check the selected account and retry') === true))
+await capture('provider-resume-error-desktop')
+await page.setViewportSize({ width: 390, height: 844 })
+await page.reload()
+await providerError.waitFor()
+check('the resume error survives reload as plain text with a usable composer', await page.evaluate(() => {
+  const error = document.querySelector('[data-session-error]')
+  const alertBounds = error?.getBoundingClientRect()
+  const composer = document.querySelector('[data-composer]')?.getBoundingClientRect()
+  const send = document.querySelector('[data-send]')?.getBoundingClientRect()
+  return error?.textContent?.includes('<div data-error-injection>') === true && !error.querySelector('[data-error-injection]')
+    && !!alertBounds && !!composer && Math.abs(alertBounds.left - composer.left) < 1 && Math.abs(alertBounds.right - composer.right) < 1
+    && !!send && send.top >= 0 && send.bottom <= innerHeight
+}))
+await capture('provider-resume-error-phone')
+await page.locator('[data-prompt]').fill('Retry in the original thread.')
+await page.locator('[data-send]').click()
+await page.locator('[data-turn]').getByText('Retry in the original thread.').waitFor()
+check('retry accepts a new turn in the same thread and clears the previous error', await providerError.isHidden()
+  && Number(new URL(page.url()).pathname.split('/').at(-1)) === catalogSession?.id)
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

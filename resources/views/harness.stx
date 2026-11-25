@@ -108,6 +108,7 @@ export const hasProfiles = profiles.length > 0
 export const turns = activeSession ? activeSession.turns : []
 export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : draftProject?.name || (draftWithoutProject ? 'New session' : 'Harness')
 export const sessionState = activeSession ? activeSession.state : 'idle'
+export const initialSessionError = activeSession?.lastError || ''
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const sessionDriver = activeSession ? (activeSession.driverKind || '') : ''
@@ -496,6 +497,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
     @includeWhen(activeSession, '../partials/harness-approval-card')
     @includeWhen(activeSession, '../partials/harness-question-card')
+
+    @if(activeSession)
+      <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
+    @endif
 
     @if(canCompose)
     <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt)hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt)" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
@@ -1020,6 +1025,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // made a session waiting on *you* look idle. Seeded from the server render;
   // the chip, Send/Stop and the revert buttons all bind to it.
   const uiState = state(sessionState || 'idle')
+  const sessionError = state(initialSessionError)
   const runningTurnId = state(initialResponseTurn)
   const steerableTurn = state(initialSteerable ? initialResponseTurn : 0)
   const canSteer = derived(() => sessionOnline() && uiState() === 'running' && steerableTurn() !== 0 && steerableTurn() === runningTurnId())
@@ -3176,6 +3182,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
       }
       if (payload.type === 'turn.started') {
+        sessionError.set('')
         // Only the user's half opens a new exchange; the assistant's turn is
         // the reply within it.
         if (payload.role === 'user') {
@@ -3267,12 +3274,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         // bindings put Send back while the chip says what happened.
         batch(() => {
           setSessionState('failed')
+          sessionError.set(payload.message || 'The agent could not finish this response.')
           closeConnectorOptions()
           pendingApprovals.set([])
           pendingApprovalId.set(0)
           questionForm()?.interrupt()
         })
-        transcriptAnnouncement.set('The agent could not finish this response.')
+        transcriptAnnouncement.set('')
       }
       else if (payload.type === 'approval.requested') {
         batch(() => {

@@ -165,6 +165,7 @@ const RESPONSIVE_SHELL = `
 [data-transcript] { padding-inline: var(--workspace-gutter); padding-block: 24px 16px; }
 [data-transcript] > :is([data-turn], [data-follow-ups]) { max-width: var(--workspace-content); margin-inline: auto; }
 [data-user-prompt] { background: var(--workspace-hover); }
+[data-session-error] { width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter))); }
 [data-composer] {
   box-sizing: border-box;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -182,6 +182,7 @@ export function viewProps(state: HarnessState, options: {
           title: threadTitle(active),
           navigation: active.navigation,
           state: active.state,
+          lastError: active.state === 'failed' ? active.lastError : undefined,
           // Which agent this session runs — shown in the header and preselected
           // in the composer's picker, so switching has a visible ground truth.
           driverKind: active.driverKind,

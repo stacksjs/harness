@@ -28,6 +28,7 @@ export interface SessionState {
   codexTurnOptions?: CodexTurnOptions
   providerSessionId: string
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
+  lastError?: string
   lastSeq: number
   navigation?: ThreadNavigation
   turns: TurnState[]
@@ -381,6 +382,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (active?.status === 'running') active.status = 'failed'
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'failed'
+      session.lastError = p.message
       clearTurnRequests(session)
       break
     }
@@ -389,6 +391,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'running'
+      delete session.lastError
       if (session.navigation?.settledAt || session.navigation?.snoozedUntil) {
         session.navigation.settledAt = null
         session.navigation.snoozedUntil = null

@@ -549,11 +549,24 @@ class CodexInstance implements ProviderInstance {
     // Resume the provider's own thread when we have one, so a restarted server
     // continues the conversation instead of starting a stranger.
     if (input.providerSessionId && !this.threadId) {
-      const resumed = await this.request('thread/resume', { threadId: input.providerSessionId })
-      this.threadId = resumed.result?.thread?.id ?? null
-      // A thread Codex has forgotten (pruned, or another machine's) must not
-      // take the turn down — falling through starts a fresh one.
-      if (resumed.error) this.threadId = null
+      const threadId = input.providerSessionId
+      const resume = () => this.request('thread/resume', { threadId, excludeTurns: true }, 15_000)
+      let resumed = await resume()
+      if (queue.closed || this.queue !== queue) return
+      if (/\bsession \S+ is archived\b|\bcodex unarchive\b/i.test(resumed.error?.message ?? '')) {
+        // Some Codex versions can move the archived thread and still fail to
+        // read it for the response. Verify the outcome by resuming the same ID.
+        await this.request('thread/unarchive', { threadId }, 15_000)
+        if (queue.closed || this.queue !== queue) return
+        resumed = await resume()
+      }
+      if (queue.closed || this.queue !== queue) return
+      if (resumed.error || resumed.result?.thread?.id !== threadId) {
+        const detail = resumed.error && !this.config.chatGptPlan ? ` ${this.providerError(resumed.error.message)}` : ''
+        queue.finish({ type: 'error', message: `Codex could not resume this conversation. Check the selected account and retry, or use New thread to start separately.${detail}` })
+        return
+      }
+      this.threadId = threadId
     }
 
     if (!this.threadId) {
