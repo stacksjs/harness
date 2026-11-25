@@ -10,6 +10,7 @@
 import type { HostSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
+import { isForkableResponse } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
@@ -204,7 +205,6 @@ export function viewProps(state: HarnessState, options: {
           model: active.model,
           codexTurnOptions: active.codexTurnOptions,
           providerInstanceId: active.providerInstanceId,
-          handoffBoundary: active.handoff?.afterTurnId ?? 0,
           lastSeq: active.lastSeq,
           // For the terminal: a shell opens in the session's workspace, and
           // the island should not have to reverse-engineer it from the DOM.
@@ -225,6 +225,7 @@ export function viewProps(state: HarnessState, options: {
             prompt: turn.prompt,
             response: turn.response,
             status: turn.status,
+            forkable: isForkableResponse(turn),
             switchedProvider: turn.switchedProvider,
             modelChange: turn.modelChanged && turn.codexSelection ? codexSelectionLabel(turn.codexSelection) : undefined,
             steerable: turn.steerable === true,

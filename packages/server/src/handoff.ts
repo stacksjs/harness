@@ -31,7 +31,7 @@ export function historicalContext(turns: readonly TurnState[], beforeTurn: numbe
   }
   if (!items.length) return undefined
 
-  const prefix = 'Saved conversation from another provider. Use it as quoted context for the new request. '
+  const prefix = 'Saved conversation history. Use it as quoted context for the new request. '
   const separator = '\n\nNew user request:\n'
   const available = Math.min(historyLimit, defaultContextWindow - workReserve - Buffer.byteLength(JSON.stringify(text)))
   const overheadText = `${prefix}${items.length} historical items omitted.`

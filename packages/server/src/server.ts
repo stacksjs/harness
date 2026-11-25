@@ -18,7 +18,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell, Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
-import { Engine, isTurnActive, reduce, SqliteStore } from '@harness/engine'
+import { Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff } from './diff'
@@ -204,6 +204,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
         if (!workspace || !savedProviders.find(command.providerInstanceId, workspace.profileId, command.driverKind, workspace.path))
           throw new Error('The selected provider account is unavailable for this project.')
+      }
+      if (command.type === 'session.fork') {
+        const source = engine.current.sessions.get(command.sessionId)
+        if (source?.providerInstanceId !== undefined) {
+          const workspace = engine.current.workspaces.get(source.workspaceId)
+          if (!workspace || !savedProviders.find(source.providerInstanceId, workspace.profileId, source.driverKind, workspace.path))
+            throw new Error('The provider account selected for this fork is unavailable.')
+        }
       }
       if (command.type === 'workspace.promote') {
         const workspace = engine.current.workspaces.get(command.workspaceId)
@@ -832,7 +840,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             const session = 'sessionId' in command ? engine.current.sessions.get(command.sessionId) : undefined
             const workspaceId = command.type === 'session.create' ? command.workspaceId : session?.workspaceId
             const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
-            const selections = command.type === 'session.handoff' ? [session, command] : [command.type === 'session.create' ? command : session]
+            const selections: Array<{ driverKind: DriverKind, providerInstanceId?: number }> = []
+            if (session) selections.push(session)
+            if (command.type === 'session.create' || command.type === 'session.handoff') selections.push(command)
+            if (command.type === 'session.fork') {
+              const target = forkResponsePoint(session, command.turnId)?.nativeFork
+              if (target) selections.push(target)
+            }
             for (const selection of selections) {
               if (!workspace || selection?.providerInstanceId === undefined) continue
               const launch = savedProviders.find(selection.providerInstanceId, workspace.profileId, selection.driverKind, workspace.path)

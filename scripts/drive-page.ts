@@ -89,7 +89,7 @@ const script: ProviderEvent[] = [
 ]
 const instance: ProviderInstance = {
   async *startTurn(input) {
-    if (input.text.startsWith('Saved conversation from another provider.')) {
+    if (input.text.startsWith('Saved conversation history.')) {
       fixtureHandoffs.push(input)
       yield { type: 'session-bound', providerSessionId: `handoff-fixture-${fixtureHandoffs.length}` }
       yield { type: 'assistant-delta', text: 'I received the saved context.' }
@@ -2000,6 +2000,44 @@ check('the provider switch boundary survives a page reload', await page.locator(
 await capture('handoff-completed-phone')
 await page.setViewportSize({ width: 1280, height: 800 })
 await capture('handoff-completed-desktop')
+await page.setViewportSize({ width: 390, height: 844 })
+const historicalFork = page.locator('[data-turn="1"]').getByRole('button', { name: 'Fork from this response' })
+await historicalFork.scrollIntoViewIfNeeded()
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await historicalFork.scrollIntoViewIfNeeded()
+    await capture(`historical-fork-source-${width}`)
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+}
+check('the current and historical responses offer the Fork action after a provider switch',
+  await historicalFork.isVisible() && await handedOff.getByRole('button', { name: 'Fork from this response' }).isVisible())
+await historicalFork.click()
+await page.waitForURL(url => url.pathname.startsWith('/s/') && ![`/s/${sourceId}`, `/s/${forkId}`].includes(url.pathname))
+const historicalId = Number(new URL(page.url()).pathname.split('/').at(-1))
+await page.getByText('Forked conversation', { exact: true }).waitFor()
+check('a portable historical fork selects the current account and copies only its prefix',
+  harness.engine.current.sessions.get(historicalId)?.driverKind === 'claude'
+  && harness.engine.current.sessions.get(historicalId)?.providerInstanceId === 2
+  && harness.engine.current.sessions.get(historicalId)?.providerSessionId === ''
+  && fixtureCodexForks.length === 1
+  && await page.locator('[data-turn]').count() === 1)
+await capture('historical-fork-completed-phone')
+await page.locator('[data-prompt]').fill('Continue from the historical response only.')
+await page.locator('[data-send]').click()
+await page.locator('[data-turn="2"]').getByText('I received the saved context.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const forkContext = fixtureHandoffs.at(-1)
+check('the portable fork imports the selected history into one fresh conversation',
+  forkContext?.providerSessionId === undefined
+  && forkContext?.text.includes('Thinking… done.')
+  && !forkContext?.text.includes('Queue with the fast model.')
+  && !forkContext?.text.includes('Continue the Codex work with Claude.')
+  && forkContext?.text.endsWith('Continue from the historical response only.')
+  && harness.engine.current.sessions.get(sourceId)?.driverKind === 'claude')
+await capture('historical-fork-continued-phone')
+await page.goto(`${baseUrl}/s/${sourceId}`)
 await page.setViewportSize({ width: 390, height: 844 })
 await handoffPicker.click()
 await handoffDialog.getByRole('combobox', { name: 'Search models' }).fill('Fixture Fast Catalog fixture')

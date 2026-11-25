@@ -95,12 +95,19 @@ export interface CheckpointState {
   reverted: boolean
 }
 
+interface NativeForkTarget {
+  driverKind: 'codex'
+  providerSessionId: string
+  providerInstanceId?: number
+}
+
 export interface TurnState {
   id: number
   role: 'user' | 'assistant'
   status: 'pending' | 'running' | 'complete' | 'interrupted' | 'failed'
   codexSelection?: CodexTurnSelection
   providerTurnId?: string
+  nativeFork?: NativeForkTarget
   modelChanged?: boolean
   switchedProvider?: DriverKind
   /** What the user asked. Set once, at `turn.started`. */
@@ -206,6 +213,16 @@ export function providerConversation(session: SessionState) {
 
 function forgetProviderConversation(session: SessionState): void {
   if (session.providerConversations) delete session.providerConversations[providerConversationKey(session)]
+}
+
+export function isForkableResponse(turn: TurnState): boolean {
+  return turn.status === 'complete' && Boolean(turn.response.trim())
+}
+
+export function forkResponsePoint(session: SessionState | undefined, turnId: number): TurnState | undefined {
+  if (!session || session.navigation?.archivedAt || (session.fork && session.fork.state !== 'ready')) return undefined
+  const turn = session.turns.find(turn => turn.id === turnId)
+  return turn && isForkableResponse(turn) ? turn : undefined
 }
 
 export function isTurnActive(state: SessionState['state']): boolean {
@@ -372,6 +389,9 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       for (const turn of copied) {
         // Attachments are retained by the source session and its access route.
         for (const request of turn.inputRequests ?? []) delete request.attachments
+        // The fork owns only the native history copied from its chosen account.
+        if (turn.nativeFork?.providerSessionId !== fork?.providerSessionId
+          || turn.nativeFork?.providerInstanceId !== p.providerInstanceId) delete turn.nativeFork
       }
       state.sessions.set(event.sessionId, {
         id: event.sessionId,
@@ -382,8 +402,8 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         ...(p.codexTurnOptions ? { codexTurnOptions: p.codexTurnOptions } : {}),
         providerSessionId: '',
         ...(fork ? {
-          fork: { ...fork, state: 'pending' },
-          ...(source?.handoff ? { handoff: { ...source.handoff, pending: false } } : {}),
+          fork: { ...fork, state: fork.providerSessionId ? 'pending' : 'ready' },
+          ...(!fork.providerSessionId ? { handoff: { afterTurnId: fork.turnId, pending: true } } : {}),
           navigation: { title: threadDisplayTitle(source?.navigation?.title, source?.turns[0]?.prompt) + ' fork' },
         } : {}),
         state: 'idle',
@@ -409,6 +429,9 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
             providerSessionId: p.providerSessionId,
             throughTurnId: session.fork.turnId,
           },
+        }
+        for (const turn of session.turns) {
+          if (turn.nativeFork) turn.nativeFork.providerSessionId = p.providerSessionId
         }
         session.fork.state = 'ready'
       }
@@ -592,6 +615,13 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (t) {
         t.status = 'complete'
         if (session.providerSessionId) {
+          if (session.driverKind === 'codex' && t.response.trim()) {
+            t.nativeFork = {
+              driverKind: 'codex',
+              providerSessionId: session.providerSessionId,
+              ...(session.providerInstanceId === undefined ? {} : { providerInstanceId: session.providerInstanceId }),
+            }
+          }
           session.providerConversations ??= {}
           session.providerConversations[providerConversationKey(session)] = {
             providerSessionId: session.providerSessionId,

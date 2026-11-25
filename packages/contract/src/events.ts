@@ -24,7 +24,8 @@ export interface EventBase {
 export interface ForkSource {
   sessionId: number
   turnId: number
-  providerSessionId: string
+  /** A missing native ID creates a portable fork with the selected history. */
+  providerSessionId?: string
 }
 
 export type EventPayload =
@@ -45,7 +46,7 @@ export type EventPayload =
   | { type: 'turn.steering-ready', turnId: number }
   | { type: 'turn.steer.requested', turnId: number, id: string, requestId: string, text: string }
   | { type: 'turn.steer.resolved', turnId: number, id: string, outcome: SteeringOutcome, text: string }
-  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string }
+  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, responseForkable?: true }
   | { type: 'turn.interrupted', turnId: number }
   | { type: 'turn.failed', turnId: number, message: string }
   | { type: 'assistant.delta', turnId: number, text: string }

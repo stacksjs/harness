@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
-import { isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
+import { forkResponsePoint, isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
 
@@ -478,19 +478,18 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
 
     case 'session.fork': {
       const source = state.sessions.get(command.sessionId)
-      const turn = source?.turns.find(turn => turn.id === command.turnId)
-      if (!source || source.driverKind !== 'codex' || !source.providerSessionId || source.navigation?.archivedAt
-        || turn?.status !== 'complete' || !turn.response.trim() || turn.id <= (source.handoff?.afterTurnId ?? 0))
-        throw new InvalidCommand('Choose a completed response in an available Codex conversation.')
+      const turn = forkResponsePoint(source, command.turnId)
+      if (!source || !turn)
+        throw new InvalidCommand('Choose a completed response in an available conversation.')
       if (!state.workspaces.get(source.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before forking a conversation.')
 
       const sessionId = derivedId(commandId)
       if (state.sessions.has(sessionId)) throw new InvalidCommand('This fork ID is already in use.')
-      const model = turn.codexSelection?.model ?? source.model
-      const options = turn.codexSelection
-        ? { effort: turn.codexSelection.effort, serviceTier: turn.codexSelection.serviceTier }
-        : source.codexTurnOptions
+      const native = turn.nativeFork
+      const providerSessionId = native?.driverKind === source.driverKind
+        && native.providerInstanceId === source.providerInstanceId && !isTurnActive(source.state)
+        ? native.providerSessionId : undefined
       return [{
         sessionId,
         commandId,
@@ -500,9 +499,9 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           workspaceId: source.workspaceId,
           driverKind: source.driverKind,
           ...(source.providerInstanceId !== undefined ? { providerInstanceId: source.providerInstanceId } : {}),
-          ...sessionModel({ driverKind: source.driverKind, model, codexTurnOptions: options }),
+          ...sessionModel(source),
           ...(source.isolate ? { isolate: true } : {}),
-          forkFrom: { sessionId: source.id, turnId: turn.id, providerSessionId: source.providerSessionId },
+          forkFrom: { sessionId: source.id, turnId: turn.id, ...(providerSessionId ? { providerSessionId } : {}) },
         },
       }]
     }
@@ -901,6 +900,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           tokensOut: command.tokensOut,
           cost: command.cost,
           ...(command.providerTurnId ? { providerTurnId: command.providerTurnId } : {}),
+          ...(turn.response.trim() ? { responseForkable: true } : {}),
         },
       }]
     }

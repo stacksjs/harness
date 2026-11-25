@@ -595,7 +595,11 @@ describe('a turn drives the provider', () => {
     })
 
     const launched: DriverConfig[] = []
-    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const { driver } = fakeDriver([
+      { type: 'session-bound', providerSessionId: 'host-only-native' },
+      { type: 'assistant-delta', text: 'Host-only account response.' },
+      { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 },
+    ])
     harness = await serve({
       port, databasePath, remote: true, localTokenPath: join(dir, 'host-token'), chatGptCredentialDirectory: credentialsPath,
       resolveDriver: kind => ({
@@ -666,6 +670,21 @@ describe('a turn drives the provider', () => {
       expect((await catalog(access.localToken)).accounts[0].status).toBe('unauthenticated')
       host.send({ t: 'dispatch', envelope: { id: 'host-after-disconnect', at: 6, command } })
       expect(await host.waitFor('session.failed')).toMatchObject({ message: expect.stringContaining('Reconnect the selected ChatGPT plan') })
+      expect(launched).toHaveLength(1)
+
+      await harness.engine.dispatch({ id: 'leave-managed-provider', at: 7, command: {
+        type: 'session.handoff', sessionId, afterTurnId: 2, driverKind: 'claude', text: 'Continue elsewhere',
+      } })
+      const historicalFork = { type: 'session.fork', sessionId, turnId: 1 }
+      device.send({ t: 'dispatch', envelope: { id: 'device-historical-fork', at: 8, command: historicalFork } })
+      expect(await device.waitForRejection('device-historical-fork')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })
+      expect(harness.engine.current.sessions.has(derivedId('device-historical-fork'))).toBe(false)
+      expect(removeSavedProvider(databasePath, workspaceId, accountId)).toBe(true)
+      host.send({ t: 'dispatch', envelope: { id: 'portable-account-fork', at: 9, command: historicalFork } })
+      expect(await host.waitForDispatch('portable-account-fork')).toMatchObject({ t: 'dispatched' })
+      expect(harness.engine.current.sessions.get(derivedId('portable-account-fork'))).toMatchObject({
+        driverKind: 'claude', providerSessionId: '', handoff: { pending: true, afterTurnId: 1 },
+      })
       expect(launched).toHaveLength(1)
     }
     finally {

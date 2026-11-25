@@ -496,7 +496,7 @@ export class ProviderRuntime {
     const session = this.options.engine.current.sessions.get(sessionId)
     const fork = session?.fork
     const turn = session?.turns.at(-1)
-    if (!session || fork?.state !== 'pending' || !turn) return
+    if (!session || fork?.state !== 'pending' || !fork.providerSessionId || !turn) return
     try {
       if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted)
         throw new Error('Trust the workspace before creating this fork.')

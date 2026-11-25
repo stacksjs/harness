@@ -133,7 +133,6 @@ export const activeSessionId = activeSession ? activeSession.id : 0
 const providerNames = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
 export const providerDisplayName = kind => providerNames[kind] || kind
 export const initialSessionModel = activeSession?.model || ''
-export const initialHandoffBoundary = activeSession?.handoffBoundary || 0
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialFork = activeSession?.fork || null
 export const initialCodexSelection = activeCodex && activeSession.model
@@ -155,7 +154,7 @@ export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 export const initialHasResponse = Boolean(liveTurn?.response)
 export const initialResponseTurn = liveTurn?.id || 0
-export const initialSsrForkable = Boolean(liveTurn?.status === 'complete' && liveTurn.response)
+export const initialForkableTurns = turns.filter(turn => turn.forkable).map(turn => turn.id)
 export const initialSteerable = liveTurn?.steerable === true
 export const initialInputActivity = liveTurn?.inputRequests || []
 </script>
@@ -393,7 +392,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
           @if(turn.status === 'complete' && turn.response)
             <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
-              @click="forkResponse({{ turn.id }})" :disabled="forkingResponseId() !== 0" @if(!activeCodex || turn.id <= initialHandoffBoundary)hidden@endif :hidden="!canForkResponse({{ turn.id }})" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+              @click="forkResponse({{ turn.id }})" :disabled="forkingResponseId() !== 0" @if(!turn.forkable || (initialFork && initialFork.state !== 'ready') || initialNavigation.archivedAt)hidden@endif :hidden="!canForkResponse({{ turn.id }})" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
                 <span>Fork</span>
             </button>
           @endif
@@ -471,7 +470,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
             <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
               @click="forkResponse({{ liveTurn.id }})" :disabled="forkingResponseId() !== 0"
-              @if(!initialSsrForkable || !activeCodex || liveTurn.id <= initialHandoffBoundary)hidden@endif :hidden="!canForkResponse({{ liveTurn.id }}) || !ssrForkable()" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+              @if(!liveTurn.forkable || (initialFork && initialFork.state !== 'ready') || initialNavigation.archivedAt)hidden@endif :hidden="!canForkResponse({{ liveTurn.id }})" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
                 <span>Fork</span>
             </button>
           {{--
@@ -530,7 +529,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <div class="transcript-markdown" data-response></div>
             <button type="button" data-fork-response aria-label="Fork from this response" title="Fork from this response"
               @click="forkResponse(turn.id)" :disabled="forkingResponseId() !== 0"
-              hidden :hidden="!canForkResponse(turn.id) || !turn.completed || !turn.hasResponse" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
+              hidden :hidden="!canForkResponse(turn.id)" class="harness-response-action"><span class="inline-block size-4 i-hugeicons-git-branch" aria-hidden="true"></span>
                 <span>Fork</span>
             </button>
         </article>
@@ -1076,13 +1075,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   const sessionId = Number(activeSessionId) || 0
   const forkingResponseId = state(0)
-  const ssrForkable = state(initialSsrForkable)
+  const forkableTurns = state(initialForkableTurns)
   const forkStatus = state(initialFork?.state || 'ready')
   const forkError = state(initialFork?.error || '')
   const forkStatusText = derived(() => forkStatus() === 'pending' ? 'Creating fork…'
     : forkStatus() === 'failed' ? forkError() : 'Forked conversation')
   function canForkResponse(turnId) {
-    return currentDriver() === 'codex' && turnId > handoffBoundary() && forkStatus() === 'ready' && !threadNavigation().archivedAt
+    return forkableTurns().includes(turnId) && forkStatus() === 'ready' && !threadNavigation().archivedAt
   }
   async function forkResponse(turnId) {
     if (!canForkResponse(turnId) || forkingResponseId()) return
@@ -1960,7 +1959,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   let providerCatalogRequest = 0
   const activeDriverValue = state(sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`)
   const currentDriver = derived(() => activeDriverValue().split(':')[0])
-  const handoffBoundary = state(initialHandoffBoundary)
   const appliedCodexSelection = state(initialCodexSelection)
   const activeModel = state(initialSessionModel)
   const draftProvider = state(activeSessionId ? activeDriverValue() : defaultDriver())
@@ -3461,7 +3459,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         const followsActive = draftProvider() === previous && !pendingProviderSwitch()
         activeDriverValue.set(target)
         activeModel.set(payload.model || '')
-        handoffBoundary.set(payload.afterTurnId)
         if (followsActive || draftProvider() === target) {
           draftProvider.set(target)
           showDraftCodexSelection({ model: payload.model || '', ...payload.codexTurnOptions })
@@ -3554,10 +3551,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
-        if (payload.type === 'turn.completed') {
-          if (payload.turnId === initialResponseTurn) ssrForkable.set(ssrHasResponse())
-          else updateClientTurn(payload.turnId, turn => ({ ...turn, completed: true }))
-        }
+        if (payload.type === 'turn.completed' && payload.responseForkable)
+          forkableTurns.update(turns => [...turns, payload.turnId])
         batch(() => {
           setSessionState('idle')
           closeConnectorOptions()

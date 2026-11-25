@@ -93,11 +93,14 @@ describe('Engine — the M1 exit criterion', () => {
     const restarted = new Engine({ store, reducer: reduce })
     await restarted.hydrate()
     expect(restarted.current.sessions.get(target)).toMatchObject({
-      fork: { state: 'ready', sessionId: source, turnId: 1 },
-      providerInstanceId: 8, providerSessionId: 'native-fork', model: 'model-1',
-      turns: [{ response: 'Response 1', providerTurnId: 'native-turn-1' }],
+      fork: { state: 'ready', sessionId: source, turnId: 1, providerSessionId: 'native-source' },
+      providerInstanceId: 8, providerSessionId: 'native-fork', model: 'model-2',
+      turns: [{ response: 'Response 1', providerTurnId: 'native-turn-1', nativeFork: { providerSessionId: 'native-fork' } }],
     })
     expect(restarted.current.sessions.get(source)?.turns.map(turn => turn.response)).toEqual(['Response 1', 'Response 2'])
+    const nested = envelope({ type: 'session.fork', sessionId: target, turnId: 1 })
+    await restarted.dispatch(nested)
+    expect(restarted.current.sessions.get(derivedId(nested.id))?.fork?.providerSessionId).toBe('native-fork')
     await restarted.dispatch(envelope({ type: 'session.turn.start', sessionId: target, text: 'Continue here' }))
     expect(restarted.current.sessions.get(source)?.turns[1]?.prompt).toBe('Prompt 2')
     expect(restarted.current.sessions.get(target)?.turns[1]?.prompt).toBe('Continue here')
@@ -113,6 +116,23 @@ describe('Engine — the M1 exit criterion', () => {
     expect(restarted.current.sessions.get(cancelledId)).toMatchObject({
       state: 'stopped', providerSessionId: '', fork: { state: 'failed', error: expect.stringContaining('stopped') },
     })
+
+    await restarted.dispatch(envelope({ type: 'session.handoff', sessionId: source, afterTurnId: 2, driverKind: 'claude', text: 'Continue elsewhere' }))
+    await restarted.dispatchInternal(envelope({ type: 'thread.session.set', sessionId: source, providerSessionId: 'native-claude' }))
+    await restarted.dispatchInternal(envelope({ type: 'thread.message.assistant.delta', sessionId: source, turnId: 3, text: 'Claude response' }))
+    await restarted.dispatchInternal(envelope({ type: 'thread.turn.complete', sessionId: source, turnId: 3, tokensIn: 0, tokensOut: 0, cost: 0 }))
+    const portable = envelope({ type: 'session.fork', sessionId: source, turnId: 1 })
+    await restarted.dispatch(portable)
+    const portableId = derivedId(portable.id)
+    const replay = new Engine({ store, reducer: reduce })
+    await replay.hydrate()
+    expect(replay.current.sessions.get(portableId)).toMatchObject({
+      driverKind: 'claude', providerSessionId: '', fork: { state: 'ready', sessionId: source, turnId: 1 },
+      handoff: { pending: true, afterTurnId: 1 }, turns: [{ prompt: 'Prompt 1', response: 'Response 1' }],
+    })
+    expect(replay.current.sessions.get(portableId)?.turns[0]?.nativeFork).toBeUndefined()
+    expect(replay.current.sessions.get(source)?.providerSessionId).toBe('native-claude')
+    expect(replay.current.sessions.get(source)?.turns).toHaveLength(3)
   })
 
   it('replays its log to an identical state', async () => {
