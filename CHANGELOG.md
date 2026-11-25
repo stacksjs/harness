@@ -1,5 +1,23 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.11...v0.0.12)
+
+## ✨ Features
+
+- persist and resume queued follow-ups ([4498d0d](https://github.com/stacksjs/harness/commit/4498d0d)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🐛 Bug Fixes
+
+- **deps**: use stx 0.2.935 for Harness views ([7d7d799](https://github.com/stacksjs/harness/commit/7d7d799)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ⚡ Performance Improvements
+
+- bundle follow-up and reconnect handlers ([8b87e8b](https://github.com/stacksjs/harness/commit/8b87e8b)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.10...v0.0.11)
 
 ## ✨ Features

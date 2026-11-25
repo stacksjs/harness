@@ -6,8 +6,9 @@
       "name": "harness",
       "dependencies": {
         "@harness/ansi": "workspace:*",
-        "@stacksjs/components": "^0.2.932",
-        "@stacksjs/stx": "^0.2.932",
+        "@stacksjs/components": "^0.2.935",
+        "@stacksjs/stx": "^0.2.935",
+        "bun-plugin-stx": "^0.2.935",
         "stacks": "^0.75.674"
       },
       "devDependencies": {
@@ -64,7 +65,7 @@
         "@harness/ansi": "workspace:*",
         "@harness/contract": "workspace:*",
         "@harness/engine": "workspace:*",
-        "@stacksjs/stx": "*",
+        "@stacksjs/stx": "^0.2.935",
         "highlight.js": "^11.12.0",
         "localtunnels": "0.2.12",
         "markdown-it": "^15.0.3"
