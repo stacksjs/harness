@@ -465,6 +465,9 @@ await page.setViewportSize({ width: 1280, height: 720 })
 // and the desktop menu's `craft:settings` event reaches the same modal.
 const settingsDialog = page.getByRole('dialog', { name: 'Settings' })
 const settingsReturn = page.url()
+/** Whether the thread search sheet is open right now, without waiting for it. */
+const searchDialogVisible = (): Promise<boolean> =>
+  page.evaluate(() => document.querySelector('[data-thread-search]')?.hasAttribute('open') === true)
 await page.keyboard.press('Meta+,')
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 await page.waitForURL(url => url.pathname === '/settings/general')
@@ -481,6 +484,86 @@ check('menu event reopens settings with the saved choice', reopenedShowsChoice =
 const accessSection = await page.evaluate(() => document.querySelector('[data-settings-modal]')?.textContent ?? '')
 check('settings shows the access section honestly', accessSection.includes('No devices are paired') && accessSection.includes('--remote'))
 const settingsNavigation = settingsDialog.getByRole('navigation', { name: 'Settings sections' })
+
+// 9b. Keyboard: the registry renders every chord, refuses one another command
+// owns, keeps a rebind across loads, and the rebound chord is the one the
+// window actually answers.
+await settingsNavigation.getByRole('button', { name: 'Keyboard' }).click()
+await page.waitForURL(url => url.pathname === '/settings/keybindings')
+const keyboardRows = page.locator('[data-keybinding-row]')
+const searchRow = page.locator('[data-keybinding-row="thread.search"]')
+const searchChord = searchRow.locator('[data-keybinding-chord]')
+const keyboardStatus = page.locator('[data-keybinding-status]')
+const defaultChord = (await searchChord.textContent())?.trim() ?? ''
+check('the keyboard section lists the registry at its platform chords',
+  await keyboardRows.count() >= 5 && (defaultChord === '⌘K' || defaultChord === 'Ctrl+K'))
+check('a shortcut on its default offers no reset',
+  await searchRow.getByRole('button', { name: 'Reset' }).isDisabled())
+
+// The chord Open settings owns: refused by name, and the row keeps the chord
+// it had rather than being left unbound.
+await searchRow.getByRole('button', { name: 'Change' }).click()
+await page.keyboard.press('Meta+Comma')
+await page.waitForFunction(
+  () => (document.querySelector('[data-keybinding-status]')?.textContent ?? '').includes('already belongs to'),
+  undefined,
+  { timeout: 4000 },
+)
+check('a chord another command owns is refused by the command that owns it',
+  ((await keyboardStatus.textContent()) ?? '').includes('Open settings')
+  && (await searchChord.textContent())?.trim() === defaultChord
+  && await page.evaluate(() => localStorage.getItem('harness.keybindings.v1')) === null)
+
+// Still recording, so the next press is a second attempt at the same row.
+await page.keyboard.press('Meta+Shift+K')
+await page.waitForFunction(
+  () => (document.querySelector('[data-keybinding-row="thread.search"] [data-keybinding-chord]')?.textContent ?? '').trim() !== '',
+  undefined,
+  { timeout: 4000 },
+)
+const reboundChord = (await searchChord.textContent())?.trim() ?? ''
+check('recording a free chord rebinds the command and stores only the override',
+  (reboundChord === '⇧⌘K' || reboundChord === 'Ctrl+Shift+K')
+  && await page.evaluate(() => localStorage.getItem('harness.keybindings.v1')) === '{"thread.search":"Mod+Shift+K"}'
+  && !await searchRow.getByRole('button', { name: 'Reset' }).isDisabled())
+
+// A second load of the same origin: the override is a stored preference, not
+// island state.
+const keyboardReload = await browserContext.newPage()
+await keyboardReload.goto(new URL('/settings/keybindings', baseUrl).href)
+const reloadedChord = keyboardReload.locator('[data-keybinding-row="thread.search"] [data-keybinding-chord]')
+await keyboardReload.waitForFunction(
+  () => (document.querySelector('[data-keybinding-row="thread.search"] [data-keybinding-chord]')?.textContent ?? '').includes('K'),
+  undefined,
+  { timeout: 4000 },
+)
+check('a rebind survives a fresh load of the same origin',
+  ['⇧⌘K', 'Ctrl+Shift+K'].includes(((await reloadedChord.textContent()) ?? '').trim()))
+await keyboardReload.close()
+
+// The window answers the new chord and no longer answers the old one.
+await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+await page.waitForURL(settingsReturn)
+await page.keyboard.press('Meta+K')
+await page.waitForTimeout(250)
+const staleChordOpened = await searchDialogVisible()
+await page.keyboard.press('Meta+Shift+K')
+const reboundSearch = page.getByRole('dialog', { name: 'Search threads' })
+await reboundSearch.waitFor({ state: 'visible', timeout: 4000 })
+check('the window answers the rebound chord and ignores the original', !staleChordOpened)
+await page.keyboard.press('Escape')
+await reboundSearch.waitFor({ state: 'hidden', timeout: 4000 })
+
+// Reset all, so the rest of the drive runs on the documented defaults.
+await page.keyboard.press('Meta+,')
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
+await settingsNavigation.getByRole('button', { name: 'Keyboard' }).click()
+await page.getByRole('button', { name: 'Reset all shortcuts' }).click()
+await page.waitForFunction(() => localStorage.getItem('harness.keybindings.v1') === null, undefined, { timeout: 4000 })
+check('resetting every shortcut clears the stored overrides',
+  (await searchChord.textContent())?.trim() === defaultChord
+  && await page.getByRole('button', { name: 'Reset all shortcuts' }).isDisabled())
+
 await settingsNavigation.getByRole('button', { name: 'Access' }).click()
 await page.waitForURL(url => url.pathname === '/settings/access')
 check('settings navigation moves keyboard focus to the selected section',
@@ -681,6 +764,26 @@ if (screenshotDir) {
     }))
     await capture(`settings-general-${width}x${height}`)
   }
+  // The Keyboard section at a desktop and the narrowest width: its rows carry
+  // a chord and two controls, which is the densest line in the whole sheet.
+  await settingsNavigation.getByRole('button', { name: 'Keyboard' }).click()
+  await page.waitForURL(url => url.pathname === '/settings/keybindings')
+  for (const [width, height] of [[1280, 800], [360, 800]] as const) {
+    await page.setViewportSize({ width, height })
+    check(`the keyboard rows and their controls fit at ${width}×${height}`,
+      await page.locator('[data-keybinding-list]').evaluate((list) => {
+        const bounds = list.getBoundingClientRect()
+        if (list.scrollWidth > list.clientWidth + 1 || bounds.left < 0 || bounds.right > innerWidth) return false
+        return [...list.querySelectorAll('[data-keybinding-row] button, [data-keybinding-chord]')].every((control) => {
+          const box = control.getBoundingClientRect()
+          return box.width > 0 && box.left >= 0 && box.right <= innerWidth
+        })
+      }))
+    await capture(`settings-keyboard-${width}x${height}`)
+  }
+  await settingsNavigation.getByRole('button', { name: 'General' }).click()
+  await page.waitForURL(url => url.pathname === '/settings/general')
+  await page.setViewportSize({ width: 360, height: 800 })
   await capture('settings-mobile')
   await page.keyboard.press('Escape')
   await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
