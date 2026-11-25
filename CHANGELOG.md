@@ -1,5 +1,19 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.28...v0.0.29)
+
+## ✨ Features
+
+- **codex**: fork a conversation from a selected response ([995e26a](https://github.com/stacksjs/harness/commit/995e26a)) _(by Chris)_
+
+## 🐛 Bug Fixes
+
+- **ui**: mark fork lineage after the source response ([9151841](https://github.com/stacksjs/harness/commit/9151841)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.27...v0.0.28)
 
 ## ✨ Features
