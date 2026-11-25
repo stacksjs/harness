@@ -73,7 +73,7 @@ export type ClientCommand =
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'session.fork', sessionId: number, turnId: number }
   | { type: 'session.handoff', sessionId: number, afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, text: string }
-  | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
+  | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection, compactAfterTurnId?: number }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
   | { type: 'session.queue.edit', sessionId: number, id: string, text: string, previousText: string }
@@ -146,6 +146,7 @@ export type InternalCommand =
   | { type: 'thread.steer.ready', sessionId: number, turnId: number }
   | { type: 'thread.steer.settle', sessionId: number, id: string, requestId: string, outcome: SteeringOutcome }
   | { type: 'thread.queue.advance', sessionId: number }
+  | { type: 'thread.compact.idle', sessionId: number, afterTurnId: number }
   | { type: 'thread.queue.hold', sessionId: number }
   | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'thread.message.assistant.delta', sessionId: number, turnId: number, text: string }

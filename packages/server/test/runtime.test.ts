@@ -298,6 +298,109 @@ describe('manual compaction', () => {
   })
 })
 
+describe('Claude idle compaction', () => {
+  it.each(['keep', 'compact', 'off', 'failure', 'restart', 'scheduled', 'disabled-before-timer'] as const)(
+    'preserves one native conversation and prompt when the outcome is %s', async (scenario) => {
+      const databasePath = join(dir, 'test.sqlite')
+      const scheduled = scenario === 'scheduled' || scenario === 'disabled-before-timer'
+      const order: Array<[string, string | undefined]> = []
+      const gate = Promise.withResolvers<void>()
+      const { driver } = fakeDriver([])
+      const resolveDriver = () => ({
+        ...driver,
+        async create(config: DriverConfig) {
+          return {
+            ...await driver.create(config),
+            async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+              order.push([input.text, input.providerSessionId])
+              if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'claude-context' }
+              yield { type: 'assistant-delta', text: 'The fixture acknowledged the request.' }
+              yield {
+                type: 'turn-complete', tokensIn: 5, tokensOut: 3, costMicros: 0,
+                ...(input.text === 'Seed context' ? { contextUsage: {
+                  usedTokens: 220_000, maxTokens: 1_000_000,
+                  promptCacheExpiresAt: Date.now() + (scheduled ? 120_000 + 700 : -1000),
+                } } : {}),
+              }
+            },
+            async *compact(providerSessionId: string): AsyncIterable<ProviderEvent> {
+              order.push(['/compact', providerSessionId])
+              if (scenario === 'restart') await gate.promise
+              if (scenario === 'failure') yield { type: 'error', message: 'Compaction was unavailable.' }
+              else yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
+            },
+          }
+        },
+      })
+      harness = await serve({ port, databasePath, resolveDriver })
+      let client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      const { sessionId } = await bootstrap(client)
+      const send = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 10, command } })
+
+      try {
+        if (scheduled || scenario === 'off') {
+          send('idle-settings', { type: 'settings.update', changes: { claudeIdleCompaction: scheduled ? 'beforeCacheExpires' : 'off' } })
+          expect(await client.waitForDispatch('idle-settings')).toMatchObject({ t: 'dispatched' })
+        }
+        send('idle-seed', { type: 'session.turn.start', sessionId, text: 'Seed context' })
+        expect(await client.waitFor('turn.completed')).toMatchObject({ turnId: 1, contextUsage: { usedTokens: 220_000 } })
+
+        if (scenario === 'scheduled') {
+          expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 2)).toMatchObject({ contextCompacted: true })
+          expect(client.payloads('turn.started').at(-1)).toMatchObject({ automaticCompaction: true })
+          expect(order).toEqual([['Seed context', undefined], ['/compact', 'claude-context']])
+          return
+        }
+        if (scenario === 'disabled-before-timer') {
+          send('turn-off', { type: 'settings.update', changes: { claudeIdleCompaction: 'off' } })
+          expect(await client.waitForDispatch('turn-off')).toMatchObject({ t: 'dispatched' })
+          await Bun.sleep(900)
+          expect(order).toEqual([['Seed context', undefined]])
+          return
+        }
+
+        const command: Command = {
+          type: 'session.turn.start', sessionId, text: 'Deliver the real follow-up.',
+          ...(scenario === 'keep' ? {} : { compactAfterTurnId: 1 }),
+        }
+        send('idle-return', command)
+        const needsRecovery = scenario === 'failure' || scenario === 'restart'
+        if (needsRecovery) {
+          expect(await client.waitFor('queue.added')).toMatchObject({ entry: { id: 'idle-return', text: command.text } })
+          if (scenario === 'restart') {
+            client.close()
+            harness.stop()
+            gate.resolve()
+            harness = await serve({ port, databasePath, resolveDriver })
+            client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+            client.send({ t: 'subscribe', sessionId })
+            expect(await client.waitFor('turn.interrupted')).toMatchObject({ turnId: 2 })
+          }
+          else expect(await client.waitFor('session.failed')).toMatchObject({ message: 'Compaction was unavailable.' })
+          expect(harness.engine.current.sessions.get(sessionId)?.followUps).toMatchObject({ held: true, entries: [{ text: command.text }] })
+          expect(order.map(([text]) => text)).not.toContain(command.text)
+          send('idle-recover', { type: 'session.queue.send', sessionId, id: 'idle-return' })
+        }
+
+        const shouldCompact = scenario !== 'keep' && scenario !== 'off'
+        expect(await client.waitFor('turn.completed', 3000, event => event.turnId === (shouldCompact ? 3 : 2))).toBeTruthy()
+        send('idle-return', command)
+        expect(await client.waitForDispatch('idle-return')).toMatchObject({ t: 'dispatched' })
+        expect(order).toEqual([
+          ['Seed context', undefined],
+          ...(shouldCompact ? [['/compact', 'claude-context']] : []),
+          [command.text, 'claude-context'],
+        ])
+        expect(harness.engine.current.sessions.get(sessionId)?.followUps.entries).toHaveLength(0)
+      }
+      finally {
+        gate.resolve()
+        client.close()
+      }
+    },
+  )
+})
+
 describe('provider handoff', () => {
   it.each(['resumed', 'missing', 'ambiguous', 'over-capacity', 'changed-model', 'small-window'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
     const databasePath = join(dir, 'test.sqlite')
@@ -1390,7 +1493,7 @@ describe('host settings belong to the host', () => {
     const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' } } } })
     expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning' })
 
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
@@ -1417,7 +1520,7 @@ describe('host settings belong to the host', () => {
     // The setting is in the log, so a fresh process over the same database
     // still has it.
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning' })
     harness.stop()
 
     // A different host, which is a different log: independent by construction
@@ -1425,7 +1528,7 @@ describe('host settings belong to the host', () => {
     const otherDatabase = join(dir, 'other.sqlite')
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning' })
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {

@@ -216,6 +216,7 @@ const RESPONSIVE_SHELL = `
 [data-composer-provider-controls] { display: flex; min-width: 0; align-items: center; }
 [data-composer-provider-controls] select { max-width: min(230px, 100%); }
 [data-composer-actions] { flex-shrink: 0; align-items: center; }
+[data-idle-compaction][aria-pressed="true"], [data-idle-compaction]:hover { background: var(--workspace-hover); }
 [data-send] {
   padding-inline: 12px; font-weight: 600; color: var(--workspace-surface);
   background: var(--workspace-accent);

@@ -21,7 +21,7 @@ export interface InputRequestState {
 interface ProviderConversation {
   providerSessionId: string
   throughTurnId: number
-  context?: { usage: ProviderContextUsage, model: string, serviceTier?: string }
+  context?: { usage: ProviderContextUsage, reportedAt: number, model: string, serviceTier?: string }
 }
 
 export interface SessionState {
@@ -115,6 +115,7 @@ export interface TurnState {
   providerTurnId?: string
   nativeFork?: NativeForkTarget
   compaction?: true
+  automaticCompaction?: true
   contextCompacted?: true
   modelChanged?: boolean
   switchedProvider?: DriverKind
@@ -528,6 +529,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         status: 'running',
         prompt: p.text ?? '',
         ...(p.compaction ? { compaction: true } : {}),
+        ...(p.automaticCompaction ? { automaticCompaction: true } : {}),
         ...(p.codexSelection ? { codexSelection: p.codexSelection } : {}),
         ...(p.modelChanged ? { modelChanged: true } : {}),
         ...(p.switchedProvider ? { switchedProvider: p.switchedProvider } : {}),
@@ -637,7 +639,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
             providerSessionId: session.providerSessionId,
             throughTurnId: t.id,
             ...(p.contextUsage ? {
-              context: { usage: p.contextUsage, model: session.model, serviceTier: session.codexTurnOptions?.serviceTier },
+              context: { usage: p.contextUsage, reportedAt: event.at, model: session.model, serviceTier: session.codexTurnOptions?.serviceTier },
             } : {}),
           }
         }

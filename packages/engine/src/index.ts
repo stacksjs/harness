@@ -1,3 +1,4 @@
+export { claudeIdleCompaction } from './idle-compaction'
 export { CommandRejected, Engine } from './engine'
 export type { DispatchResult, EngineOptions, Reducer } from './engine'
 export { apply, emptyState, forkResponsePoint, isForkableResponse, isTurnActive, providerConversation, replay } from './projections'

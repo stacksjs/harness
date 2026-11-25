@@ -24,7 +24,7 @@ import { join } from 'node:path'
  * so the codec is scoped to the code that uses it rather than being two more
  * names on `window` that anything could overwrite.
  */
-const ENTRY = `export { applyFollowUpEvent, codexSelectionLabel, encode, decode, threadDisplayTitle } from '@harness/contract'
+const ENTRY = `export { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, encode, decode, threadDisplayTitle } from '@harness/contract'
 export { Terminal, toHtml } from '@harness/ansi'
 export { updateTranscriptMarkdown } from './packages/server/src/transcript-markdown'
 export { sendBrowserCommand } from './packages/server/src/browser-command'

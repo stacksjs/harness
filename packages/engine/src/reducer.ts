@@ -9,6 +9,7 @@
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, isCompactCommand, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
 import { forkResponsePoint, isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
+import { claudeIdleCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
 
@@ -658,7 +659,30 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before sending a message.')
 
-      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection)) }]
+      const turn = turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection))
+      const base = { sessionId: session.id, commandId, at }
+      if (command.compactAfterTurnId !== undefined && state.settings.claudeIdleCompaction !== 'off'
+        && !isCompactCommand(command.text)) {
+        const eligible = claudeIdleCompaction(session, at)
+        if (eligible && eligible.afterTurnId === command.compactAfterTurnId && eligible.availableAt <= at) {
+          return [
+            { ...base, payload: { ...turnStarted(session, '/compact'), automaticCompaction: true } },
+            { ...base, payload: { type: 'queue.added', entry: { id: commandId, text: followUpText(command.text) } } },
+          ]
+        }
+      }
+      return [{ ...base, payload: turn }]
+    }
+
+    case 'thread.compact.idle': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session || state.settings.claudeIdleCompaction !== 'beforeCacheExpires'
+        || !state.workspaces.get(session.workspaceId)?.trusted) return []
+      const eligible = claudeIdleCompaction(session, at)
+      if (!eligible || eligible.afterTurnId !== command.afterTurnId || eligible.startsAt === undefined
+        || at < eligible.startsAt || eligible.expiresAt === undefined || at >= eligible.expiresAt) return []
+
+      return [{ sessionId: session.id, commandId, at, payload: { ...turnStarted(session, '/compact'), automaticCompaction: true } }]
     }
 
     case 'session.queue.add':

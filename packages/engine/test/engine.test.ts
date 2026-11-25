@@ -418,10 +418,10 @@ describe('Engine — the client/internal boundary', () => {
 describe('Host settings', () => {
   it('records only what changed and replays to the same state', async () => {
     const { engine, store } = await bootedEngine()
-    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system' })
+    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning' })
 
     await engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'queue' } }))
-    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue', terminalShell: 'system' })
+    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning' })
 
     // `followUpBehavior` was already queue, so the log records the one field
     // that moved. Restating the rest would make the log unable to answer what
@@ -455,7 +455,7 @@ describe('Host settings', () => {
       at: clock,
       payload: { type: 'settings.updated', changes: { defaultDriver: 'retired-agent', followUpBehavior: 'steer' } as never },
     }], emptyState())
-    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer', terminalShell: 'system' })
+    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer', terminalShell: 'system', claudeIdleCompaction: 'whenReturning' })
   })
 })
 

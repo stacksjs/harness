@@ -10,7 +10,7 @@
 import type { HostSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { isForkableResponse, providerConversation } from '@harness/engine'
+import { claudeIdleCompaction, isForkableResponse, providerConversation } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
@@ -206,6 +206,7 @@ export function viewProps(state: HarnessState, options: {
           codexTurnOptions: active.codexTurnOptions,
           providerInstanceId: active.providerInstanceId,
           contextUsage: activeContextUsage(active),
+          idleCompaction: claudeIdleCompaction(active, Date.now()),
           lastSeq: active.lastSeq,
           // For the terminal: a shell opens in the session's workspace, and
           // the island should not have to reverse-engineer it from the DOM.
@@ -227,6 +228,7 @@ export function viewProps(state: HarnessState, options: {
             response: turn.response,
             status: turn.status,
             ...(turn.contextCompacted ? { contextCompacted: true } : {}),
+            ...(turn.automaticCompaction ? { automaticCompaction: true } : {}),
             forkable: isForkableResponse(turn),
             switchedProvider: turn.switchedProvider,
             modelChange: turn.modelChanged && turn.codexSelection ? codexSelectionLabel(turn.codexSelection) : undefined,

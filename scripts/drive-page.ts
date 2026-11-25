@@ -21,6 +21,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, webkit } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
+import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/index'
 
 const checks: Array<[string, boolean]> = []
@@ -87,8 +88,27 @@ const script: ProviderEvent[] = [
   { type: 'assistant-delta', text: 'done.' },
   { type: 'turn-complete', tokensIn: 5, tokensOut: 3, costMicros: 0 },
 ]
+const idleClaudeDelivery: Array<[string, string | undefined]> = []
 const instance: ProviderInstance = {
+  async *compact(providerSessionId) {
+    idleClaudeDelivery.push(['/compact', providerSessionId])
+    yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
+  },
   async *startTurn(input) {
+    if (input.text.startsWith('Idle Claude fixture:')) {
+      idleClaudeDelivery.push([input.text, input.providerSessionId])
+      if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'idle-claude-fixture' }
+      const warm = input.text === 'Idle Claude fixture: warm cache'
+      const report = warm || input.text.startsWith('Idle Claude fixture: expired cache')
+      yield { type: 'assistant-delta', text: report ? 'Fixture context recorded.' : 'Fixture continued.' }
+      yield {
+        type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0,
+        ...(report ? { contextUsage: {
+          usedTokens: 220_000, maxTokens: 1_000_000, promptCacheExpiresAt: Date.now() + (warm ? 1600 : -1000),
+        } } : {}),
+      }
+      return
+    }
     if (input.text.startsWith('Saved conversation history.')) {
       fixtureHandoffs.push(input)
       yield { type: 'session-bound', providerSessionId: `handoff-fixture-${fixtureHandoffs.length}` }
@@ -2165,6 +2185,81 @@ check('an occupied provider window starts one fresh continuation in the same thr
 await capacityFallback.scrollIntoViewIfNeeded()
 await capture('handoff-capacity-fallback-phone')
 
+
+
+const idleFixtureId = 'claude-idle-browser'
+await harness.engine.dispatch({
+  id: idleFixtureId, at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' },
+})
+const idleUrl = new URL(`/s/${derivedId(idleFixtureId)}`, baseUrl)
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.goto(idleUrl.href)
+const compactChoice = page.locator('[data-idle-compaction]')
+const idlePrompt = page.getByRole('textbox', { name: 'Message', exact: true })
+await idlePrompt.fill('Idle Claude fixture: warm cache')
+await idlePrompt.press('Enter')
+await page.getByText('Fixture context recorded.', { exact: true }).last().waitFor()
+check('Claude does not offer prompt compaction while the cache is warm', await compactChoice.isHidden())
+await compactChoice.waitFor({ state: 'visible', timeout: 5000 })
+check('an expiring cache reveals the Compact choice without a reload',
+  await compactChoice.getAttribute('aria-pressed') === 'true'
+  && /220K/i.test(await compactChoice.textContent() ?? ''))
+await compactChoice.click()
+await page.getByRole('button', { name: /Keep full context/ }).waitFor()
+await capture('idle-compaction-keep-desktop')
+await idlePrompt.fill('Idle Claude fixture: follow-up with full context')
+await idlePrompt.press('Enter')
+await page.getByText('Fixture continued.', { exact: true }).last().waitFor()
+check('Keep delivers the user message without running compaction',
+  !idleClaudeDelivery.some(([message]) => message === '/compact'))
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+await idlePrompt.fill('Idle Claude fixture: expired cache')
+await idlePrompt.press('Enter')
+await compactChoice.waitFor({ state: 'visible' })
+await page.reload()
+await compactChoice.waitFor({ state: 'visible' })
+check('an eligible Claude conversation keeps its Compact choice after reload', await compactChoice.getAttribute('aria-pressed') === 'true')
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await capture(`idle-compaction-compact-${width}`)
+  }
+}
+await page.setViewportSize({ width: 390, height: 844 })
+await idlePrompt.fill('Idle Claude fixture: follow-up after compaction')
+await idlePrompt.press('Enter')
+const automaticCompaction = page.locator('[data-context-compacted]:visible')
+await automaticCompaction.waitFor()
+await page.locator('[data-turn]').filter({ hasText: 'Idle Claude fixture: follow-up after compaction' })
+  .getByText('Fixture continued.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+check('Compact sends the queued follow-up once after marking the native compaction',
+  JSON.stringify(idleClaudeDelivery.slice(-2)) === JSON.stringify([
+    ['/compact', 'idle-claude-fixture'],
+    ['Idle Claude fixture: follow-up after compaction', 'idle-claude-fixture'],
+  ]) && await page.locator('[data-automatic-compaction]:visible').count() === 1)
+await automaticCompaction.scrollIntoViewIfNeeded()
+await capture('idle-compaction-completed-phone')
+
+const providerPreferences = new URL('/settings/providers', baseUrl)
+providerPreferences.searchParams.set('from', idleUrl.pathname)
+await page.goto(providerPreferences.href)
+await settingsDialog.getByText('Advanced', { exact: true }).click()
+const idleSetting = settingsDialog.getByLabel('Compact idle threads')
+check('the host defaults to compacting idle Claude threads on return', await idleSetting.inputValue() === 'whenReturning')
+await idleSetting.selectOption('off')
+await page.waitForFunction(() => document.querySelector('#settings-claude-idle-compaction')?.value === 'off')
+await capture('idle-compaction-settings-phone')
+await page.reload()
+await settingsDialog.getByText('Advanced', { exact: true }).click()
+check('Never is saved as a host provider setting', await idleSetting.inputValue() === 'off')
+await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+await page.waitForURL(idleUrl.href)
+await idlePrompt.fill('Idle Claude fixture: expired cache with Never selected')
+await idlePrompt.press('Enter')
+await page.locator('[data-turn]').filter({ hasText: 'Idle Claude fixture: expired cache with Never selected' })
+  .getByText('Fixture context recorded.', { exact: true }).waitFor()
+check('Never suppresses the Compact choice for a fresh high-usage sample', await compactChoice.isHidden())
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

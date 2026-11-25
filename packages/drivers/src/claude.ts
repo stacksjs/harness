@@ -200,11 +200,12 @@ export class ClaudeInstance implements ProviderInstance {
     let run: Query | undefined
     let bound = input.providerSessionId ?? null
     let compacted = false
-    let occupancy: { model: string, usedTokens: number } | undefined
+    let occupancy: { model: string, usedTokens: number, promptCacheExpiresAt?: number } | undefined
 
     try {
       const query = this.queryFactory ?? (await import('@anthropic-ai/claude-agent-sdk')).query
       if (queue.closed) return
+      const requestedAt = Date.now()
       run = query({ prompt: input.text, options: this.options(queue, input.providerSessionId) })
       this.running = run
       for await (const message of run as AsyncIterable<SDKMessage>) {
@@ -225,13 +226,24 @@ export class ClaudeInstance implements ProviderInstance {
           const { input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens } = sample
           const inputTokens = (input_tokens ?? 0) + (cache_read_input_tokens ?? 0) + (cache_creation_input_tokens ?? 0)
           const usedTokens = inputTokens + (output_tokens ?? 0)
-          if (Number.isSafeInteger(usedTokens) && inputTokens > 0) occupancy = { model: message.message.model, usedTokens }
+          if (Number.isSafeInteger(usedTokens) && inputTokens > 0) {
+            // Cache hits alone do not identify the TTL. Only schedule from a reported cache write.
+            const cacheCreation = usage.cache_creation
+            const ttlMinutes = (cacheCreation?.ephemeral_1h_input_tokens ?? 0) > 0 ? 60
+              : (cacheCreation?.ephemeral_5m_input_tokens ?? 0) > 0 ? 5 : 0
+            occupancy = {
+              model: message.message.model,
+              usedTokens,
+              ...(ttlMinutes ? { promptCacheExpiresAt: requestedAt + ttlMinutes * 60_000 } : {}),
+            }
+          }
         }
         for (const event of translate(message)) {
           if (event.type === 'turn-complete') {
             const maxTokens = occupancy && message.type === 'result' ? message.modelUsage?.[occupancy.model]?.contextWindow : undefined
             const contextUsage = occupancy ? {
               usedTokens: occupancy.usedTokens,
+              ...(occupancy.promptCacheExpiresAt === undefined ? {} : { promptCacheExpiresAt: occupancy.promptCacheExpiresAt }),
               ...(maxTokens && Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
             } : undefined
             queue.finish(!compacting ? { ...event, ...(contextUsage ? { contextUsage } : {}) } : compacted

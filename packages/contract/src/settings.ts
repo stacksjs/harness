@@ -18,6 +18,7 @@ import type { DriverKind } from './commands'
 
 export type FollowUpBehavior = 'queue' | 'steer'
 export type TerminalShell = 'system' | 'den'
+export type ClaudeIdleCompaction = 'whenReturning' | 'beforeCacheExpires' | 'off'
 
 export interface HostSettings {
   /** The agent a new thread starts with, unless the composer overrides it. */
@@ -26,6 +27,8 @@ export interface HostSettings {
   followUpBehavior: FollowUpBehavior
   /** Shell for new local terminals. */
   terminalShell: TerminalShell
+  /** When to compact an idle Claude conversation with a large context. */
+  claudeIdleCompaction: ClaudeIdleCompaction
 }
 
 const DRIVER_KINDS: readonly DriverKind[] = ['claude', 'codex', 'cursor', 'opencode', 'grok']
@@ -35,6 +38,7 @@ export const defaultHostSettings: Readonly<HostSettings> = Object.freeze({
   defaultDriver: 'claude',
   followUpBehavior: 'queue',
   terminalShell: 'system',
+  claudeIdleCompaction: 'whenReturning',
 })
 
 /** A fresh, mutable copy of the defaults. */
@@ -61,6 +65,8 @@ export function acceptedSettings(changes: unknown): Partial<HostSettings> {
     accepted.followUpBehavior = source.followUpBehavior as FollowUpBehavior
   if (source.terminalShell === 'system' || source.terminalShell === 'den')
     accepted.terminalShell = source.terminalShell
+  if (source.claudeIdleCompaction === 'whenReturning' || source.claudeIdleCompaction === 'beforeCacheExpires' || source.claudeIdleCompaction === 'off')
+    accepted.claudeIdleCompaction = source.claudeIdleCompaction
   return accepted
 }
 

@@ -18,7 +18,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell, Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
-import { Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
+import { claudeIdleCompaction, Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff } from './diff'
@@ -559,12 +559,52 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   const turnExecutions = new Map<number, Promise<void>>()
+  const compactTimers = new Map<number, ReturnType<typeof setTimeout>>()
+
+  function cancelIdleCompaction(sessionId: number): void {
+    clearTimeout(compactTimers.get(sessionId))
+    compactTimers.delete(sessionId)
+  }
+
+  function scheduleIdleCompaction(sessionId: number): void {
+    cancelIdleCompaction(sessionId)
+    if (closing || engine.current.settings.claudeIdleCompaction !== 'beforeCacheExpires') return
+    const session = engine.current.sessions.get(sessionId)
+    if (!session || !engine.current.workspaces.get(session.workspaceId)?.trusted) return
+    const now = Date.now()
+    const eligible = claudeIdleCompaction(session, now)
+    if (!eligible || eligible.startsAt === undefined || eligible.expiresAt === undefined || eligible.expiresAt <= now) return
+
+    const startsAt = eligible.startsAt
+    const timer = setTimeout(() => {
+      compactTimers.delete(sessionId)
+      if (closing) return
+      const at = Date.now()
+      if (at < startsAt) {
+        scheduleIdleCompaction(sessionId)
+        return
+      }
+      void engine.dispatchInternal({
+        id: `idle_compact_${sessionId}_${eligible.afterTurnId}`, at,
+        command: { type: 'thread.compact.idle', sessionId, afterTurnId: eligible.afterTurnId },
+      }).then((result) => {
+        if (closing || result.replayed) return
+        broadcast(result.events)
+        startAcceptedTurn(result.events)
+      }).catch((error) => {
+        if (!closing) console.warn('[idle compaction] Could not compact the thread.', error)
+      })
+    }, Math.max(0, startsAt - now))
+    timer.unref()
+    compactTimers.set(sessionId, timer)
+  }
 
   function startAcceptedTurn(events: HarnessEvent[]): void {
     const event = events.find(item => item.payload.type === 'turn.started')
     const payload = event?.payload
     if (!event || payload?.type !== 'turn.started' || closing) return
     const { sessionId } = event
+    cancelIdleCompaction(sessionId)
     const previous = turnExecutions.get(sessionId)
 
     const execution = Promise.resolve(previous).then(async () => {
@@ -583,6 +623,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (turnExecutions.get(sessionId) !== execution) return
       turnExecutions.delete(sessionId)
       advanceFollowUps(sessionId)
+      scheduleIdleCompaction(sessionId)
     })
 
     turnExecutions.set(sessionId, execution)
@@ -818,7 +859,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           send(socket, { t: 'protocol-error', message: 'dispatch requires an envelope with id and command' })
           return
         }
-        const envelope = received.command.type === 'session.organize' ? { ...received, at: Date.now() } : received
+        const useHostClock = received.command.type === 'session.organize'
+          || (received.command.type === 'session.turn.start' && received.command.compactAfterTurnId !== undefined)
+        const envelope = useHostClock ? { ...received, at: Date.now() } : received
         // Read before dispatching: a deleted profile takes its sessions with
         // it, and their worktree paths go with them.
         const doomed = envelope.command.type === 'profile.delete'
@@ -1236,6 +1279,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     stop: () => {
       closing = true
       clearTimeout(wakeTimer)
+      for (const timer of compactTimers.values()) clearTimeout(timer)
+      compactTimers.clear()
       void tunnel?.close()
       void runtime.stopAll()
       server.stop(true)

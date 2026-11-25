@@ -20,7 +20,7 @@ export const settingsSections = $props.settingsSections || []
 // The keyboard registry, with both platform spellings of every default chord.
 export const keybindings = $props.keybindings || []
 // Settings this host owns, shared by every client connected to it.
-export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system' }
+export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning' }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -36,6 +36,7 @@ export const initialApprovals = activeSession?.pendingApprovals || []
 export const initialInputs = activeSession?.pendingInputs || []
 export const initialFollowUps = activeSession?.followUps || { entries: [], held: false }
 export const initialContextUsage = activeSession?.contextUsage || null
+export const initialIdleCompaction = activeSession?.idleCompaction || null
 const pendingApproval = initialApprovals[0]
 
 // One space per profile. Its project rows contain threads that are ready for another message.
@@ -361,7 +362,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}" id="turn-{{ turn.id }}">
           @if(turn.switchedProvider)<p data-provider-switch class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Continued with {{ providerDisplayName(turn.switchedProvider) }}</p>@endif
           @if(turn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ turn.modelChange }}</p>@endif
-          <div class="sr-only">You</div>
+          @if(!turn.automaticCompaction)<div class="sr-only">You</div>@endif
+          @if(turn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
           @if(turn.contextCompacted)<p data-context-compacted class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>@endif
           @foreach(turn.steered as message)
@@ -425,7 +427,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article class="mb-5" data-turn="{{ liveTurn.id }}" id="turn-{{ liveTurn.id }}" data-live>
           @if(liveTurn.switchedProvider)<p data-provider-switch class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Continued with {{ providerDisplayName(liveTurn.switchedProvider) }}</p>@endif
           @if(liveTurn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ liveTurn.modelChange }}</p>@endif
-          <div class="sr-only">You</div>
+          @if(!liveTurn.automaticCompaction)<div class="sr-only">You</div>@endif
+          @if(liveTurn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
           <p data-context-compacted @if(!liveTurn.contextCompacted)hidden@endif :hidden="ssrCompactedTurn() !== {{ liveTurn.id }}" class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>
           <div data-steering-history>
@@ -510,7 +513,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
           <p data-provider-switch hidden :hidden="!turn.providerSwitch" :text="turn.providerSwitch" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300"></p>
           <p data-model-change :hidden="!turn.modelChange" :text="turn.modelChange ? 'Switched to ' + turn.modelChange : ''" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300"></p>
-          <div class="sr-only">You</div>
+          <div class="sr-only" :hidden="turn.automaticCompaction">You</div>
+          <p data-automatic-compaction hidden :hidden="!turn.automaticCompaction" class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
           <p data-context-compacted hidden :hidden="!turn.contextCompacted" class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>
           <div data-steering-history></div>
@@ -597,7 +601,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         @include('../partials/harness-model-picker')
         </div>
         <div data-composer-actions class="flex flex-wrap gap-2 justify-end">
-          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :hidden="!showSend()" :disabled="!composerText().trim() || startPending() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+          <button type="button" data-idle-compaction hidden :hidden="!idleCompactionOffer()" @click="toggleIdleCompaction" :aria-pressed="compactNextPrompt()" :aria-label="idleCompactionLabel()" :title="idleCompactionLabel()" class="px-2 min-h-8 text-[12px] border border-black/10 rounded-full dark:border-white/20" :text="idleCompactionChip()"></button>
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!composerText().trim() || startPending() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
             <span data-send-text :text="sendLabel()">Send</span>
           </button>
@@ -947,6 +952,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <span class="text-[11px] opacity-60" :text="account.stateText"></span>
         </li>
       </ul>
+      <details class="mt-4 pt-3 border-black/10 border-t dark:border-white/10">
+        <summary class="font-semibold text-[13px] cursor-pointer">Advanced</summary>
+        <label for="settings-claude-idle-compaction" class="block mt-3 font-medium text-[13px]">Compact idle threads</label>
+        <p id="settings-claude-idle-help" class="mt-1 text-neutral-600 text-xs dark:text-neutral-300">Applies to Claude Code conversations with at least 200,000 tokens.</p>
+        <select id="settings-claude-idle-compaction" aria-describedby="settings-claude-idle-help" :value="settings().claudeIdleCompaction ?? 'whenReturning'" @change="changeClaudeIdleCompaction" class="mt-2 px-2 max-w-full min-h-9 text-[13px] bg-white dark:bg-neutral-900 border border-black/10 rounded-md dark:border-white/20">
+          <option value="whenReturning">When you return</option>
+          <option value="beforeCacheExpires">Before the cache expires (beta)</option>
+          <option value="off">Never</option>
+        </select>
+        <p data-provider-settings-error role="alert" hidden :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mt-1 text-red-700 text-xs dark:text-red-300"></p>
+      </details>
 
       </section>
       <section :hidden="settingsSelection() !== 'access'" data-settings-pane>
@@ -1318,6 +1334,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
    * put back if the host refuses. Leaving the control ahead of the host would
    * have the next reload silently undo the change.
    */
+  function changeClaudeIdleCompaction(event) {
+    void updateSettings({ claudeIdleCompaction: event.currentTarget.value })
+  }
+
   async function updateSettings(changes) {
     const previous = settings()
     if (Object.entries(changes).every(([key, value]) => previous[key] === value)) return
@@ -1378,6 +1398,40 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const workspaceDetailsOpen = useLocalStorage('harness.workspaceDetailsOpen', true)
   const showContextWindow = useLocalStorage('harness.showContextWindow', false)
   const contextUsage = state(initialContextUsage)
+  const idleCompactionCandidate = state(initialIdleCompaction)
+  const idleCompactionClock = state(Date.now())
+  const keepContextTurn = state(0)
+  const compactTokenNumber = new Intl.NumberFormat(undefined, { notation: 'compact' })
+  const idleCompactionOffer = derived(() => {
+    const candidate = idleCompactionCandidate()
+    if (!candidate || candidate.availableAt > idleCompactionClock() || uiState() !== 'idle'
+      || settings().claudeIdleCompaction === 'off' || !sessionOnline() || pendingProviderSwitch() || editingFollowUp()
+      || followUps().entries.length || localFollowUps()?.length || threadNavigation().settledAt
+      || threadNavigation().snoozedUntil || /^\s*\/compact(?:\s|$)/iu.test(composerText())) return null
+    return candidate
+  })
+  const compactNextPrompt = derived(() => Boolean(idleCompactionOffer() && idleCompactionOffer().afterTurnId !== keepContextTurn()))
+  const idleCompactionChip = derived(() => {
+    const offer = idleCompactionOffer()
+    return offer ? `${compactNextPrompt() ? 'Compact' : 'Keep'} · ${compactTokenNumber.format(offer.usedTokens)}` : ''
+  })
+  const idleCompactionLabel = derived(() => idleCompactionOffer()
+    ? `${compactNextPrompt() ? 'Compact before sending' : 'Keep full context'} (${idleCompactionOffer().usedTokens.toLocaleString()} tokens)`
+    : '')
+  let idleCompactionTimer
+  effect(() => {
+    const candidate = idleCompactionCandidate()
+    idleCompactionTimer?.stop()
+    const now = Date.now()
+    idleCompactionClock.set(now)
+    if (candidate && candidate.availableAt > now)
+      idleCompactionTimer = useTimeout(() => idleCompactionClock.set(Date.now()), candidate.availableAt - now)
+  })
+  onDestroy(() => idleCompactionTimer?.stop())
+  function toggleIdleCompaction() {
+    const offer = idleCompactionOffer()
+    if (offer) keepContextTurn.set(compactNextPrompt() ? offer.afterTurnId : 0)
+  }
   const tokenNumber = new Intl.NumberFormat()
   const contextTokens = derived(() => {
     const usage = contextUsage()
@@ -2986,7 +3040,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
     startPending.set(true)
     try {
-      await sendCommand({ type: 'session.turn.start', sessionId, text, ...(codexSelection ? { codexSelection } : {}) }, commandId)
+      const compactAfterTurnId = compactNextPrompt() ? idleCompactionOffer()?.afterTurnId : undefined
+      await sendCommand({ type: 'session.turn.start', sessionId, text, ...(codexSelection ? { codexSelection } : {}),
+        ...(compactAfterTurnId === undefined ? {} : { compactAfterTurnId }) }, commandId)
       if (box.value === raw) {
         box.value = ''
         composerText.set('')
@@ -3380,7 +3436,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
@@ -3472,7 +3528,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         terminalError.set(frame.message)
         return
       }
-      if (frame?.t !== 'event' || frame.event.sessionId !== sessionId || frame.event.seq <= cursor) return
+      if (frame?.t !== 'event') return
+      if (frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated') {
+        settings.update(previous => ({ ...previous, ...frame.event.payload.changes }))
+        return
+      }
+      if (frame.event.sessionId !== sessionId || frame.event.seq <= cursor) return
       cursor = frame.event.seq
       const payload = frame.event.payload
       const updatedQueue = applyFollowUpEvent(followUps(), payload)
@@ -3491,9 +3552,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         forkError.set(payload.message)
         forkStatus.set('failed')
       }
-      if (payload.type === 'session.provider-bound') contextUsage.set(null)
+      if (payload.type === 'session.provider-bound') {
+        contextUsage.set(null)
+        idleCompactionCandidate.set(null)
+      }
       if (payload.type === 'session.provider-switched') {
         contextUsage.set(null)
+        idleCompactionCandidate.set(null)
         const previous = activeDriverValue()
         const target = payload.providerInstanceId === undefined ? payload.driverKind : `${payload.driverKind}:${payload.providerInstanceId}`
         const followsActive = draftProvider() === previous && !pendingProviderSwitch()
@@ -3528,6 +3593,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
             prompt: payload.text ?? '',
+            automaticCompaction: payload.automaticCompaction === true,
             providerSwitch: payload.switchedProvider ? 'Continued with ' + DRIVER_LABELS[payload.switchedProvider] : '',
             modelChange: payload.modelChanged && payload.codexSelection ? codexSelectionLabel(payload.codexSelection) : '',
             tools: [],
@@ -3594,7 +3660,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
-        contextUsage.set(payload.type === 'turn.completed' ? payload.contextUsage ?? null : null)
+        const usage = payload.type === 'turn.completed' ? payload.contextUsage : undefined
+        contextUsage.set(usage ?? null)
+        const availableAt = activeDriverValue().split(':')[0] === 'claude'
+          ? claudeCompactionReturnAt(usage, frame.event.at)
+          : undefined
+        idleCompactionCandidate.set(availableAt === undefined ? null : {
+          availableAt, afterTurnId: payload.turnId, usedTokens: usage.usedTokens,
+        })
         if (payload.type === 'turn.completed' && payload.responseForkable)
           forkableTurns.update(turns => [...turns, payload.turnId])
         if (payload.type === 'turn.completed' && payload.contextCompacted) {
@@ -3614,6 +3687,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       }
       else if (payload.type === 'session.failed') {
         contextUsage.set(null)
+        idleCompactionCandidate.set(null)
         // A failed turn is over too. Leaving Stop up would offer to interrupt
         // something that already stopped; 'failed' is not busy, so the
         // bindings put Send back while the chip says what happened.
