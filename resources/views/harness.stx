@@ -17,6 +17,8 @@ export const activeProfile = $props.activeProfile || (profiles[0] && profiles[0]
 export const activeSession = $props.activeSession || null
 export const initialSettingsSection = $props.settingsSection || ''
 export const settingsSections = $props.settingsSections || []
+// The keyboard registry, with both platform spellings of every default chord.
+export const keybindings = $props.keybindings || []
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -184,7 +186,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
     </div>
     <div data-navigation-footer>
-      <button type="button" data-account-button data-nav-settings @click="openSettings" aria-label="Settings" title="Settings (⌘,)" class="harness-icon-button">
+      <button type="button" data-account-button data-nav-settings @click="openSettings" aria-label="Settings" :title="settingsShortcutTitle()" class="harness-icon-button">
         <span class="inline-block size-4 i-hugeicons-settings-02" aria-hidden="true"></span>
       </button>
     </div>
@@ -253,7 +255,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @endif
       <div data-header-actions>
         @if(hasProfiles)
-          <button type="button" data-thread-search-toggle @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" aria-keyshortcuts="Meta+K Control+K" class="harness-icon-button">
+          <button type="button" data-thread-search-toggle @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" :aria-keyshortcuts="shortcutKeys('thread.search')" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-search-01" aria-hidden="true"></span>
           </button>
         @endif
@@ -273,7 +275,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <span data-workspace-menu-icon :hidden="wideWorkspace()" class="size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
           </button>
         @endif
-        <button type="button" data-account-button data-header-settings title="Settings (⌘,)" aria-label="Settings" @click="openSettings" class="harness-icon-button">
+        <button type="button" data-account-button data-header-settings :title="settingsShortcutTitle()" aria-label="Settings" @click="openSettings" class="harness-icon-button">
           <span class="inline-block size-4 i-hugeicons-settings-02" aria-hidden="true"></span>
         </button>
       </div>
@@ -749,6 +751,32 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <h3 data-settings-section="appearance" tabindex="-1">Appearance</h3>
         <AppearancePicker v-model:value="appearancePreference" label="Appearance" :options="[{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'auto', label: 'System' }]" />
       </section>
+      {{--
+        Keyboard. One row per registered command, so the chords the window
+        answers are visible and changeable in the same place rather than being
+        learned from tooltips. Overrides are this browser's own, which is what
+        keeps a loopback origin and a paired remote one independent.
+      --}}
+      <section :hidden="settingsSelection() !== 'keybindings'" data-settings-pane>
+        <h3 data-settings-section="keybindings" tabindex="-1">Keyboard</h3>
+        <p class="mb-3 text-[12px] text-neutral-600 dark:text-neutral-300">Shortcuts apply to this browser only. Choose Change, then press the new chord with at least one modifier. Esc keeps the current one.</p>
+        <ul data-keybinding-list class="my-0 list-none">
+          @foreach(keybindings as binding)
+            <li data-keybinding-row="{{ binding.id }}" class="flex flex-wrap gap-3 items-center py-2 border-b border-black/5 dark:border-white/10">
+              {{-- 12rem before the controls wrap: a phone gets two lines rather than a squeezed chord. --}}
+              <span class="flex-1 min-w-[12rem]">
+                <span class="block font-medium text-[13px]">{{ binding.label }}</span>
+                <span class="block text-[12px] text-neutral-600 dark:text-neutral-300">{{ binding.description }}</span>
+              </span>
+              <kbd data-keybinding-chord :text="chordLabel('{{ binding.id }}')" class="shrink-0 px-[6px] py-[1px] font-mono leading-[18px] text-[12px] border border-black/10 rounded-[5px] dark:border-white/15 opacity-70">{{ binding.other }}</kbd>
+              <button type="button" data-keybinding-record data-command="{{ binding.id }}" :aria-pressed="recordingKeybinding() === '{{ binding.id }}' ? 'true' : 'false'" @click="recordKeybinding('{{ binding.id }}')" :text="recordingKeybinding() === '{{ binding.id }}' ? 'Press keys…' : 'Change'" class="shrink-0 px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15">Change</button>
+              <button type="button" data-keybinding-reset data-command="{{ binding.id }}" :disabled="!keybindingOverrides()['{{ binding.id }}']" @click="resetKeybinding('{{ binding.id }}')" class="shrink-0 px-2 py-0.5 text-[11px] border border-black/10 rounded-[6px] dark:border-white/15 disabled:opacity-40">Reset</button>
+            </li>
+          @endforeach
+        </ul>
+        <p data-keybinding-status role="status" aria-live="polite" class="mt-3 min-h-[1.25rem] text-[12px] text-neutral-600 dark:text-neutral-300" :text="keybindingStatus()"></p>
+        <button type="button" data-keybinding-reset-all :disabled="!keybindingOverridden()" @click="resetAllKeybindings" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15 disabled:opacity-40">Reset all shortcuts</button>
+      </section>
       <section :hidden="settingsSelection() !== 'general'" data-settings-pane>
       <h3 data-settings-section="general" tabindex="-1">General</h3>
       <label class="block mb-2 font-medium text-[13px]" for="settings-driver">Agent for new sessions</label>
@@ -1150,6 +1178,133 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const settingsPanel = useRef('settingsPanelBox')
   const settingsSelection = state(initialSettingsSection || 'general')
   const settingsSelectionLabel = derived(() => settingsSections.find(section => section.id === settingsSelection())?.label || 'General')
+
+  // The keyboard registry's live state. `keybindingTable` is null until the
+  // shared module loads; the rows fall back to the server-rendered defaults
+  // until it does, so the pane never paints a raw `Mod+K`.
+  const keybindingTable = state(null)
+  const keybindingOverrides = derived(() => keybindingTable()?.overrides || {})
+  const keybindingOverridden = derived(() => Object.keys(keybindingOverrides()).length > 0)
+  const recordingKeybinding = state('')
+  const keybindingStatus = state('')
+  // Which spelling of a chord this keyboard uses. `userAgentData` first — it
+  // is the only one of the three that is not deprecated — then the two older
+  // fields, because Safari and WebKit still answer only those.
+  const appleKeyboard = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent)
+  let keyboard = null
+  let keybindingStore = null
+
+  function keybindingRow(id) {
+    return keybindings.find(binding => binding.id === id) || null
+  }
+
+  function chordLabel(id) {
+    const row = keybindingRow(id)
+    const bound = keybindingTable()?.bindings?.[id]
+    if (keyboard && bound && bound !== row?.chord) return keyboard.formatChordText(bound, appleKeyboard)
+    return (appleKeyboard ? row?.apple : row?.other) || ''
+  }
+
+  const settingsShortcutTitle = derived(() => `Settings (${chordLabel('settings.open')})`)
+
+  // What a control advertising this chord should put in `aria-keyshortcuts`.
+  // Rebinding has to move the announced chord too, or assistive technology
+  // keeps reading out a key that no longer does anything.
+  function shortcutKeys(id) {
+    const row = keybindingRow(id)
+    const bound = keybindingTable()?.bindings?.[id]
+    if (keyboard && bound && bound !== row?.chord) {
+      const chord = keyboard.parseChord(bound)
+      if (chord) return keyboard.ariaKeyshortcuts(chord)
+    }
+    return row?.aria || ''
+  }
+
+  function matchedCommand(event) {
+    const table = keybindingTable()
+    return keyboard && table ? keyboard.matchCommand(table.bindings, event) : null
+  }
+
+  // Load the registry once, and report anything the stored overrides lost. A
+  // preference that silently reverts reads as a bug in the setting, so the
+  // pane says which binding it could not keep.
+  async function loadKeybindings() {
+    if (!codecUrl || keybindingStore) return
+    try {
+      const module = await import(codecUrl)
+      keybindingStore = module.createKeybindingStore(localStorage)
+      keyboard = module
+      const resolved = keybindingStore.read()
+      keybindingTable.set(resolved)
+      if (resolved.rejected.length) {
+        const names = resolved.rejected.map(entry => keybindingRow(entry.id)?.label || entry.id)
+        keybindingStatus.set(`Restored the default shortcut for ${names.join(', ')}.`)
+      }
+    }
+    catch {
+      // No registry means no rebinding and no window chords; Escape and every
+      // on-screen control still work.
+    }
+  }
+
+  function recordKeybinding(id) {
+    if (!keybindingStore) return
+    if (recordingKeybinding() === id) {
+      recordingKeybinding.set('')
+      keybindingStatus.set('')
+      return
+    }
+    recordingKeybinding.set(id)
+    keybindingStatus.set(`Press the new shortcut for ${keybindingRow(id)?.label || id}.`)
+  }
+
+  // Captured from the window handler, ahead of its dialog guard, so the chord
+  // being recorded cannot also trigger the command it is being bound to.
+  function captureKeybinding(event) {
+    const id = recordingKeybinding()
+    if (!id || !keybindingStore || !keyboard) return
+    if (event.key === 'Escape') {
+      recordingKeybinding.set('')
+      keybindingStatus.set('Kept the current shortcut.')
+      return
+    }
+    const chord = keyboard.chordFromEvent(event)
+    if (!chord) {
+      // A modifier on its own keeps waiting — it is half of a chord. Anything
+      // else without a modifier is refused: a bare key would fire while
+      // typing in the composer.
+      if (!/^(Shift|Meta|Control|Alt|AltGraph|CapsLock|Dead|Unidentified)$/.test(event.key))
+        keybindingStatus.set(appleKeyboard ? 'Hold ⌘, ⌃, or ⌥ and press a key.' : 'Hold Ctrl or Alt and press a key.')
+      return
+    }
+    const text = keyboard.chordText(chord)
+    const result = keybindingStore.save(id, text)
+    const shown = keyboard.formatChordText(text, appleKeyboard)
+    if (result.ok) {
+      keybindingTable.set(result.resolved)
+      recordingKeybinding.set('')
+      keybindingStatus.set(`${keybindingRow(id)?.label || id} is now ${shown}.`)
+      return
+    }
+    // Recording stays open on a refusal so the next press is another attempt
+    // rather than a reopened row, and the command keeps the chord it had.
+    if (result.reason === 'conflict') keybindingStatus.set(`${shown} already belongs to ${result.command.label}. Pick another chord.`)
+    else keybindingStatus.set(appleKeyboard ? 'Hold ⌘, ⌃, or ⌥ and press a key.' : 'Hold Ctrl or Alt and press a key.')
+  }
+
+  function resetKeybinding(id) {
+    if (!keybindingStore) return
+    keybindingTable.set(keybindingStore.reset(id))
+    recordingKeybinding.set('')
+    keybindingStatus.set(`${keybindingRow(id)?.label || id} is back to ${chordLabel(id)}.`)
+  }
+
+  function resetAllKeybindings() {
+    if (!keybindingStore) return
+    keybindingTable.set(keybindingStore.resetAll())
+    recordingKeybinding.set('')
+    keybindingStatus.set('Every shortcut is back to its default.')
+  }
   const colorMode = useColorMode()
   const appearancePreference = state(colorMode.preference)
   const unsubscribeAppearance = colorMode.subscribe((_mode, preference) => appearancePreference.set(preference))
@@ -1780,6 +1935,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function hideSettings() {
+    // A row left recording would otherwise keep capturing after the sheet is
+    // gone, and the next chord pressed in the workspace would be swallowed
+    // into a rebind nobody asked for.
+    recordingKeybinding.set('')
+    keybindingStatus.set('')
     settingsDialogRef.current?.close()
     settingsTrigger?.focus()
     settingsTrigger = null
@@ -1811,6 +1971,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   })
 
   onMount(() => {
+    void loadKeybindings()
     if (initialSettingsSection) openSettings(undefined, initialSettingsSection, false)
   })
 
@@ -2549,13 +2710,20 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     })
   }
 
-  // Ctrl+` toggles the terminal — the shell-toggle convention every editor
-  // uses. Window-level so it works from the composer too, and the one
-  // keyboard path to the terminal a desktop window can be driven through.
-  // Cmd+, (or Ctrl+, where the browser owns Cmd+,) opens settings; in the
-  // desktop window the menu item usually claims the chord first and arrives
-  // as `craft:settings` instead.
+  // Window chords. Which chord runs which command comes from the keyboard
+  // registry, so the Keyboard settings section is the single place that
+  // decides — the defaults are still Ctrl+` for the terminal, the editor
+  // convention, and Cmd+, for settings, where in the desktop window the menu
+  // item usually claims the chord first and arrives as `craft:settings`.
   useEventListener('keydown', (event) => {
+    // Recording comes before the dialog guard: the pane records from inside
+    // the open settings sheet, and the chord being bound must not also run
+    // the command it is being bound to.
+    if (recordingKeybinding()) {
+      event.preventDefault()
+      captureKeybinding(event)
+      return
+    }
     if (projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open || threadActionsDialog.current?.open) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
@@ -2579,35 +2747,40 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       }
       return
     }
-    if (sessionId && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.code === 'KeyF') {
+    // A command whose precondition fails is left unhandled rather than
+    // swallowed, so Cmd+F still reaches the browser's own find on a page with
+    // no transcript.
+    const command = matchedCommand(event)
+    if (command === 'transcript.find' && sessionId) {
       event.preventDefault()
       openTranscriptFind(event.target)
       return
     }
-    if ((event.metaKey || event.ctrlKey) && event.key === ',') {
+    if (command === 'settings.open') {
       event.preventDefault()
       openSettings()
       return
     }
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && Number(activeProfile)) {
+    if (command === 'thread.search' && Number(activeProfile)) {
       event.preventDefault()
       openThreadSearch()
       return
     }
-    if ((event.metaKey || event.ctrlKey) && event.altKey && event.code === 'KeyN') {
+    if (command === 'thread.startWithoutProject') {
       event.preventDefault()
       startWithoutProject()
       return
     }
-    if (!(event.ctrlKey && event.key === '`')) return
+    if (command !== 'terminal.toggle') return
     event.preventDefault()
     toggleTerminal()
   }, { target: window })
 
   function termKeydown(event) {
     if (event.metaKey) return
-    // The toggle chord belongs to the window handler, not the shell.
-    if (event.ctrlKey && event.key === '`') return
+    // The toggle chord belongs to the window handler, not the shell — asked
+    // of the registry, so rebinding it moves both halves at once.
+    if (matchedCommand(event) === 'terminal.toggle') return
     let data = null
     if (event.ctrlKey && event.key.length === 1) {
       const code = event.key.toLowerCase().charCodeAt(0)
