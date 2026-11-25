@@ -1025,12 +1025,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const threadNavigation = state(initialNavigation)
   const threadActionsOpen = state(false)
   const threadActionForm = state('')
+  const threadSnoozePresets = state([])
+  const threadSnoozeMode = state('date')
   const threadActionBusy = state(false)
   const threadActionError = state('')
   const threadTitleDraft = state('')
   const threadActionsDialog = useRef('threadActionsDialogBox')
   const threadActionsTrigger = useRef('threadActionsTriggerBox')
+  const threadSnoozeTrigger = useRef('threadSnoozeTriggerBox')
+  const threadSnoozePanel = useRef('threadSnoozePanelBox')
   const threadWakeTime = useRef('threadWakeTimeBox')
+  const threadWakeDuration = useRef('threadWakeDurationBox')
   const threadTitleEdit = useRef('threadTitleEditBox')
 
   function positionThreadActions() {
@@ -1042,6 +1047,23 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const width = dialog.getBoundingClientRect().width
     dialog.style.setProperty('--thread-menu-top', anchor.bottom + 5 + 'px')
     dialog.style.setProperty('--thread-menu-left', Math.max(8, Math.min(anchor.left, viewport - width - 8)) + 'px')
+    positionThreadSnooze()
+  }
+
+  function positionThreadSnooze() {
+    const dialog = threadActionsDialog.current
+    const trigger = threadSnoozeTrigger.current
+    const panel = threadSnoozePanel.current
+    if (!dialog?.open || !trigger || !panel) return
+    const viewport = dialog.ownerDocument.documentElement
+    const left = dialog.getBoundingClientRect().right - 1
+    const beside = viewport.clientWidth >= 768 && viewport.clientWidth - left >= 208
+    dialog.dataset.snoozeSide = String(beside)
+    if (beside) {
+      const top = Math.max(8, Math.min(trigger.getBoundingClientRect().top, viewport.clientHeight - panel.scrollHeight - 10))
+      dialog.style.setProperty('--thread-snooze-top', top + 'px')
+      dialog.style.setProperty('--thread-snooze-left', left + 'px')
+    }
   }
 
   function openThreadActions() {
@@ -1070,6 +1092,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     threadActionError.set('')
     threadActionForm.set(form)
     if (form === 'rename') void nextTick(() => threadTitleEdit.current?.select())
+    if (form === 'snooze' || form === 'custom-snooze') void nextTick(positionThreadSnooze)
+    if (form === 'snooze' && codecUrl) {
+      void import(codecUrl).then(({ threadSnoozeChoices }) => {
+        if (threadActionForm() !== 'snooze') return
+        threadSnoozePresets.set(threadSnoozeChoices(new Date()))
+        void nextTick(positionThreadSnooze)
+      }).catch(() => {})
+    }
   }
 
   useEventListener('resize', positionThreadActions)
@@ -1093,9 +1123,26 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     void organizeThread('rename', { title: threadTitleDraft() })
   }
 
-  function snoozeThread(hours) {
-    const until = hours ? Date.now() + hours * 60 * 60 * 1000 : Date.parse(threadWakeTime.current?.value ?? '')
-    if (!Number.isFinite(until) || until <= Date.now()) {
+  async function snoozeFromPreset(choice) {
+    if (!codecUrl) return
+    const { chosenSnoozeTime } = await import(codecUrl)
+    const until = chosenSnoozeTime(choice, Date.now())
+    if (!until) {
+      threadActionError.set('That wake time has passed. Choose another time.')
+      return
+    }
+    void organizeThread('snooze', { until })
+  }
+
+  function snoozeThread() {
+    const mode = threadSnoozeMode()
+    const duration = Number(threadWakeDuration.current?.value)
+    const units = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 }
+    const now = Date.now()
+    const until = mode === 'date'
+      ? Date.parse(threadWakeTime.current?.value ?? '')
+      : Number.isSafeInteger(duration) && duration > 0 ? now + duration * units[mode] : NaN
+    if (!Number.isFinite(until) || until <= now) {
       threadActionError.set('Choose a wake time in the future.')
       return
     }

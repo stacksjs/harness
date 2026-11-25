@@ -226,6 +226,11 @@ const harness = await serve({
   resolveDriver: kind => kind === 'codex' ? codexDriver : driver,
 })
 const baseUrl = `http://localhost:${port}`
+// Compile the fixture's template before starting the browser's network drive.
+// The performance drive measures cold rendering separately.
+const warmup = await harness.server.fetch(new Request(baseUrl))
+if (!warmup.ok) throw new Error(`Could not render the browser fixture: HTTP ${warmup.status}`)
+await warmup.body?.cancel()
 const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
 if (screenshotDir) mkdirSync(screenshotDir, { recursive: true })
 
@@ -1392,8 +1397,43 @@ check('closing thread actions returns focus to its button', await threadActionsT
 await page.setViewportSize({ width: 1280, height: 800 })
 await threadActionsTrigger.click()
 await threadActions.getByRole('button', { name: 'Snooze', exact: true }).click()
-await threadActions.getByRole('button', { name: 'For one hour', exact: true }).click()
+await threadActions.getByRole('button', { name: /^In 1 hour/ }).waitFor()
+await threadActions.getByRole('button', { name: /^In 3 hours/ }).waitFor()
+const snoozeChoices = threadActions.locator('#thread-snooze-form')
+check('snooze opens beside the desktop thread menu', await snoozeChoices.evaluate(panel => {
+  const menu = panel.closest('dialog')?.getBoundingClientRect()
+  const bounds = panel.getBoundingClientRect()
+  const choice = panel.querySelector('button')?.getBoundingClientRect()
+  return Boolean(menu && choice && bounds.left >= menu.right - 2 && bounds.right <= innerWidth
+    && panel.contains(document.elementFromPoint(choice.x + choice.width / 2, choice.y + choice.height / 2)))
+}))
+await capture('thread-snooze-presets')
+await page.setViewportSize({ width: 360, height: 800 })
+await page.waitForFunction(() => document.querySelector('#harness-thread-actions')?.getAttribute('data-snooze-side') === 'false')
+check('snooze stays inside the thread menu on a phone', await snoozeChoices.evaluate(panel => {
+  const menu = panel.closest('dialog')?.getBoundingClientRect()
+  const bounds = panel.getBoundingClientRect()
+  return Boolean(menu && bounds.left >= menu.left && bounds.right <= menu.right && bounds.right <= innerWidth)
+}))
+await capture('thread-snooze-phone')
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.waitForFunction(() => document.querySelector('#harness-thread-actions')?.getAttribute('data-snooze-side') === 'true')
+await threadActions.getByRole('button', { name: 'Custom wake time' }).click()
+await threadActions.getByLabel('Wake after').selectOption('minutes')
+await threadActions.getByRole('spinbutton', { name: 'Wake duration' }).fill('20')
+const earliestWake = Date.now() + 20 * 60_000
+await threadActions.getByRole('button', { name: 'Set wake time' }).click()
 const snoozedThread = page.locator('[data-section-id^="snoozed-"]').getByText('Parity release review', { exact: true })
+await snoozedThread.waitFor()
+const wake = harness.engine.current.sessions.get(steerSessionId)?.navigation?.snoozedUntil
+check('custom snooze duration starts when the wake is confirmed',
+  typeof wake === 'number' && wake >= earliestWake && wake < earliestWake + 10000)
+await threadActionsTrigger.click()
+await threadActions.getByRole('button', { name: 'Wake thread', exact: true }).click()
+await pinnedThreads.getByText('Parity release review', { exact: true }).waitFor()
+await threadActionsTrigger.click()
+await threadActions.getByRole('button', { name: 'Snooze', exact: true }).click()
+await threadActions.getByRole('button', { name: /^In 1 hour/ }).click()
 await snoozedThread.waitFor()
 await threadActionsTrigger.click()
 await threadActions.getByRole('button', { name: 'Wake thread', exact: true }).click()
@@ -1432,9 +1472,8 @@ const conversationQuery = conversationFind.getByRole('searchbox', { name: 'Find 
 const findCount = conversationFind.locator('[data-find-counter]')
 await threadActionsTrigger.click()
 await threadActions.getByRole('button', { name: 'Find in thread', exact: true }).click()
-await conversationQuery.waitFor()
-check('Find in thread opens from the title menu and focuses its input',
-  await conversationQuery.evaluate(input => input === document.activeElement))
+await page.waitForFunction(() => document.activeElement?.matches('[data-transcript-find] input[type="search"]') === true)
+check('Find in thread opens from the title menu and focuses its input', true)
 await conversationQuery.fill('ACTIVE STEERING')
 await conversationFind.getByText('1/2', { exact: true }).waitFor()
 check('the first result clears the find bar', await page.evaluate(() => {

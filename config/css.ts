@@ -210,6 +210,17 @@ const RESPONSIVE_SHELL = `
   padding-inline: 8px; text-align: start; border-radius: 4px; font-size: 13px;
 }
 [data-thread-action] > span { display: inline-block; width: 14px; height: 14px; flex-shrink: 0; opacity: .65; }
+[data-thread-action] > :is([data-snooze-label], [data-snooze-detail]) { width: auto; height: auto; }
+[data-thread-action] > [data-snooze-label] { flex: 1; opacity: 1; }
+[data-thread-action] > [data-snooze-detail] { font-size: 11px; font-variant-numeric: tabular-nums; }
+[data-snooze-arrow] { margin-inline-start: auto; }
+#thread-snooze-form { padding-inline-start: 8px; }
+#harness-thread-actions[data-snooze-side="true"] #thread-snooze-form {
+  position: fixed; top: var(--thread-snooze-top); left: var(--thread-snooze-left);
+  width: 200px; max-height: calc(100dvh - var(--thread-snooze-top) - 8px); overflow: auto;
+  padding: 4px; background: var(--workspace-surface); border: 1px solid var(--workspace-line);
+  border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+}
 [data-thread-action]:hover:not(:disabled), [data-thread-action]:focus-visible {
   background: color-mix(in srgb, currentColor 8%, transparent);
 }
