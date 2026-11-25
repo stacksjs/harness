@@ -19,6 +19,7 @@ export type {
   CommandType,
   DriverKind,
   InternalCommand,
+  ModelFavorite,
 } from './commands'
 export { isClientCommand } from './commands'
 export type { EventBase, EventPayload, EventType, HarnessEvent } from './events'

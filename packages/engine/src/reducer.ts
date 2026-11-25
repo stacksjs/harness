@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, validInputAnswers } from '@harness/contract'
-import { isTurnActive } from './projections'
+import { isTurnActive, modelFavoriteIndex } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
 
@@ -171,6 +171,31 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         commandId,
         at,
         payload: { type: 'profile.updated', profileId: command.profileId, ...changed },
+      }]
+    }
+
+    case 'profile.model-favorite.set': {
+      const profile = state.profiles.get(command.profileId)
+      if (!profile) throw new InvalidCommand('This profile is unavailable.')
+      const { favorite, selected } = command
+      if (!favorite || typeof favorite.driverKind !== 'string' || !favorite.driverKind
+        || typeof favorite.model !== 'string' || !favorite.model.trim() || favorite.model.length > 200
+        || typeof selected !== 'boolean' || (favorite.providerInstanceId !== undefined
+          && (!Number.isSafeInteger(favorite.providerInstanceId) || favorite.providerInstanceId <= 0)))
+        throw new InvalidCommand('Choose a model to save.')
+
+      const favorites = profile.modelFavorites ?? []
+      const exists = modelFavoriteIndex(favorites, favorite) >= 0
+      if (exists === selected) return []
+      const { driverKind, providerInstanceId, model } = favorite
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: {
+          type: 'profile.model-favorite.changed', profileId: profile.id, selected,
+          favorite: { driverKind, model, ...(providerInstanceId === undefined ? {} : { providerInstanceId }) },
+        },
       }]
     }
 

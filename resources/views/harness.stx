@@ -1801,6 +1801,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const providerAccounts = state([])
   const defaultProviders = state([])
   const providerCatalog = state('loading')
+  const modelFavorites = state([])
+  let modelFavoritesRevision = 0
   const draftProvider = state(defaultDriver())
   const draftModel = state('')
   const draftEffort = state('')
@@ -1826,17 +1828,26 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const pickerAccount = state('')
   const pickerQuery = state('')
   const pickerIndex = state(0)
+  const favoritePending = state(false)
+  const favoriteError = state('')
+  const pickerFavoriteKeys = derived(() => new Set(modelFavorites().map(favorite => {
+    const account = favorite.providerInstanceId === undefined ? favorite.driverKind : `${favorite.driverKind}:${favorite.providerInstanceId}`
+    return `${account}/${favorite.model}`
+  })))
   const pickerOptionModel = derived(() => {
     const model = selectedDraftModel()
-    return pickerAccount() === draftProvider() && draftProvider().split(':')[0] === 'codex'
+    return (pickerAccount() === draftProvider() || pickerAccount() === 'favorites') && draftProvider().split(':')[0] === 'codex'
       && (model?.reasoningEfforts.length || model?.speedTiers.length) ? model : undefined
   })
   const pickerResults = derived(() => {
     const search = pickerQuery().toLowerCase().trim().split(/\s+/).filter(Boolean)
-    const accounts = composerProviders().filter(account => account.status === 'ready' && (search.length || account.value === pickerAccount()))
+    const favoritesOnly = pickerAccount() === 'favorites'
+    const favoriteKeys = pickerFavoriteKeys()
+    const accounts = composerProviders().filter(account => account.status === 'ready' && (favoritesOnly || search.length || account.value === pickerAccount()))
     return accounts.flatMap(account => {
-      const rows = [{ id: '', name: 'Provider default' }, ...(account.models || [])]
+      const rows = favoritesOnly ? account.models || [] : [{ id: '', name: 'Provider default' }, ...(account.models || [])]
       return rows.filter(model => {
+        if (favoritesOnly && !favoriteKeys.has(`${account.value}/${model.id}`)) return false
         const text = `${model.name} ${model.id} ${account.name}`.toLowerCase()
         return search.every(word => text.includes(word))
       }).map(model => ({ id: model.id, name: model.name, account: account.value, accountName: account.name, key: `${account.value}/${model.id}` }))
@@ -1845,6 +1856,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const pickerStatus = derived(() => {
     if (providerCatalog() === 'failed') return 'Could not load provider accounts.'
     if (providerCatalog() === 'loading') return 'Checking provider accounts…'
+    if (pickerAccount() === 'favorites' && !pickerQuery().trim()) return 'No favorite models available.'
     if (!pickerQuery().trim() && !pickerResults().length) return 'Choose an available account.'
     return 'No matching models'
   })
@@ -1876,10 +1888,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const dialog = draftPickerDialog.current
     if (!dialog || dialog.open) return
     pickerQuery.set('')
+    favoriteError.set('')
     pickerAccount.set(draftProvider())
     pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.id === draftModel())))
     draftPickerOpen.set(true)
     dialog.showModal()
+    if (providerCatalog() === 'ready') void annotateDriverPickers()
     void nextTick(() => {
       positionDraftPicker()
       if (event?.pointerType !== 'touch') draftPickerSearch.current?.focus()
@@ -1897,6 +1911,30 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     pickerQuery.set('')
     pickerIndex.set(0)
     void nextTick(revealPickerAccount)
+  }
+
+  async function toggleModelFavorite(result) {
+    if (!Number(activeProfile) || !result.id || favoritePending()) return
+    const favorite = { ...agentChoice(result.account), model: result.id }
+    const selected = !pickerFavoriteKeys().has(result.key)
+    favoritePending.set(true)
+    favoriteError.set('')
+    try {
+      await sendCommand({ type: 'profile.model-favorite.set', profileId: Number(activeProfile), favorite, selected })
+      modelFavoritesRevision++
+      modelFavorites.update(entries => selected ? [...entries, favorite] : entries.filter(entry => entry.driverKind !== favorite.driverKind
+        || entry.providerInstanceId !== favorite.providerInstanceId || entry.model !== favorite.model))
+      if (!selected && pickerAccount() === 'favorites') {
+        pickerIndex.set(Math.max(0, Math.min(pickerIndex(), pickerResults().length - 1)))
+        void nextTick(() => draftPickerSearch.current?.focus({ preventScroll: true }))
+      }
+    }
+    catch (error) {
+      favoriteError.set(error.message || 'Could not save this favorite.')
+    }
+    finally {
+      favoritePending.set(false)
+    }
   }
 
   function revealPickerAccount() {
@@ -1951,8 +1989,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       draftSpeed.set('')
     }
     if (!result.account.includes(':')) localStorage.setItem('harness.defaultDriver', result.account)
-    browsePickerAccount(result.account)
-    pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.id === result.id)))
+    if (pickerAccount() !== 'favorites') browsePickerAccount(result.account)
+    pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.key === result.key)))
     if (!pickerOptionModel()) closeDraftPicker()
     else void nextTick(positionDraftPicker)
   }
@@ -2000,12 +2038,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (!defaultProviders().length) providerCatalog.set('loading')
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
     const modelsQuery = !activeSessionId && canCompose ? '&models=1' : ''
-    const response = await fetch(`/drivers?workspace=${workspace}${modelsQuery}`).catch(() => null)
-    if (!response?.ok) {
+    const favoritesRevision = modelFavoritesRevision
+    const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`)
+      .then(response => response.ok ? response.json() : null).catch(() => null)
+    if (!catalog) {
       if (!defaultProviders().length) providerCatalog.set('failed')
       return
     }
-    const { drivers, accounts = [] } = await response.json()
+    const { drivers, accounts = [], favorites = [] } = catalog
+    if (modelsQuery && favoritesRevision === modelFavoritesRevision) modelFavorites.set(favorites)
     if (sessionProviderInstanceId !== null && !accounts.some(account => account.id === sessionProviderInstanceId)) {
       accounts.push({ id: sessionProviderInstanceId, kind: sessionDriver, name: 'Saved account', status: 'deleted' })
     }

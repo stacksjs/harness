@@ -797,8 +797,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           : []
 
         try {
+          const command = envelope.command
+          if (command.type === 'profile.model-favorite.set') {
+            const favorite = command.favorite
+            if (!favorite || !driverKinds().includes(favorite.driverKind)) throw new Error('Choose an available provider.')
+            if (favorite.providerInstanceId !== undefined) {
+              const launch = savedProviders.find(favorite.providerInstanceId, command.profileId, favorite.driverKind, tmpdir())
+              if (!launch) throw new Error('This provider account is unavailable in the selected profile.')
+              if (launch.chatGptClientId && !socket.data.canUseHostPrivileges) throw new Error('This ChatGPT plan is available only on the Harness host.')
+            }
+          }
           if (!socket.data.canUseHostPrivileges) {
-            const command = envelope.command
             const session = 'sessionId' in command ? engine.current.sessions.get(command.sessionId) : undefined
             const selection = command.type === 'session.create' ? command : session
             if (selection?.providerInstanceId !== undefined) {
@@ -808,7 +817,6 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             }
           }
           attachmentOwners.set(envelope, socket.data.deviceId ?? 'local')
-          const command = envelope.command
           const result = command.type === 'session.input.respond' && Number.isSafeInteger(command.sessionId) && typeof command.requestId === 'string'
             ? await attachments.serialize(command.sessionId, command.requestId, () => engine.dispatch(envelope))
             : await engine.dispatch(envelope)
@@ -1009,6 +1017,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // should not fork ten processes.
       if (url.pathname === '/drivers') {
         const workspace = engine.current.workspaces.get(Number(url.searchParams.get('workspace')))
+        const profile = engine.current.profiles.get(workspace?.profileId ?? Number(url.searchParams.get('profile')))
         const workspacePath = workspace?.trusted && !workspace.scratch ? workspace.path : tmpdir()
         const includeModels = url.searchParams.get('models') === '1'
         const drivers = Promise.all(driverKinds().map(async kind => ({
@@ -1030,7 +1039,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
                 }
               }))
           : []
-        return Promise.all([drivers, accounts]).then(([drivers, accounts]) => Response.json({ drivers, accounts }))
+        return Promise.all([drivers, accounts]).then(([drivers, accounts]) => Response.json({
+          drivers,
+          accounts,
+          ...(includeModels ? {
+            favorites: profile?.modelFavorites?.filter(favorite => favorite.providerInstanceId === undefined
+              || accounts.some(account => account.id === favorite.providerInstanceId && account.kind === favorite.driverKind)) ?? [],
+          } : {}),
+        }, { headers: { 'cache-control': 'no-store' } }))
       }
 
       // The web surface. Rendered from the in-memory projection — no query

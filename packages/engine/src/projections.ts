@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { CodexTurnOptions, ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, ModelFavorite, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
 import { applyFollowUpEvent } from '@harness/contract'
 
@@ -144,6 +144,12 @@ export interface ProfileState {
   workspaceIds: number[]
   /** In the order they were attached. */
   mcpServers: McpServerState[]
+  modelFavorites?: ModelFavorite[]
+}
+
+export function modelFavoriteIndex(favorites: readonly ModelFavorite[], favorite: ModelFavorite): number {
+  return favorites.findIndex(entry => entry.driverKind === favorite.driverKind
+    && entry.providerInstanceId === favorite.providerInstanceId && entry.model === favorite.model)
 }
 
 export interface WorkspaceState {
@@ -229,6 +235,16 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (p.icon !== undefined) profile.icon = p.icon
       if (p.tint !== undefined) profile.tint = p.tint
       if (p.position !== undefined) profile.position = p.position
+      break
+    }
+
+    case 'profile.model-favorite.changed': {
+      const profile = state.profiles.get(p.profileId)
+      if (!profile) break
+      const favorites = profile.modelFavorites ??= []
+      const index = modelFavoriteIndex(favorites, p.favorite)
+      if (p.selected && index < 0) favorites.push(p.favorite)
+      else if (!p.selected && index >= 0) favorites.splice(index, 1)
       break
     }
 

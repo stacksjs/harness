@@ -7,6 +7,7 @@
   <div data-draft-model-layout>
     <section ref="draftPickerAccountsBox" data-draft-model-accounts aria-label="Provider accounts">
       <h2>Accounts</h2>
+      <button type="button" data-draft-model-account :aria-pressed="String(pickerAccount() === 'favorites')" @click="browsePickerAccount('favorites')">Favorites</button>
       <template :for="account in composerProviders()" :key="account.value">
         <button type="button" data-draft-model-account :aria-pressed="String(pickerAccount() === account.value)" :disabled="account.status !== 'ready'" :title="account.stateText || account.name" @click="browsePickerAccount(account.value)">
           <span class="truncate" :text="account.name"></span>
@@ -15,16 +16,27 @@
       </template>
     </section>
     <section data-draft-model-main aria-label="Models">
-      <input type="search" ref="draftPickerSearchBox" aria-label="Search models" role="combobox" aria-autocomplete="list" aria-controls="draft-model-results" aria-expanded="true" :aria-activedescendant="pickerResults().length ? 'draft-model-result-' + pickerIndex() : undefined" :value="pickerQuery()" @input="updatePickerQuery" @keydown="pickerSearchKeydown" placeholder="Search models" autocomplete="off" />
-      <div id="draft-model-results" ref="draftPickerResultsBox" role="listbox" aria-label="Models">
+      <input type="search" ref="draftPickerSearchBox" aria-label="Search models" role="combobox" aria-autocomplete="list" aria-haspopup="grid" aria-controls="draft-model-results" aria-expanded="true" :aria-activedescendant="pickerResults().length ? 'draft-model-result-' + pickerIndex() : undefined" :value="pickerQuery()" @input="updatePickerQuery" @keydown="pickerSearchKeydown" placeholder="Search models" autocomplete="off" />
+      <div id="draft-model-results" ref="draftPickerResultsBox" role="grid" aria-label="Models">
         <template :for="(result, index) in pickerResults()" :key="result.key">
-          <button type="button" role="option" tabindex="-1" :id="'draft-model-result-' + index" :aria-selected="String(draftProvider() === result.account && draftModel() === result.id)" :data-highlighted="String(index === pickerIndex())" :title="result.name" @click="pickDraftModel(result)" @pointermove="pickerIndex.set(index)">
-            <span class="truncate" :text="result.name"></span>
-            <small class="truncate" :hidden="!pickerQuery().trim()" :text="result.accountName"></small>
-            <span class="inline-block shrink-0 size-3 i-hugeicons-tick-02" :hidden="draftProvider() !== result.account || draftModel() !== result.id" aria-hidden="true"></span>
-          </button>
+          <div role="row" data-draft-model-row :aria-selected="String(draftProvider() === result.account && draftModel() === result.id)" @pointermove="pickerIndex.set(index)">
+            <div role="gridcell" :id="'draft-model-result-' + index">
+              <button type="button" data-draft-model-option tabindex="-1" :data-highlighted="String(index === pickerIndex())" :title="result.name" @click="pickDraftModel(result)">
+                <span class="truncate" :text="result.name"></span>
+                <small class="truncate" :hidden="!pickerQuery().trim() && pickerAccount() !== 'favorites'" :text="result.accountName"></small>
+                <span class="inline-block shrink-0 size-3 i-hugeicons-tick-02" :hidden="draftProvider() !== result.account || draftModel() !== result.id" aria-hidden="true"></span>
+              </button>
+            </div>
+            <div role="gridcell" :hidden="!result.id">
+              <button type="button" data-draft-model-star :aria-label="'Favorite ' + result.name + ' on ' + result.accountName" :aria-pressed="String(pickerFavoriteKeys().has(result.key))" :disabled="favoritePending()" @click="toggleModelFavorite(result)">
+                <span class="inline-block shrink-0 size-4 i-f7-star" :hidden="pickerFavoriteKeys().has(result.key)" aria-hidden="true"></span>
+                <span class="inline-block shrink-0 size-4 i-f7-star-fill" :hidden="!pickerFavoriteKeys().has(result.key)" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
         </template>
       </div>
+      <p role="alert" :hidden="!favoriteError()" :text="favoriteError()"></p>
       <p role="status" :hidden="pickerResults().length > 0" :text="pickerStatus()"></p>
       <button type="button" :hidden="providerCatalog() !== 'failed'" @click="annotateDriverPickers">Retry</button>
     </section>

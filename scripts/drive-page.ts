@@ -263,11 +263,11 @@ const browserContext = await browser.newContext({ colorScheme, reducedMotion })
 const page = await browserContext.newPage()
 const captures: Array<{ name: string, width: number, height: number }> = []
 
-async function capture(name: string): Promise<void> {
+async function capture(name: string, target = page): Promise<void> {
   if (!screenshotDir) return
-  const viewport = page.viewportSize()
+  const viewport = target.viewportSize()
   if (!viewport) throw new Error('The screenshot drive requires an explicit viewport.')
-  await page.screenshot({ path: join(screenshotDir, `${name}.png`), animations: 'disabled' })
+  await target.screenshot({ path: join(screenshotDir, `${name}.png`), animations: 'disabled' })
   captures.push({ name, ...viewport })
 }
 
@@ -663,7 +663,7 @@ await capture('onboarding-selected-project')
 await page.setViewportSize({ width: 1280, height: 800 })
 await page.getByRole('button', { name: 'Choose agent and model' }).click()
 await page.getByRole('button', { name: /Claude Code.*Personal/ }).click()
-await page.getByRole('option', { name: 'Provider default' }).click()
+await page.getByRole('grid', { name: 'Models' }).getByRole('button', { name: 'Provider default' }).click()
 await page.fill('[data-prompt]', 'typed with no session open')
 await page.click('[data-send]')
 await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
@@ -1547,11 +1547,52 @@ await page.setViewportSize({ width: 1280, height: 800 })
 const draftPicker = page.getByRole('button', { name: 'Choose agent and model' })
 const draftDialog = page.getByRole('dialog', { name: 'Agent and model' })
 const draftSearch = draftDialog.getByRole('combobox', { name: 'Search models' })
+const modelGrid = draftDialog.getByRole('grid', { name: 'Models' })
+const fastModel = modelGrid.locator('[data-draft-model-option]').filter({ hasText: 'Fixture Fast' })
 await draftPicker.click()
 await draftDialog.getByRole('button', { name: /Codex.*Catalog fixture/ }).click()
 check('browsing a named account exposes its own model catalog',
-  await draftDialog.getByRole('option', { name: 'Fixture Fast' }).isVisible()
-  && await draftDialog.getByRole('option', { name: 'Fixture Default' }).count() === 0)
+  await fastModel.isVisible()
+  && await modelGrid.getByRole('button', { name: 'Fixture Default', exact: true }).count() === 0)
+const favoriteFast = modelGrid.getByRole('button', { name: /^Favorite Fixture Fast on Codex/ })
+await favoriteFast.press('Space')
+await page.waitForFunction(() => document.querySelector('[data-draft-model-star][aria-pressed="true"]') !== null)
+check('favoriting a model keeps the draft selection and scopes the flag to its account',
+  (await draftPicker.textContent())?.includes('Fixture Fast') === false
+  && harness.engine.current.profiles.get(providerProfileId)?.modelFavorites?.some(model => model.model === 'fixture-fast' && model.providerInstanceId === 4) === true)
+await draftDialog.getByRole('button', { name: 'Favorites', exact: true }).click()
+check('the Favorites filter shows the starred account and model',
+  await fastModel.isVisible() && await modelGrid.getByRole('button', { name: 'Provider default', exact: true }).count() === 0)
+await capture('model-favorites-desktop')
+const favoritesClient = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme, reducedMotion })
+try {
+  const phoneFavorites = await favoritesClient.newPage()
+  await phoneFavorites.goto(`${baseUrl}/?workspace=${workspaceId}`)
+  await phoneFavorites.getByRole('button', { name: 'Choose agent and model' }).click()
+  await phoneFavorites.getByRole('button', { name: 'Favorites', exact: true }).click()
+  const phoneStar = phoneFavorites.locator('[data-draft-model-star][aria-pressed="true"]')
+  await phoneStar.waitFor()
+  check('another client sees the saved model and a visible star on a narrow screen', await phoneStar.evaluate(star => {
+    const rect = star.getBoundingClientRect()
+    const glyph = star.querySelector('.i-f7-star-fill')
+    return rect.left >= 0 && rect.right <= innerWidth && Boolean(glyph && getComputedStyle(glyph).maskImage !== 'none')
+  }))
+  await capture('model-favorites-phone', phoneFavorites)
+}
+finally {
+  await favoritesClient.close()
+}
+await page.reload()
+await draftPicker.click()
+await draftDialog.getByRole('button', { name: 'Favorites', exact: true }).click()
+await fastModel.waitFor()
+check('favorites reload from the host', await favoriteFast.getAttribute('aria-pressed') === 'true')
+await favoriteFast.click()
+await draftDialog.getByText('No favorite models available.').waitFor()
+check('removing a favorite leaves focus in the picker and clears the saved flag',
+  await draftSearch.evaluate(input => input === document.activeElement)
+  && harness.engine.current.profiles.get(providerProfileId)?.modelFavorites?.length === 0)
+await draftDialog.getByRole('button', { name: /Codex.*Catalog fixture/ }).click()
 await draftSearch.fill('No such model')
 await draftDialog.getByText('No matching models').waitFor()
 await draftSearch.press('Escape')
@@ -1560,7 +1601,7 @@ check('Escape returns focus after browsing and leaves the draft selection unchan
   await draftPicker.evaluate(button => button === document.activeElement && !button.textContent?.includes('Fixture Fast')))
 await draftPicker.click()
 await draftSearch.fill('fixture-fast')
-await draftDialog.getByRole('option', { name: /Fixture Fast/ }).waitFor()
+await fastModel.waitFor()
 await draftSearch.press('ArrowDown')
 check('model search keeps keyboard focus on the combobox and exposes the highlighted result',
   await draftSearch.evaluate(input => {

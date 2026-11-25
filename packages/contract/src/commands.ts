@@ -19,6 +19,12 @@ export interface CodexTurnOptions {
   serviceTier?: string
 }
 
+export interface ModelFavorite {
+  driverKind: DriverKind
+  providerInstanceId?: number
+  model: string
+}
+
 export type ApprovalDecision = 'allowed' | 'denied' | 'cancelled'
 export type ApprovalScope = 'once' | 'session' | 'workspace' | 'always'
 
@@ -67,6 +73,7 @@ export type ClientCommand =
   | ({ type: 'session.organize', sessionId: number } & ThreadOrganizationAction)
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
   | { type: 'profile.update', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
+  | { type: 'profile.model-favorite.set', profileId: number, favorite: ModelFavorite, selected: boolean }
   | { type: 'profile.delete', profileId: number }
   /**
    * Attach an MCP server to a profile.
@@ -167,6 +174,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'session.organize',
   'profile.create',
   'profile.update',
+  'profile.model-favorite.set',
   'profile.delete',
   'workspace.add',
   'workspace.register',

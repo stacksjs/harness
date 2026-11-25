@@ -6,7 +6,7 @@
  * be wrong is corrected by a later fact. That is what makes replay meaningful.
  */
 
-import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, ConnectorApproval, DriverKind } from './commands'
+import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, ConnectorApproval, DriverKind, ModelFavorite } from './commands'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
 import type { ThreadNavigation } from './thread-navigation'
@@ -72,6 +72,7 @@ export type EventPayload =
    * that has to restate everything.
    */
   | { type: 'profile.updated', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
+  | { type: 'profile.model-favorite.changed', profileId: number, favorite: ModelFavorite, selected: boolean }
   /**
    * The workspaces and sessions removed along with it.
    *
@@ -116,6 +117,7 @@ export const GLOBAL_SESSION_ID = 0
 const GLOBAL_EVENT_TYPES: ReadonlySet<string> = new Set<EventType>([
   'profile.created',
   'profile.updated',
+  'profile.model-favorite.changed',
   'profile.deleted',
   'workspace.added',
   'workspace.promoted',

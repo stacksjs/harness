@@ -310,6 +310,13 @@ describe('a turn drives the provider', () => {
       expect(withModels.accounts.map((account: { id: number, models?: Array<{ id: string }> }) => [account.id, account.models?.map(model => model.id)]))
         .toEqual([[1, ['fixture-work']], [2, undefined], [4, undefined]])
       expect(JSON.stringify(withModels)).not.toContain('/fixture/')
+      const favorite = { driverKind: 'claude', providerInstanceId: 1, model: 'fixture-work' }
+      const favoriteCommand = { type: 'profile.model-favorite.set', profileId, favorite, selected: true }
+      client.send({ t: 'dispatch', envelope: { id: 'save-work-favorite', at: 4, command: favoriteCommand } })
+      expect(await client.waitFor('profile.model-favorite.changed')).toMatchObject({ profileId, favorite, selected: true })
+      expect((await catalog(true)).favorites).toEqual([favorite])
+      client.send({ t: 'dispatch', envelope: { id: 'other-profile-favorite', at: 4, command: { ...favoriteCommand, profileId: otherProfileId } } })
+      expect(await client.waitForRejection('other-profile-favorite')).toMatchObject({ message: expect.stringContaining('unavailable in the selected profile') })
       probed.length = 0
       for (const id of [3, 4, 99]) {
         await expect(harness.engine.dispatch({
@@ -410,13 +417,21 @@ describe('a turn drives the provider', () => {
       await harness.engine.dispatch({ id: key, at: 1, command: { type: 'workspace.register', path: dir, trusted: true } })
       const accountId = addSavedProvider(databasePath, workspaceId, { kind: 'codex', name: 'Fixture plan', chatGptClientId: clientId })
       const pick = { type: 'session.create', workspaceId, driverKind: 'codex', providerInstanceId: accountId } as const
-      const catalog = (token: string) => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}`, {
+      const catalog = (token: string, includeModels = false) => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}${includeModels ? '&models=1' : ''}`, {
         headers: { authorization: `Bearer ${token}` },
       }).then(res => res.json())
       const listed = await catalog(access.localToken)
       expect(listed.accounts).toEqual([{ id: accountId, kind: 'codex', name: 'Fixture plan', status: 'ready', auth: 'chatgpt' }])
       expect(JSON.stringify(listed)).not.toContain(clientId)
       expect((await catalog(paired.token)).accounts).toEqual([])
+      const favorite = { driverKind: 'codex', providerInstanceId: accountId, model: 'fixture-plan-model' }
+      const favoriteCommand = { type: 'profile.model-favorite.set', profileId: workspaceId, favorite, selected: true }
+      device.send({ t: 'dispatch', envelope: { id: 'device-save-favorite', at: 2, command: favoriteCommand } })
+      expect(await device.waitForRejection('device-save-favorite')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })
+      host.send({ t: 'dispatch', envelope: { id: 'host-save-favorite', at: 2, command: favoriteCommand } })
+      expect(await host.waitFor('profile.model-favorite.changed')).toMatchObject({ favorite })
+      expect((await catalog(access.localToken, true)).favorites).toEqual([favorite])
+      expect((await catalog(paired.token, true)).favorites).toEqual([])
 
       device.send({ t: 'dispatch', envelope: { id: 'device-create', at: 2, command: pick } })
       expect(await device.waitForRejection('device-create')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })

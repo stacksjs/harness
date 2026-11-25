@@ -201,8 +201,8 @@ const RESPONSIVE_SHELL = `
 [data-draft-model-layout] h2 { margin: 3px 5px 8px; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 [data-draft-model-main] { display: flex; flex-direction: column; gap: 6px; min-height: 0; min-width: 0; padding: 8px; }
 [data-draft-model-main] input { width: 100%; min-height: 35px; padding: 6px 8px; background: var(--workspace-bg); border: 1px solid var(--workspace-line); border-radius: 6px; }
-[data-draft-model-main] [role="listbox"] { min-height: 0; overflow: auto; }
-[data-draft-model-main] [role="status"] { margin: 3px 7px; opacity: .8; }
+[data-draft-model-main] [role="grid"] { min-height: 0; overflow: auto; }
+[data-draft-model-main] [role="status"], [data-draft-model-main] [role="alert"] { margin: 3px 7px; opacity: .8; }
 [data-draft-model-layout] button {
   width: 100%; min-height: 30px; padding: 4px 7px; border-radius: 6px;
   display: flex; align-items: center; gap: 5px; text-align: start;
@@ -210,8 +210,12 @@ const RESPONSIVE_SHELL = `
 [data-draft-model-account] { flex-direction: column; align-items: flex-start !important; }
 [data-draft-model-account] span { max-width: 100%; }
 [data-draft-model-layout] small { font-size: 11px; opacity: .78; }
-[data-draft-model-layout] [role="option"] > span:first-child { flex: 1 1 auto; }
-[data-draft-model-layout] [role="option"] > small { max-width: 45%; }
+[data-draft-model-row] { display: flex; }
+[data-draft-model-row] > [role="gridcell"]:first-child { flex: 1; min-width: 0; }
+[data-draft-model-option] > span:first-child { flex: 1 1 auto; min-width: 0; }
+[data-draft-model-option] > small { max-width: 45%; }
+[data-draft-model-star] { min-width: 32px; justify-content: center; opacity: .75; }
+[data-draft-model-star][aria-pressed="true"] { color: var(--workspace-accent); opacity: 1; }
 [data-draft-model-layout] button[aria-pressed="true"], [data-draft-model-layout] button[data-highlighted="true"], [data-draft-model-layout] button:hover:not(:disabled) { background: var(--workspace-hover); }
 [data-draft-model-layout] button:disabled { opacity: .68; cursor: default; }
 [data-draft-model-layout] :focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
