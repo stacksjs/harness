@@ -1,5 +1,20 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.21...v0.0.22)
+
+## 🐛 Bug Fixes
+
+- **lint**: exclude Buddy-synced Stacks defaults ([4473b2e](https://github.com/stacksjs/harness/commit/4473b2e)) _(by Chris)_
+- **composer**: keep the active account visible on resize ([e473e73](https://github.com/stacksjs/harness/commit/e473e73)) _(by Chris)_
+
+## 🔧 Chores
+
+- **deps**: upgrade Harness to Stacks 0.75.685 ([2ec01ab](https://github.com/stacksjs/harness/commit/2ec01ab)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.20...v0.0.21)
 
 ## ✨ Features
