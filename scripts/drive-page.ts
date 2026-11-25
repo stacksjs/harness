@@ -1123,7 +1123,8 @@ catch (error) {
 }
 await promptBox.fill('Queue using the opposite shortcut.')
 await promptBox.press('Control+Enter')
-await followUpRows.filter({ hasText: 'Queue using the opposite shortcut.' }).waitFor()
+const oppositeQueuedRow = followUpRows.filter({ hasText: 'Queue using the opposite shortcut.' })
+await oppositeQueuedRow.getByRole('button', { name: 'Send now', exact: true }).waitFor()
 await promptBox.fill('Keep this draft while steering the oldest item.')
 await promptBox.press('Control+Shift+Enter')
 await originalTurn.getByText('Queue using the opposite shortcut.').waitFor()
