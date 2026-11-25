@@ -1,5 +1,19 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.23...v0.0.24)
+
+## 🐛 Bug Fixes
+
+- **codex**: preserve the original conversation on resume ([675e0bc](https://github.com/stacksjs/harness/commit/675e0bc)) _(by Chris)_
+
+## 📝 Documentation
+
+- **parity**: record model favorites and resume evidence ([7a9389d](https://github.com/stacksjs/harness/commit/7a9389d)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.22...v0.0.23)
 
 ## ✨ Features
