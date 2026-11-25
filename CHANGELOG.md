@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.29...v0.0.30)
+
+## 🐛 Bug Fixes
+
+- **ui**: preserve fork lineage in loaded history ([7e26869](https://github.com/stacksjs/harness/commit/7e26869)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.28...v0.0.29)
 
 ## ✨ Features
