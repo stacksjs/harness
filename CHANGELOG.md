@@ -1,5 +1,19 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.9...v0.0.10)
+
+## ✨ Features
+
+- **chat**: attach files to provider answers ([26208e9](https://github.com/stacksjs/harness/commit/26208e9)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 📝 Documentation
+
+- record transcript syntax parity evidence ([39ca06d](https://github.com/stacksjs/harness/commit/39ca06d)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.8...v0.0.9)
 
 ## ✨ Features
