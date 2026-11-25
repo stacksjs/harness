@@ -7,7 +7,7 @@
  * has run.
  */
 
-import type { ThreadNavigation } from '@harness/contract'
+import type { HostSettings, ThreadNavigation } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -48,6 +48,12 @@ export interface ViewProps {
   remoteEnabled: boolean
   settingsSection: SettingsSection | null
   settingsSections: typeof settingsSections
+  /**
+   * Host settings, rendered rather than read from the browser store: they
+   * belong to this host, so the page must not paint one client's idea of them
+   * and then correct itself.
+   */
+  hostSettings: HostSettings
   /**
    * The keyboard registry, rendered into the Keyboard section.
    *
@@ -161,6 +167,7 @@ export function viewProps(state: HarnessState, options: {
     remoteEnabled: options.remoteEnabled === true,
     settingsSection: options.settingsSection ?? null,
     settingsSections,
+    hostSettings: { ...state.settings },
     keybindings: keybindingCommands.map((command) => {
       const chord = parseChord(command.chord)
       return {
