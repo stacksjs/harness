@@ -6,9 +6,9 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, HostSettings, InputQuestion, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
-import { applyFollowUpEvent } from '@harness/contract'
+import { acceptedSettings, applyFollowUpEvent, hostSettings } from '@harness/contract'
 
 export interface InputRequestState {
   attachments?: QuestionAttachment[]
@@ -171,10 +171,12 @@ export interface HarnessState {
   profiles: Map<number, ProfileState>
   workspaces: Map<number, WorkspaceState>
   devices: Map<string, DeviceState>
+  /** Host-wide preferences, at their defaults until something changes one. */
+  settings: HostSettings
 }
 
 export function emptyState(): HarnessState {
-  return { sessions: new Map(), profiles: new Map(), workspaces: new Map(), devices: new Map() }
+  return { sessions: new Map(), profiles: new Map(), workspaces: new Map(), devices: new Map(), settings: hostSettings() }
 }
 
 export function isTurnActive(state: SessionState['state']): boolean {
@@ -207,6 +209,15 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
   const p = event.payload
 
   switch (p.type) {
+    case 'settings.updated': {
+      // Filtered on the way in as well as on the way out: a value this build
+      // no longer accepts was written by one that did, and replaying it
+      // verbatim would put the projection somewhere the type says it cannot
+      // be. The setting falls back to its default instead.
+      Object.assign(state.settings, acceptedSettings(p.changes))
+      return state
+    }
+
     case 'profile.created':
       state.profiles.set(p.profileId, {
         id: p.profileId,
