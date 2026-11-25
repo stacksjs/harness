@@ -35,6 +35,7 @@ export const sinceSeq = $props.sinceSeq || 0
 export const initialApprovals = activeSession?.pendingApprovals || []
 export const initialInputs = activeSession?.pendingInputs || []
 export const initialFollowUps = activeSession?.followUps || { entries: [], held: false }
+export const initialContextUsage = activeSession?.contextUsage || null
 const pendingApproval = initialApprovals[0]
 
 // One space per profile. Its project rows contain threads that are ready for another message.
@@ -688,6 +689,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <span>Add project</span>
         </button>
         @endif
+        @if(activeSession)
+          <div data-context-window hidden :hidden="showContextWindow() !== true || !contextUsage()" class="grid gap-1 mt-1 mx-2 pb-2 pt-2 text-xs border-black/10 border-t dark:border-white/10">
+            <div class="flex flex-wrap gap-x-2 items-baseline justify-between">
+              <span class="font-medium text-neutral-600 dark:text-neutral-300">Context window</span>
+              <span class="font-medium tabular-nums" :text="contextTokens()"></span>
+            </div>
+            <meter aria-label="Context window usage" :aria-valuetext="contextTokens()" hidden :hidden="!contextUsage()?.maxTokens" min="0" :max="contextUsage()?.maxTokens || 1" :low="(contextUsage()?.maxTokens || 1) * 0.8" :high="(contextUsage()?.maxTokens || 1) * 0.9" optimum="0" :value="Math.min(contextUsage()?.usedTokens || 0, contextUsage()?.maxTokens || 1)" class="block h-2 w-full"></meter>
+          </div>
+        @endif
       </div>
     <section id="harness-changes" aria-labelledby="harness-changes-title" data-diff hidden :hidden="!diffOpen()">
       <div data-diff-header class="flex gap-2 items-center justify-between">
@@ -825,6 +835,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       <section :hidden="settingsSelection() !== 'appearance'" data-settings-pane>
         <h3 data-settings-section="appearance" tabindex="-1">Appearance</h3>
         <AppearancePicker v-model:value="appearancePreference" label="Appearance" :options="[{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'auto', label: 'System' }]" />
+        <fieldset class="mt-5 p-0 border-0">
+          <legend class="font-semibold text-[13px]">Thread details</legend>
+          <label class="flex gap-2 items-center mt-1 min-h-11 text-[13px]">
+            <input type="checkbox" :checked="showContextWindow() === true" @change="updateContextWindowPreference" class="accent-neutral-900 dark:accent-neutral-100" />
+            Context window
+          </label>
+        </fieldset>
       </section>
       {{--
         Keyboard. One row per registered command, so the chords the window
@@ -1359,6 +1376,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   let sidebarDrag = null
   const workspaceActionsOpen = state(false)
   const workspaceDetailsOpen = useLocalStorage('harness.workspaceDetailsOpen', true)
+  const showContextWindow = useLocalStorage('harness.showContextWindow', false)
+  const contextUsage = state(initialContextUsage)
+  const tokenNumber = new Intl.NumberFormat()
+  const contextTokens = derived(() => {
+    const usage = contextUsage()
+    if (!usage) return ''
+    const used = tokenNumber.format(usage.usedTokens)
+    return usage.maxTokens ? `${used} / ${tokenNumber.format(usage.maxTokens)} tokens` : `${used} tokens used`
+  })
+  function updateContextWindowPreference(event) {
+    showContextWindow.set(event.currentTarget.checked)
+  }
   const wideWorkspace = useMediaQuery('(min-width: 75rem)')
   const diffClose = useRef('diffCloseBox')
   const workspaceActionsToggle = useRef('workspaceActionsToggleBox')
@@ -3462,7 +3491,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         forkError.set(payload.message)
         forkStatus.set('failed')
       }
+      if (payload.type === 'session.provider-bound') contextUsage.set(null)
       if (payload.type === 'session.provider-switched') {
+        contextUsage.set(null)
         const previous = activeDriverValue()
         const target = payload.providerInstanceId === undefined ? payload.driverKind : `${payload.driverKind}:${payload.providerInstanceId}`
         const followsActive = draftProvider() === previous && !pendingProviderSwitch()
@@ -3478,6 +3509,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       if (payload.type === 'turn.started') {
         sessionError.set('')
         if (payload.codexSelection) {
+          const previous = appliedCodexSelection()
+          if (previous?.model !== payload.codexSelection.model || previous?.serviceTier !== payload.codexSelection.serviceTier)
+            contextUsage.set(null)
           const useApplied = matchesActiveCodexSelection(draftCodexSelection())
           appliedCodexSelection.set(payload.codexSelection)
           if (useApplied) showDraftCodexSelection(payload.codexSelection)
@@ -3560,6 +3594,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         while (revertWaiters.length > 0) revertWaiters.shift()()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
+        contextUsage.set(payload.type === 'turn.completed' ? payload.contextUsage ?? null : null)
         if (payload.type === 'turn.completed' && payload.responseForkable)
           forkableTurns.update(turns => [...turns, payload.turnId])
         if (payload.type === 'turn.completed' && payload.contextCompacted) {
@@ -3578,6 +3613,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           : 'Response stopped.')
       }
       else if (payload.type === 'session.failed') {
+        contextUsage.set(null)
         // A failed turn is over too. Leaving Stop up would offer to interrupt
         // something that already stopped; 'failed' is not busy, so the
         // bindings put Send back while the chip says what happened.
