@@ -1,0 +1,13 @@
+# Pull request labels, by the files a branch touches.
+#
+# Read by actions/labeler@v4 from .github/workflows/labeler.yml. The action
+# fetches this file from the base branch over the API, so while it is missing
+# the triage check fails on every pull request with a bare `Not Found`.
+#
+# Only labels that already exist in this repository are mapped. Create the
+# label first, then add its paths here: a mapping to a label that does not
+# exist has the action create a colourless one on the first pull request that
+# matches it.
+documentation:
+  - docs/**/*
+  - '**/*.md'
