@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.17...v0.0.18)
+
+## ✨ Features
+
+- route settings by section ([99c62dd](https://github.com/stacksjs/harness/commit/99c62dd)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.16...v0.0.17)
 
 ## ✨ Features
