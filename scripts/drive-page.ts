@@ -330,8 +330,13 @@ check('Escape closes workspace actions and restores focus', await workspaceActio
   && await workspaceActions.evaluate(el => el === document.activeElement))
 await page.locator('[data-sidebar-toggle]').click()
 await page.waitForFunction(() => document.querySelector('[data-harness-sidebar]')?.getAttribute('data-open') === 'true')
+check('the open phone navigation drawer makes workspace controls inert',
+  await page.locator('[data-workspace-layout]').getAttribute('inert') !== null)
 await page.keyboard.press('Escape')
-check('mobile closes navigation and returns focus to its toggle', await page.locator('[data-sidebar-toggle]').evaluate(el => el === document.activeElement))
+await page.locator('[data-harness-sidebar]').waitFor({ state: 'hidden' })
+await page.waitForFunction(() => !document.querySelector('[data-workspace-layout]')?.hasAttribute('inert')
+  && document.activeElement?.matches('[data-sidebar-toggle]'), undefined, { timeout: 5000 })
+check('mobile closes navigation and returns focus to its toggle', true)
 check('mobile composer controls fit the viewport', await page.locator('[data-send]').evaluate((el) => {
   const rect = el.getBoundingClientRect()
   return rect.left >= 0 && rect.right <= window.innerWidth
@@ -353,6 +358,39 @@ await page.waitForFunction(() => document.querySelector('[data-sidebar-resize]')
 await page.reload()
 await page.waitForFunction(() => document.querySelector('[data-sidebar-resize]')?.getAttribute('aria-valuenow') === '294')
 check('desktop navigation restores its dragged width after reload', (await page.locator('[data-harness-sidebar]').boundingBox())?.width === 294)
+const desktopNav = page.locator('[data-harness-sidebar]')
+await desktopNav.locator('[data-sidebar-close]').click()
+await desktopNav.waitFor({ state: 'hidden' })
+await page.reload()
+await page.locator('[data-harness-shell][data-sidebar-collapsed="true"]').waitFor()
+await page.locator('[data-sidebar-toggle]').click()
+await desktopNav.waitFor()
+check('desktop navigation collapse survives reload and reopens at the saved width',
+  (await desktopNav.boundingBox())?.width === 294)
+const desktopChanges = page.locator('[data-diff-toggle]')
+await desktopChanges.waitFor()
+await workspaceActions.click()
+await desktopChanges.waitFor({ state: 'hidden' })
+await page.reload()
+await page.locator('[data-workspace-layout][data-details-open="false"]').waitFor()
+await workspaceActions.click()
+await desktopChanges.waitFor()
+check('workspace detail visibility survives reload and can be restored', await desktopChanges.isVisible())
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  check(`workspace header and composer fit at ${width}×${height}`, await page.evaluate(() => {
+    const elements = ['[data-workspace-header]', '[data-composer]', '[data-send]']
+    return document.documentElement.scrollWidth === innerWidth
+      && elements.every((selector) => {
+        const bounds = document.querySelector(selector)?.getBoundingClientRect()
+        return Boolean(bounds && bounds.width > 0 && bounds.left >= 0 && bounds.right <= innerWidth + 1)
+      })
+  }))
+  await capture(`workspace-layout-${width}x${height}`)
+}
+await page.setViewportSize({ width: 1280, height: 800 })
+
+
 
 // 1. Composer: type a prompt, send, watch the turn stream in — with the
 // thinking dots holding the gap before the first token.
@@ -438,6 +476,11 @@ const reopenedShowsChoice = await page.evaluate(() => (document.querySelector('#
 check('menu event reopens settings with the saved choice', reopenedShowsChoice === 'opencode')
 const accessSection = await page.evaluate(() => document.querySelector('[data-settings-modal]')?.textContent ?? '')
 check('settings shows the access section honestly', accessSection.includes('No devices are paired') && accessSection.includes('--remote'))
+const settingsNavigation = settingsDialog.getByRole('navigation', { name: 'Settings sections' })
+await settingsNavigation.getByRole('button', { name: 'Access' }).click()
+check('settings navigation moves keyboard focus to the selected section',
+  await settingsDialog.getByRole('heading', { name: 'Access' }).evaluate(heading => document.activeElement === heading))
+
 await page.keyboard.press('Escape')
 await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
 check('Esc closes the settings modal', true)
@@ -498,21 +541,21 @@ check('type-to-start delivers the prompt in the selected workspace', harness.eng
   && harness.engine.current.sessions.get(newSessionId)?.providerInstanceId === 2)
 
 // 12. The account corner: the header's person icon opens the same settings.
-await page.click('[data-account-button]')
+await page.click('[data-account-button]:visible')
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('the account icon opens settings', true)
-const backgroundCanFocus = await page.locator('[data-account-button]').evaluate((button: HTMLElement) => {
+const backgroundCanFocus = await page.locator('[data-account-button]:visible').evaluate((button: HTMLElement) => {
   button.focus()
   return document.activeElement === button
 })
 check('modal settings make the background inert', !backgroundCanFocus)
 await page.keyboard.press('Escape')
 await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })
-check('closing settings returns focus to its trigger', await page.locator('[data-account-button]').evaluate(button => document.activeElement === button))
+check('closing settings returns focus to its trigger', await page.locator('[data-account-button]:visible').evaluate(button => document.activeElement === button))
 
 // 13. The Agents section: each CLI's live status, and a Log in button that
 // runs the CLI's login flow against the fixture executable in the terminal.
-await page.click('[data-account-button]')
+await page.click('[data-account-button]:visible')
 await page.waitForFunction(() => document.querySelector('[data-agent-row="claude"] [data-agent-state]')?.textContent === 'ready', undefined, { timeout: 4000 })
 const agentRows = await page.evaluate(() => [...document.querySelectorAll('[data-agent-row]')].map(row => ({
   state: row.querySelector('[data-agent-state]')?.textContent,
@@ -583,7 +626,7 @@ check('an invalid stored appearance falls back to the system', await prePaintPag
 await prePaintPage.close()
 
 await page.reload()
-await page.locator('[data-account-button]').click()
+await page.locator('[data-account-button]:visible').click()
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('appearance selection survives reload', await appearancePicker.getByRole('radio', { name: manualLabel }).getAttribute('aria-checked') === 'true')
 await appearancePicker.getByRole('radio', { name: manualLabel }).press('End')
@@ -596,7 +639,7 @@ if (screenshotDir) {
   await capture('workspace-desktop')
   await page.setViewportSize({ width: 390, height: 844 })
   await capture('workspace-mobile')
-  await page.locator('[data-account-button]').click()
+  await page.locator('[data-account-button]:visible').click()
   await capture('settings-mobile')
   await page.keyboard.press('Escape')
   await settingsDialog.waitFor({ state: 'hidden', timeout: 4000 })

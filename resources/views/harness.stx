@@ -67,17 +67,16 @@ export const spaces = profiles.map((profile, index) => ({
   sections: [
     {
       id: `active-${profile.id}`,
-      label: 'Active',
+      label: 'Working',
       items: (profile.sessions || []).filter(isActiveThread).map(toItem),
     },
     {
       id: `recent-${profile.id}`,
-      label: 'Recent',
+      label: 'Settled',
       items: (profile.sessions || []).filter(session => !isActiveThread(session)).map(toItem),
     },
   ].filter(section => section.items.length > 0),
   clear: { id: 'clear', label: 'Clear' },
-  action: { id: 'new-session', label: 'New Session', icon: 'i-hugeicons-add-01' },
 }))
 
 function toItem(session) {
@@ -105,6 +104,9 @@ export const promptPlaceholder = activeSession ? 'Ask the agent…' : 'Type here
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
 export const activeScratchSession = activeSession?.scratch === true
+export const workspaceName = activeSession && !activeScratchSession
+  ? profiles.flatMap(profile => profile.workspaces || []).find(workspace => workspace.id === activeWorkspaceId)?.name
+  : undefined
 export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
 export const profileProjects = Object.fromEntries(profiles.map(profile => {
   const projects = profile.workspaces || []
@@ -121,7 +123,7 @@ export const initialSteerable = liveTurn?.steerable === true
 export const initialInputActivity = liveTurn?.inputRequests || []
 </script>
 
-<div class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100 bg-neutral-50 dark:bg-neutral-950">
+<div data-harness-shell :data-sidebar-collapsed="sidebarCollapsed()" class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
   {{--
     `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
     component's own marker, and putting it on a wrapper made two elements claim
@@ -130,10 +132,37 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     the pane by inheritance and worked by luck.
   --}}
   <aside id="harness-sidebar" ref="sidebarBox" tabindex="-1" aria-label="Workspace navigation" class="shrink-0 border-black/5 border-r dark:border-white/5" data-harness-sidebar :data-open="sidebarOpen() ? 'true' : 'false'" :style="'--harness-sidebar-width: ' + sidebarWidth() + 'px'">
+    <div data-navigation-chrome>
+      <div class="flex gap-2 items-center justify-between h-11 px-3">
+        <a href="/" class="flex gap-2 items-center min-w-0 font-semibold text-sm">
+          <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
+          Harness
+        </a>
+        <button type="button" data-sidebar-close @click="toggleSidebar" aria-label="Close navigation" aria-controls="harness-sidebar" class="harness-icon-button">
+          <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
+        </button>
+      </div>
+      @if(hasProfiles)
+        <div class="flex gap-1 items-center px-2 pb-2">
+          <button type="button" data-nav-search @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" class="harness-nav-search">
+            <span class="inline-block size-4 i-hugeicons-search-01" aria-hidden="true"></span>
+            <span>Search</span>
+          </button>
+          <button type="button" @click="openProjectPicker" aria-label="Add project" title="Add project" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
+          </button>
+          <button type="button" @click="openDraft(visibleProfile())" aria-label="New thread" title="New thread" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-pencil-edit-02" aria-hidden="true"></span>
+          </button>
+        </div>
+      @endif
+    </div>
+    <div data-navigation-content>
     @if(hasProfiles)
       <Sidebar
         :spaces="spaces"
         :space="activeProfile"
+        placement="static"
         spacePersistKey="harness.profile"
         :showSpaceAdd="true"
       />
@@ -143,6 +172,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <button type="button" @click="openProfileModal" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Create profile</button>
       </div>
     @endif
+    </div>
+    <div data-navigation-footer>
+      <button type="button" data-account-button data-nav-settings @click="openSettings" aria-label="Settings" title="Settings (⌘,)" class="harness-icon-button">
+        <span class="inline-block size-4 i-hugeicons-settings-02" aria-hidden="true"></span>
+      </button>
+    </div>
   </aside>
   <button type="button" data-sidebar-scrim hidden :hidden="!sidebarOpen()" @click="closeSidebar" aria-label="Close navigation"></button>
   <div
@@ -163,12 +198,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @pointercancel="cancelSidebarResize"
   ></div>
 
-  <main class="flex flex-1 flex-col min-w-0">
+  <main data-workspace-layout data-details-open="true" :data-details-open="workspaceDetailsOpen()" :data-diff-open="diffOpen()" :inert="!desktopSidebar() && sidebarOpen()" class="flex-1 min-w-0">
     <header data-workspace-header class="flex relative gap-3 items-center shrink-0 px-4 h-[44px] border-b border-black/5 dark:border-white/5">
-      <button type="button" data-sidebar-toggle ref="sidebarToggleBox" @click="openSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
+      <button type="button" data-sidebar-toggle class="harness-icon-button" ref="sidebarToggleBox" @click="toggleSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
         <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
       </button>
-      <span data-workspace-title class="min-w-0 font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+      <div data-workspace-heading class="flex gap-2 items-center min-w-0">
+        @if(workspaceName)
+          <span data-workspace-project class="min-w-0 text-xs text-neutral-600 dark:text-neutral-400 truncate" title="{{ workspaceName }}">{{ workspaceName }}</span>
+          <span class="text-neutral-400" aria-hidden="true">/</span>
+        @endif
+        <span data-workspace-title class="min-w-0 font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+      </div>
       @if(activeSession)
       <span
         data-session-state
@@ -193,85 +234,36 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           title="This session runs in its own worktree on {{ sessionBranch }}"
         >{{ sessionBranch }}</span>
       @endif
-      @if(draftProject || activeSession || draftWithoutProject)
-      <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="workspaceActionsOpen() ? 'true' : 'false'">
-        <span class="inline-block size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
-      </button>
-      <button type="button" data-workspace-actions-scrim hidden tabindex="-1" :hidden="!workspaceActionsOpen()" @click="closeWorkspaceActions" aria-label="Close workspace actions"></button>
-      <div id="harness-workspace-actions" data-workspace-actions :data-open="workspaceActionsOpen() ? 'true' : 'false'">
-        {{--
-          Changes sit behind a toggle rather than always-on. Reading a repository
-          costs a subprocess, and most page loads never look at the diff.
-        --}}
-        @if(activeSession && !activeSession.scratch)
-        <button
-          type="button"
-          data-diff-toggle
-          class="px-2 py-[3px] text-[12px] border border-black/10 rounded-[6px] dark:border-white/15"
-          aria-expanded="false"
-          :aria-expanded="diffOpen() ? 'true' : 'false'"
-          @click="toggleDiff"
-        ><span data-workspace-action-label class="size-4 i-hugeicons-file-02" aria-hidden="true"></span>Changes</button>
-        @endif
-        @if(activeWorkspaceId)
-          <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
-            <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
-            <span data-workspace-action-label>Terminal</span>
+      <div data-header-actions>
+        @if(hasProfiles)
+          <button type="button" data-thread-search-toggle @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" aria-keyshortcuts="Meta+K Control+K" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-search-01" aria-hidden="true"></span>
           </button>
         @endif
-        @if(activeScratchSession)
-          <button type="button" data-promote-scratch @click="promoteScratchProject" :disabled="projectBusy()" class="px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Turn into project</button>
+        @if(activeSession && !activeScratchSession)
+          <button type="button" data-header-pane @click="toggleDiff" aria-label="Show changes" title="Changes" aria-controls="harness-changes" :aria-expanded="diffOpen() ? 'true' : 'false'" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-file-02" aria-hidden="true"></span>
+          </button>
+        @endif
+        @if(activeWorkspaceId)
+          <button type="button" data-header-pane @click="toggleTerminal" aria-label="Open terminal" title="Terminal" aria-controls="harness-terminal" :aria-expanded="termOpen() ? 'true' : 'false'" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
+          </button>
         @endif
         @if(draftProject || activeSession || draftWithoutProject)
-        <button type="button" data-project-add @click="openProjectPicker" class="flex gap-1.5 items-center shrink-0 px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15" aria-label="Add project" title="Add project">
-          <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
-          <span>Add project</span>
-        </button>
+          <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" title="Workspace tools" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="(wideWorkspace() ? workspaceDetailsOpen() : workspaceActionsOpen()) ? 'true' : 'false'" class="harness-icon-button">
+            <span data-workspace-tools-icon hidden :hidden="!wideWorkspace()" class="size-4 i-hugeicons-sidebar-right" aria-hidden="true"></span>
+            <span data-workspace-menu-icon :hidden="wideWorkspace()" class="size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
+          </button>
         @endif
-      </div>
-      @endif
-      @if(hasProfiles)
-        <button type="button" data-thread-search-toggle ref="threadSearchToggleBox" @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" aria-keyshortcuts="Meta+K Control+K">
-          <span class="inline-block size-4 i-hugeicons-search-01" aria-hidden="true"></span>
+        <button type="button" data-account-button data-header-settings title="Settings (⌘,)" aria-label="Settings" @click="openSettings" class="harness-icon-button">
+          <span class="inline-block size-4 i-hugeicons-settings-02" aria-hidden="true"></span>
         </button>
-      @endif
-      {{--
-        The account corner every surface has. Until M8 gives it an account to
-        show, it is the door to the settings sheet — same target as Cmd+, and
-        the app menu, so there is one settings surface, reached three ways.
-      --}}
-      <button
-        type="button"
-        data-account-button
-        ref="settingsToggleBox"
-        title="Settings (⌘,)"
-        aria-label="Settings"
-        @click="openSettings"
-        class="flex items-center justify-center ml-auto h-[26px] w-[26px] border border-black/10 rounded-full dark:border-white/15 opacity-70 hover:opacity-100"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="8" r="4"/>
-          <path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/>
-        </svg>
-      </button>
+      </div>
     </header>
 
-    <section data-diff hidden :hidden="!diffOpen()" class="overflow-y-auto shrink-0 px-4 py-3 max-h-[45%] border-b border-black/5 dark:border-white/5">
-      <div data-diff-status class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
-      <ul data-diff-files class="mb-2 list-none">
-        <template :for="file in diffFiles" :key="file.path">
-          <li class="flex gap-[8px] items-center py-[1px] text-[12px]" :data-diff-file="file.path">
-            <span class="shrink-0 w-[64px] text-[11px] uppercase opacity-50" :text="file.status"></span>
-            {{-- :text assigns text, never markup — a path is data, and a repository can contain anything. --}}
-            <span class="font-mono truncate" :text="file.path"></span>
-            {{-- Untracked files have no counts; showing +0 -0 implies an empty file. --}}
-            <span class="shrink-0 ml-auto font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
-          </li>
-        </template>
-      </ul>
-      <pre data-diff-patch class="overflow-x-auto leading-[17px] text-[12px]" :text="diffPatch()"></pre>
-    </section>
-
+    <div data-workspace-content>
+    <div data-workspace-lane>
     {{--
       The transcript. Settled turns are plain server-rendered HTML and hydrate
       on `visible`, so scrolling back through a long session costs nothing until
@@ -320,8 +312,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @endif
       @foreach(settledTurns as turn)
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}" id="turn-{{ turn.id }}">
-          <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
-          <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ turn.prompt }}</div>
+          <div class="sr-only">You</div>
+          <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
           @foreach(turn.steered as message)
             <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
               <div class="mb-1 font-medium text-[12px] text-neutral-600 dark:text-neutral-400">You followed up</div>
@@ -372,8 +364,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
       @if(liveTurn)
         <article class="mb-5" data-turn="{{ liveTurn.id }}" id="turn-{{ liveTurn.id }}" data-live>
-          <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
-          <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ liveTurn.prompt }}</div>
+          <div class="sr-only">You</div>
+          <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
           <div data-steering-history>
             @foreach(liveTurn.steered as message)
               <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
@@ -446,8 +438,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       --}}
       <template :for="turn in liveTurns" :key="turn.id">
         <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
-          <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
-          <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap" :text="turn.prompt"></div>
+          <div class="sr-only">You</div>
+          <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
           <div data-steering-history></div>
           <div data-tools>
             <template :for="call in turn.tools" :key="call.callId">
@@ -490,7 +482,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(canCompose)
-    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt()" class="grid md:flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
+    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -506,7 +498,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         rows="2"
         placeholder="{{ promptPlaceholder }}"
         :placeholder="composerPlaceholder()"
-        class="flex-1 px-3 py-2 min-h-[40px] min-w-0 text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
+        class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
       {{--
         The agent picker, where every LLM surface puts its model switch. It
@@ -519,7 +511,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         ref="driverPickerBox"
         @change="driverPicked"
         title="Agent for this session"
-        class="px-2 h-[36px] max-w-[170px] min-w-0 text-[12px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10"
+        class="px-2 h-8 max-w-[170px] min-w-0 text-xs bg-transparent border border-transparent rounded-md hover:border-black/15 dark:hover:border-white/20"
       >
         <option value="claude">Claude Code</option>
         <option value="codex">Codex</option>
@@ -529,16 +521,100 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
       </select>
       <div class="flex flex-wrap gap-2 justify-end">
-        <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" :text="sendLabel()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
+        <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" :text="sendLabel()" class="px-4 h-8 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-full">Send</button>
         <span class="md:hidden" :hidden="!canSteer() || !composerText().trim() || Boolean(editingFollowUp())">
           <button type="button" :disabled="startPending() || (oppositeFollowUp() === 'steer' && steeringPending())" :text="oppositeFollowUp() === 'steer' ? 'Steer' : 'Queue'" @click="sendPrompt(oppositeFollowUp())" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Steer</button>
         </span>
         <button type="button" :hidden="!editingFollowUp()" @click="followUpActions()?.endEdit()" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
-        <button type="button" data-resume-queue :hidden="!showResume()" :disabled="!sessionOnline() || queueActionPending()" @click="followUpActions()?.run('send')" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Resume</button>
-        <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Stop</button>
+        <button type="button" data-resume-queue :hidden="!showResume()" :disabled="!sessionOnline() || queueActionPending()" @click="followUpActions()?.run('send')" class="px-4 h-8 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-full">Resume</button>
+        <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-8 text-[13px] text-white bg-red-600 rounded-full hover:bg-red-700">Stop</button>
       </div>
     </form>
     @endif
+    @if(activeWorkspaceId)
+    <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
+      <div data-terminal-toolbar>
+        <span>Terminal</span>
+        <button type="button" aria-label="Close terminal" title="Close terminal" @click="toggleTerminal" class="harness-icon-button">
+          <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </div>
+      <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
+        {{--
+          Ten glyphs in the host's own font, laid out but invisible: the ruler
+          the island measures to turn pixels into columns and rows.
+        --}}
+        <span data-term-metric ref="termMetricBox" aria-hidden="true" class="term-metric">0123456789</span>
+        <div data-terminal-screen ref="termScreenBox"></div>
+      </div>
+    </section>
+  @endif
+    </div>
+    @if(draftProject || activeSession || draftWithoutProject)
+      <button type="button" data-workspace-actions-scrim hidden tabindex="-1" :hidden="!workspaceActionsOpen()" @click="closeWorkspaceActions" aria-label="Close workspace actions"></button>
+      <aside data-workspace-rail aria-label="Workspace tools">
+        <div id="harness-workspace-actions" data-workspace-actions :data-open="workspaceActionsOpen() ? 'true' : 'false'">
+          @if(activeWorkspaceId)
+            <div data-workspace-context>
+              <span class="inline-block size-4 i-hugeicons-folder-01" aria-hidden="true"></span>
+              <span class="min-w-0 truncate" title="{{ workspaceName || sessionTitle }}">{{ workspaceName || sessionTitle }}</span>
+            </div>
+          @endif
+        {{--
+          Changes sit behind a toggle rather than always-on. Reading a repository
+          costs a subprocess, and most page loads never look at the diff.
+        --}}
+        @if(activeSession && !activeSession.scratch)
+        <button
+          type="button"
+          data-diff-toggle
+          aria-controls="harness-changes"
+          class="px-2 py-[3px] text-[12px] border border-black/10 rounded-[6px] dark:border-white/15"
+          aria-expanded="false"
+          :aria-expanded="diffOpen() ? 'true' : 'false'"
+          @click="toggleDiff"
+        ><span class="inline-block size-4 i-hugeicons-file-02" aria-hidden="true"></span><span>Changes</span></button>
+        @endif
+        @if(activeWorkspaceId)
+          <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
+            <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
+            <span>Terminal</span>
+          </button>
+        @endif
+        @if(activeScratchSession)
+          <button type="button" data-promote-scratch @click="promoteScratchProject" :disabled="projectBusy()" class="px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Turn into project</button>
+        @endif
+        @if(draftProject || activeSession || draftWithoutProject)
+        <button type="button" data-project-add @click="openProjectPicker" class="flex gap-1.5 items-center shrink-0 px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15" aria-label="Add project" title="Add project">
+          <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
+          <span>Add project</span>
+        </button>
+        @endif
+      </div>
+    <section id="harness-changes" aria-labelledby="harness-changes-title" data-diff hidden :hidden="!diffOpen()" class="overflow-y-auto px-3 py-2">
+      <div class="flex gap-2 items-center justify-between mb-1">
+        <h2 id="harness-changes-title" class="font-semibold text-[13px]">Changes</h2>
+        <button type="button" @click="toggleDiff" aria-label="Close changes" title="Close changes" class="harness-icon-button">
+          <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </div>
+      <div data-diff-status class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
+      <ul data-diff-files class="mb-2 list-none">
+        <template :for="file in diffFiles" :key="file.path">
+          <li class="flex gap-[8px] items-center py-[1px] text-[12px]" :data-diff-file="file.path">
+            <span class="shrink-0 w-[64px] text-[11px] uppercase opacity-50" :text="file.status"></span>
+            {{-- :text assigns text, never markup — a path is data, and a repository can contain anything. --}}
+            <span class="font-mono truncate" :text="file.path"></span>
+            {{-- Untracked files have no counts; showing +0 -0 implies an empty file. --}}
+            <span class="shrink-0 ml-auto font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
+          </li>
+        </template>
+      </ul>
+      <pre data-diff-patch class="overflow-x-auto leading-[17px] text-[12px]" :text="diffPatch()"></pre>
+    </section>
+      </aside>
+    @endif
+    </div>
   </main>
 
   <dialog data-thread-search ref="threadSearchDialogBox" aria-labelledby="thread-search-heading" @cancel="cancelThreadSearch" @click.self="closeThreadSearch" class="mb-auto mt-8 mx-auto p-0 md:mt-auto text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[12px] dark:border-white/15 shadow-xl">
@@ -622,10 +698,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     everywhere else.
   --}}
   <dialog data-settings-modal ref="settingsDialogBox" aria-labelledby="harness-settings-title" @click.self="closeSettings" @cancel="cancelSettings" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[10px] dark:border-white/15 shadow-xl">
-    <div class="p-4">
-      <h2 id="harness-settings-title" class="mb-3 font-semibold text-[14px]">Settings</h2>
+    <div data-settings-shell>
+      <header data-settings-header class="flex gap-2 items-center justify-between">
+        <h2 id="harness-settings-title" class="font-semibold text-base">Settings</h2>
+        <button type="button" @click="closeSettings" class="px-3 h-8 text-xs border border-black/15 rounded-md dark:border-white/20">Done</button>
+      </header>
+      <nav data-settings-navigation aria-label="Settings sections">
+        <button type="button" @click="jumpToSettings('appearance')">Appearance</button>
+        <button type="button" @click="jumpToSettings('agents')">Agents</button>
+        <button type="button" @click="jumpToSettings('access')">Access</button>
+      </nav>
+      <div data-settings-panel>
       <div class="mb-3 pb-3 border-b border-black/10 dark:border-white/10">
-        <h3 class="mb-2 font-medium text-[13px]">Appearance</h3>
+        <h3 data-settings-section="appearance" tabindex="-1" class="mb-2 font-medium text-[13px]">Appearance</h3>
         <AppearancePicker v-model:value="appearancePreference" label="Appearance" :options="[{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'auto', label: 'System' }]" />
       </div>
       <label class="block mb-2 font-medium text-[13px]" for="settings-driver">Agent for new sessions</label>
@@ -646,7 +731,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="queue">Queue for the next turn</option>
         <option value="steer">Steer the active turn</option>
       </select>
-      <h3 class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Agents</h3>
+      <h3 data-settings-section="agents" tabindex="-1" class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Agents</h3>
       {{--
         One row per agent CLI, filled by the same `/drivers` probe that
         annotates the pickers. "Log in" runs the CLI's own login flow in the
@@ -686,7 +771,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </li>
       </ul>
 
-      <h3 class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Access</h3>
+      <h3 data-settings-section="access" tabindex="-1" class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Access</h3>
       @if(devices.length)
         <ul class="mb-2">
           @foreach(devices as device)
@@ -709,24 +794,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <p class="mb-3 text-[12px] opacity-60">Pairing needs the server started with <code>--remote</code>.</p>
       @endif
 
-      <div class="flex justify-end">
-        <button type="button" @click="closeSettings" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px]">Done</button>
       </div>
     </div>
   </dialog>
 
-  @if(activeWorkspaceId)
-    <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
-      <div data-terminal-host ref="termHostBox" @keydown="termKeydown" @paste="termPaste" tabindex="0" class="terminal-host">
-        {{--
-          Ten glyphs in the host's own font, laid out but invisible: the ruler
-          the island measures to turn pixels into columns and rows.
-        --}}
-        <span data-term-metric ref="termMetricBox" aria-hidden="true" class="term-metric">0123456789</span>
-        <div data-terminal-screen ref="termScreenBox"></div>
-      </div>
-    </section>
-  @endif
+
 </div>
 
 
@@ -920,10 +992,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const projectPath = useRef('projectPathBox')
   const projectTrust = useRef('projectTrustBox')
   const sidebarOpen = state(false)
+  const sidebarCollapsed = useLocalStorage('harness.sidebarCollapsed', false)
+  const desktopSidebar = useMediaQuery('(min-width: 48rem)')
   const storedSidebarWidth = useLocalStorage('harness.sidebarWidth', 250)
   const sidebarWidth = state(boundedSidebarWidth(storedSidebarWidth()))
   let sidebarDrag = null
   const workspaceActionsOpen = state(false)
+  const workspaceDetailsOpen = useLocalStorage('harness.workspaceDetailsOpen', true)
+  const wideWorkspace = useMediaQuery('(min-width: 75rem)')
   const workspaceActionsToggle = useRef('workspaceActionsToggleBox')
   const sidebarRef = useRef('sidebarBox')
   const sidebarToggleRef = useRef('sidebarToggleBox')
@@ -931,7 +1007,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const profileNameRef = useRef('profileNameBox')
   const driverPickerRef = useRef('driverPickerBox')
   const settingsDriverRef = useRef('settingsDriverBox')
-  const settingsToggleRef = useRef('settingsToggleBox')
   const settingsDialogRef = useRef('settingsDialogBox')
   const colorMode = useColorMode()
   const appearancePreference = state(colorMode.preference)
@@ -947,7 +1022,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const threadSearchDialog = useRef('threadSearchDialogBox')
   const threadSearchInput = useRef('threadSearchInputBox')
   const threadSearchList = useRef('threadSearchListBox')
-  const threadSearchToggle = useRef('threadSearchToggleBox')
   const threadSearchResults = state([])
   const threadSearchStatus = state('')
   const threadSearchIndex = state(0)
@@ -960,6 +1034,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const termHostRef = useRef('termHostBox')
   const termMetricRef = useRef('termMetricBox')
 
+  function toggleSidebar() {
+    if (desktopSidebar()) {
+      sidebarCollapsed.set(!sidebarCollapsed())
+      if (sidebarCollapsed()) void nextTick(() => sidebarToggleRef.current?.focus())
+      else void nextTick(() => sidebarRef.current?.focus())
+      return
+    }
+    if (sidebarOpen()) closeSidebar()
+    else openSidebar()
+  }
+
   function openSidebar() {
     workspaceActionsOpen.set(false)
     sidebarOpen.set(true)
@@ -968,7 +1053,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function closeSidebar() {
     sidebarOpen.set(false)
-    sidebarToggleRef.current?.focus()
+    void nextTick(() => sidebarToggleRef.current?.focus())
   }
 
   function boundedSidebarWidth(width) {
@@ -1015,7 +1100,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     sidebarDrag = null
   }
   function toggleWorkspaceActions() {
-    workspaceActionsOpen.update(open => !open)
+    if (wideWorkspace()) workspaceDetailsOpen.set(!workspaceDetailsOpen())
+    else workspaceActionsOpen.update(open => !open)
   }
 
   function closeWorkspaceActions() {
@@ -1451,12 +1537,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return KNOWN_DRIVERS.includes(stored) ? stored : 'claude'
   }
 
-  let settingsFromAccount = false
+  let settingsTrigger = null
 
   function openSettings(event) {
     const dialog = settingsDialogRef.current
     if (!dialog || dialog.open) return
-    settingsFromAccount = event?.currentTarget === settingsToggleRef.current
+    settingsTrigger = event?.currentTarget?.matches?.('[data-account-button]') ? event.currentTarget : null
     workspaceActionsOpen.set(false)
     dialog.showModal()
     // Re-probe on open: someone who just logged in comes back to a sheet
@@ -1472,10 +1558,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     })
   }
 
+  function jumpToSettings(section) {
+    const heading = settingsDialogRef.current?.querySelector(`[data-settings-section="${section}"]`)
+    if (!heading) return
+    heading.scrollIntoView({ block: 'start' })
+    heading.focus({ preventScroll: true })
+  }
+
   function closeSettings() {
     settingsDialogRef.current?.close()
-    if (settingsFromAccount) settingsToggleRef.current?.focus()
-    settingsFromAccount = false
+    settingsTrigger?.focus()
+    settingsTrigger = null
   }
 
   function cancelSettings(event) {
@@ -1485,12 +1578,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   let threadSearchTimer = null
   let threadSearchRequest = null
-  let threadSearchFromButton = false
+  let threadSearchTrigger = null
 
   function openThreadSearch(event) {
     const dialog = threadSearchDialog.current
     if (!dialog || dialog.open || !Number(activeProfile)) return
-    threadSearchFromButton = event?.currentTarget === threadSearchToggle.current
+    threadSearchTrigger = event?.currentTarget?.matches?.('[data-thread-search-toggle], [data-nav-search]') ? event.currentTarget : null
     workspaceActionsOpen.set(false)
     dialog.showModal()
     threadSearchInput.current?.focus()
@@ -1503,8 +1596,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     threadSearchStatus.set('')
     if (threadSearchInput.current) threadSearchInput.current.value = ''
     threadSearchDialog.current?.close()
-    if (threadSearchFromButton) threadSearchToggle.current?.focus()
-    threadSearchFromButton = false
+    threadSearchTrigger?.focus()
+    threadSearchTrigger = null
   }
 
   function cancelThreadSearch(event) {
@@ -1739,10 +1832,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     })
   }
 
-  function toggleDiff() {
+  let diffTrigger = null
+
+  function toggleDiff(event) {
+    if (diffOpen()) {
+      diffOpen.set(false)
+      diffTrigger?.focus()
+      diffTrigger = null
+      return
+    }
+    diffTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
     closeWorkspaceActions()
-    diffOpen.update(open => !open)
-    if (diffOpen() && sessionId) loadDiff()
+    diffOpen.set(true)
+    if (sessionId) loadDiff()
   }
 
   // ── The live wire ─────────────────────────────────────────────────────
@@ -2181,12 +2283,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     termObserver.observe(host)
   }
 
-  function toggleTerminal() {
-    closeWorkspaceActions()
-    // No workspace, no shell to open — the panel is not even rendered.
+  let terminalTrigger = null
+
+  function toggleTerminal(event) {
+    // No workspace, no shell to open.
     if (!Number(activeWorkspaceId)) return
-    termOpen.update(open => !open)
-    if (!termOpen()) return
+    if (termOpen()) {
+      termOpen.set(false)
+      terminalTrigger?.focus()
+      terminalTrigger = null
+      return
+    }
+    terminalTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current
+      : event?.currentTarget ?? termHostRef.current?.ownerDocument.activeElement
+    closeWorkspaceActions()
+    termOpen.set(true)
     // Focused now, not in the frame callback: keys typed right after the
     // click must land in the host (they buffer until the PTY binds).
     void nextTick(() => termHostRef.current?.focus())
