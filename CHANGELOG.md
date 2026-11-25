@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.26...v0.0.27)
+
+## ✨ Features
+
+- **ui**: align workspace controls across viewport sizes ([9f839b2](https://github.com/stacksjs/harness/commit/9f839b2)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.25...v0.0.26)
 
 ## ✨ Features
