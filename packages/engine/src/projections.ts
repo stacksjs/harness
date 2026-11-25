@@ -116,6 +116,7 @@ export interface TurnState {
   nativeFork?: NativeForkTarget
   compaction?: true
   automaticCompaction?: true
+  freshContext?: true
   contextCompacted?: true
   modelChanged?: boolean
   switchedProvider?: DriverKind
@@ -522,6 +523,11 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
     case 'turn.started': {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
+      if (p.freshContext) {
+        session.providerSessionId = ''
+        delete session.providerConversations
+        delete session.handoff
+      }
       session.state = 'running'
       delete session.lastError
       if (p.codexSelection) {
@@ -541,6 +547,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         prompt: p.text ?? '',
         ...(p.compaction ? { compaction: true } : {}),
         ...(p.automaticCompaction ? { automaticCompaction: true } : {}),
+        ...(p.freshContext ? { freshContext: true } : {}),
         ...(p.codexSelection ? { codexSelection: p.codexSelection } : {}),
         ...(p.modelChanged ? { modelChanged: true } : {}),
         ...(p.switchedProvider ? { switchedProvider: p.switchedProvider } : {}),

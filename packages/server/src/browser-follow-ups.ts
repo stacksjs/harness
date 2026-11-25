@@ -113,11 +113,11 @@ export function createFollowUpActions(options: FollowUpOptions) {
     clearTimeout(retry)
     let entry = local()?.[0]
     while (entry && !disposed && online() && (!entry.error || retryFailed)) {
-      const { id, text, codexSelection } = entry
+      const { id, text, codexSelection, freshContext } = entry
       sending.set(id)
       local.set(local().map(item => item.id === id ? { ...item, attempted: true } : item))
       try {
-        await send({ type: 'session.queue.add', sessionId, text, ...(codexSelection ? { codexSelection } : {}) }, id)
+        await send({ type: 'session.queue.add', sessionId, text, ...(codexSelection ? { codexSelection } : {}), ...(freshContext ? { freshContext } : {}) }, id)
         local.set(local().filter(item => item.id !== id))
       }
       catch (error) {

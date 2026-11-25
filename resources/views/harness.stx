@@ -364,6 +364,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}" id="turn-{{ turn.id }}">
           @if(turn.switchedProvider)<p data-provider-switch class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Continued with {{ providerDisplayName(turn.switchedProvider) }}</p>@endif
           @if(turn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ turn.modelChange }}</p>@endif
+          @if(turn.freshContext)<p data-fresh-context class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">New session</p>@endif
           @if(!turn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(turn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
@@ -429,6 +430,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article class="mb-5" data-turn="{{ liveTurn.id }}" id="turn-{{ liveTurn.id }}" data-live>
           @if(liveTurn.switchedProvider)<p data-provider-switch class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Continued with {{ providerDisplayName(liveTurn.switchedProvider) }}</p>@endif
           @if(liveTurn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ liveTurn.modelChange }}</p>@endif
+          @if(liveTurn.freshContext)<p data-fresh-context class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">New session</p>@endif
           @if(!liveTurn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(liveTurn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
@@ -515,6 +517,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
           <p data-provider-switch hidden :hidden="!turn.providerSwitch" :text="turn.providerSwitch" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300"></p>
           <p data-model-change :hidden="!turn.modelChange" :text="turn.modelChange ? 'Switched to ' + turn.modelChange : ''" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300"></p>
+          <p data-fresh-context hidden :hidden="!turn.freshContext" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">New session</p>
           <div class="sr-only" :hidden="turn.automaticCompaction">You</div>
           <p data-automatic-compaction hidden :hidden="!turn.automaticCompaction" class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
@@ -583,6 +586,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
       --}}
+      <div data-fresh-session-banner hidden :hidden="!freshSessionArmed()" class="flex flex-wrap gap-2 items-center justify-between px-2 py-1.5 text-[13px] bg-neutral-100 dark:bg-white/10 rounded-md">
+        <p role="status">Your next message starts a fresh session</p>
+        <button type="button" @click="keepCurrentProviderSession" class="px-2 min-h-8 font-medium hover:bg-black/5 dark:hover:bg-white/10 rounded-md">Keep current session</button>
+      </div>
+      <div data-clear-command-menu hidden :hidden="!offerClearCommand()" aria-label="Composer commands" role="group" class="px-1 py-1 text-[13px]">
+        <button type="button" data-clear-command ref="clearCommandBox" @click="armFreshProviderSession" class="flex gap-2 items-center px-2 min-h-9 w-full text-start hover:bg-black/5 dark:hover:bg-white/10 rounded-md">
+          <kbd class="font-medium font-mono">/clear</kbd>
+          <span class="text-neutral-600 dark:text-neutral-300">Start a fresh session</span>
+        </button>
+      </div>
       <textarea
         data-prompt
         ref="promptBox"
@@ -1178,6 +1191,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
   const promptScope = sessionId ? `session:${sessionId}`
     : draftProject ? `project:${draftProject.id}` : 'projectless'
+  const storedFreshSession = useLocalStorage(`harness.fresh-session:${activeProfile || 0}:${promptScope}`, '')
+  const freshSessionArmed = derived(() => Boolean(sessionId && typeof storedFreshSession() === 'string' && storedFreshSession()))
+  const clearCommandBox = useRef('clearCommandBox')
+  const offerClearCommand = derived(() => {
+    const text = composerText().trim().toLowerCase()
+    return Boolean(sessionId && runningTurnId() > 0 && !editingFollowUp()
+      && text.startsWith('/') && '/clear'.startsWith(text))
+  })
   const composerDraft = useLocalStorage(`harness.composer.v1:${activeProfile || 0}:${promptScope}`, null, {
     listenToStorageChanges: false,
   })
@@ -1356,11 +1377,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (editingFollowUp()) return 'Save edit'
     if (pendingProviderSwitch()) return 'Send'
     if (canSteerDraft() && followUpPreference() === 'steer') return 'Steer'
-    return sessionId && (uiBusy() || !sessionOnline()) ? 'Queue' : 'Send'
+    return sessionId && (uiBusy() || !sessionOnline() || (freshSessionArmed() && followUps().entries.length)) ? 'Queue' : 'Send'
   })
   function showQueueSend(entry) {
     return !entry.local && !entry.steering && entry.steeringIssue !== 'uncertain'
-      && editingFollowUp()?.id !== entry.id && (!uiBusy() || (entry.text.trim() !== '/compact' && canSteer() && matchesActiveCodexSelection(entry.codexSelection)))
+      && editingFollowUp()?.id !== entry.id && (!uiBusy() || (!entry.freshContext && entry.text.trim() !== '/compact' && canSteer() && matchesActiveCodexSelection(entry.codexSelection)))
   }
   function sendQueuedFollowUp(id) {
     if (canSteer()) return followUpActions()?.steerQueued(id, runningTurnId())
@@ -1492,7 +1513,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const candidate = idleCompactionCandidate()
     if (!candidate || candidate.availableAt > idleCompactionClock() || uiState() !== 'idle'
       || (accountCompaction()[agentChoice(activeDriverValue()).providerInstanceId]?.idleCompaction
-        ?? settings().claudeIdleCompaction) === 'off' || !sessionOnline() || pendingProviderSwitch() || editingFollowUp()
+        ?? settings().claudeIdleCompaction) === 'off' || freshSessionArmed() || !sessionOnline() || pendingProviderSwitch() || editingFollowUp()
       || followUps().entries.length || localFollowUps()?.length || threadNavigation().settledAt
       || threadNavigation().snoozedUntil || /^\s*\/compact(?:\s|$)/iu.test(composerText())) return null
     return candidate
@@ -2171,7 +2192,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     draftSpeed.set(typeof selection.serviceTier === 'string' ? selection.serviceTier : '')
   }
   function canSteerDraft() {
-    return composerText().trim() !== '/compact' && !pendingProviderSwitch() && canSteer() && matchesActiveCodexSelection(draftCodexSelection())
+    return !freshSessionArmed() && composerText().trim() !== '/compact' && !pendingProviderSwitch() && canSteer() && matchesActiveCodexSelection(draftCodexSelection())
   }
   const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
   const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
@@ -3005,12 +3026,37 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (current === first) void sendPrompt()
   }
 
+  function armFreshProviderSession() {
+    if (!sessionId || !runningTurnId()) {
+      stxAlert('Send a message before starting a fresh provider session.')
+      return
+    }
+    storedFreshSession.set(newCommandId())
+    const box = promptRef.current
+    if (box) {
+      box.value = ''
+      box.focus()
+    }
+    composerText.set('')
+    composerDraft.set(null)
+  }
+
+  function keepCurrentProviderSession() {
+    storedFreshSession.set('')
+    promptRef.current?.focus()
+  }
+
   async function sendPrompt(mode = followUpPreference()) {
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
-    if (!text || startPending() || handoffBlocked()) return
+    if (!text || startPending()) return
     const editing = editingFollowUp()
+    if (!editing && text.toLowerCase() === '/clear') {
+      armFreshProviderSession()
+      return
+    }
+    if (handoffBlocked()) return
     if (editing) {
       startPending.set(true)
       try {
@@ -3021,7 +3067,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
 
-    if (text === '/compact' && (!sessionId || pendingProviderSwitch())) {
+    const freshArm = freshSessionArmed() ? storedFreshSession() : ''
+    const freshContext = freshArm ? { freshContext: true } : {}
+    if (text === '/compact' && (!sessionId || pendingProviderSwitch() || freshContext.freshContext)) {
       stxAlert('Send a message to start this provider conversation before compacting it.')
       return
     }
@@ -3038,7 +3086,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         const model = draftModel() ? { model: draftModel() } : {}
         const { model: _model, ...options } = codexSelection ?? {}
         await sendCommand({ type: 'session.handoff', sessionId, afterTurnId: runningTurnId(), text, ...choice, ...model,
-          ...(codexSelection ? { codexTurnOptions: options } : {}) }, commandId)
+          ...(codexSelection ? { codexTurnOptions: options } : {}), ...freshContext }, commandId)
+        if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
         if (box.value === raw) {
           box.value = ''
           composerText.set('')
@@ -3074,10 +3123,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
 
-    if (sessionId && (uiBusy() || (!sessionOnline() && !sessionConnecting()) || localFollowUps()?.length)) {
+    if (sessionId && (uiBusy() || (!sessionOnline() && !sessionConnecting()) || localFollowUps()?.length
+      || (freshContext.freshContext && followUps().entries.length))) {
       const actions = followUpActions()
       if (!actions) return
-      actions.stage({ id: commandId, text, ...(codexSelection ? { codexSelection } : {}) })
+      actions.stage({ id: commandId, text, ...(codexSelection ? { codexSelection } : {}), ...freshContext })
+      if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
       box.value = ''
       composerText.set('')
       composerDraft.set(null)
@@ -3130,7 +3181,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     try {
       const compactAfterTurnId = compactNextPrompt() ? idleCompactionOffer()?.afterTurnId : undefined
       await sendCommand({ type: 'session.turn.start', sessionId, text, ...(codexSelection ? { codexSelection } : {}),
-        ...(compactAfterTurnId === undefined ? {} : { compactAfterTurnId }) }, commandId)
+        ...(compactAfterTurnId === undefined ? {} : { compactAfterTurnId }), ...freshContext }, commandId)
+      if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
       if (box.value === raw) {
         box.value = ''
         composerText.set('')
@@ -3147,6 +3199,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function promptKeydown(event) {
     if (event.isComposing || event.keyCode === 229) return
+    if (event.key === 'ArrowDown' && offerClearCommand()) {
+      event.preventDefault()
+      clearCommandBox.current?.focus()
+      return
+    }
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && (event.shiftKey ? canSteer() : canSteerDraft()) && !editingFollowUp()) {
       event.preventDefault()
       if (event.shiftKey) {
@@ -3666,6 +3723,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       }
       if (payload.type === 'turn.started') {
         sessionError.set('')
+        if (payload.freshContext) {
+          contextUsage.set(null)
+          idleCompactionCandidate.set(null)
+        }
         if (payload.codexSelection) {
           const previous = appliedCodexSelection()
           if (previous?.model !== payload.codexSelection.model || previous?.serviceTier !== payload.codexSelection.serviceTier)
@@ -3687,6 +3748,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             id: payload.turnId,
             prompt: payload.text ?? '',
             automaticCompaction: payload.automaticCompaction === true,
+            freshContext: payload.freshContext === true,
             providerSwitch: payload.switchedProvider ? 'Continued with ' + DRIVER_LABELS[payload.switchedProvider] : '',
             modelChange: payload.modelChanged && payload.codexSelection ? codexSelectionLabel(payload.codexSelection) : '',
             tools: [],

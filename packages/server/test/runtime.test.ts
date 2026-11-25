@@ -563,6 +563,149 @@ describe('Claude account compaction preferences', () => {
   })
 })
 
+describe('fresh provider session', () => {
+  it.each(['direct', 'switch-provider'] as const)('preserves the thread and starts the %s provider without earlier context', async mode => {
+    const databasePath = join(dir, 'test.sqlite')
+    const calls: Array<{ driver: string, input: StartTurnInput, nativeId: string }> = []
+    let launches = 0
+    const { driver } = fakeDriver([])
+    const options = {
+      port, databasePath, resolveDriver: (kind: Driver['kind']): Driver => ({
+        ...driver,
+        kind,
+        async create(config) {
+          const createdId = `native-${kind}-${++launches}`
+          return {
+            ...await driver.create(config),
+            async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+              const nativeId = input.providerSessionId ?? createdId
+              calls.push({ driver: kind, input, nativeId })
+              if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: nativeId }
+              yield { type: 'assistant-delta', text: `Reply to ${input.text}` }
+              yield { type: 'turn-complete', tokensIn: 5, tokensOut: 3, costMicros: 0 }
+            },
+          }
+        },
+      }),
+    }
+    harness = await serve(options)
+    const url = `ws://127.0.0.1:${port}/ws`
+    let client = await Client.connect(url)
+    const { sessionId } = await bootstrap(client)
+    const send = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 20, command } })
+    const oldPrompt = 'Remember the earlier draft.'
+    const freshPrompt = 'Take an independent look.'
+    try {
+      send('fresh-source', { type: 'session.turn.start', sessionId, text: oldPrompt })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 1)).toBeTruthy()
+      send('fresh-slash', { type: 'session.turn.start', sessionId, text: '/clear' })
+      expect(await client.waitForRejection('fresh-slash')).toBeTruthy()
+      const fresh: Command = mode === 'direct'
+        ? { type: 'session.turn.start', sessionId, text: freshPrompt, freshContext: true }
+        : { type: 'session.handoff', sessionId, driverKind: 'codex', afterTurnId: 1, text: freshPrompt, freshContext: true }
+      send('fresh-entry', fresh)
+      expect(await client.waitFor('turn.started', 3000, event => event.turnId === 2)).toMatchObject({ freshContext: true })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 2)).toBeTruthy()
+      expect(calls).toHaveLength(2)
+      expect(calls[1]?.input.text).toBe(freshPrompt)
+      expect(calls[1]?.input.historicalContext).toBeUndefined()
+      expect(calls[1]?.input.providerSessionId).toBeUndefined()
+      expect(calls[1]?.nativeId).not.toBe(calls[0]?.nativeId)
+      const originalNativeId = calls[0]!.nativeId
+      const freshNativeId = calls[1]!.nativeId
+
+      client.close()
+      harness.stop()
+      harness = await serve(options)
+      client = await Client.connect(url)
+      client.send({ t: 'subscribe', sessionId })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 2)).toBeTruthy()
+      send('fresh-entry', fresh)
+      expect(await client.waitForDispatch('fresh-entry')).toMatchObject({ replayed: true })
+      expect(harness.engine.current.sessions.get(sessionId)?.turns.map(turn => turn.prompt)).toEqual([oldPrompt, freshPrompt])
+      expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe(freshNativeId)
+
+      send('fresh-switch', {
+        type: 'session.handoff', sessionId, driverKind: mode === 'direct' ? 'codex' : 'claude',
+        afterTurnId: 2, text: 'Continue across providers.',
+      })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 3)).toBeTruthy()
+      expect(calls[2]?.input.text).toContain(freshPrompt)
+      expect(calls[2]?.input.text).not.toContain(oldPrompt)
+      expect(calls[2]?.input.providerSessionId).toBeUndefined()
+      expect(calls[2]?.nativeId).not.toBe(originalNativeId)
+
+      send('fresh-return', {
+        type: 'session.handoff', sessionId, driverKind: mode === 'direct' ? 'claude' : 'codex',
+        afterTurnId: 3, text: 'Return to the fresh conversation.',
+      })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 4)).toBeTruthy()
+      expect(calls[3]?.nativeId).toBe(freshNativeId)
+      expect(calls[3]?.input.text).not.toContain(oldPrompt)
+    }
+    finally { client.close() }
+  })
+
+  it('keeps the fresh-context flag on a queued message through a restart', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const gate = Promise.withResolvers<void>()
+    const bindings: Array<string | undefined> = []
+    let launches = 0
+    const { driver } = fakeDriver([])
+    const options = {
+      port, databasePath, resolveDriver: () => ({
+        ...driver,
+        async create(config: DriverConfig) {
+          const id = `native-queued-${++launches}`
+          return {
+            ...await driver.create(config),
+            async steer() { return 'delivered' as const },
+            async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+              bindings.push(input.providerSessionId)
+              if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: id }
+              if (input.text === 'Keep this turn running.') {
+                yield { type: 'steering-ready' }
+                await gate.promise
+              }
+              yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+            },
+          }
+        },
+      }),
+    }
+    harness = await serve(options)
+    const url = `ws://127.0.0.1:${port}/ws`
+    let client = await Client.connect(url)
+    const { sessionId } = await bootstrap(client)
+    const send = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 20, command } })
+    try {
+      send('fresh-hold', { type: 'session.turn.start', sessionId, text: 'Keep this turn running.' })
+      expect(await client.waitFor('turn.steering-ready')).toBeTruthy()
+      send('fresh-queued', { type: 'session.queue.add', sessionId, text: 'Start fresh when ready.', freshContext: true })
+      expect(await client.waitFor('queue.added')).toMatchObject({ entry: { freshContext: true } })
+      send('fresh-steer', { type: 'session.turn.steer', sessionId, turnId: 1, id: 'fresh-queued' })
+      expect(await client.waitForRejection('fresh-steer')).toMatchObject({ message: expect.stringContaining('wait') })
+      client.close()
+      harness.stop()
+      gate.resolve()
+      harness = await serve(options)
+      client = await Client.connect(url)
+      client.send({ t: 'subscribe', sessionId })
+      expect(await client.waitFor('turn.interrupted')).toBeTruthy()
+      expect(harness.engine.current.sessions.get(sessionId)?.followUps).toMatchObject({ held: true, entries: [{ freshContext: true }] })
+      send('fresh-resume', { type: 'session.queue.send', sessionId, id: 'fresh-queued' })
+      expect(await client.waitFor('turn.started', 3000, event => event.turnId === 2)).toMatchObject({ freshContext: true })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 2)).toBeTruthy()
+      expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe('native-queued-2')
+      expect(bindings).toEqual([undefined, undefined])
+    }
+    finally {
+      gate.resolve()
+      client.close()
+    }
+  })
+})
+
 describe('provider handoff', () => {
   it.each(['resumed', 'missing', 'ambiguous', 'over-capacity', 'changed-model', 'small-window'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
     const databasePath = join(dir, 'test.sqlite')

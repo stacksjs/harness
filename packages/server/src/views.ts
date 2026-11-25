@@ -234,6 +234,7 @@ export function viewProps(state: HarnessState, options: {
             status: turn.status,
             ...(turn.contextCompacted ? { contextCompacted: true } : {}),
             ...(turn.automaticCompaction ? { automaticCompaction: true } : {}),
+            ...(turn.freshContext ? { freshContext: true } : {}),
             forkable: isForkableResponse(turn),
             switchedProvider: turn.switchedProvider,
             modelChange: turn.modelChanged && turn.codexSelection ? codexSelectionLabel(turn.codexSelection) : undefined,

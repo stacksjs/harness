@@ -279,6 +279,7 @@ export class ProviderRuntime {
       return
     }
 
+    if (turn.freshContext) await this.stopSession(sessionId)
     const handoff = session.handoff?.pending ? session.handoff : undefined
     if (compaction && (!session.providerSessionId || handoff)) {
       await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Send a message to start this provider conversation before compacting it.' })
@@ -288,21 +289,23 @@ export class ProviderRuntime {
     let history: ReturnType<typeof historicalContext>
     if (handoff) {
       try {
+        const boundary = session.turns.findLastIndex(turn => turn.freshContext)
+        const turns = boundary < 0 ? session.turns : session.turns.slice(boundary)
         const saved = returning?.context
         const sameModel = saved?.model === session.model && saved?.serviceTier === session.codexTurnOptions?.serviceTier
         const maxTokens = sameModel ? saved?.usage.maxTokens : undefined
         const occupancy = returning ? {
-          usedTokens: saved?.usage.usedTokens ?? estimateNativeContext(session.turns, returning.throughTurnId),
+          usedTokens: saved?.usage.usedTokens ?? estimateNativeContext(turns, returning.throughTurnId),
           ...(maxTokens === undefined ? {} : { maxTokens }),
         } : undefined
         try {
-          history = historicalContext(session.turns, handoff.afterTurnId, text, returning?.throughTurnId, occupancy)
+          history = historicalContext(turns, handoff.afterTurnId, text, returning?.throughTurnId, occupancy)
         }
         catch (error) {
           if (!returning || !(error instanceof HandoffCapacityError)) throw error
           // The existing conversation cannot hold the delta. Rebuild context
           // for the same model in a fresh provider thread before dispatching.
-          history = historicalContext(session.turns, handoff.afterTurnId, text, 0, { usedTokens: 0, maxTokens })
+          history = historicalContext(turns, handoff.afterTurnId, text, 0, { usedTokens: 0, maxTokens })
           returning = undefined
         }
         // A failed handoff can have bound a native session and consumed some

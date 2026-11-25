@@ -7,7 +7,7 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
-import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isCompactCommand, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
 import { forkResponsePoint, isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
@@ -74,8 +74,10 @@ function requestedCodexSelection(session: SessionState, selection: CodexTurnSele
   return { model, ...codexTurnOptions }
 }
 
-function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string): Extract<EventPayload, { type: 'turn.started' }> {
+function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string, freshContext = false): Extract<EventPayload, { type: 'turn.started' }> {
   const compaction = isCompactCommand(text)
+  if (freshContext && (typeof text !== 'string' || !text.trim() || isClearCommand(text) || compaction))
+    throw new InvalidCommand('Write a message to start the fresh provider session.')
   const selection = compaction ? undefined : codexSelection ?? (session.driverKind === 'codex' && session.model
     ? { model: session.model, ...session.codexTurnOptions } : undefined)
   const modelChanged = selection && session.turns.length > 0 && (selection.model !== session.model
@@ -83,6 +85,7 @@ function turnStarted(session: SessionState, text: string, codexSelection?: Codex
   return {
     type: 'turn.started', turnId: session.turns.length + 1, role: 'user', text,
     ...(queuedId ? { queuedId } : {}),
+    ...(freshContext ? { freshContext: true } : {}),
     ...(compaction ? { compaction: true } : {}),
     ...(selection ? { codexSelection: selection } : {}),
     ...(modelChanged ? { modelChanged: true } : {}),
@@ -637,7 +640,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (command.driverKind === session.driverKind && command.providerInstanceId === session.providerInstanceId
         && (command.driverKind === 'codex' || (command.model ?? '') === session.model))
         throw new InvalidCommand('Choose another provider, account, or model.')
-      if (typeof command.text !== 'string' || !command.text.trim())
+      if (typeof command.text !== 'string' || !command.text.trim() || isClearCommand(command.text))
         throw new InvalidCommand('Enter a message to switch providers.')
       if (isCompactCommand(command.text))
         throw new InvalidCommand('Send a message to switch providers before compacting the new conversation.')
@@ -654,7 +657,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           ...model,
         } },
         { ...event, payload: {
-          ...turnStarted({ ...session, driverKind: command.driverKind, model: model.model ?? '', codexTurnOptions: model.codexTurnOptions }, command.text),
+          ...turnStarted({ ...session, driverKind: command.driverKind, model: model.model ?? '', codexTurnOptions: model.codexTurnOptions }, command.text, undefined, undefined, command.freshContext === true),
           switchedProvider: command.driverKind,
         } },
       ]
@@ -675,9 +678,13 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before sending a message.')
 
-      const turn = turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection))
+      if (isClearCommand(command.text)) throw new InvalidCommand('Use a fresh session with the next message.')
+      const freshContext = command.freshContext === true
+      if (freshContext && session.followUps.entries.length)
+        throw new InvalidCommand('Queue this message after the existing follow-ups.')
+      const turn = turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection), undefined, freshContext)
       const base = { sessionId: session.id, commandId, at }
-      if (command.compactAfterTurnId !== undefined && effectiveClaudeCompaction(state, session).idleCompaction !== 'off'
+      if (!freshContext && command.compactAfterTurnId !== undefined && effectiveClaudeCompaction(state, session).idleCompaction !== 'off'
         && !isCompactCommand(command.text)) {
         const eligible = claudeIdleCompaction(session, at)
         if (eligible && eligible.afterTurnId === command.compactAfterTurnId && eligible.availableAt <= at) {
@@ -718,7 +725,13 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         if (!state.workspaces.get(session.workspaceId)?.trusted)
           throw new InvalidCommand('Trust this workspace before queuing a message.')
         const codexSelection = requestedCodexSelection(session, command.codexSelection)
-        return emit({ type: 'queue.added', entry: { id: commandId, text: followUpText(command.text), ...(codexSelection ? { codexSelection } : {}) } })
+        const text = followUpText(command.text)
+        const freshContext = command.freshContext === true
+        if (isClearCommand(text) || (freshContext && isCompactCommand(text)))
+          throw new InvalidCommand('Write a message to start the fresh provider session.')
+        return emit({ type: 'queue.added', entry: {
+          id: commandId, text, ...(codexSelection ? { codexSelection } : {}), ...(freshContext ? { freshContext: true } : {}),
+        } })
       }
 
       const index = entries.findIndex(entry => entry.id === command.id)
@@ -731,7 +744,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (command.type === 'session.queue.edit') {
         if (entry.text !== command.previousText)
           throw new InvalidCommand('This message was edited on another device. Reopen it to make changes.')
-        return emit({ type: 'queue.edited', id: entry.id, text: followUpText(command.text) })
+        const text = followUpText(command.text)
+        if (isClearCommand(text) || (entry.freshContext && isCompactCommand(text)))
+          throw new InvalidCommand('Write a message to start the fresh provider session.')
+        return emit({ type: 'queue.edited', id: entry.id, text })
       }
 
       if (command.direction !== 'up' && command.direction !== 'down')
@@ -763,6 +779,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         ? entries.find(entry => entry.id === command.id)
         : { id: commandId, text: followUpText(command.text) }
       if (!entry) throw new InvalidCommand('This message is no longer queued.')
+      if ('freshContext' in entry && entry.freshContext)
+        throw new InvalidCommand('A fresh session must wait for the current turn to finish.')
+      if (isClearCommand(entry.text))
+        throw new InvalidCommand('Use a fresh session with the next message.')
       if (isCompactCommand(entry.text))
         throw new InvalidCommand('Compaction must wait for the current turn to finish.')
       const selection = 'codexSelection' in entry ? entry.codexSelection : undefined
@@ -829,7 +849,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         if (!id || command.confirmResend !== true)
           throw new InvalidCommand('Use Send again on the message whose delivery could not be confirmed.')
       }
-      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.codexSelection, entry.id) }]
+      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.codexSelection, entry.id, entry.freshContext === true) }]
     }
 
     case 'session.turn.interrupt': {

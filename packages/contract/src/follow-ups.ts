@@ -7,6 +7,7 @@ export interface QueuedFollowUp {
   id: string
   text: string
   codexSelection?: CodexTurnSelection
+  freshContext?: true
   steering?: { requestId: string, turnId: number }
   steeringIssue?: Exclude<SteeringOutcome, 'delivered'>
 }

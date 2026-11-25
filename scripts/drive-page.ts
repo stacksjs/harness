@@ -89,12 +89,25 @@ const script: ProviderEvent[] = [
   { type: 'turn-complete', tokensIn: 5, tokensOut: 3, costMicros: 0 },
 ]
 const idleClaudeDelivery: Array<[string, string | undefined]> = []
+const freshClaudeCalls: StartTurnInput[] = []
+const releaseFreshClaudeTurn = Promise.withResolvers<void>()
+let freshClaudeConversation = 0
 const instance: ProviderInstance = {
   async *compact(providerSessionId) {
     idleClaudeDelivery.push(['/compact', providerSessionId])
     yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
   },
   async *startTurn(input) {
+    if (input.text.startsWith('Fresh session fixture: ')) {
+      freshClaudeCalls.push(input)
+      if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: `fresh-fixture-${++freshClaudeConversation}` }
+      const phrase = input.text.slice('Fresh session fixture: '.length)
+      if (phrase === 'hold the current turn') yield { type: 'steering-ready' }
+      yield { type: 'assistant-delta', text: 'Fixture answer for ' + phrase }
+      if (phrase === 'hold the current turn') await releaseFreshClaudeTurn.promise
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     if (input.text.startsWith('Idle Claude fixture:')) {
       idleClaudeDelivery.push([input.text, input.providerSessionId])
       if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'idle-claude-fixture' }
@@ -2323,6 +2336,96 @@ for (const [id, label] of [[1, 'Work'], [2, 'Personal']] as const) {
   if (id === 1) await compactChoice.waitFor({ state: 'visible' })
   check(`the ${label} account uses its effective idle setting`, await compactChoice.isVisible() === (id === 1))
 }
+
+
+const freshFixtureKey = 'fresh-session-browser'
+await harness.engine.dispatch({
+  id: freshFixtureKey, at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' },
+})
+const freshSessionId = derivedId(freshFixtureKey)
+const freshUrl = new URL(`/s/${freshSessionId}`, baseUrl)
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.goto(freshUrl.href)
+const freshPromptBox = page.getByRole('textbox', { name: 'Message', exact: true })
+const freshBanner = page.locator('[data-fresh-session-banner]')
+const freshMenu = page.locator('[data-clear-command]')
+const freshBoundary = page.locator('[data-fresh-context]:visible')
+const firstFreshPrompt = 'Fresh session fixture: remember the first draft'
+await freshPromptBox.fill(firstFreshPrompt)
+await freshPromptBox.press('Enter')
+await page.getByText('Fixture answer for remember the first draft', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const originalConversation = harness.engine.current.sessions.get(freshSessionId)?.providerSessionId
+
+await freshPromptBox.fill('/cl')
+await freshMenu.waitFor({ state: 'visible' })
+await freshPromptBox.press('ArrowDown')
+check('the slash command is reachable from the composer keyboard', await freshMenu.evaluate(element => element === document.activeElement))
+await freshMenu.press('Enter')
+await freshBanner.waitFor()
+check('arming a fresh session keeps the current provider until the next send',
+  await freshPromptBox.inputValue() === '' && harness.engine.current.sessions.get(freshSessionId)?.providerSessionId === originalConversation)
+await page.reload()
+await freshBanner.waitFor()
+await freshBanner.getByRole('button', { name: 'Keep current session' }).click()
+await freshBanner.waitFor({ state: 'hidden' })
+await freshPromptBox.fill('Fresh session fixture: continue the original')
+await freshPromptBox.press('Enter')
+await page.getByText('Fixture answer for continue the original', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+check('Keep current session resumes the existing native conversation',
+  freshClaudeCalls.at(-1)?.providerSessionId === originalConversation)
+
+writeFileSync(join(dir, 'fresh-session-evidence.txt'), 'This workspace change survives the conversation reset.\n')
+await freshPromptBox.fill('/clear')
+await freshPromptBox.press('Enter')
+await freshBanner.waitFor()
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await capture(`fresh-session-armed-${width}`)
+  }
+}
+await page.setViewportSize({ width: 390, height: 844 })
+await freshPromptBox.fill('Fresh session fixture: give an independent answer')
+await freshPromptBox.press('Enter')
+await freshBoundary.waitFor()
+await page.getByText('Fixture answer for give an independent answer', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+check('a fresh session sends the new message alone and leaves prior turns visible',
+  freshClaudeCalls.at(-1)?.text === 'Fresh session fixture: give an independent answer'
+  && freshClaudeCalls.at(-1)?.providerSessionId === undefined
+  && freshClaudeCalls.at(-1)?.historicalContext === undefined
+  && harness.engine.current.sessions.get(freshSessionId)?.providerSessionId !== originalConversation
+  && await page.locator('[data-transcript]').getByText(firstFreshPrompt, { exact: true }).isVisible()
+  && new URL(page.url()).pathname === freshUrl.pathname)
+const freshSessionDiff = await page.request.get(new URL(`/s/${freshSessionId}/diff`, baseUrl).href)
+check('workspace changes remain available after the context reset',
+  freshSessionDiff.ok() && JSON.stringify(await freshSessionDiff.json()).includes('fresh-session-evidence.txt'))
+await freshBoundary.scrollIntoViewIfNeeded()
+await capture('fresh-session-boundary-phone')
+await page.reload()
+await freshBoundary.waitFor()
+check('the New session boundary survives reload', await freshBoundary.count() === 1)
+
+await freshPromptBox.fill('Fresh session fixture: hold the current turn')
+await freshPromptBox.press('Enter')
+await page.getByText('Fixture answer for hold the current turn', { exact: true }).waitFor()
+await freshPromptBox.fill('/clear')
+await freshPromptBox.press('Enter')
+await freshBanner.waitFor()
+const queuedFreshPrompt = 'Fresh session fixture: start fresh after waiting'
+await freshPromptBox.fill(queuedFreshPrompt)
+await freshPromptBox.press('Enter')
+const queuedFresh = page.locator('[data-follow-up]').filter({ hasText: queuedFreshPrompt })
+await queuedFresh.locator('[data-queued-fresh-session]').waitFor()
+check('a fresh message stays queued while the current native turn is active', await queuedFresh.getByRole('button', { name: 'Send now' }).isHidden())
+releaseFreshClaudeTurn.resolve()
+await page.getByText('Fixture answer for start fresh after waiting', { exact: true }).waitFor()
+check('the queued fresh message starts one new native context',
+  freshClaudeCalls.filter(call => call.text === queuedFreshPrompt).length === 1
+  && freshClaudeCalls.at(-1)?.providerSessionId === undefined
+  && await freshBoundary.count() === 2)
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

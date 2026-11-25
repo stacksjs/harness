@@ -44,7 +44,7 @@ export type EventPayload =
   | { type: 'session.fork-finished', providerSessionId: string }
   | { type: 'session.fork-failed', message: string }
   | { type: 'session.provider-switched', afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions }
-  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind, compaction?: true, automaticCompaction?: true }
+  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind, compaction?: true, automaticCompaction?: true, freshContext?: true }
   | { type: 'queue.added', entry: QueuedFollowUp }
   | { type: 'queue.edited', id: string, text: string }
   | { type: 'queue.removed', id: string }

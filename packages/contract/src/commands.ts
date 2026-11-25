@@ -72,10 +72,10 @@ export type ClientCommand =
     }
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'session.fork', sessionId: number, turnId: number }
-  | { type: 'session.handoff', sessionId: number, afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, text: string }
-  | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection, compactAfterTurnId?: number }
+  | { type: 'session.handoff', sessionId: number, afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, text: string, freshContext?: true }
+  | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection, compactAfterTurnId?: number, freshContext?: true }
   | { type: 'session.turn.interrupt', sessionId: number }
-  | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
+  | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection, freshContext?: true }
   | { type: 'session.queue.edit', sessionId: number, id: string, text: string, previousText: string }
   | { type: 'session.queue.remove', sessionId: number, id: string }
   | { type: 'session.queue.move', sessionId: number, id: string, direction: 'up' | 'down' }
@@ -216,6 +216,14 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'device.revoke',
 ])
 
+export function isClearCommand(text: unknown): boolean {
+  return typeof text === 'string' && text.trim().toLowerCase() === '/clear'
+}
+
+export function isCompactCommand(text: unknown): boolean {
+  return typeof text === 'string' && text.trim() === '/compact'
+}
+
 /**
  * Whether a client may dispatch this command.
  *
@@ -223,10 +231,6 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
  * is client-dispatchable until someone remembers to forbid it, and the failure
  * is silent.
  */
-export function isCompactCommand(text: unknown): boolean {
-  return typeof text === 'string' && text.trim() === '/compact'
-}
-
 export function isClientCommand(type: string): boolean {
   return CLIENT_COMMAND_TYPES.has(type)
 }
