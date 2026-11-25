@@ -32,6 +32,16 @@ export type ProviderEvent =
   | { type: 'turn-complete', tokensIn: number, tokensOut: number, costMicros: number }
   | { type: 'error', message: string }
 
+export interface ProviderModel {
+  id: string
+  name: string
+  isDefault: boolean
+  reasoningEfforts: string[]
+  defaultReasoningEffort?: string
+  speedTiers: Array<{ id: string, name: string }>
+  defaultSpeedTier?: string
+}
+
 export interface ProbeResult {
   /**
    * `unavailable` is a first-class state, not a failure. A driver whose binary
@@ -42,6 +52,7 @@ export interface ProbeResult {
   version?: string
   binaryPath?: string
   message?: string
+  models?: ProviderModel[]
 }
 
 export interface StartTurnInput {
@@ -106,6 +117,6 @@ export interface DriverConfig {
 export interface Driver {
   kind: DriverKind
   /** Is the CLI installed, authenticated, and what version? */
-  probe: (config: DriverConfig) => Promise<ProbeResult>
+  probe: (config: DriverConfig, options?: { includeModels?: boolean }) => Promise<ProbeResult>
   create: (config: DriverConfig) => Promise<ProviderInstance>
 }

@@ -15,5 +15,6 @@ export type {
   ProbeResult,
   ProviderEvent,
   ProviderInstance,
+  ProviderModel,
   StartTurnInput,
 } from './types'

@@ -214,10 +214,23 @@ const driver: Driver = {
   },
 }
 let fixtureCodexReady = false
+let fixtureCodexLaunchModel: string | undefined
 const codexDriver: Driver = {
   ...driver,
   kind: 'codex',
-  async probe() { return { status: fixtureCodexReady ? 'ready' : 'unauthenticated' } },
+  async probe(config, { includeModels } = {}) {
+    const homeModel = config.home?.endsWith('/model-fixture-home')
+    if (!homeModel && !fixtureCodexReady) return { status: 'unauthenticated' }
+    const id = homeModel ? 'fixture-fast' : 'fixture-default'
+    return {
+      status: 'ready',
+      ...(includeModels ? { models: [{ id, name: homeModel ? 'Fixture Fast' : 'Fixture Default', isDefault: true, reasoningEfforts: [], speedTiers: [] }] } : {}),
+    }
+  },
+  async create(config) {
+    fixtureCodexLaunchModel = config.model
+    return driver.create(config)
+  },
 }
 
 const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
@@ -1515,6 +1528,45 @@ await page.keyboard.press('Control+f')
 await conversationQuery.waitFor()
 check('Control+F reopens find with cleared results', await findCount.textContent() === '')
 await conversationFind.getByRole('button', { name: 'Close find' }).click()
+
+{
+  using db = new Database(databasePath)
+  db.query('INSERT INTO provider_instances (id, profile_id, driver_kind, config, resolved_home) VALUES (?, ?, ?, ?, ?)')
+    .run(4, providerProfileId, 'codex', '{"name":"Catalog fixture"}', 'model-fixture-home')
+}
+await page.goto(`${baseUrl}/?workspace=${workspaceId}`)
+const draftAgent = page.locator('[data-driver-picker]')
+const draftModelPicker = page.getByRole('combobox', { name: 'Model for the new thread' })
+await draftAgent.selectOption('codex:4')
+await page.locator('[data-model-picker] option[value="fixture-fast"]').waitFor({ state: 'attached' })
+check('choosing a named account exposes its own model catalog',
+  await draftModelPicker.isVisible() && await draftModelPicker.locator('option[value="fixture-default"]').count() === 0)
+await draftModelPicker.selectOption('fixture-fast')
+await page.setViewportSize({ width: 360, height: 800 })
+check('provider, model and send fit in the narrow composer', await page.evaluate(() => {
+  const composer = document.querySelector('[data-composer]')?.getBoundingClientRect()
+  return !!composer && [...document.querySelectorAll('[data-driver-picker], [data-model-picker], [data-send]')].every((control) => {
+    const bounds = control.getBoundingClientRect()
+    return bounds.width > 0 && bounds.left >= composer.left && bounds.right <= composer.right
+  }) && document.documentElement.scrollWidth === innerWidth
+}))
+check('the draft prompt, composer and project controls stay grouped on a phone', await page.evaluate(() => {
+  const intro = document.querySelector('[data-empty-state]')?.getBoundingClientRect()
+  const composer = document.querySelector('[data-composer]')?.getBoundingClientRect()
+  const context = document.querySelector('[data-draft-context]')?.getBoundingClientRect()
+  return Boolean(intro && composer && context && intro.bottom <= composer.top
+    && composer.top - intro.bottom <= 32 && composer.bottom <= context.top && context.bottom < innerHeight * 0.8)
+}))
+await capture('named-model-draft-phone')
+await page.setViewportSize({ width: 1280, height: 800 })
+await capture('named-model-draft-desktop')
+await page.locator('[data-prompt]').fill('Use the selected named model.')
+await page.locator('[data-send]').click()
+await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
+await page.locator('[data-turn]').getByText('Use the selected named model.').waitFor()
+const catalogSession = harness.engine.current.sessions.get(Number(new URL(page.url()).pathname.split('/').at(-1)))
+check('a new thread launches with the selected account and model',
+  catalogSession?.providerInstanceId === 4 && catalogSession.model === 'fixture-fast' && fixtureCodexLaunchModel === 'fixture-fast')
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

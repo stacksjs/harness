@@ -266,9 +266,12 @@ describe('a turn drives the provider', () => {
       databasePath,
       resolveDriver: () => ({
         ...driver,
-        probe(config) {
+        async probe(config, options) {
           probed.push(config)
-          return driver.probe(config)
+          const result = await driver.probe(config)
+          return options?.includeModels && config.home?.endsWith('/work-account')
+            ? { ...result, models: [{ id: 'fixture-work', name: 'Fixture Work', isDefault: true, reasoningEfforts: [], speedTiers: [] }] }
+            : result
         },
         create(config) {
           launched.push(config)
@@ -291,8 +294,9 @@ describe('a turn drives the provider', () => {
       expect(addSavedProvider(databasePath, profileId, { kind: 'codex', name: 'Codex' })).toBe(4)
       expect(removeSavedProvider(databasePath, otherProfileId, 2)).toBe(false)
       await harness.engine.dispatch({ id: 'configured-workspace', at: 2, command: { type: 'workspace.add', profileId, path: dir } })
-      const catalog = () => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}`).then(response => response.json())
-      expect(await catalog()).toMatchObject({ accounts: [] })
+      const catalog = (includeModels = false) => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}${includeModels ? '&models=1' : ''}`)
+        .then(response => response.json())
+      expect(await catalog(true)).toMatchObject({ accounts: [] })
       await harness.engine.dispatch({ id: 'trust-configured-workspace', at: 3, command: { type: 'workspace.trust', workspaceId, trusted: true } })
       const profileCatalog = await catalog()
       expect(profileCatalog.accounts).toEqual([
@@ -302,6 +306,10 @@ describe('a turn drives the provider', () => {
       ])
       expect(JSON.stringify(profileCatalog)).not.toContain('/fixture/')
       expect(probed).toContainEqual({ workspacePath: dir, binaryPath: join(dir, 'bin/claude'), home: join(dir, 'work-account') })
+      const withModels = await catalog(true)
+      expect(withModels.accounts.map((account: { id: number, models?: Array<{ id: string }> }) => [account.id, account.models?.map(model => model.id)]))
+        .toEqual([[1, ['fixture-work']], [2, undefined], [4, undefined]])
+      expect(JSON.stringify(withModels)).not.toContain('/fixture/')
       probed.length = 0
       for (const id of [3, 4, 99]) {
         await expect(harness.engine.dispatch({

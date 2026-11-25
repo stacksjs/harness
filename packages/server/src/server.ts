@@ -193,6 +193,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           profileId: command.profileId,
           driverKind: command.driverKind,
           path: scratchWorkspacePath(scratchDirectory, envelope.id, command.label),
+          ...(command.model ? { model: command.model } : {}),
         }
       }
       if (command.type === 'session.create' && command.providerInstanceId !== undefined) {
@@ -244,11 +245,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }).catch(() => {})
   }
   const resolveDriver = options.resolveDriver ?? resolveRegisteredDriver
-  type PublicProbe = Pick<ProbeResult, 'status' | 'version'>
+  type PublicProbe = Pick<ProbeResult, 'status' | 'version' | 'models'>
   const driverProbes = new Map<string, { at: number, result: Promise<PublicProbe> }>()
 
-  function probeDriver(kind: DriverKind, config: DriverConfig): Promise<PublicProbe> {
-    const key = JSON.stringify([kind, config.workspacePath, config.binaryPath, config.home])
+  function probeDriver(kind: DriverKind, config: DriverConfig, includeModels = false): Promise<PublicProbe> {
+    const key = JSON.stringify([kind, config.workspacePath, config.binaryPath, config.home, includeModels])
     const now = Date.now()
     for (const [key, value] of driverProbes) {
       if (now - value.at >= 30_000) driverProbes.delete(key)
@@ -260,8 +261,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       const driver = resolveDriver(kind)
       if (!driver) return { status: 'unavailable' }
       try {
-        const { status, version } = await driver.probe(config)
-        return { status, version }
+        const { status, version, models } = await driver.probe(config, { includeModels })
+        return { status, version, ...(includeModels && models ? { models } : {}) }
       }
       catch {
         return { status: 'failed' }
@@ -1008,9 +1009,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (url.pathname === '/drivers') {
         const workspace = engine.current.workspaces.get(Number(url.searchParams.get('workspace')))
         const workspacePath = workspace?.trusted && !workspace.scratch ? workspace.path : tmpdir()
+        const includeModels = url.searchParams.get('models') === '1'
         const drivers = Promise.all(driverKinds().map(async kind => ({
           kind,
-          ...await probeDriver(kind, { workspacePath }),
+          ...await probeDriver(kind, { workspacePath }, includeModels),
         })))
         const hostPrivileges = canUseHostPrivileges(request, url)
         const accounts = workspace?.trusted && !workspace.scratch
@@ -1020,7 +1022,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
                 const account = { id, kind, name, ...(launch.chatGptClientId ? { auth: 'chatgpt' } : {}) }
                 try {
                   const config = await providerLaunchConfig(chatGptCredentials, launch)
-                  return { ...account, ...await probeDriver(kind, { ...config, workspacePath }) }
+                  return { ...account, ...await probeDriver(kind, { ...config, workspacePath }, includeModels) }
                 }
                 catch {
                   return { ...account, status: 'failed' }

@@ -364,7 +364,16 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       events.push(
         { ...event, payload: { type: 'workspace.added', workspaceId: sessionId, profileId, path: command.path, scratch: true } },
         { ...event, payload: { type: 'workspace.trust-changed', workspaceId: sessionId, trusted: true } },
-        { ...event, sessionId, payload: { type: 'session.created', workspaceId: sessionId, driverKind: command.driverKind } },
+        {
+          ...event,
+          sessionId,
+          payload: {
+            type: 'session.created',
+            workspaceId: sessionId,
+            driverKind: command.driverKind,
+            ...(command.model ? { model: command.model } : {}),
+          },
+        },
       )
       return events
     }

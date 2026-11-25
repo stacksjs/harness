@@ -45,7 +45,7 @@ export type ClientCommand =
       isolate?: boolean
       providerInstanceId?: number
     }
-  | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string }
+  | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string }
   | { type: 'session.turn.start', sessionId: number, text: string }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.queue.add', sessionId: number, text: string }
@@ -110,7 +110,7 @@ export type InternalCommand =
   | { type: 'thread.steer.settle', sessionId: number, id: string, requestId: string, outcome: SteeringOutcome }
   | { type: 'thread.queue.advance', sessionId: number }
   | { type: 'thread.queue.hold', sessionId: number }
-  | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string }
+  | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string, model?: string }
   | { type: 'thread.message.assistant.delta', sessionId: number, turnId: number, text: string }
   | { type: 'thread.message.assistant.complete', sessionId: number, turnId: number }
   | { type: 'thread.tool.call.begin', sessionId: number, turnId: number, callId: string, toolName: string, args: unknown }

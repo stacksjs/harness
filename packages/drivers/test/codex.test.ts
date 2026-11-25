@@ -19,9 +19,31 @@ if (process.argv.includes('--version')) {
   for await (const line of createInterface({ input: process.stdin })) {
     const frame = JSON.parse(line);
     if (frame.method === 'initialize') console.log(JSON.stringify({ id: frame.id, result: {} }));
-    if (frame.method !== 'account/read') continue;
+    if (frame.method !== 'account/read' && frame.method !== 'model/list') continue;
     const path = process.env.CODEX_HOME;
     if (!path || realpathSync(dirname(path)) !== process.cwd()) process.exit(1);
+    if (frame.method === 'model/list') {
+      if (basename(path) === 'model-error') {
+        console.log(JSON.stringify({ id: frame.id, error: { code: 4, message: 'fixture catalog expired' } }));
+        continue;
+      }
+      const result = frame.params.cursor === 'second'
+        ? { data: [{ model: basename(path) + '-small', additionalSpeedTiers: ['fast'] }] }
+        : {
+            nextCursor: 'second',
+            data: [
+              {
+                model: basename(path), displayName: 'Fixture default', isDefault: true,
+                supportedReasoningEfforts: [{ reasoningEffort: 'medium' }], defaultReasoningEffort: 'medium',
+                serviceTiers: [{ id: 'fast', name: 'Faster' }], defaultServiceTier: 'fast',
+                privatePath: path,
+              },
+              { model: 'internal', hidden: true },
+            ],
+          };
+      console.log(JSON.stringify({ id: frame.id, result }));
+      continue;
+    }
     console.log(JSON.stringify({
       id: frame.id,
       result: { account: null, requiresOpenaiAuth: basename(path) === 'signed-out' },
@@ -34,6 +56,21 @@ if (process.argv.includes('--version')) {
         .toMatchObject({ status: 'unauthenticated', message: 'Run \`codex login\` on this machine.' })
       expect(await CodexDriver.probe({ binaryPath, workspacePath, home: 'no-login-required' }))
         .toMatchObject({ status: 'ready' })
+      const catalogs = await Promise.all(['work-account', 'personal-account'].map(home =>
+        CodexDriver.probe({ binaryPath, workspacePath, home }, { includeModels: true })))
+      expect(catalogs[0].models).toEqual([
+        {
+          id: 'work-account', name: 'Fixture default', isDefault: true,
+          reasoningEfforts: ['medium'], defaultReasoningEffort: 'medium',
+          speedTiers: [{ id: 'fast', name: 'Faster' }], defaultSpeedTier: 'fast',
+        },
+        { id: 'work-account-small', name: 'work-account-small', isDefault: false, reasoningEfforts: [], speedTiers: [{ id: 'fast', name: 'Fast' }] },
+      ])
+      expect(catalogs[1].models?.map(model => model.id)).toEqual(['personal-account', 'personal-account-small'])
+      expect((await CodexDriver.probe({ binaryPath, workspacePath, home: 'signed-out' }, { includeModels: true })).models).toBeUndefined()
+      const failedCatalog = await CodexDriver.probe({ binaryPath, workspacePath, home: 'model-error' }, { includeModels: true })
+      expect(failedCatalog.status).toBe('ready')
+      expect(failedCatalog.models).toBeUndefined()
     }
     finally {
       rmSync(workspacePath, { recursive: true, force: true })

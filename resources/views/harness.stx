@@ -282,21 +282,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     </header>
 
     <div data-workspace-content>
-    <div data-workspace-lane>
+    <div data-workspace-lane @if(!activeSession)data-workspace-draft@endif>
     {{--
       The transcript. Settled turns are plain server-rendered HTML and hydrate
       on `visible`, so scrolling back through a long session costs nothing until
       you actually scroll. The live tail hydrates eagerly — it is the only part
       the socket writes to.
     --}}
-    <div data-transcript-viewport :style="transcriptFindOpen() ? '--harness-transcript-top: 56px' : ''" class="relative flex-1 min-h-0 min-w-0">
-    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto px-4 pt-[var(--harness-transcript-top,12px)] pb-3 h-full min-w-0">
+    <div data-transcript-viewport :style="transcriptFindOpen() ? '--harness-transcript-top: 56px' : ''" class="relative min-h-0 min-w-0 @if(activeSession)flex-1@endif">
+    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto min-w-0 @if(activeSession)px-4 pt-[var(--harness-transcript-top,12px)] pb-3 h-full@endif">
       {{--
         A blank canvas says the app is broken; an empty state says what to do.
         Typing below is the fastest path, so it is the one named first.
       --}}
       @if(turns.length === 0)
-        <div data-empty-state :hidden="liveTurns().length > 0" class="flex flex-col gap-2 items-center justify-center h-full text-center">
+        <div data-empty-state :hidden="liveTurns().length > 0" class="flex flex-col gap-2 items-center justify-center text-center @if(activeSession)h-full@endif">
           @if(activeSession)
             <p class="text-[14px] font-medium">Start the conversation</p>
             <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Send a prompt to the agent below.</p>
@@ -315,17 +315,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Add a folder from the host to start working with an agent.</p>
             <button type="button" data-first-project @click="openProjectPicker" class="mt-2 px-4 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
             <button type="button" data-start-without-project @click="startWithoutProject" class="px-3 h-9 text-[13px] underline underline-offset-4">Start without a project</button>
-          @endif
-          @if(!activeSession && draftProjectChoices.length)
-            <label class="flex gap-2 items-center mt-4 text-[12px] text-neutral-600 dark:text-neutral-300">
-              Project
-              <select data-draft-project @change="chooseProject" class="px-2 h-8 max-w-[190px] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-[6px] dark:border-white/20">
-                <option value="none" @if(draftWithoutProject)selected@endif>No project</option>
-                @foreach(draftProjectChoices as workspace)
-                  <option value="{{ workspace.id }}" @if(workspace.id === draftProject?.id)selected@endif>{{ workspace.name }}</option>
-                @endforeach
-              </select>
-            </label>
           @endif
         </div>
       @endif
@@ -527,12 +516,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         :placeholder="composerPlaceholder()"
         class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
-      {{--
-        The agent picker, where every LLM surface puts its model switch. It
-        shows the session's own driver; picking another offers a fresh session
-        with it — a different CLI cannot resume this one's conversation, and
-        pretending otherwise would silently drop the context.
-      --}}
+      <div data-composer-provider-controls>
       <select
         data-driver-picker
         ref="driverPickerBox"
@@ -547,6 +531,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="grok">Grok</option>
         <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
       </select>
+      <select data-model-picker aria-label="Model for the new thread" hidden :hidden="!composerModels().length" :value="draftModel()" @change="draftModel.set($event.target.value)" class="px-2 h-8 min-w-0 text-xs bg-transparent border border-transparent rounded-md hover:border-black/15 dark:hover:border-white/20">
+        <option value="">Provider default</option>
+        <option :for="model in composerModels()" :key="model.id" :value="model.id" :text="model.name"></option>
+      </select>
+      </div>
       <div class="flex flex-wrap gap-2 justify-end">
         <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" :text="sendLabel()" class="px-4 h-8 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-full">Send</button>
         <span class="md:hidden" :hidden="!canSteer() || !composerText().trim() || Boolean(editingFollowUp())">
@@ -557,6 +546,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-8 text-[13px] text-white bg-red-600 rounded-full hover:bg-red-700">Stop</button>
       </div>
     </form>
+    @endif
+    @if(!activeSession && draftProjectChoices.length)
+      <div data-draft-context>
+        <label class="flex gap-2 items-center px-3 text-[12px] text-neutral-600 dark:text-neutral-300">
+          Project
+          <select data-draft-project @change="chooseProject" class="px-2 h-8 max-w-[190px] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-[6px] dark:border-white/20">
+            <option value="none" @if(draftWithoutProject)selected@endif>No project</option>
+            @foreach(draftProjectChoices as workspace)
+              <option value="{{ workspace.id }}" @if(workspace.id === draftProject?.id)selected@endif>{{ workspace.name }}</option>
+            @endforeach
+          </select>
+        </label>
+      </div>
     @endif
     @if(activeWorkspaceId)
     <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
@@ -1797,6 +1799,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const KNOWN_DRIVERS = ['claude', 'codex', 'opencode', 'cursor', 'grok']
   const DRIVER_LABELS = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
   const providerAccounts = state([])
+  const defaultProviderModels = state({})
+  const draftProvider = state('')
+  const draftModel = state('')
+  const composerModels = derived(() => {
+    if (activeSessionId) return []
+    const value = draftProvider()
+    return (value.includes(':') ? providerAccounts().find(account => account.value === value)?.models : defaultProviderModels()[value]) || []
+  })
   const activeDriverValue = sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`
 
   function driverStateLabel(status, version) {
@@ -1831,7 +1841,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // driver you cannot run should not be one click from a dead session.
   async function annotateDriverPickers() {
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
-    const response = await fetch(`/drivers?workspace=${workspace}`).catch(() => null)
+    const modelsQuery = !activeSessionId && canCompose ? '&models=1' : ''
+    const response = await fetch(`/drivers?workspace=${workspace}${modelsQuery}`).catch(() => null)
     if (!response?.ok) return
     const { drivers, accounts = [] } = await response.json()
     if (sessionProviderInstanceId !== null && !accounts.some(account => account.id === sessionProviderInstanceId)) {
@@ -1839,6 +1850,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     const picker = driverPickerRef.current
     const selection = picker?.value || activeDriverValue || defaultDriver()
+    defaultProviderModels.set(Object.fromEntries(drivers.map(info => [info.kind, info.models])))
     providerAccounts.set(accounts.map(account => {
       const managed = account.auth === 'chatgpt'
       const stateText = managed && account.status === 'unauthenticated'
@@ -1850,6 +1862,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }))
     void nextTick(() => {
       if (picker) picker.value = selection
+      if (!activeSessionId) draftProvider.set(selection)
     })
     for (const info of drivers) {
       const stateText = driverStateLabel(info.status, info.version)
@@ -1905,6 +1918,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const choice = agentChoice(value)
     if (!activeSessionId) {
       if (choice.providerInstanceId === undefined) localStorage.setItem('harness.defaultDriver', choice.driverKind)
+      draftProvider.set(value)
+      draftModel.set('')
       return
     }
     if (value === activeDriverValue) return
@@ -1936,6 +1951,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   requestAnimationFrame(() => {
     const picker = driverPickerRef.current
     if (picker) picker.value = activeDriverValue || defaultDriver()
+    if (!activeSessionId) draftProvider.set(picker?.value || defaultDriver())
     annotateDriverPickers()
 
     restorePrompt()
@@ -2480,12 +2496,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         const picker = driverPickerRef.current
         if (picker?.selectedOptions[0]?.disabled) throw new Error('Choose an available agent to start this session.')
         const choice = agentChoice(picker?.value || defaultDriver())
+        const selectedModel = draftModel()
+        const model = composerModels().some(item => item.id === selectedModel) ? { model: selectedModel } : {}
         if (draftWithoutProject) {
           const profileId = Number(activeProfile) || undefined
-          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text }, commandId)
+          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text, ...model }, commandId)
         }
         else {
-          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice }, commandId)
+          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice, ...model }, commandId)
         }
         const nextSession = derivedSessionId(commandId)
         pendingFirstPrompt.set({ sessionId: nextSession, text: raw })
