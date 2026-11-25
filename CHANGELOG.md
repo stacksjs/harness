@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.22...v0.0.23)
+
+## ✨ Features
+
+- **composer**: save model favorites by provider account ([d57c497](https://github.com/stacksjs/harness/commit/d57c497)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.21...v0.0.22)
 
 ## 🐛 Bug Fixes
