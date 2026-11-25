@@ -15,13 +15,14 @@ import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { ChatGptCredentialStore, driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
-import { CborError, decode, encode } from '@harness/contract'
+import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
 import { Engine, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff } from './diff'
+import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { buildClientCodec } from './client-bundle'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -165,6 +166,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
   // After the bind check, so a refused start leaves no database behind.
   const databasePath = options.databasePath ?? 'database/stacks.sqlite'
+  const attachments = new QuestionAttachments(resolve(databasePath + '.harness-attachments'))
+  const attachmentOwners = new WeakMap<CommandEnvelope, string>()
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
   const savedProviders = new SavedProviderInstances(databasePath)
@@ -173,6 +176,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     store,
     reducer: reduce,
     async prepareClientCommand(command, envelope) {
+      if (command.type === 'session.input.respond') {
+        const pending = engine.current.sessions.get(command.sessionId)?.pendingInputs.find(input => input.requestId === command.requestId)
+        const answers = pending && inputResponseValues(command, pending.questions)
+        if (pending && validInputAnswers(pending.questions, answers) && answers.some(answer => answer.attachmentIds?.length)) {
+          const stored = await attachments.resolve(command.sessionId, command.requestId, answers, attachmentOwners.get(envelope) ?? 'local')
+          return { ...command, type: 'thread.input.answer', answers, attachments: stored }
+        }
+      }
       if (command.type === 'session.scratch.create') {
         if (!driverKinds().includes(command.driverKind)) throw new Error('Choose an available agent to start this session.')
         return {
@@ -207,8 +218,28 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
     // than appearing all at once when the turn ends.
-    onEvents: events => broadcast(events),
+    onEvents(events) {
+      broadcast(events)
+      for (const event of events) {
+        if (event.payload.type === 'input.resolved' || event.payload.type === 'turn.interrupted'
+          || event.payload.type === 'turn.failed' || event.payload.type === 'turn.completed') pruneQuestionAttachments(event.sessionId)
+      }
+    },
   })
+
+  function pruneQuestionAttachments(sessionId: number): void {
+    void attachments.prune(sessionId, () => {
+      const session = engine.current.sessions.get(sessionId)
+      const keep = new Map<string, ReadonlySet<string> | null>()
+      for (const turn of session?.turns ?? []) {
+        for (const request of turn.inputRequests ?? []) {
+          if (request.outcome === 'pending') keep.set(request.requestId, null)
+          else if (request.attachments?.length) keep.set(request.requestId, new Set(request.attachments.map(file => file.id)))
+        }
+      }
+      return keep
+    }).catch(() => {})
+  }
   const resolveDriver = options.resolveDriver ?? resolveRegisteredDriver
   type PublicProbe = Pick<ProbeResult, 'status' | 'version'>
   const driverProbes = new Map<string, { at: number, result: Promise<PublicProbe> }>()
@@ -270,6 +301,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // state; nothing to recover.
     }
   }
+  for (const id of await attachments.sessionIds().catch(() => [])) pruneQuestionAttachments(id)
 
   // Built after hydrate so the paired-device list it reads is the real one.
   const access = remote
@@ -469,6 +501,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (command.type === 'profile.delete') {
       const deleted = result.events.find(event => event.payload.type === 'profile.deleted')
       if (!deleted) return
+      if (deleted.payload.type === 'profile.deleted')
+        for (const id of deleted.payload.sessionIds ?? []) pruneQuestionAttachments(id)
       const released = await releaseWorktrees(doomed)
       for (const entry of released) {
         console.warn(
@@ -507,7 +541,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     if (command.type === 'session.input.respond') {
-      await runtime.respondInput(command.sessionId, command.requestId, command)
+      const resolution = result.events.find(event => event.payload.type === 'input.resolved')?.payload
+      const submitted = resolution?.type === 'input.resolved' ? resolution.attachments : undefined
+      const answers = 'answers' in command ? command.answers : null
+      if (submitted?.length && answers) {
+        await runtime.respondInput(command.sessionId, command.requestId, {
+          answers: answers.map(({ questionId, values }) => {
+            const files = submitted.filter(file => file.questionId === questionId)
+            if (!files.length) return { questionId, values }
+            const paths = files.map(file => JSON.stringify(attachments.path(command.sessionId, command.requestId, file)))
+            return { questionId, values: [[...values, 'Attached files:', ...paths].join('\n')] }
+          }),
+        })
+      }
+      else await runtime.respondInput(command.sessionId, command.requestId, command)
+      pruneQuestionAttachments(command.sessionId)
       return
     }
 
@@ -636,7 +684,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
               if (launch?.chatGptClientId) throw new Error('This ChatGPT plan is available only on the Harness host.')
             }
           }
-          const result = await engine.dispatch(envelope)
+          attachmentOwners.set(envelope, socket.data.deviceId ?? 'local')
+          const command = envelope.command
+          const result = command.type === 'session.input.respond' && Number.isSafeInteger(command.sessionId) && typeof command.requestId === 'string'
+            ? await attachments.serialize(command.sessionId, command.requestId, () => engine.dispatch(envelope))
+            : await engine.dispatch(envelope)
           send(socket, {
             t: 'dispatched',
             id: envelope.id,
@@ -733,6 +785,67 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           },
         })
         return upgraded ? undefined : new Response('expected a websocket upgrade', { status: 426 })
+      }
+
+      const attachmentRoute = /^\/s\/([1-9]\d*)\/question-attachments(?:\/([a-f\d-]{36}))?$/u.exec(url.pathname)
+      if (attachmentRoute) {
+        if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
+        const sessionId = Number(attachmentRoute[1])
+        const session = engine.current.sessions.get(sessionId)
+        if (!session) return new Response(null, { status: 404 })
+        const id = attachmentRoute[2]
+        if (request.method === 'GET' && id) {
+          for (const turn of session.turns) {
+            for (const input of turn.inputRequests ?? []) {
+              const attachment = input.attachments?.find(file => file.id === id)
+              if (attachment) {
+                const file = Bun.file(attachments.path(sessionId, input.requestId, attachment))
+                return file.exists().then(exists => exists ? new Response(file, { headers: {
+                  'Content-Type': 'application/octet-stream',
+                  'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(attachment.name).replace(/['()*]/gu, char => '%' + char.charCodeAt(0).toString(16))}`,
+                  'Cache-Control': 'private, no-store',
+                  'X-Content-Type-Options': 'nosniff',
+                } }) : new Response(null, { status: 404 }))
+              }
+            }
+          }
+          return new Response(null, { status: 404 })
+        }
+        const origin = request.headers.get('origin')
+        if (origin !== null && origin !== url.origin) return new Response(null, { status: 403 })
+        const requestId = url.searchParams.get('request') ?? ''
+        const owner = access?.authenticate(request).deviceId ?? 'local'
+        if (request.method === 'GET' && !id) {
+          const pending = session.pendingInputs.some(input => input.requestId === requestId)
+          if (!pending) return Response.json([], { headers: { 'Cache-Control': 'private, no-store' } })
+          return attachments.drafts(sessionId, requestId, owner)
+            .then(files => Response.json(files, { headers: { 'Cache-Control': 'private, no-store' } }))
+            .catch(() => Response.json([], { status: 500 }))
+        }
+        if (request.method === 'DELETE' && id) {
+          return attachments.serialize(sessionId, requestId, async () => {
+            if (session.pendingInputs.some(input => input.requestId === requestId))
+              await attachments.removeDraft(sessionId, requestId, id, owner)
+            return new Response(null, { status: 204 })
+          }).catch(() => new Response(null, { status: 500 }))
+        }
+        if (request.method !== 'POST' || id) return new Response(null, { status: 405 })
+        const questionId = url.searchParams.get('question') ?? ''
+        const pending = session.pendingInputs.find(input => input.requestId === requestId)
+        const question = pending?.questions.find(question => question.id === questionId)
+        if (!question || !questionAllowsAttachments(question))
+          return Response.json({ error: 'This question does not accept files.' }, { status: 409 })
+        return attachments.upload(request, sessionId, requestId, questionId, owner, url.searchParams.get('name') ?? 'attachment')
+          .then((attachment) => {
+            if (!engine.current.sessions.get(sessionId)?.pendingInputs.some(input => input.requestId === requestId)) {
+              pruneQuestionAttachments(sessionId)
+              return Response.json({ error: 'This question is no longer pending.' }, { status: 409 })
+            }
+            return Response.json(attachment, { status: 201 })
+          })
+          .catch(cause => Response.json({ error: cause instanceof AttachmentError ? cause.message : 'Could not save this attachment.' }, {
+            status: cause instanceof AttachmentError ? cause.status : 500,
+          }))
       }
 
       // What the agent changed on disk. Fetched on demand rather than rendered

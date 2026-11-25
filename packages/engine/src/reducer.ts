@@ -542,15 +542,18 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
     }
 
     case 'thread.input.cancel':
+    case 'thread.input.answer':
     case 'session.input.respond': {
       const session = state.sessions.get(command.sessionId)
       const request = session?.pendingInputs.find(request => request.requestId === command.requestId)
       let outcome: 'answered' | 'declined' | 'interrupted' = 'interrupted'
-      if (command.type === 'session.input.respond') {
+      if (command.type !== 'thread.input.cancel') {
         if (!request) throw new InvalidCommand('This question is no longer pending.')
         const answers = inputResponseValues(command, request.questions)
         if (answers !== null && !validInputAnswers(request.questions, answers))
           throw new InvalidCommand('Complete all required questions with valid answers.')
+        if (command.type === 'session.input.respond' && answers?.some(answer => answer.attachmentIds?.length))
+          throw new InvalidCommand('Question attachments must be resolved by the host.')
         outcome = answers === null ? 'declined' : 'answered'
       }
       if (!request) return []
@@ -565,6 +568,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           requestId: request.requestId,
           turnId: request.turnId,
           outcome,
+          ...(command.type === 'thread.input.answer' && command.attachments.length ? { attachments: command.attachments } : {}),
         },
       }]
     }

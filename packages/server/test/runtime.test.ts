@@ -1029,6 +1029,7 @@ describe('structured input over the socket', () => {
     { id: 'choices', kind: 'multiple', question: 'Choose two', minSelections: 2, options: [
       { value: 'a', label: 'Alpha' }, { value: 'b', label: 'Beta' }, { value: 'c', label: 'Gamma' },
     ] },
+    { id: 'support', kind: 'text', question: 'Supporting file', optional: true, options: [] },
   ]
 
   function inputDriver(onAnswer?: (answers: InputAnswer[] | null) => void): Driver {
@@ -1077,15 +1078,30 @@ describe('structured input over the socket', () => {
       first.send({ t: 'dispatch', envelope: { id: 'q_extra', at: 6, command: { type: 'session.turn.start', sessionId, text: 'extra' } } })
       expect(await first.waitForRejection('q_extra')).toMatchObject({ message: 'a turn is already running' })
 
-      const answers = [{ questionId: 'private', values: ['synthetic private marker A'] }, { questionId: 'choices', values: ['b', 'c'] }]
-      const competingAnswers = [{ questionId: 'private', values: ['synthetic private marker B'] }, { questionId: 'choices', values: ['a', 'b'] }]
+      const root = `http://127.0.0.1:${port}/s/${sessionId}/question-attachments`
+      const query = new URLSearchParams({ request: requested.requestId, question: 'support', name: 'notes.txt' })
+      expect((await fetch(`${root}?${query}`, { method: 'POST', body: 'upload', headers: { Origin: 'https://unrelated.test' } })).status).toBe(403)
+      const upload = await fetch(`${root}?${query}`, { method: 'POST', body: 'synthetic attachment bytes' })
+      expect(upload.status).toBe(201)
+      const file = await upload.json() as { id: string, name: string }
+      expect((await fetch(`${root}/${file.id}`)).status).toBe(404)
+      const answerWithFile = { questionId: 'support', values: [], attachmentIds: [file.id] }
+      const answers = [{ questionId: 'private', values: ['synthetic private marker A'] }, { questionId: 'choices', values: ['b', 'c'] }, answerWithFile]
+      const competingAnswers = [{ questionId: 'private', values: ['synthetic private marker B'] }, { questionId: 'choices', values: ['a', 'b'] }, answerWithFile]
       first.send({ t: 'dispatch', envelope: { id: 'q_answer_a', at: 7, command: { ...command, answers } } })
       second.send({ t: 'dispatch', envelope: { id: 'q_answer_b', at: 7, command: { ...command, answers: competingAnswers } } })
-      expect(await second.waitFor('input.resolved')).toMatchObject({ requestId: requested.requestId, outcome: 'answered' })
+      expect(await second.waitFor('input.resolved')).toMatchObject({ requestId: requested.requestId, outcome: 'answered', attachments: [{ id: file.id, name: 'notes.txt' }] })
       expect(await second.waitFor('turn.completed')).toBeTruthy()
       expect(callbacks).toHaveLength(1)
       const firstWon = callbacks[0]?.[0]?.values[0] === 'synthetic private marker A'
-      expect(callbacks[0]).toEqual(firstWon ? answers : competingAnswers)
+      expect(callbacks[0]?.slice(0, 2)).toEqual((firstWon ? answers : competingAnswers).slice(0, 2))
+      const delivered = callbacks[0]?.[2]?.values[0]
+      expect(delivered).toStartWith('Attached files:\n')
+      expect(await Bun.file(JSON.parse(delivered!.split('\n')[1]!)).text()).toBe('synthetic attachment bytes')
+      const download = await fetch(`${root}/${file.id}`)
+      expect(download.status).toBe(200)
+      expect(download.headers.get('content-type')).toBe('application/octet-stream')
+      expect(await download.text()).toBe('synthetic attachment bytes')
       expect(await (firstWon ? second : first).waitForRejection(firstWon ? 'q_answer_b' : 'q_answer_a'))
         .toMatchObject({ message: 'This question is no longer pending.' })
       expect(second.payloads('input.resolved')).toHaveLength(1)
@@ -1094,6 +1110,7 @@ describe('structured input over the socket', () => {
       try {
         const events = db.query('SELECT payload FROM events').all()
         expect(JSON.stringify(events)).not.toContain('synthetic private marker')
+        expect(JSON.stringify(events)).not.toContain('synthetic attachment bytes')
       }
       finally { db.close() }
     }

@@ -43,6 +43,7 @@ database/stacks_testing.sqlite
 database/stacks.sqlite
 database/*.sqlite-wal
 database/*.sqlite-shm
+*.harness-attachments/
 
 # OS files
 .DS_Store

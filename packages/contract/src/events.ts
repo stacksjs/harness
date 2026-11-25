@@ -7,7 +7,7 @@
  */
 
 import type { ApprovalDecision, ApprovalScope, DriverKind } from './commands'
-import type { InputQuestion } from './input'
+import type { InputQuestion, QuestionAttachment } from './input'
 
 export interface EventBase {
   /** Monotonic per session, starting at 1. Assigned inside the command queue. */
@@ -33,7 +33,7 @@ export type EventPayload =
   | { type: 'approval.requested', approvalId: number, requestId: string, toolName: string }
   | { type: 'approval.resolved', approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
   | { type: 'input.requested', requestId: string, turnId: number, questions: InputQuestion[] }
-  | { type: 'input.resolved', requestId: string, turnId: number, outcome: 'answered' | 'declined' | 'interrupted' }
+  | { type: 'input.resolved', requestId: string, turnId: number, outcome: 'answered' | 'declined' | 'interrupted', attachments?: QuestionAttachment[] }
   /** `vcsRef` is the dangling commit holding the snapshot; see server/checkpoint.ts. */
   | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
   /**

@@ -336,6 +336,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           @foreach(turn.inputRequests as request)
             <div data-question-activity class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400">
               {{ request.outcome === 'answered' ? 'Question answered' : request.outcome === 'declined' ? 'Question declined' : 'Question interrupted' }}
+              @foreach(request.attachments as file)
+                <a class="block break-words underline" href="/s/{{ activeSession.id }}/question-attachments/{{ file.id }}" download>{!! file.nameHtml !!}</a>
+              @endforeach
             </div>
           @endforeach
           @if(turn.response)<div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>@endif
@@ -384,7 +387,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           </template>
           </div>
           <template :for="request in ssrInputActivity()" :key="request.requestId">
-            <div data-question-activity class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400" :text="questionActivityLabel(request.outcome)"></div>
+            <div data-question-activity :data-question-request="request.requestId" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400">
+              <span :text="questionActivityLabel(request.outcome)"></span>
+            </div>
           </template>
           <div @if(!liveTurn.response && sessionState !== 'running')hidden@endif
             :hidden="!ssrHasResponse() && (runningTurnId() !== initialResponseTurn || uiState() !== 'running')"
@@ -436,7 +441,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             </template>
           </div>
           <template :for="request in turn.inputRequests" :key="request.requestId">
-            <div data-question-activity class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400" :text="questionActivityLabel(request.outcome)"></div>
+            <div data-question-activity :data-question-request="request.requestId" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-400">
+              <span :text="questionActivityLabel(request.outcome)"></span>
+            </div>
           </template>
           <div :hidden="!turn.hasResponse && (runningTurnId() !== turn.id || uiState() !== 'running')"
             class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
@@ -2091,12 +2098,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
+    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
       state,
       initialRequests: initialInputs,
+      sessionId,
       focus(target) {
         void nextTick(() => {
           if (target === 'answer') questionCard.current?.querySelector('[data-question-answer]')?.focus()
@@ -2106,13 +2114,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       hasFocus(target) {
         return target === 'card' ? questionCard.current?.matches(':focus-within') : promptRef.current?.matches(':focus')
       },
-      recordActivity: updateInputActivity,
+      recordActivity(request, outcome) {
+        updateInputActivity(request, outcome)
+        if (request.attachments?.length) void nextTick(() => paintQuestionFiles(transcriptRef.current, sessionId, request))
+      },
       send(requestId, answers) {
         return sendCommand({ type: 'session.input.respond', sessionId, requestId, answers })
       },
     }))
 
     const transcript = transcriptRef.current
+    if (initialInputActivity.some(request => request.attachments?.length))
+      void nextTick(() => initialInputActivity.forEach(request => paintQuestionFiles(transcriptRef.current, sessionId, request)))
     if (transcript) {
       transcriptHighlighter = createTranscriptHighlighter(transcript)
       transcriptHighlighter?.update(transcript)

@@ -738,24 +738,62 @@ await capture('question-card-mobile')
 const strictOption = question.getByRole('radio', { name: 'Strict schemas (Recommended)' })
 await strictOption.focus()
 await page.keyboard.press('1')
+let failedUpload = false
+await page.route('**/question-attachments?**', async (route) => {
+  if (route.request().method() === 'POST' && !failedUpload) {
+    failedUpload = true
+    await route.fulfill({ status: 503, json: { error: 'Fixture upload interrupted.' } })
+  }
+  else await route.continue()
+})
+await question.locator('input[type="file"]').setInputFiles({
+  name: 'fixture-notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Safe attachment fixture.'),
+})
+await question.locator('[data-question-file-status="failed"]').waitFor()
+await question.getByRole('button', { name: 'Retry', exact: true }).click()
+await question.locator('[data-question-file-status="ready"]').waitFor()
+check('a failed upload can retry without losing the selected answer', await strictOption.isChecked())
+await page.reload()
+await question.getByText('fixture-notes.txt', { exact: true }).waitFor()
+check('ready question attachments reload while the answer is pending', await question.locator('[data-question-file-status="ready"]').count() === 1)
+await strictOption.check()
+await question.locator('input[type="file"]').setInputFiles({
+  name: 'removed-notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Removed attachment fixture.'),
+})
+await question.locator('[data-question-file-status="ready"]').nth(1).waitFor()
+const removed = page.waitForResponse(response => response.request().method() === 'DELETE' && response.url().includes('/question-attachments/'))
+await question.getByRole('button', { name: 'Remove removed-notes.txt' }).click()
+check('removing a draft deletes its host copy', (await removed).status() === 204)
+await capture('question-attachments-mobile')
 await question.getByRole('button', { name: 'Next' }).click()
 const privateInput = question.getByLabel('Answer', { exact: true })
 check('sensitive questions mask the answer', await privateInput.getAttribute('type') === 'password')
+check('sensitive questions hide attachment controls', !(await question.locator('input[type="file"]').isVisible()))
 await privateInput.fill('fixture private answer')
 await question.getByRole('button', { name: 'Back' }).click()
 check('back keeps the selected answer', await strictOption.isChecked())
+check('back keeps this question’s attachment', await question.getByText('fixture-notes.txt', { exact: true }).isVisible())
 await question.getByRole('button', { name: 'Next' }).click()
 check('next restores the unsent answer for this question', await privateInput.inputValue() === 'fixture private answer')
 await question.getByRole('button', { name: 'Submit answer' }).click()
 await transcript.getByText('Question fixture complete.', { exact: true }).waitFor()
-check('the provider receives both answers and transcript records the outcome',
-  JSON.stringify(questionAnswers.get('fixture_schemas')) === JSON.stringify([
-    { questionId: 'schema', values: ['strict'] },
-    { questionId: 'private-note', values: ['fixture private answer'] },
-  ]) && await transcript.getByText('Question answered', { exact: true }).isVisible())
+const delivered = questionAnswers.get('fixture_schemas') as Array<{ questionId: string, values: string[] }>
+const attachedPath = delivered?.[0]?.values[0]?.split('\n').at(-1)
+check('the provider receives both answers and an openable host attachment',
+  delivered?.[0]?.values[0]?.startsWith('strict\nAttached files:\n') === true
+  && Boolean(attachedPath && readFileSync(JSON.parse(attachedPath), 'utf8') === 'Safe attachment fixture.')
+  && delivered?.[1]?.values[0] === 'fixture private answer'
+  && await transcript.getByText('Question answered', { exact: true }).isVisible())
+await transcript.getByRole('link', { name: 'fixture-notes.txt', exact: true }).waitFor()
 await page.reload()
 await transcript.getByText('Question answered', { exact: true }).waitFor()
 check('question answers stay out of the restored page', !((await page.content()).includes('fixture private answer')))
+const savedFile = transcript.getByRole('link', { name: 'fixture-notes.txt', exact: true })
+const savedFilePath = (await savedFile.getAttribute('href'))!
+const savedFileResponse = await page.request.get(new URL(savedFilePath, baseUrl).href)
+check('submitted attachment survives reload and downloads as safe data',
+  await savedFile.isVisible() && await savedFileResponse.text() === 'Safe attachment fixture.'
+  && savedFileResponse.headers()['content-disposition']?.startsWith('attachment;') === true)
 
 await page.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
 await promptBox.fill('exercise transcript controls')

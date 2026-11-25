@@ -11,6 +11,7 @@ import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { threadTitle } from './thread-search'
+import { escapeTranscriptText } from './transcript-markdown'
 
 interface ProjectSummary {
   id: number
@@ -167,6 +168,7 @@ export function viewProps(state: HarnessState, options: {
             inputRequests: (turn.inputRequests ?? []).map(request => ({
               requestId: request.requestId,
               outcome: request.outcome,
+              attachments: (request.attachments ?? []).map(file => ({ ...file, nameHtml: escapeTranscriptText(file.name) })),
             })),
             // What the agent actually did. A reply without these is a summary
             // of work you cannot review.

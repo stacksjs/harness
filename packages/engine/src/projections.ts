@@ -6,9 +6,10 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { DriverKind, HarnessEvent, InputQuestion } from '@harness/contract'
+import type { DriverKind, HarnessEvent, InputQuestion, QuestionAttachment } from '@harness/contract'
 
 export interface InputRequestState {
+  attachments?: QuestionAttachment[]
   requestId: string
   turnId: number
   questions: InputQuestion[]
@@ -510,6 +511,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const index = session.pendingInputs.findIndex(request => request.requestId === p.requestId && request.turnId === p.turnId)
       if (index === -1) break
       session.pendingInputs[index]!.outcome = p.outcome
+      if (p.attachments?.length) session.pendingInputs[index]!.attachments = p.attachments
       session.pendingInputs.splice(index, 1)
       syncTurnWaitingState(session)
       break

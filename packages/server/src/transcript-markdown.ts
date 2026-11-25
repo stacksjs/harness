@@ -3,7 +3,7 @@ import MarkdownIt from 'markdown-it'
 const markdown = new MarkdownIt({ html: false, breaks: true, linkify: true })
 const responsesWithWrapOverrides = new WeakSet<Element>()
 
-function escapeTranscriptText(value: string): string {
+export function escapeTranscriptText(value: string): string {
   // The stx hydration fallback scans individual text nodes for template
   // expressions. Split adjacent opening braces without changing copied text.
   return markdown.utils.escapeHtml(value).replace(/\{{2,}/gu, run => [...run].join('<!---->'))

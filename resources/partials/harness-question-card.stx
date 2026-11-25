@@ -41,8 +41,25 @@
             :type="question.sensitive ? 'password' : 'text'"
             :inputmode="question.kind === 'number' || question.kind === 'integer' ? 'decimal' : 'text'"
             :value="questionForm()?.text(question)" @input="questionForm()?.editText(question, $event.target.value)"
+            @paste="questionForm()?.pasteFiles(question, $event)"
             class="block mt-1 px-2 h-9 min-w-0 w-full text-[13px] bg-white dark:bg-neutral-950 border border-black/15 rounded-[6px] dark:border-white/20">
         </label>
+        <div :hidden="!questionForm()?.allowsAttachments(question)" class="grid gap-1 mt-2">
+          <label class="relative px-2 py-1 w-fit text-[12px] border border-black/15 rounded-[6px] dark:border-white/20 focus-within:outline focus-within:outline-2 cursor-pointer">
+            Attach files
+            <input type="file" multiple aria-label="Attach files" @change="questionForm()?.pickFiles(question, $event)"
+              class="absolute inset-0 w-full opacity-0 cursor-pointer">
+          </label>
+          <template :for="entry in (questionForm()?.attachments(question) || [])" :key="entry.key">
+            <div class="flex gap-2 items-center min-w-0 text-[12px]" :data-question-file-status="entry.status">
+              <span class="flex-1 min-w-0 truncate" :title="entry.name" :text="entry.name"></span>
+              <span role="status" :hidden="entry.status !== 'uploading'">Uploading</span>
+              <button type="button" :hidden="entry.status !== 'failed'" :title="entry.error" @click="questionForm()?.retryFile(entry)">Retry</button>
+              <button type="button" class="shrink-0 px-1 h-8" :aria-label="'Remove ' + entry.name" @click="questionForm()?.removeFile(entry.key)">Remove</button>
+            </div>
+            <p :hidden="entry.status !== 'failed'" class="text-[11px] text-red-700 dark:text-red-300" role="status" :text="entry.error"></p>
+          </template>
+        </div>
         <p :hidden="question.kind !== 'multiple'" class="mt-1 text-[11px] text-neutral-600 dark:text-neutral-400" :text="questionForm()?.selectionHint(question)"></p>
         <button type="button" :hidden="!question.optional || !questionForm()?.draft(question)" @click="questionForm()?.clear(question)"
           class="mt-1 px-2 h-8 text-[12px] hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px]">Clear answer</button>
