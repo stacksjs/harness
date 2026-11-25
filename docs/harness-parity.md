@@ -73,7 +73,7 @@ The managed ChatGPT preview opens account consent in the system browser on a mac
 
 ## Stacks upgrade
 
-Buddy synced the framework defaults from [Stacks source `7f6ee07`](https://github.com/stacksjs/stacks/commit/7f6ee0702b1f1779997ca50a012a48df705fa838). The frozen Bun 1.3.14 install resolves the published `stacks` 0.75.674 and stx, components, and Bun plugin 0.2.937. The source and the installed packages have independent version histories.
+Buddy synced the framework defaults from [Stacks source `99bc679`](https://github.com/stacksjs/stacks/commit/99bc6797c34fda8f51f8d62a492b464dc3afa6ed). The frozen Bun 1.3.14 install resolves published Stacks and Buddy 0.75.687, plus stx, components, and the Bun plugin at 0.2.943. The source checkout declares Buddy 0.75.688.
 
 Use `./buddy migrate` before running the updated framework on an existing database. A fresh SQLite database and a copy of a populated Harness v0.0.1 database passed migration and integrity checks. The original thread URL, its transcript, and all seven historical events survived the upgrade. The team-invitation migration tests also cover deduplicating pending invitations while retaining their history.
 
