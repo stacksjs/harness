@@ -529,17 +529,22 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
     }
 
     case 'thread.fork.finished':
+    case 'thread.fork.portable':
     case 'thread.fork.failed': {
       const session = state.sessions.get(command.sessionId)
       if (session?.fork?.state !== 'pending') return []
-      if (command.type === 'thread.fork.finished') {
-        if (!command.providerSessionId || command.providerSessionId === session.fork.providerSessionId)
-          throw new InvalidCommand('The fork must have a separate provider conversation.')
-        if (!state.workspaces.get(session.workspaceId)?.trusted || session.navigation?.archivedAt)
-          throw new InvalidCommand('The fork was interrupted. Restore access to the thread and retry from the source response.')
-        return [{ sessionId: session.id, commandId, at, payload: { type: 'session.fork-finished', providerSessionId: command.providerSessionId } }]
-      }
-      return [{ sessionId: session.id, commandId, at, payload: { type: 'session.fork-failed', message: command.message } }]
+      if (command.type === 'thread.fork.failed')
+        return [{ sessionId: session.id, commandId, at, payload: { type: 'session.fork-failed', message: command.message } }]
+      if (!state.workspaces.get(session.workspaceId)?.trusted || session.navigation?.archivedAt)
+        throw new InvalidCommand('The fork was interrupted. Restore access to the thread and retry from the source response.')
+      if (command.type === 'thread.fork.portable')
+        return [{ sessionId: session.id, commandId, at, payload: { type: 'session.fork-portable' } }]
+      if (!command.providerSessionId || command.providerSessionId === session.fork.providerSessionId)
+        throw new InvalidCommand('The fork must have a separate provider conversation.')
+      return [{ sessionId: session.id, commandId, at, payload: {
+        type: 'session.fork-finished', providerSessionId: command.providerSessionId,
+        ...(command.copiedProviderTurnIds ? { copiedProviderTurnIds: command.copiedProviderTurnIds } : {}),
+      } }]
     }
 
     case 'thread.worktree.set': {

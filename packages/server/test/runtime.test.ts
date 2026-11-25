@@ -179,6 +179,79 @@ afterEach(() => {
 })
 
 describe('fork recovery', () => {
+  it.each([true, false])('continues a historical Claude fork with native history available = %s', async (available) => {
+    const databasePath = join(dir, 'test.sqlite')
+    const forkCalls: string[] = []
+    const delivered: StartTurnInput[] = []
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn(input) {
+            delivered.push(input)
+            if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: `claude-${delivered.length}` }
+            yield { type: 'assistant-delta', text: 'Fixture response.' }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `response-${delivered.length}` }
+          },
+          async fork(input) {
+            forkCalls.push(`${input.providerSessionId}:${input.providerTurnId}`)
+            if (!available) return null
+            const copied = `copy-${forkCalls.length}`
+            return { providerSessionId: `fork-${forkCalls.length}`, copiedProviderTurnIds: { [input.providerTurnId!]: copied } }
+          },
+          async interrupt() {},
+          async respondApproval() {},
+          async stop() {},
+        }
+      },
+    }
+    const start = () => serve({ port, databasePath, resolveDriver: () => driver })
+    const connect = () => Client.connect(`ws://127.0.0.1:${port}/ws`)
+    harness = await start()
+    const client = await connect()
+    const dispatch = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 1, command } })
+    try {
+      const { sessionId } = await bootstrap(client)
+      dispatch('claude-source-first', { type: 'session.turn.start', sessionId, text: 'Original first prompt' })
+      expect(await client.waitFor('turn.completed')).toMatchObject({ providerTurnId: 'response-1' })
+      dispatch('claude-source-later', { type: 'session.turn.start', sessionId, text: 'Later parent prompt' })
+      expect(await client.waitFor('turn.completed', 3000, p => p.turnId === 2)).toMatchObject({ providerTurnId: 'response-2' })
+      const command = { type: 'session.fork' as const, sessionId, turnId: 1 }
+      dispatch('claude-source-fork', command)
+      const forkId = await client.subscribeCreatedSession('claude-source-fork')
+      expect(await client.waitFor(available ? 'session.fork-finished' : 'session.fork-portable')).toBeTruthy()
+      expect(forkCalls).toEqual(['claude-1:response-1'])
+      expect(harness.engine.current.sessions.get(forkId)?.turns).toHaveLength(1)
+      expect(harness.engine.current.sessions.get(sessionId)?.turns[0]?.providerTurnId).toBe('response-1')
+      dispatch('claude-fork-follow-up', { type: 'session.turn.start', sessionId: forkId, text: 'Continue in the fork' })
+      expect(await client.waitFor('turn.completed', 3000, p => p.providerTurnId === 'response-3')).toBeTruthy()
+      if (available) expect(delivered[2]).toMatchObject({ text: 'Continue in the fork', providerSessionId: 'fork-1', requireResume: true })
+      else {
+        expect(delivered[2]?.providerSessionId).toBeUndefined()
+        expect(delivered[2]?.text).toContain('Original first prompt')
+        expect(delivered[2]?.text).not.toContain('Later parent prompt')
+      }
+
+      harness.stop()
+      harness = await start()
+      const resumed = await connect()
+      try {
+        resumed.send({ t: 'dispatch', envelope: { id: 'claude-source-fork', at: 1, command } })
+        expect(await resumed.waitForDispatch('claude-source-fork')).toMatchObject({ replayed: true })
+        expect(harness.engine.current.sessions.get(forkId)?.turns[0]?.nativeFork?.providerSessionId).toBe(available ? 'fork-1' : undefined)
+        expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe('claude-1')
+        resumed.send({ t: 'dispatch', envelope: { id: 'claude-nested-fork', at: 1, command: { type: 'session.fork', sessionId: forkId, turnId: 1 } } })
+        const nestedId = await resumed.subscribeCreatedSession('claude-nested-fork')
+        if (available) expect(await resumed.waitFor('session.fork-finished')).toMatchObject({ providerSessionId: 'fork-2' })
+        expect(harness.engine.current.sessions.get(nestedId)?.fork?.state).toBe('ready')
+        expect(forkCalls).toEqual(available ? ['claude-1:response-1', 'fork-1:copy-1'] : ['claude-1:response-1'])
+      }
+      finally { resumed.close() }
+    }
+    finally { client.close() }
+  })
+
   it('marks an interrupted fork and refuses to start a fresh provider conversation after restart', async () => {
     const databasePath = join(dir, 'test.sqlite')
     let providerResolutions = 0

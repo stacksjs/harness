@@ -102,7 +102,7 @@ export interface CheckpointState {
 }
 
 interface NativeForkTarget {
-  driverKind: 'codex'
+  driverKind: 'claude' | 'codex'
   providerSessionId: string
   providerInstanceId?: number
 }
@@ -452,8 +452,28 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
           },
         }
         for (const turn of session.turns) {
-          if (turn.nativeFork) turn.nativeFork.providerSessionId = p.providerSessionId
+          if (!turn.nativeFork) continue
+          if (turn.nativeFork.driverKind === 'claude') {
+            const copiedId = turn.providerTurnId && p.copiedProviderTurnIds?.[turn.providerTurnId]
+            if (!copiedId) {
+              delete turn.nativeFork
+              continue
+            }
+            turn.providerTurnId = copiedId
+          }
+          turn.nativeFork.providerSessionId = p.providerSessionId
         }
+        session.fork.state = 'ready'
+      }
+      break
+    }
+
+    case 'session.fork-portable': {
+      const session = state.sessions.get(event.sessionId)
+      if (session?.fork?.state === 'pending') {
+        delete session.fork.providerSessionId
+        for (const turn of session.turns) delete turn.nativeFork
+        session.handoff = { afterTurnId: session.fork.turnId, pending: true }
         session.fork.state = 'ready'
       }
       break
@@ -645,9 +665,9 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         t.status = 'complete'
         if (p.contextCompacted) t.contextCompacted = true
         if (session.providerSessionId) {
-          if (session.driverKind === 'codex' && t.response.trim()) {
+          if ((session.driverKind === 'codex' || (session.driverKind === 'claude' && p.providerTurnId)) && isForkableResponse(t)) {
             t.nativeFork = {
-              driverKind: 'codex',
+              driverKind: session.driverKind,
               providerSessionId: session.providerSessionId,
               ...(session.providerInstanceId === undefined ? {} : { providerInstanceId: session.providerInstanceId }),
             }

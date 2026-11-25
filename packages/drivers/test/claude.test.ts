@@ -1,7 +1,9 @@
 import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { DriverKind } from '@harness/contract'
 import { describe, expect, it } from 'bun:test'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ClaudeInstance, claudeAuthStatus, translate } from '../src/claude'
 import { driverKinds, resolveDriver } from '../src/registry'
 
@@ -126,6 +128,69 @@ it('passes the configured automatic compaction window to the Claude SDK and laun
   const events = []
   for await (const event of instance.startTurn({ text: 'Continue the fixture conversation.', providerSessionId: 'sess_abc' })) events.push(event)
   expect(events.at(-1)).toMatchObject({ type: 'turn-complete' })
+})
+
+it('records the last root assistant message as the native boundary', async () => {
+  const assistant = assistantWithToolUse('tool', 'Read', { path: 'note.txt' })
+  const final = { ...assistant, uuid: crypto.randomUUID(), message: { content: [{ type: 'text', text: 'Finished.' }] } }
+  const instance = new ClaudeInstance({ workspacePath: tmpdir() }, () => ({
+    async *[Symbol.asyncIterator]() {
+      yield assistant
+      yield final
+      yield { ...assistant, uuid: crypto.randomUUID(), parent_tool_use_id: 'tool' }
+      yield successResult(0)
+    },
+    close() {},
+  }) as unknown as Query)
+  const events = []
+  for await (const event of instance.startTurn({ text: 'Read the note.' })) events.push(event)
+  expect(events.at(-1)).toMatchObject({ type: 'turn-complete', providerTurnId: final.uuid })
+})
+
+it('forks and remaps Claude history within the selected account without changing either source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'harness-claude-fork-'))
+  const providerSessionId = crypto.randomUUID()
+  const ids = Array.from({ length: 6 }, () => crypto.randomUUID())
+  const plan = { providerSessionId, providerTurnId: ids[3], inheritedProviderTurnIds: [ids[1]!], prompt: '', response: '' }
+  const originalHome = process.env.CLAUDE_CONFIG_DIR
+  try {
+    const accounts = await Promise.all(['work', 'personal'].map(async (name) => {
+      const project = join(root, name, 'projects', 'fixture-project')
+      await mkdir(project, { recursive: true })
+      const source = ids.map((uuid, index) => {
+        const type = index % 2 === 0 ? 'user' : 'assistant'
+        return JSON.stringify({
+          type, uuid, parentUuid: ids[index - 1] ?? null, sessionId: providerSessionId,
+          isSidechain: false, cwd: root, timestamp: '2026-01-01T00:00:00.000Z', version: '2.1.191', userType: 'external',
+          message: { role: type, content: [{ type: 'text', text: `${name} fixture ${index + 1}` }] },
+        })
+      }).join('\n') + '\n'
+      await writeFile(join(project, `${providerSessionId}.jsonl`), source)
+      return { name, project, source, instance: new ClaudeInstance({ workspacePath: root, home: name }) }
+    }))
+    const results = await Promise.all(accounts.map(({ instance }) => instance.fork(plan)))
+    for (const [index, result] of results.entries()) {
+      expect(result?.providerSessionId).not.toBe(providerSessionId)
+      const { name, project, source, instance } = accounts[index]!
+      const child = await readFile(join(project, `${result!.providerSessionId}.jsonl`), 'utf8')
+      expect(child).toContain(`${name} fixture 4`)
+      expect(child).not.toContain('fixture 5')
+      const copied = result!.copiedProviderTurnIds!
+      expect(copied[ids[1]!]).not.toBe(ids[1]!)
+      expect(copied[ids[3]!]).not.toBe(ids[3]!)
+      const grandchild = await instance.fork({ ...plan, providerSessionId: result!.providerSessionId, providerTurnId: copied[ids[1]!] })
+      const nested = await readFile(join(project, `${grandchild!.providerSessionId}.jsonl`), 'utf8')
+      expect(nested).toContain(`${name} fixture 2`)
+      expect(nested).not.toContain('fixture 3')
+      expect(await instance.fork({ ...plan, providerTurnId: crypto.randomUUID() })).toBeNull()
+      expect(await readFile(join(project, `${providerSessionId}.jsonl`), 'utf8')).toBe(source)
+    }
+    expect(results[0]?.providerSessionId).not.toBe(results[1]?.providerSessionId)
+    expect(process.env.CLAUDE_CONFIG_DIR).toBe(originalHome)
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 describe('Claude driver — translating the SDK stream', () => {

@@ -16,7 +16,11 @@
 
 import type { AccountInfo, CanUseTool, ElicitationRequest, ElicitationResult, Options, PermissionResult, Query, query as sdkQuery, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { ApprovalChoice, InputAnswer } from '@harness/contract'
-import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
+import type { Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
+import { lstat, readdir } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { Worker } from 'node:worker_threads'
 import { claudeEnvironment } from './account-environment'
 import { EventQueue } from './event-queue'
 import { toolInputQuestions } from './input-questions'
@@ -45,6 +49,29 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
   })
 }
 
+async function forkTranscript(sessionId: string, env: NodeJS.ProcessEnv | undefined): Promise<string> {
+  if (!/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/iu.test(sessionId))
+    throw new Error('Claude Code returned an invalid saved conversation ID.')
+
+  const projects = resolve(env?.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects')
+  let transcript: string | undefined
+  const projectDirectories = await readdir(projects, { withFileTypes: true }).catch(() => {
+    throw new Error('Claude Code could not read the selected account’s saved conversations.')
+  })
+  for (const project of projectDirectories) {
+    if (!project.isDirectory()) continue
+    const candidate = join(projects, project.name, `${sessionId}.jsonl`)
+    const file = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw new Error('Claude Code could not read a saved conversation in the selected account.')
+    })
+    if (!file?.isFile()) continue
+    if (transcript) throw new Error('Claude Code found more than one file for the fork. Choose a different response to fork.')
+    transcript = candidate
+  }
+  if (!transcript) throw new Error('Claude Code could not find the fork in the selected account. Try again from the source response.')
+  return transcript
+}
+
 /** USD per token → integer micro-USD, so summing turns can't drift on floats. */
 function toMicros(usd: number): number {
   return Math.round(usd * 1_000_000)
@@ -69,6 +96,7 @@ interface PendingPermission {
 
 export class ClaudeInstance implements ProviderInstance {
   private running: Query | null = null
+  private forkAbort?: AbortController
   private activeQueue: EventQueue | null = null
   private pending = new Map<string, PendingPermission>()
   private readonly mcpConsents = new Map<string, { queue: EventQueue, acceptance: ElicitationResult, resolve: (result: ElicitationResult) => void }>()
@@ -192,8 +220,45 @@ export class ClaudeInstance implements ProviderInstance {
     return this.beginTurn(input, false)
   }
 
-  compact(providerSessionId: string): AsyncIterable<ProviderEvent> {
-    return this.beginTurn({ text: '/compact', providerSessionId, requireResume: true }, true)
+  compact(providerSessionId: string, resume?: Pick<StartTurnInput, 'forkAcrossWorktrees'>): AsyncIterable<ProviderEvent> {
+    return this.beginTurn({ text: '/compact', providerSessionId, requireResume: true, ...resume }, true)
+  }
+
+  async fork(input: ForkInput): Promise<ForkResult | null> {
+    if (!input.providerTurnId) return null
+    if (this.forkAbort) throw new Error('This Claude Code account is already preparing a fork for this thread.')
+
+    const { CLAUDE_CONFIG_DIR, HOME, USERPROFILE } = claudeEnvironment(this.config)
+    // The SDK history functions read the environment of the caller. Set it
+    // only in the worker, so a simultaneous turn can use another Claude home.
+    const worker = new Worker(new URL('./claude-history-worker.ts', import.meta.url), {
+      env: { CLAUDE_CONFIG_DIR, HOME, USERPROFILE },
+    })
+    const abort = new AbortController()
+    this.forkAbort = abort
+    const deadline = setTimeout(() => abort.abort(new Error('Claude Code timed out while preparing the fork.')), 20_000)
+    try {
+      return await new Promise<ForkResult | null>((resolve, reject) => {
+        const failed = () => reject(new Error('Claude Code could not verify a fork at the selected response.'))
+        abort.signal.addEventListener('abort', () => reject(abort.signal.reason), { once: true })
+        worker.once('error', failed)
+        worker.once('exit', failed)
+        worker.once('message', (message: { result?: ForkResult | null }) => {
+          if (message.result === undefined) failed()
+          else resolve(message.result)
+        })
+        worker.postMessage({
+          providerSessionId: input.providerSessionId,
+          providerTurnId: input.providerTurnId,
+          inheritedProviderTurnIds: input.inheritedProviderTurnIds,
+        })
+      })
+    }
+    finally {
+      clearTimeout(deadline)
+      this.forkAbort = undefined
+      await worker.terminate()
+    }
   }
 
   private beginTurn(input: StartTurnInput, compacting: boolean): AsyncIterable<ProviderEvent> {
@@ -207,13 +272,20 @@ export class ClaudeInstance implements ProviderInstance {
     let run: Query | undefined
     let bound = input.providerSessionId ?? null
     let compacted = false
+    let providerTurnId: string | undefined
     let occupancy: { model: string, usedTokens: number, promptCacheExpiresAt?: number } | undefined
 
     try {
       const query = this.queryFactory ?? (await import('@anthropic-ai/claude-agent-sdk')).query
+      const options = this.options(queue, input.providerSessionId)
+      if (input.forkAcrossWorktrees && input.providerSessionId) {
+        // A UUID only reopens sessions recorded for this checkout. Claude
+        // also accepts the transcript filename while keeping the new cwd.
+        options.resume = await forkTranscript(input.providerSessionId, options.env)
+      }
       if (queue.closed) return
       const requestedAt = Date.now()
-      run = query({ prompt: input.text, options: this.options(queue, input.providerSessionId) })
+      run = query({ prompt: input.text, options })
       this.running = run
       for await (const message of run as AsyncIterable<SDKMessage>) {
         if (input.requireResume && 'session_id' in message && message.session_id !== bound) {
@@ -226,6 +298,9 @@ export class ClaudeInstance implements ProviderInstance {
         }
 
         if (compacting && message.type === 'system' && message.subtype === 'compact_boundary') compacted = true
+        if (!compacting && message.type === 'assistant' && message.session_id === bound
+          && message.parent_tool_use_id === null && message.uuid && !message.error)
+          providerTurnId = message.uuid
         if (!compacting && message.type === 'assistant' && message.parent_tool_use_id === null && message.message.usage) {
           const usage = message.message.usage
           const iterations = (usage as typeof usage & { iterations?: Array<typeof usage & { type: string }> }).iterations
@@ -253,7 +328,7 @@ export class ClaudeInstance implements ProviderInstance {
               ...(occupancy.promptCacheExpiresAt === undefined ? {} : { promptCacheExpiresAt: occupancy.promptCacheExpiresAt }),
               ...(maxTokens && Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
             } : undefined
-            queue.finish(!compacting ? { ...event, ...(contextUsage ? { contextUsage } : {}) } : compacted
+            queue.finish(!compacting ? { ...event, ...(providerTurnId ? { providerTurnId } : {}), ...(contextUsage ? { contextUsage } : {}) } : compacted
               ? { ...event, contextCompacted: true }
               : { type: 'error', message: 'Claude Code finished without confirming context compaction.' })
             return
@@ -335,6 +410,7 @@ export class ClaudeInstance implements ProviderInstance {
   }
 
   async stop(): Promise<void> {
+    this.forkAbort?.abort(new Error('The fork was stopped. Return to the source response to try again.'))
     const run = this.running
     await this.interrupt()
     run?.close()

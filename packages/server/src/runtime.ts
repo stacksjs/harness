@@ -350,15 +350,19 @@ export class ProviderRuntime {
       if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted)
         throw new Error('Trust this workspace before sending a message.')
       const nativeHistory = running.instance.acceptsHistoricalContext ? history : undefined
-      const events = compaction ? running.instance.compact?.(session.providerSessionId) : running.instance.startTurn({
+      const providerSessionId = running.providerSessionId ?? (session.providerSessionId || undefined)
+      const claudeFork = session.driverKind === 'claude' && Boolean(session.fork?.providerSessionId && providerSessionId)
+      const forkResume = claudeFork && session.worktreePath ? { forkAcrossWorktrees: true as const } : undefined
+      const events = compaction ? running.instance.compact?.(session.providerSessionId, forkResume) : running.instance.startTurn({
         text: nativeHistory ? text : history?.inlinePrompt ?? text,
         ...(nativeHistory ? { historicalContext: nativeHistory } : {}),
         codexSelection: session.turns.at(-1)?.codexSelection,
         // The projection stores '' for "not bound yet"; the driver wants
         // undefined, so an empty string must not be passed through as a resume
         // target.
-        providerSessionId: running.providerSessionId ?? (session.providerSessionId || undefined),
-        ...(returning ? { requireResume: true } : {}),
+        providerSessionId,
+        ...(returning || claudeFork ? { requireResume: true } : {}),
+        ...forkResume,
       })
       if (!events) throw new Error('This provider does not support manual compaction in Harness.')
       for await (const event of events) {
@@ -540,29 +544,34 @@ export class ProviderRuntime {
         throw new Error('Trust the workspace before creating this fork.')
       const running = await this.instanceFor(sessionId, session.driverKind)
       if (!running?.instance.fork)
-        throw new Error('Start the fork again from the source response once its Codex account is available.')
+        throw new Error('Start the fork again from the source response once its provider account is available.')
       const current = this.options.engine.current.sessions.get(sessionId)
       if (current?.fork?.state !== 'pending' || current.navigation?.archivedAt
         || !this.options.engine.current.workspaces.get(current.workspaceId)?.trusted)
         throw new Error('The fork was interrupted. Return to the source response to try again.')
-      const providerSessionId = await running.instance.fork({
+      const inheritedProviderTurnIds = session.driverKind === 'claude' ? session.turns.flatMap(turn => (
+        turn.nativeFork?.providerSessionId === fork.providerSessionId && turn.providerTurnId ? [turn.providerTurnId] : []
+      )) : undefined
+      const destination = await running.instance.fork({
         providerSessionId: fork.providerSessionId,
         providerTurnId: turn.providerTurnId,
+        ...(inheritedProviderTurnIds?.length ? { inheritedProviderTurnIds } : {}),
         prompt: turn.prompt,
         response: turn.response,
       })
-      if (!providerSessionId || providerSessionId === fork.providerSessionId)
-        throw new Error('Codex returned the source conversation for this fork.')
+      if (destination && (!destination.providerSessionId || destination.providerSessionId === fork.providerSessionId))
+        throw new Error('The provider did not create a separate conversation for this fork.')
       if (running.abandoned) throw new Error('The fork was interrupted. Return to the source response to try again.')
       // A fork is a saved provider conversation. Release the setup process
       // before publishing readiness, since another client can send at once.
       await this.stopSession(sessionId)
-      await this.record({ type: 'thread.fork.finished', sessionId, providerSessionId })
+      await this.record(destination ? { type: 'thread.fork.finished', sessionId, ...destination }
+        : { type: 'thread.fork.portable', sessionId })
     }
     catch (error) {
       await this.emit({
         type: 'thread.fork.failed', sessionId,
-        message: error instanceof Error ? error.message : 'Codex could not finish the fork. Try again from the source response.',
+        message: error instanceof Error ? error.message : 'The provider could not finish the fork. Try again from the source response.',
       })
       await this.stopSession(sessionId).catch(() => {})
     }

@@ -41,7 +41,8 @@ export type EventPayload =
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation> }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
-  | { type: 'session.fork-finished', providerSessionId: string }
+  | { type: 'session.fork-finished', providerSessionId: string, copiedProviderTurnIds?: Record<string, string> }
+  | { type: 'session.fork-portable' }
   | { type: 'session.fork-failed', message: string }
   | { type: 'session.provider-switched', afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind, compaction?: true, automaticCompaction?: true, freshContext?: true }

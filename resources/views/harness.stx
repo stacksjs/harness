@@ -289,9 +289,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         An isolated session edits its own checkout, not the workspace. Saying
         which branch makes that visible, and names the thing you merge.
       --}}
-      @if(sessionBranch)
+      @if(activeSession)
         <span
           data-workspace-branch
+          @if(!sessionBranch)hidden@endif
+          :hidden="!workspaceBranch()"
+          :text="workspaceBranch()"
+          :title="'This session runs in its own worktree on ' + workspaceBranch()"
           class="px-[6px] py-[1px] font-mono leading-[15px] text-[11px] truncate border border-black/10 rounded-[5px] dark:border-white/15 opacity-70"
           title="This session runs in its own worktree on {{ sessionBranch }}"
         >{{ sessionBranch }}</span>
@@ -1165,6 +1169,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const diffPatch = state('')
 
   const sessionId = Number(activeSessionId) || 0
+  const workspaceBranch = state(sessionBranch)
   const forkingResponseId = state(0)
   const forkableTurns = state(initialForkableTurns)
   const forkStatus = state(initialFork?.state || 'ready')
@@ -3697,7 +3702,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         threadNavigation.update(previous => ({ ...previous, ...payload.changes }))
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
       }
-      if (payload.type === 'session.fork-finished') forkStatus.set('ready')
+      if (payload.type === 'session.isolated') workspaceBranch.set(payload.branch)
+      if (payload.type === 'session.fork-finished' || payload.type === 'session.fork-portable') forkStatus.set('ready')
       if (payload.type === 'session.fork-failed') {
         forkError.set(payload.message)
         forkStatus.set('failed')

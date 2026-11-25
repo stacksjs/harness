@@ -75,13 +75,23 @@ export interface StartTurnInput {
   providerSessionId?: string
   /** A failed resume must settle before any prompt is sent to a different conversation. */
   requireResume?: boolean
+  /** The native fork transcript can still be stored under the source worktree. */
+  forkAcrossWorktrees?: true
 }
 
 export interface ForkInput {
   providerSessionId: string
   providerTurnId?: string
+  /** Native boundaries of earlier turns that will also appear in the new thread. */
+  inheritedProviderTurnIds?: string[]
   prompt: string
   response: string
+}
+
+export interface ForkResult {
+  providerSessionId: string
+  /** When the provider gives copied messages new IDs, map the old IDs to their copies. */
+  copiedProviderTurnIds?: Record<string, string>
 }
 
 export interface ProviderInstance {
@@ -90,9 +100,9 @@ export interface ProviderInstance {
   /** Stream one turn. Ends when the provider says the turn is over. */
   startTurn: (input: StartTurnInput) => AsyncIterable<ProviderEvent>
   /** Compact an existing provider conversation without a new user prompt. */
-  compact?: (providerSessionId: string) => AsyncIterable<ProviderEvent>
-  /** Create a separate conversation through the selected response. */
-  fork?: (input: ForkInput) => Promise<string>
+  compact?: (providerSessionId: string, resume?: Pick<StartTurnInput, 'forkAcrossWorktrees'>) => AsyncIterable<ProviderEvent>
+  /** Create a separate conversation through the selected response. Null means the saved boundary is unavailable. */
+  fork?: (input: ForkInput) => Promise<ForkResult | null>
   /** Stop the running turn. Safe to call when nothing is running. */
   interrupt: () => Promise<void>
   /** Send a follow-up to the currently streaming provider turn. */

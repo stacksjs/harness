@@ -16,7 +16,7 @@
  * from, which is how a harness session survives a server restart.
  */
 
-import type { Driver, DriverConfig, ForkInput, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
+import type { Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
 import type { ApprovalChoice, InputAnswer, ProviderContextUsage, SteeringOutcome } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
@@ -740,7 +740,7 @@ class CodexInstance implements ProviderInstance {
     return turns
   }
 
-  async fork(input: ForkInput): Promise<string> {
+  async fork(input: ForkInput): Promise<ForkResult> {
     if (this.threadId) throw new Error('This Codex instance already owns a conversation.')
     await this.ensureProcess()
     let boundary = input.providerTurnId
@@ -772,7 +772,7 @@ class CodexInstance implements ProviderInstance {
       throw error
     }
     this.threadId = threadId
-    return threadId
+    return { providerSessionId: threadId }
   }
 
   async steer(text: string): Promise<SteeringOutcome> {

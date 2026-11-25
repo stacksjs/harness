@@ -92,12 +92,25 @@ const idleClaudeDelivery: Array<[string, string | undefined]> = []
 const freshClaudeCalls: StartTurnInput[] = []
 const releaseFreshClaudeTurn = Promise.withResolvers<void>()
 let freshClaudeConversation = 0
+const claudeForks: ForkInput[] = []
+const claudeForkTurns: StartTurnInput[] = []
 const instance: ProviderInstance = {
+  async fork(input) {
+    claudeForks.push(input)
+    return { providerSessionId: `fixture-claude-fork-${claudeForks.length}`, copiedProviderTurnIds: { [input.providerTurnId!]: `copy-${claudeForks.length}` } }
+  },
   async *compact(providerSessionId) {
     idleClaudeDelivery.push(['/compact', providerSessionId])
     yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
   },
   async *startTurn(input) {
+    if (input.text.startsWith('Claude fork fixture: ')) {
+      claudeForkTurns.push(input)
+      if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'fixture-claude-parent' }
+      yield { type: 'assistant-delta', text: `Claude fork fixture response ${claudeForkTurns.length}.` }
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `claude-turn-${claudeForkTurns.length}` }
+      return
+    }
     if (input.text.startsWith('Fresh session fixture: ')) {
       freshClaudeCalls.push(input)
       if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: `fresh-fixture-${++freshClaudeConversation}` }
@@ -310,7 +323,7 @@ const codexDriver: Driver = {
       async fork(input) {
         fixtureCodexForks.push(input)
         await releaseCodexFork.promise
-        return 'ps-drive-fork'
+        return { providerSessionId: 'ps-drive-fork' }
       },
     }
   },
@@ -2426,6 +2439,44 @@ check('the queued fresh message starts one new native context',
   freshClaudeCalls.filter(call => call.text === queuedFreshPrompt).length === 1
   && freshClaudeCalls.at(-1)?.providerSessionId === undefined
   && await freshBoundary.count() === 2)
+
+const claudeForkSource = 'claude-historical-fork-browser'
+await harness.engine.dispatch({
+  id: claudeForkSource, at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate: true },
+})
+const claudeForkSourceUrl = new URL(`/s/${derivedId(claudeForkSource)}`, baseUrl)
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.goto(claudeForkSourceUrl.href)
+const claudeForkPrompt = page.getByRole('textbox', { name: 'Message', exact: true })
+for (const [ordinal, text] of [[1, 'first prompt'], [2, 'later parent prompt']] as const) {
+  await claudeForkPrompt.fill(`Claude fork fixture: ${text}`)
+  await claudeForkPrompt.press('Enter')
+  await page.getByText(`Claude fork fixture response ${ordinal}.`, { exact: true }).waitFor()
+  await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+}
+await page.locator('[data-turn="1"]').getByRole('button', { name: 'Fork from this response' }).click()
+await page.waitForURL(url => url.pathname !== claudeForkSourceUrl.pathname)
+await page.locator('[data-fork-banner]').getByText('Forked conversation', { exact: true }).waitFor()
+const claudeForkId = Number(new URL(page.url()).pathname.split('/').at(-1))
+await page.locator('[data-workspace-branch]').filter({ hasText: `harness/session-${claudeForkId}` }).waitFor()
+check('Claude forks at the earlier response and records its copied native boundary',
+  claudeForks.length === 1 && claudeForks[0]?.providerTurnId === 'claude-turn-1'
+  && claudeForks[0]?.providerSessionId === 'fixture-claude-parent'
+  && await page.locator('[data-turn]').count() === 1)
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await capture(`claude-fork-ready-${width}`)
+  }
+}
+await claudeForkPrompt.fill('Claude fork fixture: continue in the fork')
+await claudeForkPrompt.press('Enter')
+await page.getByText('Claude fork fixture response 3.', { exact: true }).waitFor()
+check('the Claude fork resumes its own native conversation with an unmodified prompt',
+  claudeForkTurns.at(-1)?.providerSessionId === 'fixture-claude-fork-1'
+  && claudeForkTurns.at(-1)?.text === 'Claude fork fixture: continue in the fork'
+  && claudeForkTurns.at(-1)?.requireResume === true
+  && harness.engine.current.sessions.get(derivedId(claudeForkSource))?.turns.length === 2)
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

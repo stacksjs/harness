@@ -299,7 +299,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         })
         if (mode === 'missing') await expect(fork).rejects.toThrow('missing from the Codex fork')
         else {
-          expect(await fork).toBe('native-fork')
+          expect(await fork).toEqual({ providerSessionId: 'native-fork' })
           const stream = instance.startTurn({ text: 'Continue the fork', providerSessionId: 'native-fork' })
           expect((await stream[Symbol.asyncIterator]().next()).value).toEqual({ type: 'steering-ready' })
         }
