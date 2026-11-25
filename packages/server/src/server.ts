@@ -16,7 +16,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { ChatGptCredentialStore, driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
-import { findDenShell, Pty } from './pty'
+import { findDenShell } from './pty'
 import type { HarnessState } from '@harness/engine'
 import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
@@ -32,6 +32,7 @@ import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
+import { WorkspaceTerminals } from './workspace-terminals'
 
 export interface ServeOptions {
   port?: number
@@ -81,12 +82,6 @@ interface SocketData {
    */
   deviceId: string | null
   canUseHostPrivileges: boolean
-  /**
-   * Live terminals owned by this socket, killed with it. Owned per-socket
-   * rather than pooled because a PTY with no reader is a shell running
-   * unwatched — exactly what a disconnect must not leave behind.
-   */
-  terminals: Map<number, Pty>
   /** Sessions this socket has subscribed to. Empty means "not subscribed". */
   subscriptions: Set<number>
   catchingUp: Map<number, HarnessEvent[]>
@@ -106,7 +101,7 @@ type ClientFrame =
   | { t: 'subscribe', sessionId: number, sinceSeq?: number }
   | { t: 'unsubscribe', sessionId: number }
   | { t: 'ping' }
-  | { t: 'term-open', workspaceId: number, cols?: number, rows?: number }
+  | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number }
   | { t: 'term-input', termId: number, data: string }
   | { t: 'term-resize', termId: number, cols: number, rows: number }
   | { t: 'term-close', termId: number }
@@ -363,7 +358,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   const sockets = new Set<HarnessSocket>()
-  let lastTermId = 0
+  const terminals = new WorkspaceTerminals<HarnessSocket>(send)
   const assetCache = new AssetCache()
   // Built once, before listening: the page references it by URL, so it must be
   // servable by the time the first render can hand that URL out.
@@ -485,6 +480,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
     if (events.length > 0) stateRev++
     for (const event of events) {
+      if (event.payload.type === 'profile.deleted')
+        terminals.prune(scope => engine.current.workspaces.has(scope.workspaceId))
       // A revoke has to reach the connection, not just the next handshake.
       // Closed before the event is delivered, so the socket being cut off does
       // not first get told why in a frame it could act on.
@@ -779,6 +776,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           send(socket, { t: 'term-error', message: `no workspace ${frame.workspaceId}` })
           return
         }
+        const session = frame.sessionId === undefined ? undefined : engine.current.sessions.get(frame.sessionId)
+        if ((frame.sessionId !== undefined && session?.workspaceId !== workspace.id)
+          || (frame.resumeKey !== undefined && (typeof frame.resumeKey !== 'string' || !/^[\da-f-]{36}$/u.test(frame.resumeKey) || !session))) {
+          send(socket, { t: 'term-error', message: 'This terminal does not belong to the thread.' })
+          return
+        }
+        const scope = { workspaceId: workspace.id, sessionId: session?.id, resumeKey: frame.resumeKey }
+        if (terminals.resume(socket, scope)) return
+        if (frame.resumeOnly === true) {
+          send(socket, { t: 'term-error', message: 'This terminal session is no longer available.' })
+          return
+        }
         const shellKind = engine.current.settings.terminalShell
         const shell = shellKind === 'den' ? findDenShell() : undefined
         if (shell === null) {
@@ -794,40 +803,32 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             return
           }
         }
-        const termId = ++lastTermId
-        const cols = frame.cols ?? 80
-        const rows = frame.rows ?? 24
-        const pty = new Pty({ cwd: workspace.path, cols, rows, shell, denIntegration: shellKind === 'den' })
-        socket.data.terminals.set(termId, pty)
-        pty.onData(chunk => send(socket, { t: 'term-data', termId, data: chunk }))
-        pty.onExit((code) => {
-          socket.data.terminals.delete(termId)
-          send(socket, { t: 'term-exit', termId, code })
-        })
-        send(socket, { t: 'term-opened', termId, workspaceId: frame.workspaceId, cols, rows, shell: shellKind })
+        if (!sockets.has(socket) || !engine.current.workspaces.has(workspace.id)) return
+        const cwd = session ? defaultWorkspacePath(engine.current, session.id) ?? workspace.path : workspace.path
+        const cols = Number.isFinite(frame.cols) ? Math.min(500, Math.max(20, Math.floor(frame.cols!))) : 80
+        const rows = Number.isFinite(frame.rows) ? Math.min(200, Math.max(5, Math.floor(frame.rows!))) : 24
+        terminals.open(socket, scope, shellKind, { cwd, cols, rows, shell, denIntegration: shellKind === 'den' })
         return
       }
 
       case 'term-input':
         // An unknown id is a close racing input — dropped, like a late approval.
-        socket.data.terminals.get(frame.termId)?.write(frame.data)
+        if (typeof frame.data === 'string') terminals.input(socket, frame.termId, frame.data)
         return
 
       case 'term-resize': {
         // Clamped: the client computes these from layout, and a garbage
         // measurement must not become a 0-column or million-row winsize.
+        if (!Number.isFinite(frame.cols) || !Number.isFinite(frame.rows)) return
         const cols = Math.min(500, Math.max(20, Math.floor(frame.cols)))
         const rows = Math.min(200, Math.max(5, Math.floor(frame.rows)))
-        socket.data.terminals.get(frame.termId)?.resize(cols, rows)
+        terminals.resize(socket, frame.termId, cols, rows)
         return
       }
 
-      case 'term-close': {
-        const pty = socket.data.terminals.get(frame.termId)
-        socket.data.terminals.delete(frame.termId)
-        pty?.kill()
+      case 'term-close':
+        terminals.close(socket, frame.termId)
         return
-      }
 
       case 'subscribe': {
         const { sessionId } = frame
@@ -996,7 +997,6 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           data: {
             deviceId: access?.authenticate(request).deviceId ?? null,
             canUseHostPrivileges: hostPrivileges,
-            terminals: new Map<number, Pty>(),
             subscriptions: new Set<number>(),
             catchingUp: new Map<number, HarnessEvent[]>(),
             cursors: new Map<number, number>(),
@@ -1235,9 +1235,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       },
       close(socket) {
         sockets.delete(socket)
-        // A PTY with no reader is a shell running unwatched.
-        for (const pty of socket.data.terminals.values()) pty.kill()
-        socket.data.terminals.clear()
+        terminals.disconnect(socket)
       },
       message(socket, message) {
         // Text frames are not part of the protocol: the contract is CBOR, and
@@ -1290,6 +1288,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       compactTimers.clear()
       void tunnel?.close()
       void runtime.stopAll()
+      terminals.prune(() => false)
       server.stop(true)
       savedProviders.close()
       store.close()

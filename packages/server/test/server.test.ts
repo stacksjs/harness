@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
+import { Terminal } from '@harness/ansi'
 import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
 import { serve } from '../src/server'
@@ -439,10 +440,17 @@ describe('harness serve — durability', () => {
 })
 
 describe('terminals over the socket', () => {
-  // The PTY is `script(1)` around a real shell (see src/pty.ts) — these run a
-  // live process, which is the point: the transport's job is to carry actual
-  // shell bytes, and a fake shell would prove the frames while missing the
-  // spawn spelling that differs per platform.
+  // Use a real POSIX shell so local prompts and exit hooks cannot affect the
+  // transport assertions. This still exercises the host's native PTY.
+  let originalShell: string | undefined
+  beforeEach(() => {
+    originalShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+  })
+  afterEach(() => {
+    if (originalShell === undefined) delete process.env.SHELL
+    else process.env.SHELL = originalShell
+  })
 
   function url(): string {
     return `ws://localhost:${port}/ws`
@@ -523,6 +531,51 @@ describe('terminals over the socket', () => {
     client.send({ t: 'ping' })
     expect((await client.until('pong')).t).toBe('pong')
     client.close()
+  })
+
+  it('retains a thread shell and its real output across connections', async () => {
+    const first = await TestClient.connect(url())
+    await first.until('ready')
+    const workspaceId = await openWorkspace(first)
+    const dispatch = async (id: string, command: object) => {
+      first.send({ t: 'dispatch', envelope: { id, at: 3, command } })
+      await first.until('dispatched')
+    }
+    await dispatch('term-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+    await dispatch('term-session', { type: 'session.create', workspaceId, driverKind: 'claude' })
+    const sessionId = derivedId('term-session')
+    const resumeKey = crypto.randomUUID()
+    const open = { t: 'term-open', workspaceId, sessionId, resumeKey, cols: 80, rows: 12 }
+    first.send(open)
+    const opened = await first.until('term-opened')
+    first.send({ t: 'term-input', termId: opened.termId, data: 'printf "before-%d\\n" $((40+2)); sleep .3; printf "offline-%d\\n" $((43+1))\n' })
+    let output = ''
+    for (let i = 0; i < 30 && !output.includes('before-42'); i++) output += (await first.until('term-data')).data
+    expect(output).toContain('before-42')
+    first.close()
+    await Bun.sleep(450)
+
+    const second = await TestClient.connect(url())
+    try {
+      await second.until('ready')
+      second.send({ ...open, resumeKey: crypto.randomUUID(), resumeOnly: true })
+      expect((await second.until('term-error')).message).toContain('no longer available')
+      second.send({ ...open, resumeOnly: true })
+      const resumed = await second.until('term-opened')
+      expect(resumed.termId).toBe(opened.termId)
+      const restored = Terminal.fromCheckpoint(resumed.checkpoint)
+      expect(restored.toText()).toContain('before-42')
+      expect(restored.toText()).toContain('offline-44')
+      second.send({ t: 'term-input', termId: resumed.termId, data: 'exit 7\n' })
+      expect((await second.until('term-exit')).code).toBe(7)
+      second.send({ ...open, resumeOnly: true })
+      expect(await second.until('term-opened')).toMatchObject({ termId: opened.termId, exit: { code: 7 } })
+      second.send({ t: 'term-close', termId: resumed.termId })
+      await second.until('term-closed')
+      second.send({ ...open, resumeOnly: true })
+      expect((await second.until('term-error')).message).toContain('no longer available')
+    }
+    finally { second.close() }
   })
 
   it('resizes a live terminal, and the shell sees the new size', async () => {

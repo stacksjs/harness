@@ -639,6 +639,26 @@ check('reopening the same PTY on desktop applies the desktop width', phoneColumn
 if (!(colsAfter > 0 && colsAfter < colsBefore)) console.log('resize readings:', sizeBefore?.[0], '->', sizeAfter?.[0])
 check('shrinking the window resizes the live PTY', colsAfter > 0 && colsAfter < colsBefore)
 await page.setViewportSize({ width: 1280, height: 720 })
+await page.keyboard.type('n=42; echo "kept-$n"')
+await page.keyboard.press('Enter')
+const terminalScreen = page.locator('[data-terminal-screen]')
+const waitForTerminalLine = (line: string) => page.waitForFunction(expected =>
+  document.querySelector('[data-terminal-screen]')?.textContent?.split('\n').some(row => row.trim() === expected), line)
+await waitForTerminalLine('kept-42')
+await page.reload()
+await waitForTerminalLine('kept-42')
+await page.locator('[data-terminal-host]').focus()
+await page.keyboard.type('echo "still-$((n+2))"')
+await page.keyboard.press('Enter')
+await waitForTerminalLine('still-44')
+check('terminal restores scrollback and the running shell on reload', true)
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`terminal-reconnected-${width}`)
+  }
+}
+await page.setViewportSize({ width: 1280, height: 720 })
 await page.keyboard.type('exit')
 await page.keyboard.press('Enter')
 const restartTerminal = page.getByRole('button', { name: 'Restart terminal' })
@@ -647,6 +667,11 @@ await page.waitForFunction(() => document.activeElement?.matches('[data-terminal
   && document.querySelector('[data-terminal-screen]')?.textContent?.includes('Harness test terminal')
   && !document.querySelector('[data-terminal-screen]')?.textContent?.includes('[exited'))
 check('an exited terminal can be restarted from its pane', !await restartTerminal.isVisible())
+await page.getByRole('button', { name: 'End terminal session' }).click()
+await phoneTerminal.waitFor({ state: 'hidden' })
+await page.click('[data-terminal-toggle]')
+await waitForTerminalLine('Harness test terminal')
+check('ending a terminal clears its scrollback before the next launch', !(await terminalScreen.textContent())?.includes('still-44'))
 
 // 9. Settings: the Cmd+, chord opens the modal, the driver choice persists,
 // and the desktop menu's `craft:settings` event reaches the same modal.
