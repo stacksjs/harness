@@ -30,7 +30,7 @@ export interface ViewProps {
     icon?: string
     tint?: string
     workspaces: ProjectSummary[]
-    sessions: Array<{ id: number, title: string, state: string, navigation?: ThreadNavigation }>
+    sessions: Array<{ id: number, workspaceId: number, title: string, state: string, navigation?: ThreadNavigation }>
   }>
   activeProfile: string
   draftWorkspace: ProjectSummary | null
@@ -120,6 +120,7 @@ export function viewProps(state: HarnessState, options: {
       .filter(session => workspaceIds.has(session.workspaceId))
       .map(session => ({
         id: session.id,
+        workspaceId: session.workspaceId,
         // A session with no title yet is named by its first prompt — the same
         // thing a person would call it. Before that it is simply new: the
         // derived id is a hash, and a hash is not a name.
@@ -137,7 +138,7 @@ export function viewProps(state: HarnessState, options: {
       tint: profile.tint || undefined,
       workspaces: workspaces.filter(w => !w.scratch).map(w => ({
         id: w.id,
-        // The last path segment reads better in a tile than the absolute path.
+        // The last path segment reads better in the sidebar than the absolute path.
         name: basename(w.path) || w.path,
         trusted: w.trusted,
       })),
