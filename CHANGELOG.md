@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.15...v0.0.16)
+
+## ✨ Features
+
+- add durable thread navigation actions ([0b14c50](https://github.com/stacksjs/harness/commit/0b14c50)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.14...v0.0.15)
 
 ## 🐛 Bug Fixes
