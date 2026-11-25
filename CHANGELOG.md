@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.10...v0.0.11)
+
+## ✨ Features
+
+- support scoped MCP connector consent ([9052463](https://github.com/stacksjs/harness/commit/9052463)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.9...v0.0.10)
 
 ## ✨ Features
