@@ -586,6 +586,8 @@ declare module '@stacksjs/database' {
       started_at: string
       completed_at: string
       courier_id: number
+      driver: string
+      driver_id: number | null
     }
     delivery_stops: {
       // columns
