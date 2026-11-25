@@ -14,6 +14,28 @@ function term(cols = 20, rows = 5): Terminal {
   return new Terminal({ cols, rows })
 }
 
+it('restores output, the alternate buffer, and an unfinished escape sequence', () => {
+  const original = new Terminal({ cols: 32, rows: 3, scrollback: 10 })
+  original.write('earlier\r\nworking\r\n%\r\n\x1b[?2004h\x1b[?1049h\x1b[31mλ result\x1b[?104')
+  const restored = Terminal.fromCheckpoint(JSON.parse(JSON.stringify(original.checkpoint())), { scrollback: 10 })
+  expect(restored.onAltScreen).toBe(true)
+  expect(restored.toText()).toBe('λ result')
+  expect(restored.viewport()[0]?.[0]?.style.fg).toBe(1)
+  expect(restored.formatPaste('pasted')).toBe('\x1b[200~pasted\x1b[201~')
+  restored.write('9l\x1b]133;D;7\x07')
+  expect(restored.onAltScreen).toBe(false)
+  expect(restored.toText()).toBe('earlier\nworking\n%')
+  expect(restored.shellActivity.lastExitStatus).toBe(7)
+})
+
+it('keeps only the newest scrollback permitted by the byte budget', () => {
+  const terminal = new Terminal({ cols: 20, rows: 1, scrollback: 5, scrollbackBytes: 70 })
+  terminal.write('line one\nline two\nline three\nline four')
+  expect(terminal.toText()).toBe('line two\nline three\nline four')
+  terminal.write('\x1b[3J\x1b[Hline five\nline six')
+  expect(terminal.toText()).toBe('line five\nline six')
+})
+
 it('honors bracketed paste modes emitted in separate PTY frames', () => {
   const terminal = term()
   const text = 'echo first\necho second'

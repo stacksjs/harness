@@ -45,8 +45,27 @@ export const DEFAULT_STYLE: Style = Object.freeze({
   strike: false,
 })
 
+const BLANK: Cell = Object.freeze({ ch: ' ', style: DEFAULT_STYLE })
+
 function blankRow(cols: number): Cell[] {
-  return Array.from({ length: cols }, () => ({ ch: ' ', style: DEFAULT_STYLE }))
+  return Array<Cell>(cols).fill(BLANK)
+}
+
+type PackedRow = Array<[text: string, style: Style | null]>
+
+function packRow(row: Cell[]): PackedRow {
+  const result: PackedRow = []
+  let lastStyle: Style | undefined
+  for (const { ch, style } of row) {
+    if (style === lastStyle) result.at(-1)![0] += ch
+    else result.push([ch, style === DEFAULT_STYLE ? null : style])
+    lastStyle = style
+  }
+  return result
+}
+
+function unpackRow(row: PackedRow): Cell[] {
+  return row.flatMap(([text, style]) => [...text].map(ch => ch === ' ' && !style ? BLANK : { ch, style: style ?? DEFAULT_STYLE }))
 }
 
 const ParseState = {
@@ -64,6 +83,8 @@ export interface TerminalOptions {
   rows?: number
   /** Lines kept above the viewport once they scroll off. */
   scrollback?: number
+  /** Optional budget for the packed scrollback representation, in UTF-8 bytes. */
+  scrollbackBytes?: number
   /**
    * Treat `\n` as `\r\n`. Defaults on, because the near consumer is *piped*
    * tool output, where no PTY line discipline has done the translation and a
@@ -81,6 +102,9 @@ export class Terminal {
   private _cols: number
   private _rows: number
   private readonly scrollbackLimit: number
+  private readonly scrollbackByteLimit: number
+  private scrollbackBytes = 0
+  private scrollbackRowBytes: number[] = []
   private readonly convertEol: boolean
 
   private grid: Cell[][]
@@ -112,6 +136,7 @@ export class Terminal {
     this._cols = Math.max(2, options.cols ?? 80)
     this._rows = Math.max(1, options.rows ?? 24)
     this.scrollbackLimit = options.scrollback ?? 1000
+    this.scrollbackByteLimit = options.scrollbackBytes ?? Infinity
     this.convertEol = options.convertEol ?? true
     this.grid = Array.from({ length: this.rows }, () => blankRow(this.cols))
   }
@@ -135,6 +160,49 @@ export class Terminal {
 
   get onAltScreen(): boolean {
     return this.savedMain !== null
+  }
+
+  private rememberRow(row: Cell[]): void {
+    const bytes = Number.isFinite(this.scrollbackByteLimit) ? new TextEncoder().encode(JSON.stringify(packRow(row))).length + 1 : 0
+    this.scrollback.push(row)
+    this.scrollbackRowBytes.push(bytes)
+    this.scrollbackBytes += bytes
+    while (this.scrollback.length > this.scrollbackLimit || this.scrollbackBytes > this.scrollbackByteLimit) {
+      this.scrollback.shift()
+      this.scrollbackBytes -= this.scrollbackRowBytes.shift() ?? 0
+    }
+  }
+
+  /** Capture the buffers and parser position so split escape sequences can finish after a reconnect. */
+  checkpoint() {
+    return {
+      cols: this.cols, rows: this.rows, grid: this.grid.map(packRow), history: this.scrollback.map(packRow),
+      x: this.x, y: this.y, cursor: this.savedCursor, style: this.style, wrap: this.pendingWrap,
+      main: this.savedMain && { ...this.savedMain, grid: this.savedMain.grid.map(packRow) },
+      parser: this.state, csi: this.csiParams, csiPrivate: this.csiPrivate, osc: this.oscData, oscEscape: this.oscEscape,
+      bracketedPaste: this.bracketedPaste, shellPhase: this.shellPhase, lastExitStatus: this.lastExitStatus,
+    }
+  }
+
+  static fromCheckpoint(checkpoint: TerminalCheckpoint, options: TerminalOptions = {}): Terminal {
+    const terminal = new Terminal({ ...options, cols: checkpoint.cols, rows: checkpoint.rows })
+    terminal.grid = checkpoint.grid.map(unpackRow)
+    for (const row of checkpoint.history) terminal.rememberRow(unpackRow(row))
+    terminal.x = checkpoint.x
+    terminal.y = checkpoint.y
+    terminal.savedCursor = checkpoint.cursor
+    terminal.style = checkpoint.style
+    terminal.pendingWrap = checkpoint.wrap
+    terminal.savedMain = checkpoint.main && { ...checkpoint.main, grid: checkpoint.main.grid.map(unpackRow) }
+    terminal.state = checkpoint.parser
+    terminal.csiParams = checkpoint.csi
+    terminal.csiPrivate = checkpoint.csiPrivate
+    terminal.oscData = checkpoint.osc
+    terminal.oscEscape = checkpoint.oscEscape
+    terminal.bracketedPaste = checkpoint.bracketedPaste
+    terminal.shellPhase = checkpoint.shellPhase
+    terminal.lastExitStatus = checkpoint.lastExitStatus
+    return terminal
   }
 
   /**
@@ -164,10 +232,7 @@ export class Terminal {
       while (grid.length > nextRows) {
         const top = grid.shift()
         removed++
-        if (intoScrollback && top) {
-          this.scrollback.push(top)
-          if (this.scrollback.length > this.scrollbackLimit) this.scrollback.shift()
-        }
+        if (intoScrollback && top) this.rememberRow(top)
       }
       while (grid.length < nextRows) grid.push(blankRow(nextCols))
       return { grid, removed }
@@ -329,8 +394,7 @@ export class Terminal {
     // The alternate screen is a full-screen app's canvas; what scrolls off it
     // is repaint debris, not history.
     if (!this.onAltScreen) {
-      this.scrollback.push(scrolled)
-      if (this.scrollback.length > this.scrollbackLimit) this.scrollback.shift()
+      this.rememberRow(scrolled)
     }
   }
 
@@ -404,7 +468,11 @@ export class Terminal {
     }
     else if (mode === 2 || mode === 3) {
       for (let row = 0; row < this.rows; row++) this.grid[row] = blankRow(this.cols)
-      if (mode === 3) this.scrollback = []
+      if (mode === 3) {
+        this.scrollback = []
+        this.scrollbackRowBytes = []
+        this.scrollbackBytes = 0
+      }
     }
   }
 
@@ -493,7 +561,7 @@ export class Terminal {
 
   /** Scrollback + viewport, trailing blank rows dropped. */
   snapshot(): Cell[][] {
-    const all = [...this.scrollback, ...this.grid]
+    const all = this.onAltScreen ? this.grid : [...this.scrollback, ...this.grid]
     let end = all.length
     while (end > 0 && all[end - 1]!.every(cell => cell.ch === ' ')) end -= 1
     return all.slice(0, end)
@@ -506,6 +574,8 @@ export class Terminal {
       .join('\n')
   }
 }
+
+export type TerminalCheckpoint = ReturnType<Terminal['checkpoint']>
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
