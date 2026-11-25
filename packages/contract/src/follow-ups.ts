@@ -1,8 +1,12 @@
 import type { EventPayload } from './events'
 
+export type SteeringOutcome = 'delivered' | 'rejected' | 'uncertain'
+
 export interface QueuedFollowUp {
   id: string
   text: string
+  steering?: { requestId: string, turnId: number }
+  steeringIssue?: Exclude<SteeringOutcome, 'delivered'>
 }
 
 export interface FollowUpQueue {
@@ -26,6 +30,23 @@ export function applyFollowUpEvent(queue: FollowUpQueue, event: EventPayload): F
       const [entry] = entries.splice(index, 1)
       entries.splice(event.toIndex, 0, entry!)
       return { ...queue, entries }
+    }
+    case 'turn.steer.requested':
+      return {
+        ...queue,
+        entries: queue.entries.map(entry => entry.id === event.id
+          ? { id: entry.id, text: entry.text, steering: { requestId: event.requestId, turnId: event.turnId } }
+          : entry),
+      }
+    case 'turn.steer.resolved': {
+      const { id, outcome } = event
+      if (outcome === 'delivered') return { ...queue, entries: queue.entries.filter(entry => entry.id !== id) }
+      return {
+        held: true,
+        entries: queue.entries.map(entry => entry.id === id
+          ? { id, text: entry.text, steeringIssue: outcome }
+          : entry),
+      }
     }
     case 'turn.interrupted':
     case 'turn.failed':

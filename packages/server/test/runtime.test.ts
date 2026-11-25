@@ -847,6 +847,98 @@ describe('queued follow-up delivery', () => {
     }
   })
 
+  it('steers once across clients and holds ambiguous delivery across a host restart', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const activeTurn = Promise.withResolvers<void>()
+    const firstSteer = Promise.withResolvers<'delivered'>()
+    const droppedSteer = Promise.withResolvers<'uncertain'>()
+    const steeringCalls: string[] = []
+    const started: string[] = []
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn({ text }) {
+            started.push(text)
+            if (text === 'Active turn') {
+              yield { type: 'steering-ready' }
+              await activeTurn.promise
+            }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+          async steer(text) {
+            steeringCalls.push(text)
+            return text === 'Queued update' ? firstSteer.promise : droppedSteer.promise
+          },
+          async respondApproval() {},
+          async interrupt() { activeTurn.resolve() },
+          async stop() { activeTurn.resolve() },
+        }
+      },
+    }
+    const options = { port, databasePath, resolveDriver: () => driver }
+    harness = await serve(options)
+    const url = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(url)
+    const second = await Client.connect(url)
+    const { sessionId } = await bootstrap(first)
+    second.send({ t: 'subscribe', sessionId })
+    const dispatch = (client: Client, id: string, command: Record<string, unknown>) => {
+      client.send({ t: 'dispatch', envelope: { id, at: Date.now(), command: { ...command, sessionId } } })
+    }
+    try {
+      dispatch(first, 'first-turn', { type: 'session.turn.start', text: 'Active turn' })
+      expect(await first.waitFor('turn.steering-ready')).toMatchObject({ turnId: 1 })
+      dispatch(first, 'queued', { type: 'session.queue.add', text: 'Queued update' })
+      expect(await first.waitForDispatch('queued')).toMatchObject({ t: 'dispatched' })
+      const steer = { type: 'session.turn.steer', id: 'queued', turnId: 1 }
+      dispatch(first, 'steer-first', steer)
+      expect(await second.waitFor('turn.steer.requested')).toMatchObject({ turnId: 1, id: 'queued' })
+      dispatch(second, 'steer-first', steer)
+      expect(await second.waitForDispatch('steer-first')).toMatchObject({ replayed: true })
+      dispatch(second, 'steer-again', steer)
+      expect(await second.waitForRejection('steer-again')).toBeTruthy()
+      expect(steeringCalls).toEqual(['Queued update'])
+      firstSteer.resolve('delivered')
+      expect(await first.waitFor('turn.steer.resolved')).toMatchObject({ id: 'queued', outcome: 'delivered' })
+      expect(harness.engine.current.sessions.get(sessionId)?.turns).toMatchObject([{
+        id: 1, steered: [{ id: 'queued', text: 'Queued update' }],
+      }])
+      dispatch(first, 'ambiguous', { type: 'session.turn.steer', turnId: 1, text: 'Unconfirmed update' })
+      expect(await second.waitFor('turn.steer.requested', 3000, event => event.id === 'ambiguous')).toBeTruthy()
+      expect(steeringCalls).toEqual(['Queued update', 'Unconfirmed update'])
+      expect(started).toEqual(['Active turn'])
+    }
+    finally {
+      firstSteer.resolve('delivered')
+      first.close()
+      second.close()
+      harness.stop()
+      droppedSteer.resolve('uncertain')
+    }
+
+    harness = await serve(options)
+    const restored = await Client.connect(url)
+    try {
+      restored.send({ t: 'subscribe', sessionId })
+      expect(await restored.waitFor('turn.steer.resolved', 3000, event => event.id === 'ambiguous')).toMatchObject({ turnId: 1, outcome: 'uncertain' })
+      expect(harness.engine.current.sessions.get(sessionId)?.followUps).toEqual({
+        held: true, entries: [{ id: 'ambiguous', text: 'Unconfirmed update', steeringIssue: 'uncertain' }],
+      })
+      dispatch(restored, 'resume', { type: 'session.queue.send' })
+      expect(await restored.waitForRejection('resume')).toBeTruthy()
+      expect(started).toEqual(['Active turn'])
+      dispatch(restored, 'confirm', { type: 'session.queue.send', id: 'ambiguous', confirmResend: true })
+      expect(await restored.waitFor('turn.completed', 3000, event => event.turnId === 2)).toBeTruthy()
+      expect(started).toEqual(['Active turn', 'Unconfirmed update'])
+      expect(steeringCalls).toEqual(['Queued update', 'Unconfirmed update'])
+    }
+    finally {
+      restored.close()
+    }
+  })
+
   it('holds an interrupted queue across restart and rejects a competing send of the same entry', async () => {
     const path = join(dir, 'test.sqlite')
     const gate = Promise.withResolvers<void>()

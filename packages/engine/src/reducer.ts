@@ -445,6 +445,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const index = entries.findIndex(entry => entry.id === command.id)
       const entry = entries[index]
       if (!entry) throw new InvalidCommand('This message is no longer queued.')
+      if (entry.steering) throw new InvalidCommand('Wait for the provider to confirm this message.')
 
       if (command.type === 'session.queue.remove')
         return emit({ type: 'queue.removed', id: entry.id })
@@ -458,6 +459,49 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('Choose a direction to move the queued message.')
       const toIndex = index + (command.direction === 'up' ? -1 : 1)
       return toIndex < 0 || toIndex >= entries.length ? [] : emit({ type: 'queue.moved', id: entry.id, toIndex })
+    }
+
+    case 'thread.steer.ready': {
+      const session = state.sessions.get(command.sessionId)
+      const turn = session?.turns.at(-1)
+      if (!session || turn?.id !== command.turnId || turn.status !== 'running' || turn.steerable) return []
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'turn.steering-ready', turnId: turn.id } }]
+    }
+
+    case 'session.turn.steer': {
+      const session = state.sessions.get(command.sessionId)
+      const turn = session?.turns.at(-1)
+      if (!session || session.state !== 'running' || !turn?.steerable || turn.id !== command.turnId)
+        throw new InvalidCommand('This turn is no longer available to steer.')
+      if (!state.workspaces.get(session.workspaceId)?.trusted)
+        throw new InvalidCommand('Trust this workspace before steering the agent.')
+      const entries = session.followUps.entries
+      if (entries.some(entry => entry.steering))
+        throw new InvalidCommand('Wait for the agent to confirm the previous steer.')
+
+      const event = { sessionId: session.id, commandId, at }
+      const entry = 'id' in command
+        ? entries.find(entry => entry.id === command.id)
+        : { id: commandId, text: followUpText(command.text) }
+      if (!entry) throw new InvalidCommand('This message is no longer queued.')
+      if (entry.steeringIssue === 'uncertain')
+        throw new InvalidCommand('Review this message before sending it again.')
+      return [
+        ...('id' in command ? [] : [{ ...event, payload: { type: 'queue.added' as const, entry } }]),
+        { ...event, payload: { type: 'turn.steer.requested', turnId: turn.id, id: entry.id, requestId: commandId, text: entry.text } },
+      ]
+    }
+
+    case 'thread.steer.settle': {
+      const session = state.sessions.get(command.sessionId)
+      const entry = session?.followUps.entries.find(entry => entry.id === command.id)
+      if (!session || !entry?.steering || entry.steering.requestId !== command.requestId) return []
+      return [{
+        sessionId: session.id,
+        commandId,
+        at,
+        payload: { type: 'turn.steer.resolved', turnId: entry.steering.turnId, id: entry.id, outcome: command.outcome, text: entry.text },
+      }]
     }
 
     case 'thread.queue.hold': {
@@ -479,9 +523,18 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         if (automatic) return [{ sessionId: session.id, commandId, at, payload: { type: 'queue.held' } }]
         throw new InvalidCommand('Trust this workspace before sending a queued message.')
       }
+      if (session.followUps.entries.some(entry => entry.steering)) {
+        if (automatic) return []
+        throw new InvalidCommand('Wait for the provider to confirm the message being sent.')
+      }
       const id = automatic ? undefined : command.id
       const entry = id === undefined ? session.followUps.entries[0] : session.followUps.entries.find(entry => entry.id === id)
       if (!entry) throw new InvalidCommand('This message is no longer queued.')
+      if (entry.steeringIssue === 'uncertain') {
+        if (automatic) return [{ sessionId: session.id, commandId, at, payload: { type: 'queue.held' } }]
+        if (!id || command.confirmResend !== true)
+          throw new InvalidCommand('Use Send again on the message whose delivery could not be confirmed.')
+      }
       return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.id) }]
     }
 

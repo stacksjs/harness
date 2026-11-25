@@ -94,6 +94,8 @@ export interface TurnState {
   status: 'pending' | 'running' | 'complete' | 'interrupted' | 'failed'
   /** What the user asked. Set once, at `turn.started`. */
   prompt: string
+  steerable?: boolean
+  steered?: Array<{ id: string, text: string }>
   /**
    * What the agent replied, accumulated from deltas.
    *
@@ -373,6 +375,20 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         tokensOut: 0,
         cost: 0,
       })
+      break
+    }
+
+    case 'turn.steering-ready': {
+      const session = state.sessions.get(event.sessionId)
+      const active = session && turn(session, p.turnId)
+      if (active) active.steerable = true
+      break
+    }
+
+    case 'turn.steer.resolved': {
+      const session = state.sessions.get(event.sessionId)
+      const active = session && turn(session, p.turnId)
+      if (active && p.outcome === 'delivered') (active.steered ??= []).push({ id: p.id, text: p.text })
       break
     }
 

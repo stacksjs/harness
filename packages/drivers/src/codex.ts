@@ -17,7 +17,7 @@
  */
 
 import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
-import type { ApprovalChoice, InputAnswer } from '@harness/contract'
+import type { ApprovalChoice, InputAnswer, SteeringOutcome } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { codexEnvironment } from './account-environment'
@@ -35,6 +35,7 @@ interface Frame {
   params?: any
   result?: any
   error?: { code?: number, message?: string }
+  transportError?: boolean
 }
 
 /**
@@ -278,7 +279,7 @@ class CodexInstance implements ProviderInstance {
   }
 
   private finishRequests(message: string): void {
-    for (const resolve of this.pending.values()) resolve({ error: { message } })
+    for (const resolve of this.pending.values()) resolve({ error: { message }, transportError: true })
     this.pending.clear()
   }
 
@@ -464,17 +465,32 @@ class CodexInstance implements ProviderInstance {
     this.send({ id, result })
   }
 
-  private request(method: string, params: unknown): Promise<Frame> {
+  private request(method: string, params: unknown, timeoutMs?: number): Promise<Frame> {
     const id = ++this.nextId
-    return new Promise<Frame>((resolve) => {
-      this.pending.set(id, resolve)
-      this.send({ id, method, params })
+    return new Promise<Frame>((resolve, reject) => {
+      const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+        this.pending.delete(id)
+        resolve({ transportError: true })
+      }, timeoutMs)
+      this.pending.set(id, (frame) => {
+        clearTimeout(timer)
+        resolve(frame)
+      })
+      try {
+        this.send({ id, method, params })
+      }
+      catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(error)
+      }
     })
   }
 
   startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
     const queue = new EventQueue()
     this.queue = queue
+    this.turnId = null
     this.usage = { tokensIn: 0, tokensOut: 0 }
     this.turnError = null
     this.inputs.clear()
@@ -522,7 +538,21 @@ class CodexInstance implements ProviderInstance {
       queue.finish({ type: 'error', message: this.providerError(turn.error.message ?? 'turn/start failed') })
       return
     }
+    if (queue.closed || this.queue !== queue) return
     this.turnId = turn.result?.turn?.id ?? null
+    if (this.turnId) queue.push({ type: 'steering-ready' })
+  }
+
+  async steer(text: string): Promise<SteeringOutcome> {
+    const threadId = this.threadId
+    const expectedTurnId = this.turnId
+    if (!this.child || !threadId || !expectedTurnId || this.queue?.closed) return 'rejected'
+    const reply = await this.request('turn/steer', {
+      threadId, expectedTurnId, input: [{ type: 'text', text }],
+    }, 10_000)
+    if (reply.transportError) return 'uncertain'
+    if (reply.error) return 'rejected'
+    return reply.result?.turnId === expectedTurnId ? 'delivered' : 'uncertain'
   }
 
   async interrupt(): Promise<void> {

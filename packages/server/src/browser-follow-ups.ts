@@ -25,6 +25,8 @@ interface FollowUpOptions {
   pending: Writable<boolean>
   send: (command: ClientCommand, id?: string) => Promise<void>
   alert: (message: string) => void
+  transcript: () => HTMLElement | undefined
+  steeringMessage: () => HTMLTemplateElement | undefined
 }
 
 export function createFollowUpActions(options: FollowUpOptions) {
@@ -67,13 +69,11 @@ export function createFollowUpActions(options: FollowUpOptions) {
     endEdit()
   }
 
-  async function run(action: 'move' | 'remove' | 'send', id?: string, direction?: 'up' | 'down'): Promise<void> {
+  async function updateQueue(command: ClientCommand): Promise<void> {
     if (pending() || !online()) return
     pending.set(true)
     try {
-      if (action === 'send') await send({ type: 'session.queue.send', sessionId, ...(id ? { id } : {}) })
-      else if (action === 'remove' && id) await send({ type: 'session.queue.remove', sessionId, id })
-      else if (action === 'move' && id && direction) await send({ type: 'session.queue.move', sessionId, id, direction })
+      await send(command)
     }
     catch (error) {
       options.alert(error instanceof Error ? error.message : 'Could not update the queue.')
@@ -81,6 +81,31 @@ export function createFollowUpActions(options: FollowUpOptions) {
     finally {
       pending.set(false)
     }
+  }
+
+  async function run(action: 'move' | 'remove' | 'send', id?: string, direction?: 'up' | 'down'): Promise<void> {
+    if (action === 'send') await updateQueue({ type: 'session.queue.send', sessionId, id })
+    else if (action === 'remove' && id) await updateQueue({ type: 'session.queue.remove', sessionId, id })
+    else if (action === 'move' && id && direction) await updateQueue({ type: 'session.queue.move', sessionId, id, direction })
+  }
+
+  function steerQueued(id: string, turnId: number): Promise<void> {
+    return updateQueue({ type: 'session.turn.steer', sessionId, turnId, id })
+  }
+
+  function resend(id: string): Promise<void> {
+    return updateQueue({ type: 'session.queue.send', sessionId, id, confirmResend: true })
+  }
+
+  function showDelivery(turnId: number, text: string): void {
+    const history = options.transcript()?.querySelector(`[data-turn="${turnId}"] [data-steering-history]`)
+    const template = options.steeringMessage()
+    if (!history || !template) return
+    const fragment = template.content.cloneNode(true) as DocumentFragment
+    const message = fragment.querySelector('[data-steering-text]')
+    if (!message) return
+    message.textContent = text
+    history.append(fragment)
   }
 
   async function flush(retryFailed = false): Promise<void> {
@@ -127,7 +152,7 @@ export function createFollowUpActions(options: FollowUpOptions) {
   }
 
   return {
-    beginEdit, endEdit, saveEdit, run, flush, stage, removeLocal,
+    beginEdit, endEdit, saveEdit, run, steerQueued, resend, showDelivery, flush, stage, removeLocal,
     dispose() {
       disposed = true
       clearTimeout(retry)

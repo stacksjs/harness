@@ -74,6 +74,8 @@ const connectorGate = Promise.withResolvers<void>()
 const connectorWithdrawal = Promise.withResolvers<void>()
 const followUpGate = Promise.withResolvers<void>()
 const followUpDelivery: string[] = []
+let releaseSteering: (() => void) | undefined
+const steeringCalls: string[] = []
 let connectorScope: string | undefined
 const script: ProviderEvent[] = [
   { type: 'session-bound', providerSessionId: 'ps-drive' },
@@ -86,6 +88,16 @@ const script: ProviderEvent[] = [
 ]
 const instance: ProviderInstance = {
   async *startTurn(input) {
+    if (input.text === 'exercise active steering') {
+      const { promise, resolve } = Promise.withResolvers<void>()
+      releaseSteering = resolve
+      yield { type: 'steering-ready' }
+      yield { type: 'assistant-delta', text: 'Ready for active steering.' }
+      await promise
+      releaseSteering = undefined
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     if (input.text === 'exercise follow-up queue') {
       yield { type: 'assistant-delta', text: 'Waiting for queued messages.' }
       await followUpGate.promise
@@ -167,7 +179,14 @@ const instance: ProviderInstance = {
       if (event.type === 'approval-request') await gate
     }
   },
-  async interrupt() { followUpGate.resolve() },
+  async steer(text) {
+    steeringCalls.push(text)
+    return text === 'Unconfirmed steering fixture.' ? 'uncertain' : 'delivered'
+  },
+  async interrupt() {
+    followUpGate.resolve()
+    releaseSteering?.()
+  },
   async respondApproval(id, allow, _reason, choice) {
     if (id === 'fixture_connector') {
       connectorScope = allow ? choice?.scope : undefined
@@ -194,12 +213,17 @@ const driver: Driver = {
     return instance
   },
 }
-const signedOutDriver: Driver = { ...driver, kind: 'codex', async probe() { return { status: 'unauthenticated' } } }
+let fixtureCodexReady = false
+const codexDriver: Driver = {
+  ...driver,
+  kind: 'codex',
+  async probe() { return { status: fixtureCodexReady ? 'ready' : 'unauthenticated' } },
+}
 
 const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
 const harness = await serve({
   port, databasePath, scratchDirectory, chatGptCredentialDirectory: join(driveRoot, 'credentials'),
-  resolveDriver: kind => kind === 'codex' ? signedOutDriver : driver,
+  resolveDriver: kind => kind === 'codex' ? codexDriver : driver,
 })
 const baseUrl = `http://localhost:${port}`
 const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
@@ -1030,6 +1054,104 @@ await phone.locator('[data-session-state][data-state="idle"]').waitFor({ state: 
 check('explicit resume drains the edited order once, including the offline message',
   JSON.stringify(followUpDelivery) === JSON.stringify(['Follow-up fixture: revised task', 'Follow-up fixture: first task', 'Follow-up fixture: offline task']))
 await followUpClient.close()
+
+fixtureCodexReady = true
+const steerSessionIds = new Set(harness.engine.current.sessions.keys())
+cmd('d_steer', { type: 'session.create', workspaceId, driverKind: 'codex', label: 'exercise active steering' })
+let steerSessionId: number | undefined
+for (let tries = 0; tries < 40 && steerSessionId === undefined; tries++) {
+  steerSessionId = [...harness.engine.current.sessions.keys()].find(id => !steerSessionIds.has(id))
+  if (steerSessionId === undefined) await Bun.sleep(25)
+}
+if (steerSessionId === undefined) throw new Error('Could not start the steering fixture session.')
+await page.goto(`${baseUrl}/s/${steerSessionId}`)
+await page.locator('[data-composer][data-session-online="true"]').waitFor()
+await promptBox.fill('exercise active steering')
+await page.click('[data-send]')
+await transcript.getByText('Ready for active steering.').waitFor()
+const steeringReady = page.locator('[data-composer][data-steer-ready="true"]')
+try {
+  await steeringReady.waitFor({ timeout: 5000 })
+}
+catch (error) {
+  const turn = [...harness.engine.current.sessions.values()].find(item => item.turns.at(-1)?.prompt === 'exercise active steering')
+  console.error('Steering readiness:', turn?.state, turn?.turns.at(-1),
+    await page.locator('[data-composer]').evaluate(form => [form.getAttribute('data-steer-ready'), form.getAttribute('data-session-online'), form.getAttribute('hidden')]),
+    pageErrors)
+  throw error
+}
+await promptBox.fill('Steer from a queued row.')
+await page.getByRole('button', { name: 'Queue', exact: true }).click()
+const steerRow = followUpRows.filter({ hasText: 'Steer from a queued row.' })
+await steerRow.waitFor()
+const sendNow = steerRow.getByRole('button', { name: 'Send now', exact: true })
+try {
+  await sendNow.waitFor({ timeout: 5000 })
+}
+catch (error) {
+  console.error('Steering row:', await steerRow.evaluate(row => row.outerHTML), 'page errors:', pageErrors)
+  throw error
+}
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await sendNow.scrollIntoViewIfNeeded()
+    await capture(`steering-queued-${width}x${height}`)
+  }
+}
+await page.setViewportSize({ width: 1280, height: 800 })
+await sendNow.click()
+const originalTurn = transcript.locator('[data-turn]').filter({ hasText: 'exercise active steering' })
+await originalTurn.locator('[data-steered-message]').getByText('Steer from a queued row.').waitFor()
+await steerRow.waitFor({ state: 'hidden' })
+check('Send now steers the original turn exactly once', steeringCalls.join() === 'Steer from a queued row.')
+await page.reload()
+await steeringReady.waitFor()
+await originalTurn.getByText('Steer from a queued row.').waitFor()
+check('the original turn retains its steer after a reload', await originalTurn.locator('[data-steered-message]').count() === 1)
+await page.keyboard.press('Control+,')
+await page.locator('#settings-follow-up').selectOption('steer')
+await page.keyboard.press('Escape')
+await promptBox.fill('Steer directly from the composer.')
+await page.getByRole('button', { name: 'Steer', exact: true }).click()
+try {
+  await originalTurn.getByText('Steer directly from the composer.').waitFor({ timeout: 5000 })
+}
+catch (error) {
+  console.error('Direct steer:', steeringCalls, await originalTurn.innerText(), pageErrors)
+  throw error
+}
+await promptBox.fill('Queue using the opposite shortcut.')
+await promptBox.press('Control+Enter')
+await followUpRows.filter({ hasText: 'Queue using the opposite shortcut.' }).waitFor()
+await promptBox.fill('Keep this draft while steering the oldest item.')
+await promptBox.press('Control+Shift+Enter')
+await originalTurn.getByText('Queue using the opposite shortcut.').waitFor()
+check('steering the oldest queued item preserves the composer draft',
+  await promptBox.inputValue() === 'Keep this draft while steering the oldest item.')
+await page.setViewportSize({ width: 390, height: 844 })
+await promptBox.fill('Queue using the touch action.')
+const touchQueue = page.getByRole('button', { name: 'Queue', exact: true })
+await touchQueue.click()
+const touchRow = followUpRows.filter({ hasText: 'Queue using the touch action.' })
+const touchSendNow = touchRow.getByRole('button', { name: 'Send now', exact: true })
+await touchSendNow.waitFor()
+check('the phone exposes the alternate action without horizontal page scrolling',
+  await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+await capture('steering-touch-alternate')
+await touchSendNow.click()
+await originalTurn.getByText('Queue using the touch action.').waitFor()
+await page.setViewportSize({ width: 1280, height: 800 })
+await promptBox.fill('Unconfirmed steering fixture.')
+await page.getByRole('button', { name: 'Steer', exact: true }).click()
+const unconfirmed = followUpRows.filter({ hasText: 'Unconfirmed steering fixture.' })
+await unconfirmed.getByText('Delivery unconfirmed').waitFor()
+await page.getByRole('button', { name: 'Stop', exact: true }).click()
+await unconfirmed.getByRole('button', { name: 'Send again', exact: true }).waitFor()
+check('an ambiguous steer needs an explicit resend', !await page.locator('[data-resume-queue]').isVisible()
+  && steeringCalls.filter(text => text === 'Unconfirmed steering fixture.').length === 1)
+await capture('steering-unconfirmed')
+
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

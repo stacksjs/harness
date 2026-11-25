@@ -11,7 +11,7 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { ApprovalChoice, CommandEnvelope, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse } from '@harness/contract'
+import type { ApprovalChoice, CommandEnvelope, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, SteeringOutcome } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
@@ -311,6 +311,11 @@ export class ProviderRuntime {
             })
             break
 
+          case 'steering-ready':
+            if (running.instance.steer && !running.interrupted)
+              await this.emit({ type: 'thread.steer.ready', sessionId, turnId })
+            break
+
           case 'assistant-delta':
             await this.emit({
               type: 'thread.message.assistant.delta',
@@ -561,6 +566,24 @@ export class ProviderRuntime {
       // The ref is a dangling commit, so "unknown checkpoint" usually means
       // `git gc` collected it rather than that anything is broken.
       message: `could not revert: ${result.reason ?? 'unknown reason'}`,
+    })
+  }
+
+  async steer(sessionId: number, requested: Extract<HarnessEvent['payload'], { type: 'turn.steer.requested' }>): Promise<void> {
+    const running = this.sessions.get(sessionId)
+    const session = this.options.engine.current.sessions.get(sessionId)
+    let outcome: SteeringOutcome = 'rejected'
+    if (running?.instance.steer && running.turnId === requested.turnId && !running.interrupted && !running.abandoned
+      && session?.state === 'running' && this.options.engine.current.workspaces.get(session.workspaceId)?.trusted) {
+      try {
+        outcome = await running.instance.steer(requested.text)
+      }
+      catch {
+        outcome = 'uncertain'
+      }
+    }
+    await this.emit({
+      type: 'thread.steer.settle', sessionId, id: requested.id, requestId: requested.requestId, outcome,
     })
   }
 

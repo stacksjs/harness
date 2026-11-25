@@ -117,6 +117,7 @@ export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 export const initialHasResponse = Boolean(liveTurn?.response)
 export const initialResponseTurn = liveTurn?.id || 0
+export const initialSteerable = liveTurn?.steerable === true
 export const initialInputActivity = liveTurn?.inputRequests || []
 </script>
 
@@ -321,6 +322,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}" id="turn-{{ turn.id }}">
           <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
           <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ turn.prompt }}</div>
+          @foreach(turn.steered as message)
+            <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
+              <div class="mb-1 font-medium text-[12px] text-neutral-600 dark:text-neutral-400">You followed up</div>
+              <div class="break-words text-[13px] whitespace-pre-wrap">{{ message.text }}</div>
+            </div>
+          @endforeach
           {{--
             What the agent ran, before what it said. These were in the log from
             the start and rendered nowhere, so the transcript showed a reply
@@ -367,6 +374,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article class="mb-5" data-turn="{{ liveTurn.id }}" id="turn-{{ liveTurn.id }}" data-live>
           <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
           <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap">{{ liveTurn.prompt }}</div>
+          <div data-steering-history>
+            @foreach(liveTurn.steered as message)
+              <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
+                <div class="mb-1 font-medium text-[12px] text-neutral-600 dark:text-neutral-400">You followed up</div>
+                <div class="break-words text-[13px] whitespace-pre-wrap">{{ message.text }}</div>
+              </div>
+            @endforeach
+          </div>
           <div data-tools>
           {{--
             The static state is the SSR truth; the binding overlays what
@@ -433,6 +448,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
           <div class="mb-1 font-medium text-[12px] opacity-50">You</div>
           <div class="mb-3 leading-[20px] text-[13px] whitespace-pre-wrap" :text="turn.prompt"></div>
+          <div data-steering-history></div>
           <div data-tools>
             <template :for="call in turn.tools" :key="call.callId">
               <div class="flex gap-[6px] items-center mb-1 text-[12px]" :data-tool-call="call.callId" :data-tool-state="toolResults()[call.callId] || 'running'">
@@ -454,6 +470,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </article>
       </template>
 
+      @if(activeSession)
+        <template ref="steeringMessageBox">
+          <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
+            <div class="mb-1 font-medium text-[12px] text-neutral-600 dark:text-neutral-400">You followed up</div>
+            <div data-steering-text class="break-words text-[13px] whitespace-pre-wrap"></div>
+          </div>
+        </template>
+      @endif
       @includeWhen(activeSession, '../partials/harness-follow-ups')
     </div>
     @if(activeSession)
@@ -466,7 +490,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(canCompose)
-    <form data-composer :data-session-online="sessionOnline()" @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt" class="grid md:flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
+    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt()" class="grid md:flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -505,7 +529,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
       </select>
       <div class="flex flex-wrap gap-2 justify-end">
-        <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting()" :text="sendLabel()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
+        <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" :text="sendLabel()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
+        <span class="md:hidden" :hidden="!canSteer() || !composerText().trim() || Boolean(editingFollowUp())">
+          <button type="button" :disabled="startPending() || (oppositeFollowUp() === 'steer' && steeringPending())" :text="oppositeFollowUp() === 'steer' ? 'Steer' : 'Queue'" @click="sendPrompt(oppositeFollowUp())" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Steer</button>
+        </span>
         <button type="button" :hidden="!editingFollowUp()" @click="followUpActions()?.endEdit()" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
         <button type="button" data-resume-queue :hidden="!showResume()" :disabled="!sessionOnline() || queueActionPending()" @click="followUpActions()?.run('send')" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Resume</button>
         <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Stop</button>
@@ -613,6 +640,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="opencode">OpenCode</option>
         <option value="cursor">Cursor</option>
         <option value="grok">Grok</option>
+      </select>
+      <label class="block mb-2 font-medium text-[13px]" for="settings-follow-up">Follow-up behavior</label>
+      <select id="settings-follow-up" :value="followUpPreference()" @change="setFollowUpPreference" class="mb-3 px-3 py-2 w-full text-[13px] bg-white dark:bg-neutral-950 border border-black/10 rounded-[8px] dark:border-white/10">
+        <option value="queue">Queue for the next turn</option>
+        <option value="steer">Steer the active turn</option>
       </select>
       <h3 class="mb-2 pt-3 font-medium text-[13px] border-t border-black/10 dark:border-white/10">Agents</h3>
       {{--
@@ -803,6 +835,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   })
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
   const followUps = state(initialFollowUps)
+  const steeringMessage = useRef('steeringMessageBox')
+  const followUpPreference = useLocalStorage('harness.follow-up-behavior.v1', 'queue')
+  const oppositeFollowUp = derived(() => followUpPreference() === 'steer' ? 'queue' : 'steer')
+  const steeringPending = derived(() => followUps().entries.some(entry => entry.steering))
   const localFollowUps = useLocalStorage(`harness.follow-ups.v1:${activeProfile || 0}:${promptScope}`, [], { listenToStorageChanges: false })
   const sessionOnline = state(false)
   const sessionConnecting = state(Boolean(sessionId && serverUrl && codecUrl))
@@ -825,10 +861,27 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // the chip, Send/Stop and the revert buttons all bind to it.
   const uiState = state(sessionState || 'idle')
   const runningTurnId = state(initialResponseTurn)
+  const steerableTurn = state(initialSteerable ? initialResponseTurn : 0)
+  const canSteer = derived(() => sessionOnline() && uiState() === 'running' && steerableTurn() !== 0 && steerableTurn() === runningTurnId())
   const uiBusy = derived(() => uiState() === 'running' || uiState() === 'awaiting-approval' || uiState() === 'awaiting-input')
-  const showResume = derived(() => Boolean(sessionId && !uiBusy() && followUps().held && followUps().entries.length && !composerText().trim() && !editingFollowUp()))
+  const showResume = derived(() => Boolean(sessionId && !uiBusy() && followUps().held && followUps().entries.length && !steeringPending() && followUps().entries[0]?.steeringIssue !== 'uncertain' && !composerText().trim() && !editingFollowUp()))
   const showSend = derived(() => !showResume() && Boolean(!uiBusy() || composerText().trim() || editingFollowUp()))
-  const sendLabel = derived(() => editingFollowUp() ? 'Save edit' : sessionId && (uiBusy() || !sessionOnline()) ? 'Queue' : 'Send')
+  const sendLabel = derived(() => {
+    if (editingFollowUp()) return 'Save edit'
+    if (canSteer() && followUpPreference() === 'steer') return 'Steer'
+    return sessionId && (uiBusy() || !sessionOnline()) ? 'Queue' : 'Send'
+  })
+  function showQueueSend(entry) {
+    return !entry.local && !entry.steering && entry.steeringIssue !== 'uncertain'
+      && editingFollowUp()?.id !== entry.id && (!uiBusy() || canSteer())
+  }
+  function sendQueuedFollowUp(id) {
+    if (canSteer()) return followUpActions()?.steerQueued(id, runningTurnId())
+    return followUpActions()?.run('send', id)
+  }
+  function setFollowUpPreference(event) {
+    followUpPreference.set(event.target.value === 'steer' ? 'steer' : 'queue')
+  }
   // Stop hides the moment it is clicked, before the log settles the turn.
   const stopPressed = state(false)
   function setSessionState(next) {
@@ -1816,7 +1869,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (current === first) void sendPrompt()
   }
 
-  async function sendPrompt() {
+  async function sendPrompt(mode = followUpPreference()) {
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
@@ -1836,6 +1889,26 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const draft = composerDraft()
     const commandId = draft?.commandId ?? newCommandId()
     if (draft) composerDraft.set({ ...draft, commandId })
+
+    if (canSteer() && mode === 'steer') {
+      if (steeringPending()) return
+      startPending.set(true)
+      try {
+        await sendCommand({ type: 'session.turn.steer', sessionId, turnId: runningTurnId(), text }, commandId)
+        if (box.value === raw) {
+          box.value = ''
+          composerText.set('')
+          composerDraft.set(null)
+        }
+      }
+      catch (error) {
+        stxAlert(error.message || 'Could not steer the turn. Your draft is still here.')
+      }
+      finally {
+        startPending.set(false)
+      }
+      return
+    }
 
     if (sessionId && (uiBusy() || (!sessionOnline() && !sessionConnecting()) || localFollowUps()?.length)) {
       const actions = followUpActions()
@@ -1900,10 +1973,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function promptKeydown(event) {
+    if (event.isComposing || event.keyCode === 229) return
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && canSteer() && !editingFollowUp()) {
+      event.preventDefault()
+      if (event.shiftKey) {
+        const entry = followUps().entries[0]
+        if (entry && showQueueSend(entry) && !steeringPending()) void sendQueuedFollowUp(entry.id)
+      }
+      else {
+        void sendPrompt(oppositeFollowUp())
+      }
+      return
+    }
     if (event.altKey && event.key === 'ArrowUp' && !event.isComposing && event.target.selectionStart === 0
       && event.target.selectionEnd === 0 && !editingFollowUp()) {
       const entry = followUps().entries.at(-1)
-      if (entry) {
+      if (entry && !entry.steering) {
         event.preventDefault()
         followUpActions()?.beginEdit(entry)
         return
@@ -2242,6 +2327,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       rememberDraft: rememberPrompt, restoreDraft: restorePrompt, hasDraft: () => Boolean(composerDraft()?.text),
       editing: editingFollowUp, local: localFollowUps, sending: outboxSending, pending: queueActionPending,
       send: sendCommand, alert: stxAlert,
+      transcript: () => transcriptRef.current, steeringMessage: () => steeringMessage.current,
     }))
 
     function onMessage(frame) {
@@ -2290,6 +2376,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         // the reply within it.
         if (payload.role === 'user') {
           responseByTurn.set(payload.turnId, '')
+          steerableTurn.set(0)
           runningTurnId.set(payload.turnId)
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
@@ -2301,6 +2388,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           transcriptAnnouncement.set('')
           setSessionState('running')
           paintTranscript(updateTranscriptMarkdown)
+        }
+      }
+      else if (payload.type === 'turn.steering-ready') {
+        steerableTurn.set(payload.turnId)
+      }
+      else if (payload.type === 'turn.steer.resolved') {
+        if (payload.outcome === 'delivered') {
+          void nextTick(() => followUpActions()?.showDelivery(payload.turnId, payload.text))
+          transcriptAnnouncement.set('Follow-up sent to the active turn.')
+          paintTranscript(updateTranscriptMarkdown)
+        }
+        else {
+          transcriptAnnouncement.set(payload.outcome === 'uncertain'
+            ? 'Delivery could not be confirmed. The message is held for review.'
+            : 'The agent did not accept the follow-up. The message is held in the queue.')
         }
       }
       else if (payload.type === 'tool.call.began') {

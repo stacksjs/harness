@@ -8,6 +8,7 @@
  * ordering and one audit trail rather than two.
  */
 
+import type { SteeringOutcome } from './follow-ups'
 import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
 
 export type DriverKind = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok'
@@ -50,7 +51,8 @@ export type ClientCommand =
   | { type: 'session.queue.edit', sessionId: number, id: string, text: string, previousText: string }
   | { type: 'session.queue.remove', sessionId: number, id: string }
   | { type: 'session.queue.move', sessionId: number, id: string, direction: 'up' | 'down' }
-  | { type: 'session.queue.send', sessionId: number, id?: string }
+  | { type: 'session.queue.send', sessionId: number, id?: string, confirmResend?: boolean }
+  | ({ type: 'session.turn.steer', sessionId: number, turnId: number } & ({ id: string } | { text: string }))
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
   | ({ type: 'session.input.respond', sessionId: number, requestId: string } & InputResponse)
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
@@ -101,6 +103,8 @@ export type ClientCommand =
  * authorisation to forge assistant text.
  */
 export type InternalCommand =
+  | { type: 'thread.steer.ready', sessionId: number, turnId: number }
+  | { type: 'thread.steer.settle', sessionId: number, id: string, requestId: string, outcome: SteeringOutcome }
   | { type: 'thread.queue.advance', sessionId: number }
   | { type: 'thread.queue.hold', sessionId: number }
   | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string }
@@ -138,6 +142,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'session.scratch.create',
   'session.turn.start',
   'session.turn.interrupt',
+  'session.turn.steer',
   'session.queue.add',
   'session.queue.edit',
   'session.queue.remove',

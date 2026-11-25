@@ -28,4 +28,4 @@ export { MAX_QUESTION_ATTACHMENTS, MAX_QUESTION_FILE_BYTES, MAX_QUESTION_IMAGE_B
 export type { QuestionAttachment } from './input'
 
 export { applyFollowUpEvent } from './follow-ups'
-export type { FollowUpQueue, QueuedFollowUp } from './follow-ups'
+export type { FollowUpQueue, QueuedFollowUp, SteeringOutcome } from './follow-ups'

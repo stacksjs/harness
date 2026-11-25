@@ -222,6 +222,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     onEvents(events) {
       broadcast(events)
       for (const event of events) {
+        if (event.payload.type === 'turn.steer.resolved') advanceFollowUps(event.sessionId)
         if (event.payload.type === 'input.resolved' || event.payload.type === 'turn.interrupted'
           || event.payload.type === 'turn.failed' || event.payload.type === 'turn.completed') pruneQuestionAttachments(event.sessionId)
       }
@@ -285,6 +286,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // Recorded as an interruption rather than quietly rewritten, so the log says
   // what happened.
   for (const session of engine.current.sessions.values()) {
+    for (const entry of session.followUps.entries) {
+      if (!entry.steering) continue
+      await engine.dispatchInternal({
+        id: `boot_steer_${crypto.randomUUID()}`,
+        at: Date.now(),
+        command: { type: 'thread.steer.settle', sessionId: session.id, id: entry.id, requestId: entry.steering.requestId, outcome: 'uncertain' },
+      })
+    }
     const turn = session.turns.at(-1)
     if (isTurnActive(session.state) && turn?.status === 'running') {
       await engine.dispatchInternal({
@@ -520,7 +529,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   function advanceFollowUps(sessionId: number): void {
     if (closing || turnExecutions.has(sessionId)) return
     const session = engine.current.sessions.get(sessionId)
-    if (!session || session.state !== 'idle' || session.followUps.held || !session.followUps.entries.length) return
+    if (!session || session.state !== 'idle' || session.followUps.held || !session.followUps.entries.length
+      || session.followUps.entries.some(entry => entry.steering)) return
     void engine.dispatchInternal({
       id: `queue_advance_${crypto.randomUUID()}`, at: Date.now(),
       command: { type: 'thread.queue.advance', sessionId },
@@ -567,6 +577,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
     if (command.type === 'session.turn.start' || command.type === 'session.queue.send') {
       startAcceptedTurn(result.events)
+      return
+    }
+    if (command.type === 'session.turn.steer') {
+      const requested = result.events.find(event => event.payload.type === 'turn.steer.requested')?.payload
+      if (requested?.type === 'turn.steer.requested') await runtime.steer(command.sessionId, requested)
       return
     }
     if (command.type === 'session.queue.add') {

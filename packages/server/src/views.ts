@@ -166,6 +166,8 @@ export function viewProps(state: HarnessState, options: {
             prompt: turn.prompt,
             response: turn.response,
             status: turn.status,
+            steerable: turn.steerable === true,
+            steered: turn.steered ?? [],
             inputRequests: (turn.inputRequests ?? []).map(request => ({
               requestId: request.requestId,
               outcome: request.outcome,

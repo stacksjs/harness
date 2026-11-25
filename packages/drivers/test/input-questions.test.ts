@@ -70,7 +70,7 @@ it('delivers Codex questions and typed ACP form answers over their stdio transpo
       const events = []
       try {
         for await (const event of instance.startTurn({ text: 'Ask a fixture question' })) {
-          events.push(event)
+          if (event.type !== 'steering-ready') events.push(event)
           if (event.type !== 'input-request') continue
           if (driver === CodexDriver) {
             expect(event.questions).toMatchObject([{ id: 'choice', allowOther: true }, { id: 'private', sensitive: true }])

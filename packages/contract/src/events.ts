@@ -7,7 +7,7 @@
  */
 
 import type { ApprovalDecision, ApprovalScope, ConnectorApproval, DriverKind } from './commands'
-import type { QueuedFollowUp } from './follow-ups'
+import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
 
 export interface EventBase {
@@ -30,6 +30,9 @@ export type EventPayload =
   | { type: 'queue.removed', id: string }
   | { type: 'queue.moved', id: string, toIndex: number }
   | { type: 'queue.held' }
+  | { type: 'turn.steering-ready', turnId: number }
+  | { type: 'turn.steer.requested', turnId: number, id: string, requestId: string, text: string }
+  | { type: 'turn.steer.resolved', turnId: number, id: string, outcome: SteeringOutcome, text: string }
   | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number }
   | { type: 'turn.interrupted', turnId: number }
   | { type: 'turn.failed', turnId: number, message: string }

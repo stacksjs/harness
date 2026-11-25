@@ -70,7 +70,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   const events = []
   try {
     for await (const event of instance.startTurn({ text: 'Ask for connector consent.' })) {
-      events.push(event)
+      if (event.type !== 'steering-ready') events.push(event)
       if (event.type === 'approval-request' && event.requestId === 'mcp:92')
         await instance.respondApproval(event.requestId, true, undefined, { decision: 'allowed', scope: 'session' })
     }

@@ -10,7 +10,7 @@
  * `driverKind: 'harness'` beside `'claude'`, with nothing above it changing.
  */
 
-import type { ApprovalChoice, ConnectorApproval, DriverKind, InputAnswer, InputQuestion } from '@harness/contract'
+import type { ApprovalChoice, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
 
 /**
  * What a driver emits while a turn runs.
@@ -21,6 +21,7 @@ import type { ApprovalChoice, ConnectorApproval, DriverKind, InputAnswer, InputQ
  */
 export type ProviderEvent =
   | { type: 'session-bound', providerSessionId: string }
+  | { type: 'steering-ready' }
   | { type: 'assistant-delta', text: string }
   | { type: 'tool-call-begin', callId: string, toolName: string, args: unknown }
   | { type: 'tool-call-end', callId: string, ok: boolean }
@@ -54,6 +55,8 @@ export interface ProviderInstance {
   startTurn: (input: StartTurnInput) => AsyncIterable<ProviderEvent>
   /** Stop the running turn. Safe to call when nothing is running. */
   interrupt: () => Promise<void>
+  /** Send a follow-up to the currently streaming provider turn. */
+  steer?: (text: string) => Promise<SteeringOutcome>
   /** Answer a pending approval request. */
   respondApproval: (requestId: string, allow: boolean, reason?: string, choice?: Pick<ApprovalChoice, 'decision' | 'scope'>) => Promise<void>
   /** Deliver an answer or decline to an agent waiting for input. */
