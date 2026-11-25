@@ -259,7 +259,13 @@ const codexDriver: Driver = {
         const sequence = fixtureCodexTurns.push(input)
         for await (const event of created.startTurn(input)) {
           if (event.type === 'session-bound' && input.providerSessionId) continue
-          if (event.type === 'turn-complete') yield { ...event, providerTurnId: `fixture-turn-${sequence}` }
+          if (event.type === 'turn-complete') {
+            const nearlyFull = input.text === 'Record nearly full context usage.'
+            yield {
+              ...event, providerTurnId: `fixture-turn-${sequence}`,
+              ...(nearlyFull ? { contextUsage: { usedTokens: 31_000, maxTokens: 32_000 } } : {}),
+            }
+          }
           else yield event
         }
       },
@@ -2103,6 +2109,38 @@ await page.getByText(afterCompaction, { exact: true }).waitFor()
 await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
 check('the next prompt resumes the compacted provider thread',
   fixtureCodexTurns.find(input => input.text === afterCompaction)?.providerSessionId === 'ps-drive')
+await page.locator('[data-prompt]').fill('Record nearly full context usage.')
+await page.locator('[data-send]').click()
+await page.getByText('Record nearly full context usage.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+await handoffPicker.click()
+await handoffDialog.getByRole('combobox', { name: 'Search models' }).fill('Claude Personal')
+await handoffDialog.getByRole('button', { name: /Provider default.*Claude Code.*Personal/ }).click()
+await page.locator('[data-prompt]').fill('Bring this new constraint from Claude.')
+await page.locator('[data-send]').click()
+const extraClaude = page.locator('[data-turn]').filter({ hasText: 'Bring this new constraint from Claude.' })
+await extraClaude.getByText('I received the saved context.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+await handoffPicker.click()
+await handoffDialog.getByRole('combobox', { name: 'Search models' }).fill('Fixture Fast Catalog fixture')
+await handoffDialog.getByRole('button', { name: /^Fixture Fast.*Codex.*Catalog fixture$/ }).click()
+await handoffDialog.getByRole('button', { name: 'Done' }).click()
+const fallbackPrompt = 'Continue with the retained history on Codex.'
+await page.locator('[data-prompt]').fill(fallbackPrompt)
+await page.locator('[data-send]').click()
+const capacityFallback = page.locator('[data-turn]').filter({ hasText: fallbackPrompt })
+await capacityFallback.getByText('I received the saved context.', { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const capacityInput = fixtureCodexTurns.find(input => input.text.endsWith(fallbackPrompt))
+check('an occupied provider window starts one fresh continuation in the same thread',
+  capacityInput?.providerSessionId === undefined
+  && capacityInput?.text.includes('Record nearly full context usage.')
+  && capacityInput?.text.includes('Bring this new constraint from Claude.')
+  && fixtureCodexTurns.filter(input => input.text.endsWith(fallbackPrompt)).length === 1
+  && new URL(page.url()).pathname === `/s/${sourceId}`)
+await capacityFallback.scrollIntoViewIfNeeded()
+await capture('handoff-capacity-fallback-phone')
+
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

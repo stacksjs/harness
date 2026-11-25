@@ -67,6 +67,44 @@ for await (const line of createInterface({ input: process.stdin })) {
   })
 })
 
+it('retains the latest matching native turn occupancy rather than cumulative usage', async () => {
+  const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-context-'))
+  const binaryPath = join(workspacePath, 'codex-fixture')
+  try {
+    writeFileSync(binaryPath, `#!${process.execPath}
+import { createInterface } from 'node:readline'
+const threadId = 'native-context'
+const notify = (method, params) => console.log(JSON.stringify({ method, params }))
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method } = JSON.parse(line)
+  if (id === undefined) continue
+  const respond = result => console.log(JSON.stringify({ id, result }))
+  if (method === 'thread/start') respond({ thread: { id: threadId } })
+  else if (method === 'turn/start') {
+    const turnId = 'native-turn'
+    respond({ turn: { id: turnId } })
+    notify('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { last: { inputTokens: 90, outputTokens: 10, totalTokens: 100 }, total: { totalTokens: 8000 }, modelContextWindow: 32000 } })
+    notify('thread/tokenUsage/updated', { threadId: 'different-thread', turnId, tokenUsage: { last: { totalTokens: 9999 }, modelContextWindow: 16000 } })
+    notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } })
+  }
+  else respond({})
+}
+`, { mode: 0o755 })
+    const instance = await CodexDriver.create({ binaryPath, workspacePath })
+    try {
+      const events = []
+      for await (const event of instance.startTurn({ text: 'Use the saved context.' })) events.push(event)
+      expect(events.at(-1)).toMatchObject({ type: 'turn-complete', contextUsage: { usedTokens: 100, maxTokens: 32000 } })
+    }
+    finally {
+      await instance.stop()
+    }
+  }
+  finally {
+    rmSync(workspacePath, { recursive: true, force: true })
+  }
+})
+
 describe('codex native compaction', () => {
   it.each(['confirmed', 'unconfirmed', 'unsupported', 'interrupted'] as const)('reports the %s provider operation without sending a prompt', async mode => {
     const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-compact-'))

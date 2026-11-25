@@ -17,7 +17,7 @@
  */
 
 import type { Driver, DriverConfig, ForkInput, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
-import type { ApprovalChoice, InputAnswer, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, InputAnswer, ProviderContextUsage, SteeringOutcome } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { codexEnvironment } from './account-environment'
@@ -226,6 +226,7 @@ class CodexInstance implements ProviderInstance {
   private threadId: string | null = null
   private turnId: string | null = null
   private compaction: { confirmed: boolean } | undefined
+  private contextUsage: (ProviderContextUsage & { turnId: string }) | undefined
   private queue: EventQueue | null = null
   private usage = { tokensIn: 0, tokensOut: 0 }
   /**
@@ -497,9 +498,17 @@ class CodexInstance implements ProviderInstance {
     }
 
     switch (frame.method) {
-      case 'thread/tokenUsage/updated':
-        this.usage = usageOf(frame.params?.tokenUsage)
+      case 'thread/tokenUsage/updated': {
+        const { turnId, tokenUsage } = frame.params ?? {}
+        if (this.turnId && this.turnId !== turnId) return
+        this.usage = usageOf(tokenUsage)
+        const usedTokens = tokenUsage?.last?.totalTokens
+        const maxTokens = tokenUsage?.modelContextWindow
+        if (typeof turnId === 'string' && Number.isSafeInteger(usedTokens) && usedTokens > 0) {
+          this.contextUsage = { turnId, usedTokens, ...(Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}) }
+        }
         return
+      }
 
       case 'serverRequest/resolved': {
         const requestId = String(frame.params?.requestId)
@@ -522,6 +531,7 @@ class CodexInstance implements ProviderInstance {
         this.turnError = null
         const providerTurnId = frame.params?.turn?.id ?? this.turnId
         const compaction = this.compaction
+        const context = this.contextUsage?.turnId === providerTurnId ? this.contextUsage : undefined
         this.turnId = null
         this.compaction = undefined
         const failure = error ? this.providerError(error)
@@ -533,6 +543,12 @@ class CodexInstance implements ProviderInstance {
               type: 'turn-complete', ...this.usage, costMicros: 0,
               ...(typeof providerTurnId === 'string' && providerTurnId ? { providerTurnId } : {}),
               ...(compaction ? { contextCompacted: true } : {}),
+              ...(!compaction && context ? {
+                contextUsage: {
+                  usedTokens: context.usedTokens,
+                  ...(context.maxTokens === undefined ? {} : { maxTokens: context.maxTokens }),
+                },
+              } : {}),
             })
         return
       }
@@ -590,6 +606,7 @@ class CodexInstance implements ProviderInstance {
     this.queue = queue
     this.turnId = null
     this.usage = { tokensIn: 0, tokensOut: 0 }
+    this.contextUsage = undefined
     this.turnError = null
     this.inputs.clear()
     this.cancelMcpConsents()

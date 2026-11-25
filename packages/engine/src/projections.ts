@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
 import { acceptedSettings, applyFollowUpEvent, hostSettings, threadDisplayTitle } from '@harness/contract'
 
@@ -16,6 +16,12 @@ export interface InputRequestState {
   turnId: number
   questions: InputQuestion[]
   outcome: 'pending' | 'answered' | 'declined' | 'interrupted'
+}
+
+interface ProviderConversation {
+  providerSessionId: string
+  throughTurnId: number
+  context?: { usage: ProviderContextUsage, model: string, serviceTier?: string }
 }
 
 export interface SessionState {
@@ -28,7 +34,7 @@ export interface SessionState {
   codexTurnOptions?: CodexTurnOptions
   providerSessionId: string
   /** Last confirmed native conversation and coverage for each provider account. */
-  providerConversations?: Record<string, { providerSessionId: string, throughTurnId: number }>
+  providerConversations?: Record<string, ProviderConversation>
   handoff?: { afterTurnId: number, pending: boolean }
   fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', error?: string }
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
@@ -630,6 +636,9 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
           session.providerConversations[providerConversationKey(session)] = {
             providerSessionId: session.providerSessionId,
             throughTurnId: t.id,
+            ...(p.contextUsage ? {
+              context: { usage: p.contextUsage, model: session.model, serviceTier: session.codexTurnOptions?.serviceTier },
+            } : {}),
           }
         }
         if (session.handoff && p.turnId > session.handoff.afterTurnId) session.handoff.pending = false

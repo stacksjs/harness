@@ -10,7 +10,7 @@
  * `driverKind: 'harness'` beside `'claude'`, with nothing above it changing.
  */
 
-import type { ApprovalChoice, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, CodexTurnOptions, CodexTurnSelection, ProviderContextUsage, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
 
 /**
  * What a driver emits while a turn runs.
@@ -31,7 +31,7 @@ export type ProviderEvent =
   | { type: 'approval-cancelled', requestId: string }
   | { type: 'input-request', requestId: string, questions: InputQuestion[] }
   | { type: 'input-cancelled', requestId: string }
-  | { type: 'turn-complete', tokensIn: number, tokensOut: number, costMicros: number, providerTurnId?: string, contextCompacted?: true }
+  | { type: 'turn-complete', tokensIn: number, tokensOut: number, costMicros: number, providerTurnId?: string, contextCompacted?: true, contextUsage?: ProviderContextUsage }
   | { type: 'error', message: string }
 
 export interface ProviderModel {

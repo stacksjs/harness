@@ -8,6 +8,7 @@
  * ordering and one audit trail rather than two.
  */
 
+import type { ProviderContextUsage } from './events'
 import type { SteeringOutcome } from './follow-ups'
 import type { HostSettings } from './settings'
 import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
@@ -156,7 +157,7 @@ export type InternalCommand =
   | { type: 'thread.input.request', sessionId: number, turnId: number, questions: InputQuestion[] }
   | { type: 'thread.input.cancel', sessionId: number, requestId: string }
   | ({ type: 'thread.input.answer', sessionId: number, requestId: string, attachments: QuestionAttachment[] } & InputResponse)
-  | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, contextCompacted?: true }
+  | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, contextCompacted?: true, contextUsage?: ProviderContextUsage }
   | { type: 'thread.fork.finished', sessionId: number, providerSessionId: string }
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }

@@ -908,6 +908,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           ...(command.providerTurnId ? { providerTurnId: command.providerTurnId } : {}),
           ...(turn.response.trim() && !turn.compaction ? { responseForkable: true } : {}),
           ...(command.contextCompacted ? { contextCompacted: true } : {}),
+          ...(command.contextUsage ? { contextUsage: command.contextUsage } : {}),
         },
       }]
     }

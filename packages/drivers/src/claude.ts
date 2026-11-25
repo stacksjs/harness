@@ -200,6 +200,7 @@ export class ClaudeInstance implements ProviderInstance {
     let run: Query | undefined
     let bound = input.providerSessionId ?? null
     let compacted = false
+    let occupancy: { model: string, usedTokens: number } | undefined
 
     try {
       const query = this.queryFactory ?? (await import('@anthropic-ai/claude-agent-sdk')).query
@@ -217,9 +218,23 @@ export class ClaudeInstance implements ProviderInstance {
         }
 
         if (compacting && message.type === 'system' && message.subtype === 'compact_boundary') compacted = true
+        if (!compacting && message.type === 'assistant' && message.parent_tool_use_id === null && message.message.usage) {
+          const usage = message.message.usage
+          const iterations = (usage as typeof usage & { iterations?: Array<typeof usage & { type: string }> }).iterations
+          const sample = iterations?.findLast(iteration => iteration.type === 'message') ?? usage
+          const { input_tokens, cache_read_input_tokens, cache_creation_input_tokens, output_tokens } = sample
+          const inputTokens = (input_tokens ?? 0) + (cache_read_input_tokens ?? 0) + (cache_creation_input_tokens ?? 0)
+          const usedTokens = inputTokens + (output_tokens ?? 0)
+          if (Number.isSafeInteger(usedTokens) && inputTokens > 0) occupancy = { model: message.message.model, usedTokens }
+        }
         for (const event of translate(message)) {
           if (event.type === 'turn-complete') {
-            queue.finish(!compacting ? event : compacted
+            const maxTokens = occupancy && message.type === 'result' ? message.modelUsage?.[occupancy.model]?.contextWindow : undefined
+            const contextUsage = occupancy ? {
+              usedTokens: occupancy.usedTokens,
+              ...(maxTokens && Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
+            } : undefined
+            queue.finish(!compacting ? { ...event, ...(contextUsage ? { contextUsage } : {}) } : compacted
               ? { ...event, contextCompacted: true }
               : { type: 'error', message: 'Claude Code finished without confirming context compaction.' })
             return

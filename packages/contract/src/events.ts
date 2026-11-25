@@ -21,6 +21,11 @@ export interface EventBase {
   at: number
 }
 
+export interface ProviderContextUsage {
+  usedTokens: number
+  maxTokens?: number
+}
+
 export interface ForkSource {
   sessionId: number
   turnId: number
@@ -46,7 +51,7 @@ export type EventPayload =
   | { type: 'turn.steering-ready', turnId: number }
   | { type: 'turn.steer.requested', turnId: number, id: string, requestId: string, text: string }
   | { type: 'turn.steer.resolved', turnId: number, id: string, outcome: SteeringOutcome, text: string }
-  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, responseForkable?: true, contextCompacted?: true }
+  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, responseForkable?: true, contextCompacted?: true, contextUsage?: ProviderContextUsage }
   | { type: 'turn.interrupted', turnId: number }
   | { type: 'turn.failed', turnId: number, message: string }
   | { type: 'assistant.delta', turnId: number, text: string }

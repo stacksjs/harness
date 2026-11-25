@@ -299,7 +299,7 @@ describe('manual compaction', () => {
 })
 
 describe('provider handoff', () => {
-  it.each(['resumed', 'missing', 'ambiguous'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
+  it.each(['resumed', 'missing', 'ambiguous', 'over-capacity', 'changed-model', 'small-window'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
     const databasePath = join(dir, 'test.sqlite')
     {
       using db = new Database(databasePath)
@@ -315,7 +315,7 @@ describe('provider handoff', () => {
           ...await driver.create(config),
           async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
             calls.push({ home: config.home, input })
-            if (input.requireResume && outcome !== 'resumed') {
+            if (input.requireResume && (outcome === 'missing' || outcome === 'ambiguous')) {
               if (outcome === 'missing') yield { type: 'resume-unavailable' }
               else yield { type: 'error', message: 'The provider disconnected during the return.' }
               return
@@ -325,7 +325,11 @@ describe('provider handoff', () => {
               yield { type: 'session-bound', providerSessionId }
             }
             yield { type: 'assistant-delta', text: config.home ? 'The alternate response.' : 'The original response.' }
-            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+            const capped = outcome === 'over-capacity' || outcome === 'changed-model' || outcome === 'small-window'
+            yield {
+              type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0,
+              ...(capped && calls.length === 1 ? { contextUsage: { usedTokens: 30_000, maxTokens: 32_000 } } : {}),
+            }
           },
         }
       },
@@ -352,7 +356,16 @@ describe('provider handoff', () => {
       expect(calls[1]?.input.providerSessionId).toBeUndefined()
 
       await restart()
-      send('return-to-original', { type: 'session.handoff', sessionId, afterTurnId: 2, driverKind: 'claude', text: 'Return to the original account.' })
+      const text = 'Return to the original account.' + (outcome === 'small-window' ? 'a'.repeat(22_000) : '')
+      send('return-to-original', {
+        type: 'session.handoff', sessionId, afterTurnId: 2, driverKind: 'claude', text,
+        ...(outcome === 'changed-model' ? { model: 'different-model' } : {}),
+      })
+      if (outcome === 'small-window') {
+        expect(await client.waitFor('session.failed')).toMatchObject({ message: expect.stringContaining('too little room') })
+        expect(calls).toHaveLength(2)
+        return
+      }
       if (outcome === 'ambiguous') {
         expect(await client.waitFor('session.failed')).toMatchObject({ message: 'The provider disconnected during the return.' })
         expect(calls).toHaveLength(3)
@@ -365,11 +378,21 @@ describe('provider handoff', () => {
       }
 
       expect(calls[2]?.home).toBeUndefined()
+      if (outcome === 'over-capacity') {
+        expect(calls).toHaveLength(3)
+        expect(calls[2]?.input.providerSessionId).toBeUndefined()
+        expect(calls[2]?.input.requireResume).toBeUndefined()
+        expect(calls[2]?.input.text).toContain('The original response.')
+        expect(calls[2]?.input.text).toContain('The alternate response.')
+        expect(calls[2]?.input.text).toEndWith(text)
+        expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe('replacement-native')
+        return
+      }
       expect(calls[2]?.input.providerSessionId).toBe('original-native')
       expect(calls[2]?.input.requireResume).toBe(true)
       expect(calls[2]?.input.text).toContain('The alternate response.')
       expect(calls[2]?.input.text).not.toContain('The original response.')
-      if (outcome === 'resumed') {
+      if (outcome === 'resumed' || outcome === 'changed-model') {
         expect(calls).toHaveLength(3)
         expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe('original-native')
       }

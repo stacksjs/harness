@@ -19,7 +19,7 @@ import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
 import { providerConversation } from '@harness/engine'
 import { capture, restore } from './checkpoint'
-import { historicalContext } from './handoff'
+import { estimateNativeContext, HandoffCapacityError, historicalContext } from './handoff'
 import { missingReferences, resolveForDriver } from './mcp'
 import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
 import { providerLaunchConfig } from './provider-instances'
@@ -277,11 +277,27 @@ export class ProviderRuntime {
       await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Send a message to start this provider conversation before compacting it.' })
       return
     }
-    const returning = handoff && !session.providerSessionId ? providerConversation(session) : undefined
+    let returning = handoff && !session.providerSessionId ? providerConversation(session) : undefined
     let history: ReturnType<typeof historicalContext>
     if (handoff) {
       try {
-        history = historicalContext(session.turns, handoff.afterTurnId, text, returning?.throughTurnId)
+        const saved = returning?.context
+        const sameModel = saved?.model === session.model && saved?.serviceTier === session.codexTurnOptions?.serviceTier
+        const maxTokens = sameModel ? saved?.usage.maxTokens : undefined
+        const occupancy = returning ? {
+          usedTokens: saved?.usage.usedTokens ?? estimateNativeContext(session.turns, returning.throughTurnId),
+          ...(maxTokens === undefined ? {} : { maxTokens }),
+        } : undefined
+        try {
+          history = historicalContext(session.turns, handoff.afterTurnId, text, returning?.throughTurnId, occupancy)
+        }
+        catch (error) {
+          if (!returning || !(error instanceof HandoffCapacityError)) throw error
+          // The existing conversation cannot hold the delta. Rebuild context
+          // for the same model in a fresh provider thread before dispatching.
+          history = historicalContext(session.turns, handoff.afterTurnId, text, 0, { usedTokens: 0, maxTokens })
+          returning = undefined
+        }
         // A failed handoff can have bound a native session and consumed some
         // context. Retry with a fresh conversation to avoid inserting it twice.
         await this.stopSession(sessionId)
@@ -452,6 +468,7 @@ export class ProviderRuntime {
               cost: event.costMicros,
               ...(event.providerTurnId ? { providerTurnId: event.providerTurnId } : {}),
               ...(event.contextCompacted ? { contextCompacted: true } : {}),
+              ...(event.contextUsage ? { contextUsage: event.contextUsage } : {}),
             })
             break
 

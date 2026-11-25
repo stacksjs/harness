@@ -81,6 +81,25 @@ it.each([true, false])('runs Claude’s native command with completion confirmat
     : { type: 'error', message: 'Claude Code finished without confirming context compaction.' })
 })
 
+it('takes Claude context occupancy from the last root inference and includes cached tokens', async () => {
+  const rootUsage = { input_tokens: 20, output_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 30 }
+  const assistant = (model: string, usage: object, parentId: string | null) => ({
+    type: 'assistant', session_id: 'sess_abc', parent_tool_use_id: parentId, message: { content: [], model, usage },
+  })
+  const instance = new ClaudeInstance({ workspacePath: tmpdir() }, () => ({
+    async *[Symbol.asyncIterator]() {
+      yield assistant('root-model', { input_tokens: 5, output_tokens: 1 }, null)
+      yield assistant('root-model', { input_tokens: 9000, iterations: [{ type: 'message', ...rootUsage }] }, null)
+      yield assistant('child-model', { input_tokens: 20000, output_tokens: 1000 }, 'worker')
+      yield { ...successResult(0, 90, 150), modelUsage: { 'root-model': { contextWindow: 32000 }, 'child-model': { contextWindow: 128000 } } }
+    },
+    close() {},
+  }) as unknown as Query)
+  const events = []
+  for await (const event of instance.startTurn({ text: 'Use the saved context.' })) events.push(event)
+  expect(events.at(-1)).toMatchObject({ type: 'turn-complete', contextUsage: { usedTokens: 160, maxTokens: 32000 } })
+})
+
 describe('Claude driver — translating the SDK stream', () => {
   it('turns a text delta into an assistant delta', () => {
     expect(translate(streamDelta('Hello'))).toEqual([{ type: 'assistant-delta', text: 'Hello' }])
