@@ -1,5 +1,31 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.18...v0.0.19)
+
+## ✨ Features
+
+- **threads**: add preset and custom snooze choices ([9082add](https://github.com/stacksjs/harness/commit/9082add)) _(by Chris)_
+- **keyboard**: rebind workspace shortcuts from settings ([3450cf7](https://github.com/stacksjs/harness/commit/3450cf7)) _(by glennmichael123)_
+- **settings**: add the Keyboard section and serve its registry ([2f31159](https://github.com/stacksjs/harness/commit/2f31159)) _(by glennmichael123)_
+- **keyboard**: declare every window chord in one registry ([70143d6](https://github.com/stacksjs/harness/commit/70143d6)) _(by glennmichael123)_
+
+## 🐛 Bug Fixes
+
+- **performance**: adopt the published stx template scan fix ([401b67c](https://github.com/stacksjs/harness/commit/401b67c)) _(by Chris)_
+- **ci**: add the labeler config the triage job reads ([425695b](https://github.com/stacksjs/harness/commit/425695b)) _(by Glenn Michael Torregosa)_
+
+## 📝 Documentation
+
+- **parity**: record the WebKit drives for the keyboard row ([3c60ee0](https://github.com/stacksjs/harness/commit/3c60ee0)) _(by glennmichael123)_
+- catalog native reference entry points ([bfae43b](https://github.com/stacksjs/harness/commit/bfae43b)) _(by Chris)_
+- inventory pinned T3 Code reference surfaces ([06f30f7](https://github.com/stacksjs/harness/commit/06f30f7)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+- _Glenn Michael Torregosa_
+- _glennmichael123_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.17...v0.0.18)
 
 ## ✨ Features
