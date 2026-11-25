@@ -28,6 +28,8 @@ const ENTRY = `export { applyFollowUpEvent, encode, decode } from '@harness/cont
 export { Terminal, toHtml } from '@harness/ansi'
 export { updateTranscriptMarkdown } from './packages/server/src/transcript-markdown'
 export { sendBrowserCommand } from './packages/server/src/browser-command'
+export { createFollowUpActions } from './packages/server/src/browser-follow-ups'
+export { createSessionSocket } from './packages/server/src/browser-session-socket'
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
 export { createTranscriptHighlighter } from './packages/server/src/browser-transcript-highlight'
 export { createQuestionForm, paintQuestionFiles } from './packages/server/src/browser-questions'`
