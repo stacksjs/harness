@@ -72,6 +72,8 @@ const questionAnswers = new Map<string, unknown>()
 const markdownControlsGate = Promise.withResolvers<void>()
 const connectorGate = Promise.withResolvers<void>()
 const connectorWithdrawal = Promise.withResolvers<void>()
+const followUpGate = Promise.withResolvers<void>()
+const followUpDelivery: string[] = []
 let connectorScope: string | undefined
 const script: ProviderEvent[] = [
   { type: 'session-bound', providerSessionId: 'ps-drive' },
@@ -84,6 +86,18 @@ const script: ProviderEvent[] = [
 ]
 const instance: ProviderInstance = {
   async *startTurn(input) {
+    if (input.text === 'exercise follow-up queue') {
+      yield { type: 'assistant-delta', text: 'Waiting for queued messages.' }
+      await followUpGate.promise
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
+    if (input.text.startsWith('Follow-up fixture:')) {
+      followUpDelivery.push(input.text)
+      yield { type: 'assistant-delta', text: 'Received the queued message.' }
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     if (input.text === 'exercise connector consent') {
       const connector = {
         prompt: 'Allow this fixture connector to read the calendar?',
@@ -153,7 +167,7 @@ const instance: ProviderInstance = {
       if (event.type === 'approval-request') await gate
     }
   },
-  async interrupt() {},
+  async interrupt() { followUpGate.resolve() },
   async respondApproval(id, allow, _reason, choice) {
     if (id === 'fixture_connector') {
       connectorScope = allow ? choice?.scope : undefined
@@ -938,6 +952,84 @@ check('the exact scope from the selected choice reached the provider', connector
 connectorWithdrawal.resolve()
 await transcript.getByText('Connector consent fixture complete.').waitFor()
 check('provider withdrawal closes the connector card', !await connectorCard.isVisible())
+
+await page.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
+await page.setViewportSize({ width: 1280, height: 800 })
+await promptBox.fill('exercise follow-up queue')
+await page.click('[data-send]')
+await transcript.getByText('Waiting for queued messages.').waitFor()
+const queue = page.getByRole('region', { name: 'Queued messages' })
+const followUpRows = queue.locator('[data-follow-up]')
+for (const text of ['Follow-up fixture: first task', 'Follow-up fixture: second task']) {
+  await promptBox.fill(text)
+  await page.getByRole('button', { name: 'Queue', exact: true }).click()
+  await followUpRows.filter({ hasText: text }).getByRole('button', { name: 'Edit queued message' }).waitFor()
+}
+await followUpRows.nth(1).getByRole('button', { name: 'Move queued message up' }).click()
+await page.waitForFunction(() => document.querySelector('[data-follow-up]')?.textContent.includes('second task'))
+await promptBox.fill('Keep this draft in the composer.')
+await promptBox.evaluate((box: HTMLTextAreaElement) => box.setSelectionRange(0, 0))
+await promptBox.press('Alt+ArrowUp')
+check('the queued edit shortcut opens the last message', await promptBox.inputValue() === 'Follow-up fixture: first task')
+await promptBox.press('Escape')
+await followUpRows.first().getByRole('button', { name: 'Edit queued message' }).click()
+await promptBox.fill('Follow-up fixture: revised task')
+await page.getByRole('button', { name: 'Save edit', exact: true }).click()
+await followUpRows.first().getByText('Follow-up fixture: revised task').waitFor()
+check('editing an item restores the pre-edit draft', await promptBox.inputValue() === 'Keep this draft in the composer.')
+await capture('follow-ups-desktop')
+
+const followUpClient = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme })
+let routeOffline = false
+let disconnectFollowUpClient = async () => {}
+await followUpClient.routeWebSocket('**/ws', async (route) => {
+  if (routeOffline) { await route.close({ code: 1001 }); return }
+  route.connectToServer()
+  disconnectFollowUpClient = () => route.close({ code: 1001 })
+})
+const phone = await followUpClient.newPage()
+phone.on('pageerror', e => pageErrors.push(e.message))
+await phone.goto(page.url())
+await phone.locator('[data-composer][data-session-online="true"]').waitFor()
+const phoneQueue = phone.getByRole('region', { name: 'Queued messages' })
+await phoneQueue.getByText('Follow-up fixture: revised task').waitFor()
+routeOffline = true
+await disconnectFollowUpClient()
+await phone.locator('[data-composer][data-session-online="false"]').waitFor()
+await phone.locator('[data-prompt]').fill('Follow-up fixture: offline task')
+await phone.getByRole('button', { name: 'Queue', exact: true }).click()
+await phoneQueue.getByText('Waiting to sync').waitFor()
+await phone.reload()
+await phoneQueue.getByText('Follow-up fixture: offline task').waitFor()
+check('offline text and host queue survive the browser closing and reopening',
+  await phoneQueue.getByText('Waiting to sync').isVisible()
+  && await phoneQueue.getByText('Follow-up fixture: revised task').isVisible())
+await phone.locator('[data-prompt]').fill('Discard this unsynced message.')
+await phone.getByRole('button', { name: 'Queue', exact: true }).click()
+const unsynced = phoneQueue.locator('[data-follow-up]').filter({ hasText: 'Discard this unsynced message.' })
+await unsynced.getByRole('button', { name: 'Remove unsynced message' }).click()
+await unsynced.waitFor({ state: 'hidden' })
+if (screenshotDir) {
+  await phoneQueue.scrollIntoViewIfNeeded()
+  await phone.screenshot({ path: join(screenshotDir, 'follow-ups-phone-offline.png'), animations: 'disabled' })
+}
+routeOffline = false
+await phone.evaluate(() => globalThis.dispatchEvent(new Event('online')))
+await queue.getByText('Follow-up fixture: offline task').waitFor()
+await phoneQueue.getByText('Waiting to sync').waitFor({ state: 'hidden' })
+await page.getByRole('button', { name: 'Stop', exact: true }).click()
+await phoneQueue.getByText('Held', { exact: true }).waitFor()
+check('Stop holds the saved queue without delivering another prompt', followUpDelivery.length === 0)
+if (screenshotDir) {
+  await phoneQueue.scrollIntoViewIfNeeded()
+  await phone.screenshot({ path: join(screenshotDir, 'follow-ups-phone-held.png'), animations: 'disabled' })
+}
+await phone.getByRole('button', { name: 'Resume', exact: true }).click()
+await phoneQueue.waitFor({ state: 'hidden' })
+await phone.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
+check('explicit resume drains the edited order once, including the offline message',
+  JSON.stringify(followUpDelivery) === JSON.stringify(['Follow-up fixture: revised task', 'Follow-up fixture: first task', 'Follow-up fixture: offline task']))
+await followUpClient.close()
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

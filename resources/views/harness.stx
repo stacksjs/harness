@@ -28,6 +28,7 @@ export const sinceSeq = $props.sinceSeq || 0
 // for: the client that raised it may be long gone.
 export const initialApprovals = activeSession?.pendingApprovals || []
 export const initialInputs = activeSession?.pendingInputs || []
+export const initialFollowUps = activeSession?.followUps || { entries: [], held: false }
 const pendingApproval = initialApprovals[0]
 
 // One space per profile. `pinned` is the favourite-repos tile grid; the
@@ -453,6 +454,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </article>
       </template>
 
+      @includeWhen(activeSession, '../partials/harness-follow-ups')
     </div>
     @if(activeSession)
       <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="absolute bottom-3 inset-e-4 px-3 h-9 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full shadow-sm dark:border-white/20">Jump to latest</button>
@@ -464,7 +466,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(canCompose)
-    <form data-composer @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt" class="grid md:flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
+    <form data-composer :data-session-online="sessionOnline()" @if(initialInputs.length)hidden@endif :hidden="Boolean(inputRequest())" @submit.prevent="sendPrompt" class="grid md:flex gap-2 items-end shrink-0 p-3 border-black/5 border-t dark:border-white/5">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -479,6 +481,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         @click="rememberPrompt"
         rows="2"
         placeholder="{{ promptPlaceholder }}"
+        :placeholder="composerPlaceholder()"
         class="flex-1 px-3 py-2 min-h-[40px] min-w-0 text-[13px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10 resize-none"
       ></textarea>
       {{--
@@ -492,7 +495,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         ref="driverPickerBox"
         @change="driverPicked"
         title="Agent for this session"
-        class="px-2 h-[36px] max-w-[170px] text-[12px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10"
+        class="px-2 h-[36px] max-w-[170px] min-w-0 text-[12px] bg-white dark:bg-neutral-900 border border-black/10 outline-none rounded-[8px] dark:border-white/10"
       >
         <option value="claude">Claude Code</option>
         <option value="codex">Codex</option>
@@ -501,15 +504,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="grok">Grok</option>
         <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
       </select>
-      <button type="submit" data-send :hidden="uiBusy()" :disabled="startPending()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
-      {{--
-        Stop is the one control a running agent must always offer. It replaces
-        Send rather than sitting beside it: while a turn runs there is nothing
-        to send, and two enabled buttons invite sending into a busy session.
-        `stopPressed` hides it the moment it is clicked — optimistic, but the
-        turn is only over when the log says so.
-      --}}
-      <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" @click="stopTurn" class="px-4 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Stop</button>
+      <div class="flex flex-wrap gap-2 justify-end">
+        <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting()" :text="sendLabel()" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Send</button>
+        <button type="button" :hidden="!editingFollowUp()" @click="endFollowUpEdit()" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
+        <button type="button" data-resume-queue :hidden="!showResume()" :disabled="!sessionOnline() || queueActionPending()" @click="runQueueAction('send')" class="px-4 h-[36px] text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Resume</button>
+        <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" @click="stopTurn" class="px-4 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Stop</button>
+      </div>
     </form>
     @endif
   </main>
@@ -802,6 +802,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     listenToStorageChanges: false,
   })
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
+  const followUps = state(initialFollowUps)
+  const localFollowUps = useLocalStorage(`harness.follow-ups.v1:${activeProfile || 0}:${promptScope}`, [], { listenToStorageChanges: false })
+  const sessionOnline = state(false)
+  const sessionConnecting = state(Boolean(sessionId && serverUrl && codecUrl))
+  const outboxSending = state('')
+  let outboxRetry = null
+  const queueActionPending = state(false)
+  const editingFollowUp = state(null)
+  const composerText = state('')
+  const composerPlaceholder = derived(() => editingFollowUp() ? 'Edit queued message' : promptPlaceholder)
+  const visibleFollowUps = derived(() => {
+    const committed = followUps().entries
+    return [...committed, ...(Array.isArray(localFollowUps()) ? localFollowUps() : [])
+      .filter(entry => !committed.some(item => item.id === entry.id))
+      .map(entry => ({ ...entry, local: true }))]
+  })
 
   // The session's own state string, not a boolean: a turn blocked on an
   // approval is still in flight, and collapsing that to "not running" once
@@ -810,6 +826,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const uiState = state(sessionState || 'idle')
   const runningTurnId = state(initialResponseTurn)
   const uiBusy = derived(() => uiState() === 'running' || uiState() === 'awaiting-approval' || uiState() === 'awaiting-input')
+  const showResume = derived(() => Boolean(sessionId && !uiBusy() && followUps().held && followUps().entries.length && !composerText().trim() && !editingFollowUp()))
+  const showSend = derived(() => !showResume() && Boolean(!uiBusy() || composerText().trim() || editingFollowUp()))
+  const sendLabel = derived(() => editingFollowUp() ? 'Save edit' : sessionId && (uiBusy() || !sessionOnline()) ? 'Queue' : 'Send')
   // Stop hides the moment it is clicked, before the log settles the turn.
   const stopPressed = state(false)
   function setSessionState(next) {
@@ -1060,6 +1079,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // Set by the transcript's socket once it opens, so a sidebar command reuses
   // it rather than opening a second connection to the same server.
   let liveSocket = null
+  let disconnectLiveSession = () => {}
+  let reconnectLiveSession = () => {}
+  onUnmounted(() => disconnectLiveSession())
+  useEventListener('online', () => reconnectLiveSession())
 
   /**
    * Dispatch a command that is not about the open session.
@@ -1761,6 +1784,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   function rememberPrompt() {
     const box = promptRef.current
     if (!box) return
+    composerText.set(box.value)
+    if (editingFollowUp()) return
     const previous = composerDraft()
     if (!box.value) {
       if (previous) composerDraft.set(null)
@@ -1791,16 +1816,120 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (current === first) void sendPrompt()
   }
 
+  function beginFollowUpEdit(entry) {
+    const box = promptRef.current
+    if (!box || inputRequest()) return
+    if (!editingFollowUp()) rememberPrompt()
+    editingFollowUp.set(entry)
+    box.value = entry.text
+    composerText.set(entry.text)
+    box.setSelectionRange(entry.text.length, entry.text.length)
+    box.focus()
+  }
+
+  function endFollowUpEdit(saveOrphan = false) {
+    const box = promptRef.current
+    const entry = editingFollowUp()
+    if (!entry || !box) return
+    const text = box.value
+    editingFollowUp.set(null)
+    box.value = ''
+    composerText.set('')
+    if (saveOrphan && !composerDraft()?.text && text !== entry.text) {
+      box.value = text
+      rememberPrompt()
+      return
+    }
+    restorePrompt()
+    box.focus({ preventScroll: true })
+  }
+
+  async function runQueueAction(action, id, direction) {
+    if (queueActionPending() || !sessionOnline()) return
+    queueActionPending.set(true)
+    try {
+      if (action === 'move') await sendCommand({ type: 'session.queue.move', sessionId, id, direction })
+      else if (action === 'remove') await sendCommand({ type: 'session.queue.remove', sessionId, id })
+      else await sendCommand({ type: 'session.queue.send', sessionId, ...(id ? { id } : {}) })
+    }
+    catch (error) {
+      stxAlert(error.message || 'Could not update the queue.')
+    }
+    finally {
+      queueActionPending.set(false)
+    }
+  }
+
+  function removeLocalFollowUp(entry) {
+    if (outboxSending() === entry.id || (entry.attempted && !entry.error)) return
+    localFollowUps.set(localFollowUps().filter(item => item.id !== entry.id))
+    void flushFollowUps()
+  }
+
+  async function flushFollowUps(retryFailed = false) {
+    if (!sessionOnline() || outboxSending()) return
+    outboxRetry?.stop()
+    let entry = localFollowUps()?.[0]
+    while (entry && sessionOnline() && (!entry.error || retryFailed)) {
+      outboxSending.set(entry.id)
+      localFollowUps.set(localFollowUps().map(item => item.id === entry.id ? { ...item, attempted: true } : item))
+      try {
+        await sendCommand({ type: 'session.queue.add', sessionId, text: entry.text }, entry.id)
+        localFollowUps.set(localFollowUps().filter(item => item.id !== entry.id))
+      }
+      catch (error) {
+        if (error.name === 'CommandConnectionError') {
+          if (sessionOnline()) outboxRetry = useTimeout(() => flushFollowUps(), 1500)
+        }
+        else {
+          localFollowUps.set(localFollowUps().map(item => item.id === entry.id ? { ...item, error: error.message } : item))
+        }
+        return
+      }
+      finally {
+        outboxSending.set('')
+      }
+      retryFailed = false
+      entry = localFollowUps()?.[0]
+    }
+  }
+
   async function sendPrompt() {
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
-    if (!text || startPending() || uiBusy()) return
+    if (!text || startPending()) return
+    const editing = editingFollowUp()
+    if (editing) {
+      startPending.set(true)
+      try {
+        await sendCommand({ type: 'session.queue.edit', sessionId, id: editing.id, text, previousText: editing.text })
+        endFollowUpEdit()
+      }
+      catch (error) { stxAlert(error.message) }
+      finally { startPending.set(false) }
+      return
+    }
 
     rememberPrompt()
     const draft = composerDraft()
     const commandId = draft?.commandId ?? newCommandId()
     if (draft) composerDraft.set({ ...draft, commandId })
+
+    if (sessionId && (uiBusy() || (!sessionOnline() && !sessionConnecting()) || localFollowUps()?.length)) {
+      const entries = localFollowUps() || []
+      if (!entries.some(entry => entry.id === commandId)) localFollowUps.set([...entries, { id: commandId, text }])
+      box.value = ''
+      composerText.set('')
+      composerDraft.set(null)
+      followingTranscript.set(true)
+      void nextTick(() => {
+        const transcript = transcriptRef.current
+        if (transcript) transcript.scrollTop = transcript.scrollHeight
+      })
+      void flushFollowUps()
+      return
+    }
 
     if (!sessionId) {
       if (!draftProject?.trusted && !draftWithoutProject) return
@@ -1820,6 +1949,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         pendingFirstPrompt.set({ sessionId: nextSession, text: raw })
         if (box.value === raw) {
           box.value = ''
+          composerText.set('')
           composerDraft.set(null)
         }
         navigate(`/s/${nextSession}`)
@@ -1836,6 +1966,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       await sendCommand({ type: 'session.turn.start', sessionId, text }, commandId)
       if (box.value === raw) {
         box.value = ''
+        composerText.set('')
         composerDraft.set(null)
       }
     }
@@ -1848,6 +1979,20 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function promptKeydown(event) {
+    if (event.altKey && event.key === 'ArrowUp' && !event.isComposing && event.target.selectionStart === 0
+      && event.target.selectionEnd === 0 && !editingFollowUp()) {
+      const entry = followUps().entries.at(-1)
+      if (entry) {
+        event.preventDefault()
+        beginFollowUpEdit(entry)
+        return
+      }
+    }
+    if (event.key === 'Escape' && editingFollowUp()) {
+      event.preventDefault()
+      endFollowUpEdit()
+      return
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault()
       event.target.form?.requestSubmit()
@@ -2127,7 +2272,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
+    const { applyFollowUpEvent, encode, decode, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
@@ -2168,28 +2313,53 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (hash?.startsWith('#turn-')) followingTranscript.set(false)
     else paintTranscript(updateTranscriptMarkdown)
 
-    const socket = new WebSocket(serverUrl)
-    socket.binaryType = 'arraybuffer'
-    liveSocket = socket
+    let cursor = Number(sinceSeq) || 0
+    let reconnectTimer = null
+    let reconnectDelay = 300
+    let disposed = false
     termToHtml = toHtml
-    sendFrame = (frame) => {
-      socket.send(encode(frame))
-      return true
+
+    function openSocket() {
+      if (disposed || liveSocket) return
+      const socket = new WebSocket(serverUrl)
+      socket.binaryType = 'arraybuffer'
+      liveSocket = socket
+      sendFrame = (frame) => {
+        if (socket.readyState !== WebSocket.OPEN) return false
+        socket.send(encode(frame))
+        return true
+      }
+
+      socket.addEventListener('open', () => {
+        socket.send(encode({ t: 'subscribe', sessionId, sinceSeq: cursor }))
+      })
+      socket.addEventListener('close', () => {
+        if (liveSocket !== socket) return
+        liveSocket = null
+        sessionOnline.set(false)
+        sessionConnecting.set(false)
+        if (termId && term) {
+          term.write('\r\n[connection closed]')
+          termId = null
+          renderTerm()
+        }
+        if (disposed) return
+        reconnectTimer = useTimeout(openSocket, reconnectDelay)
+        reconnectDelay = Math.min(reconnectDelay * 2, 5000)
+      })
+      socket.addEventListener('message', onMessage)
     }
 
-    socket.addEventListener('open', () => {
-      // Resume from the last sequence the server rendered into this page, so a
-      // reload replays the gap rather than the whole session.
-      // From the sequence the server already rendered, not from zero.
-      // `window.__harnessSinceSeq` was read here and never written anywhere, so
-      // every load resubscribed from the beginning and the server replayed the
-      // whole session on top of the transcript already on the page — the
-      // response appeared twice.
-      socket.send(encode({ t: 'subscribe', sessionId, sinceSeq: Number(sinceSeq) || 0 }))
-    })
-
-    socket.addEventListener('message', (event) => {
+    function onMessage(event) {
+      if (event.currentTarget !== liveSocket) return
       const frame = decode(new Uint8Array(event.data))
+      if (frame?.t === 'subscribed' && frame.sessionId === sessionId) {
+        reconnectDelay = 300
+        sessionOnline.set(true)
+        sessionConnecting.set(false)
+        void flushFollowUps()
+        return
+      }
       if (frame?.t === 'term-opened') {
         termId = frame.termId
         term = new Terminal({ cols: frame.cols, rows: frame.rows })
@@ -2220,8 +2390,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         stxAlert(frame.message)
         return
       }
-      if (frame?.t !== 'event') return
+      if (frame?.t !== 'event' || frame.event.sessionId !== sessionId || frame.event.seq <= cursor) return
+      cursor = frame.event.seq
       const payload = frame.event.payload
+      const updatedQueue = applyFollowUpEvent(followUps(), payload)
+      if (updatedQueue !== followUps()) {
+        followUps.set(updatedQueue)
+        const editing = editingFollowUp()
+        if (editing && !updatedQueue.entries.some(entry => entry.id === editing.id)) endFollowUpEdit(true)
+        paintTranscript(updateTranscriptMarkdown)
+      }
       if (payload.type === 'turn.started') {
         // Only the user's half opens a new exchange; the assistant's turn is
         // the reply within it.
@@ -2329,8 +2507,20 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         })
         paintTranscript(updateTranscriptMarkdown)
       }
-    })
+    }
+
+    reconnectLiveSession = () => {
+      reconnectTimer?.stop()
+      openSocket()
+    }
+    disconnectLiveSession = () => {
+      disposed = true
+      reconnectTimer?.stop()
+      outboxRetry?.stop()
+      liveSocket?.close()
+    }
+    openSocket()
   }
 
-  if (sessionId && serverUrl && codecUrl) connectLiveSession()
+  if (sessionId && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
 </script>

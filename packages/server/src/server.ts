@@ -7,7 +7,7 @@
  * rather than being a feature bolted on later.
  */
 
-import type { CommandEnvelope, DriverKind } from '@harness/contract'
+import type { CommandEnvelope, DriverKind, HarnessEvent } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver, DriverConfig, ProbeResult } from '@harness/drivers'
 import { access as checkAccess, constants, realpath, stat } from 'node:fs/promises'
@@ -88,6 +88,7 @@ interface SocketData {
   terminals: Map<number, Pty>
   /** Sessions this socket has subscribed to. Empty means "not subscribed". */
   subscriptions: Set<number>
+  catchingUp: Map<number, HarnessEvent[]>
   /**
    * Highest sequence delivered per session. Provider events arrive outside the
    * request path, so the drain pass needs to know what each socket already has
@@ -284,21 +285,20 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // Recorded as an interruption rather than quietly rewritten, so the log says
   // what happened.
   for (const session of engine.current.sessions.values()) {
-    if (!isTurnActive(session.state)) continue
     const turn = session.turns.at(-1)
-    if (!turn || turn.status !== 'running') continue
-    try {
-      // The same command a person's stop button sends. It finds the running
-      // turn itself and is a no-op when there is none.
+    if (isTurnActive(session.state) && turn?.status === 'running') {
       await engine.dispatchInternal({
         id: `boot_interrupt_${session.id}_${turn.id}`,
         at: Date.now(),
         command: { type: 'session.turn.interrupt', sessionId: session.id },
       })
     }
-    catch {
-      // A session the reducer refuses to interrupt is already in some terminal
-      // state; nothing to recover.
+    else if (session.followUps.entries.length && !session.followUps.held) {
+      await engine.dispatchInternal({
+        id: `boot_queue_hold_${session.id}_${session.lastSeq}`,
+        at: Date.now(),
+        command: { type: 'thread.queue.hold', sessionId: session.id },
+      })
     }
   }
   for (const id of await attachments.sessionIds().catch(() => [])) pruneQuestionAttachments(id)
@@ -472,11 +472,63 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
       for (const socket of sockets) {
         if (event.sessionId !== 0 && !socket.data.subscriptions.has(event.sessionId)) continue
-        send(socket, { t: 'event', event })
+        const buffered = socket.data.catchingUp.get(event.sessionId)
+        if (buffered) {
+          buffered.push(event)
+          continue
+        }
         const seen = socket.data.cursors.get(event.sessionId) ?? 0
-        if (event.seq > seen) socket.data.cursors.set(event.sessionId, event.seq)
+        if (event.seq <= seen) continue
+        send(socket, { t: 'event', event })
+        socket.data.cursors.set(event.sessionId, event.seq)
       }
     }
+  }
+
+  let closing = false
+  const turnExecutions = new Map<number, Promise<void>>()
+
+  function startAcceptedTurn(events: HarnessEvent[]): void {
+    const event = events.find(item => item.payload.type === 'turn.started')
+    const payload = event?.payload
+    if (!event || payload?.type !== 'turn.started' || closing) return
+    const { sessionId } = event
+    const previous = turnExecutions.get(sessionId)
+
+    const execution = Promise.resolve(previous).then(async () => {
+      if (closing) return
+      const turn = engine.current.sessions.get(sessionId)?.turns.at(-1)
+      if (turn?.id !== payload.turnId || turn.status !== 'running') return
+      await runtime.runTurn(sessionId, payload.turnId, payload.text ?? '')
+    }).catch(async () => {
+      if (closing) return
+      const result = await engine.dispatchInternal({
+        id: `launch_failure_${event.commandId}`, at: Date.now(),
+        command: { type: 'thread.error', sessionId, turnId: payload.turnId, message: 'The provider could not start. Check its connection before sending another message.' },
+      })
+      broadcast(result.events)
+    }).finally(() => {
+      if (turnExecutions.get(sessionId) !== execution) return
+      turnExecutions.delete(sessionId)
+      advanceFollowUps(sessionId)
+    })
+
+    turnExecutions.set(sessionId, execution)
+    void execution.catch(() => {})
+  }
+
+  function advanceFollowUps(sessionId: number): void {
+    if (closing || turnExecutions.has(sessionId)) return
+    const session = engine.current.sessions.get(sessionId)
+    if (!session || session.state !== 'idle' || session.followUps.held || !session.followUps.entries.length) return
+    void engine.dispatchInternal({
+      id: `queue_advance_${crypto.randomUUID()}`, at: Date.now(),
+      command: { type: 'thread.queue.advance', sessionId },
+    }).then((result) => {
+      if (result.replayed || closing) return
+      broadcast(result.events)
+      startAcceptedTurn(result.events)
+    }).catch(() => {})
   }
 
   /**
@@ -513,11 +565,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return
     }
 
-    if (command.type === 'session.turn.start') {
-      const started = result.events.find(event => event.payload.type === 'turn.started')
-      if (!started) return
-      const turnId = (started.payload as { turnId: number }).turnId
-      void runtime.runTurn(command.sessionId, turnId, command.text)
+    if (command.type === 'session.turn.start' || command.type === 'session.queue.send') {
+      startAcceptedTurn(result.events)
+      return
+    }
+    if (command.type === 'session.queue.add') {
+      advanceFollowUps(command.sessionId)
       return
     }
 
@@ -527,7 +580,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     if (command.type === 'session.turn.interrupt') {
-      await runtime.interrupt(command.sessionId)
+      if (result.events.some(event => event.payload.type === 'turn.interrupted')) await runtime.interrupt(command.sessionId)
       return
     }
 
@@ -643,22 +696,31 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       }
 
       case 'subscribe': {
-        socket.data.subscriptions.add(frame.sessionId)
-        // Replay from where the client left off. This is what makes a dropped
-        // connection mid-turn lossless: the client sends the last seq it saw
-        // and gets everything after it, in order, before any live event.
-        const missed = await store.read(frame.sessionId, frame.sinceSeq ?? 0)
-        for (const event of missed) send(socket, { t: 'event', event })
-        socket.data.cursors.set(
-          frame.sessionId,
-          missed.at(-1)?.seq ?? frame.sinceSeq ?? 0,
-        )
-        send(socket, { t: 'subscribed', sessionId: frame.sessionId, caughtUpTo: missed.at(-1)?.seq ?? frame.sinceSeq ?? 0 })
+        const { sessionId } = frame
+        const buffered: HarnessEvent[] = []
+        socket.data.catchingUp.set(sessionId, buffered)
+        socket.data.subscriptions.add(sessionId)
+        // A live event can arrive while the database read is in flight. Keep it
+        // behind replay and use the committed cursor to filter duplicates.
+        const missed = await store.read(sessionId, frame.sinceSeq ?? 0)
+        if (socket.data.catchingUp.get(sessionId) !== buffered) return
+        let caughtUpTo = frame.sinceSeq ?? 0
+        const events = buffered.length ? [...missed, ...buffered].sort((a, b) => a.seq - b.seq) : missed
+        for (const event of events) {
+          if (event.seq <= caughtUpTo) continue
+          send(socket, { t: 'event', event })
+          caughtUpTo = event.seq
+        }
+        socket.data.cursors.set(sessionId, caughtUpTo)
+        socket.data.catchingUp.delete(sessionId)
+        send(socket, { t: 'subscribed', sessionId, caughtUpTo })
         return
       }
 
       case 'unsubscribe':
         socket.data.subscriptions.delete(frame.sessionId)
+        socket.data.catchingUp.delete(frame.sessionId)
+        socket.data.cursors.delete(frame.sessionId)
         return
 
       case 'dispatch': {
@@ -781,6 +843,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             canUseHostPrivileges: hostPrivileges,
             terminals: new Map<number, Pty>(),
             subscriptions: new Set<number>(),
+            catchingUp: new Map<number, HarnessEvent[]>(),
             cursors: new Map<number, number>(),
           },
         })
@@ -1050,6 +1113,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     tunnelUrl: tunnel?.url ?? null,
     markWindowSpawned: () => { windowSpawnedAt = Date.now() },
     stop: () => {
+      closing = true
       void tunnel?.close()
       void runtime.stopAll()
       server.stop(true)

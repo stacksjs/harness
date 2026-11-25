@@ -121,6 +121,10 @@ class Client {
     return frame?.event.payload ?? null
   }
 
+  waitForDispatch(id: string): Promise<{ t: 'dispatched' | 'rejected', replayed?: boolean } | null> {
+    return this.waitForFrame(frame => (frame?.t === 'dispatched' || frame?.t === 'rejected') && frame.id === id, 3000)
+  }
+
   waitForRejection(id: string): Promise<unknown> {
     return this.waitForFrame(frame => frame?.t === 'rejected' && frame.id === id, 3000)
   }
@@ -773,6 +777,141 @@ describe('checkpoint and revert', () => {
     expect(await client.waitFor('turn.completed')).toBeTruthy()
     expect(client.payloads('checkpoint.captured')).toEqual([])
     client.close()
+  })
+})
+
+describe('queued follow-up delivery', () => {
+  it('shares an editable order across clients and delivers each entry once after completion', async () => {
+    const gate = Promise.withResolvers<void>()
+    const delivered: string[] = []
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn({ text }) {
+            delivered.push(text)
+            if (text === 'First turn') {
+              yield { type: 'assistant-delta', text: 'Waiting' }
+              await gate.promise
+            }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+          async respondApproval() {},
+          async interrupt() { gate.resolve() },
+          async stop() { gate.resolve() },
+        }
+      },
+    }
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    const url = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(url)
+    const second = await Client.connect(url)
+    const { sessionId } = await bootstrap(first)
+    second.send({ t: 'subscribe', sessionId })
+    const dispatch = (client: Client, id: string, command: Record<string, unknown>) => {
+      client.send({ t: 'dispatch', envelope: { id, at: Date.now(), command: { ...command, sessionId } } })
+    }
+
+    try {
+      dispatch(first, 'first-turn', { type: 'session.turn.start', text: 'First turn' })
+      expect(await first.waitFor('assistant.delta')).toMatchObject({ text: 'Waiting' })
+
+      for (const [id, text] of [['one', 'First follow-up'], ['two', 'Second follow-up'], ['three', 'Remove me']]) {
+        dispatch(first, id!, { type: 'session.queue.add', text })
+        expect(await first.waitForDispatch(id!)).toMatchObject({ replayed: false })
+      }
+      dispatch(second, 'one', { type: 'session.queue.add', text: 'Duplicate retry' })
+      expect(await second.waitForDispatch('one')).toMatchObject({ replayed: true })
+      dispatch(second, 'move-two', { type: 'session.queue.move', id: 'two', direction: 'up' })
+      dispatch(second, 'edit-two', { type: 'session.queue.edit', id: 'two', text: 'Edited follow-up', previousText: 'Second follow-up' })
+      dispatch(second, 'remove-three', { type: 'session.queue.remove', id: 'three' })
+      expect(await first.waitFor('queue.removed')).toMatchObject({ id: 'three' })
+      dispatch(first, 'old-edit', { type: 'session.queue.edit', id: 'two', text: 'Overwritten', previousText: 'Second follow-up' })
+      expect(await first.waitForRejection('old-edit')).toMatchObject({ message: expect.stringContaining('edited on another device') })
+      dispatch(first, 'forged-advance', { type: 'thread.queue.advance' })
+      expect(await first.waitForRejection('forged-advance')).toBeTruthy()
+      expect(harness.engine.current.sessions.get(sessionId)?.followUps.entries.map(entry => entry.id)).toEqual(['two', 'one'])
+      expect(delivered).toEqual(['First turn'])
+
+      gate.resolve()
+      expect(await second.waitFor('turn.completed', 5000, event => event.turnId === 3)).toBeTruthy()
+      expect(delivered).toEqual(['First turn', 'Edited follow-up', 'First follow-up'])
+      expect(second.payloads('turn.started').map(event => event.queuedId)).toEqual([undefined, 'two', 'one'])
+      expect(harness.engine.current.sessions.get(sessionId)?.followUps.entries).toEqual([])
+    }
+    finally {
+      gate.resolve()
+      first.close()
+      second.close()
+    }
+  })
+
+  it('holds an interrupted queue across restart and rejects a competing send of the same entry', async () => {
+    const path = join(dir, 'test.sqlite')
+    const gate = Promise.withResolvers<void>()
+    const delivered: string[] = []
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn({ text }) {
+            delivered.push(text)
+            if (text === 'Interrupt me') {
+              yield { type: 'assistant-delta', text: 'Working' }
+              await gate.promise
+            }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+          async respondApproval() {},
+          async interrupt() { gate.resolve() },
+          async stop() { gate.resolve() },
+        }
+      },
+    }
+
+    harness = await serve({ port, databasePath: path, resolveDriver: () => driver })
+    const url = `ws://127.0.0.1:${port}/ws`
+    const original = await Client.connect(url)
+    const { sessionId } = await bootstrap(original)
+    const dispatch = (client: Client, id: string, command: Record<string, unknown>) => {
+      client.send({ t: 'dispatch', envelope: { id, at: Date.now(), command: { ...command, sessionId } } })
+    }
+    dispatch(original, 'interrupted-turn', { type: 'session.turn.start', text: 'Interrupt me' })
+    expect(await original.waitFor('assistant.delta')).toBeTruthy()
+    dispatch(original, 'held-entry', { type: 'session.queue.add', text: 'Resume once' })
+    expect(await original.waitFor('queue.added')).toBeTruthy()
+    original.close()
+    harness.stop()
+
+    harness = await serve({ port, databasePath: path, resolveDriver: () => driver })
+    const first = await Client.connect(url)
+    const second = await Client.connect(url)
+    try {
+      first.send({ t: 'subscribe', sessionId })
+      second.send({ t: 'subscribe', sessionId })
+      expect(await second.waitFor('turn.interrupted')).toMatchObject({ turnId: 1 })
+      expect(harness.engine.current.sessions.get(sessionId)?.followUps).toEqual({
+        held: true, entries: [{ id: 'held-entry', text: 'Resume once' }],
+      })
+      expect(delivered).toEqual(['Interrupt me'])
+      const send = { type: 'session.queue.send', id: 'held-entry' }
+      dispatch(first, 'send-first', send)
+      dispatch(second, 'send-second', send)
+      expect(await first.waitFor('turn.completed', 5000, event => event.turnId === 2)).toBeTruthy()
+      expect(delivered).toEqual(['Interrupt me', 'Resume once'])
+      expect(harness.engine.current.sessions.get(sessionId)?.followUps).toEqual({ held: false, entries: [] })
+      const outcomes = await Promise.all([
+        first.waitForDispatch('send-first'),
+        second.waitForDispatch('send-second'),
+      ])
+      expect(outcomes.map(frame => frame?.t).sort()).toEqual(['dispatched', 'rejected'])
+    }
+    finally {
+      first.close()
+      second.close()
+    }
   })
 })
 

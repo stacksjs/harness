@@ -155,6 +155,7 @@ export function viewProps(state: HarnessState, options: {
           // it. Previously an approval only reached whichever browser happened
           // to be connected when it fired, and the turn waited forever if that
           // one went away.
+          followUps: active.followUps,
           pendingApprovals: active.pendingApprovals,
           pendingInputs: active.pendingInputs,
           // Shown in the header when the session has a checkout of its own, so

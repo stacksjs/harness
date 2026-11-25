@@ -6,7 +6,9 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, QuestionAttachment } from '@harness/contract'
+import type { ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, QuestionAttachment } from '@harness/contract'
+
+import { applyFollowUpEvent } from '@harness/contract'
 
 export interface InputRequestState {
   attachments?: QuestionAttachment[]
@@ -27,6 +29,7 @@ export interface SessionState {
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastSeq: number
   turns: TurnState[]
+  followUps: FollowUpQueue
   /** Oldest first, so the newest revert target is the last one. */
   checkpoints: CheckpointState[]
   /**
@@ -320,6 +323,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         state: 'idle',
         lastSeq: 0,
         turns: [],
+        followUps: { entries: [], held: false },
         checkpoints: [],
         pendingApprovals: [],
         pendingInputs: [],
@@ -522,7 +526,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
   }
 
   const session = state.sessions.get(event.sessionId)
-  if (session) session.lastSeq = Math.max(session.lastSeq, event.seq)
+  if (session) {
+    session.lastSeq = Math.max(session.lastSeq, event.seq)
+    session.followUps = applyFollowUpEvent(session.followUps, p)
+  }
 
   return state
 }

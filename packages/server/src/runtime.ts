@@ -258,6 +258,11 @@ export class ProviderRuntime {
     const session = this.options.engine.current.sessions.get(sessionId)
     if (!session) return
 
+    if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted) {
+      await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Trust this workspace before sending a message.' })
+      return
+    }
+
     const running = await this.instanceFor(sessionId, session.driverKind)
     if (!running) return
 
@@ -276,6 +281,12 @@ export class ProviderRuntime {
     // silently for a workspace that is not a repository.
     await this.captureCheckpoint(sessionId, turnId, 'turn-start')
     if (running.abandoned || running.interrupted || running.turnId !== turnId) return
+
+    if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted) {
+      delete running.turnId
+      await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Trust this workspace before sending a message.' })
+      return
+    }
 
     try {
       for await (const event of running.instance.startTurn({

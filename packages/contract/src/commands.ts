@@ -46,6 +46,11 @@ export type ClientCommand =
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string }
   | { type: 'session.turn.start', sessionId: number, text: string }
   | { type: 'session.turn.interrupt', sessionId: number }
+  | { type: 'session.queue.add', sessionId: number, text: string }
+  | { type: 'session.queue.edit', sessionId: number, id: string, text: string, previousText: string }
+  | { type: 'session.queue.remove', sessionId: number, id: string }
+  | { type: 'session.queue.move', sessionId: number, id: string, direction: 'up' | 'down' }
+  | { type: 'session.queue.send', sessionId: number, id?: string }
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
   | ({ type: 'session.input.respond', sessionId: number, requestId: string } & InputResponse)
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
@@ -96,6 +101,8 @@ export type ClientCommand =
  * authorisation to forge assistant text.
  */
 export type InternalCommand =
+  | { type: 'thread.queue.advance', sessionId: number }
+  | { type: 'thread.queue.hold', sessionId: number }
   | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string }
   | { type: 'thread.message.assistant.delta', sessionId: number, turnId: number, text: string }
   | { type: 'thread.message.assistant.complete', sessionId: number, turnId: number }
@@ -111,7 +118,7 @@ export type InternalCommand =
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number }
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
   | { type: 'thread.session.set', sessionId: number, providerSessionId: string }
-  | { type: 'thread.error', sessionId: number, message: string }
+  | { type: 'thread.error', sessionId: number, message: string, turnId?: number }
   /**
    * Record a device that completed pairing.
    *
@@ -131,6 +138,11 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'session.scratch.create',
   'session.turn.start',
   'session.turn.interrupt',
+  'session.queue.add',
+  'session.queue.edit',
+  'session.queue.remove',
+  'session.queue.move',
+  'session.queue.send',
   'session.approval.respond',
   'session.input.respond',
   'session.checkpoint.revert',

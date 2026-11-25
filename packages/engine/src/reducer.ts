@@ -6,11 +6,11 @@
  * identical state rather than a similar one.
  */
 
-import type { Command, CommandEnvelope } from '@harness/contract'
+import type { Command, CommandEnvelope, EventPayload } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, validInputAnswers } from '@harness/contract'
 import { isTurnActive } from './projections'
 import type { AppendableEvent } from './store'
-import type { HarnessState } from './projections'
+import type { HarnessState, SessionState } from './projections'
 
 export class InvalidCommand extends Error {
   constructor(message: string) {
@@ -35,6 +35,19 @@ function derivedId(commandId: string): number {
   }
   // Positive, and clear of the reserved global session id.
   return (hash >>> 0) % 2147483647 + 1
+}
+
+function followUpText(value: unknown): string {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) throw new InvalidCommand('Enter a message to queue.')
+  return text
+}
+
+function turnStarted(session: SessionState, text: string, queuedId?: string): EventPayload {
+  return {
+    type: 'turn.started', turnId: session.turns.length + 1, role: 'user', text,
+    ...(queuedId ? { queuedId } : {}),
+  }
 }
 
 export function reduce(state: HarnessState, command: Command, envelope: CommandEnvelope): AppendableEvent[] {
@@ -408,18 +421,68 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('a turn is already running')
       if (session.state === 'stopped')
         throw new InvalidCommand('session is stopped')
+      if (!state.workspaces.get(session.workspaceId)?.trusted)
+        throw new InvalidCommand('Trust this workspace before sending a message.')
 
-      return [{
-        sessionId: command.sessionId,
-        commandId,
-        at,
-        payload: {
-          type: 'turn.started',
-          turnId: session.turns.length + 1,
-          role: 'user',
-          text: command.text,
-        },
-      }]
+      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, command.text) }]
+    }
+
+    case 'session.queue.add':
+    case 'session.queue.edit':
+    case 'session.queue.move':
+    case 'session.queue.remove': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session || session.state === 'stopped')
+        throw new InvalidCommand('This session is unavailable.')
+      const emit = (payload: EventPayload): AppendableEvent[] => [{ sessionId: session.id, commandId, at, payload }]
+      const entries = session.followUps.entries
+      if (command.type === 'session.queue.add') {
+        if (!state.workspaces.get(session.workspaceId)?.trusted)
+          throw new InvalidCommand('Trust this workspace before queuing a message.')
+        return emit({ type: 'queue.added', entry: { id: commandId, text: followUpText(command.text) } })
+      }
+
+      const index = entries.findIndex(entry => entry.id === command.id)
+      const entry = entries[index]
+      if (!entry) throw new InvalidCommand('This message is no longer queued.')
+
+      if (command.type === 'session.queue.remove')
+        return emit({ type: 'queue.removed', id: entry.id })
+      if (command.type === 'session.queue.edit') {
+        if (entry.text !== command.previousText)
+          throw new InvalidCommand('This message was edited on another device. Reopen it to make changes.')
+        return emit({ type: 'queue.edited', id: entry.id, text: followUpText(command.text) })
+      }
+
+      if (command.direction !== 'up' && command.direction !== 'down')
+        throw new InvalidCommand('Choose a direction to move the queued message.')
+      const toIndex = index + (command.direction === 'up' ? -1 : 1)
+      return toIndex < 0 || toIndex >= entries.length ? [] : emit({ type: 'queue.moved', id: entry.id, toIndex })
+    }
+
+    case 'thread.queue.hold': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session?.followUps.entries.length || session.followUps.held) return []
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'queue.held' } }]
+    }
+
+    case 'session.queue.send':
+    case 'thread.queue.advance': {
+      const automatic = command.type === 'thread.queue.advance'
+      const session = state.sessions.get(command.sessionId)
+      if (automatic && (!session || session.followUps.held || !session.followUps.entries.length)) return []
+      if (!session || session.state === 'stopped' || isTurnActive(session.state)) {
+        if (automatic) return []
+        throw new InvalidCommand('Wait for the current turn to finish before sending this message.')
+      }
+      if (!state.workspaces.get(session.workspaceId)?.trusted) {
+        if (automatic) return [{ sessionId: session.id, commandId, at, payload: { type: 'queue.held' } }]
+        throw new InvalidCommand('Trust this workspace before sending a queued message.')
+      }
+      const id = automatic ? undefined : command.id
+      const entry = id === undefined ? session.followUps.entries[0] : session.followUps.entries.find(entry => entry.id === id)
+      if (!entry) throw new InvalidCommand('This message is no longer queued.')
+      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.id) }]
     }
 
     case 'session.turn.interrupt': {
@@ -430,7 +493,11 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // Interrupting an idle session is a no-op rather than an error: the user
       // pressed stop just as the turn finished, and telling them off for it
       // would be pedantic.
-      if (!running) return []
+      if (!running) {
+        return session.followUps.entries.length && !session.followUps.held
+          ? [{ sessionId: session.id, commandId, at, payload: { type: 'queue.held' } }]
+          : []
+      }
 
       return [{
         sessionId: command.sessionId,
@@ -616,13 +683,18 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         payload: { type: 'session.provider-bound', providerSessionId: command.providerSessionId },
       }]
 
-    case 'thread.error':
+    case 'thread.error': {
+      if (command.turnId !== undefined) {
+        const turn = state.sessions.get(command.sessionId)?.turns.at(-1)
+        if (turn?.id !== command.turnId || turn.status !== 'running') return []
+      }
       return [{
         sessionId: command.sessionId,
         commandId,
         at,
         payload: { type: 'session.failed', message: command.message },
       }]
+    }
 
     default:
       // Not every command has a reducer yet. Producing nothing is correct for

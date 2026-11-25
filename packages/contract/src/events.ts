@@ -7,6 +7,7 @@
  */
 
 import type { ApprovalDecision, ApprovalScope, ConnectorApproval, DriverKind } from './commands'
+import type { QueuedFollowUp } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
 
 export interface EventBase {
@@ -23,7 +24,12 @@ export type EventPayload =
   | { type: 'session.stopped' }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
-  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string }
+  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string }
+  | { type: 'queue.added', entry: QueuedFollowUp }
+  | { type: 'queue.edited', id: string, text: string }
+  | { type: 'queue.removed', id: string }
+  | { type: 'queue.moved', id: string, toIndex: number }
+  | { type: 'queue.held' }
   | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number }
   | { type: 'turn.interrupted', turnId: number }
   | { type: 'turn.failed', turnId: number, message: string }
