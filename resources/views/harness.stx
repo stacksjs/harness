@@ -128,7 +128,7 @@ export const initialSessionError = activeSession?.lastError || ''
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const sessionDriver = activeSession ? (activeSession.driverKind || '') : ''
 export const sessionProviderInstanceId = activeSession?.providerInstanceId ?? null
-export const promptPlaceholder = 'Ask the agent…'
+export const promptPlaceholder = 'Message the agent…'
 export const activeSessionId = activeSession ? activeSession.id : 0
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialCodexSelection = activeCodex && activeSession.model
@@ -185,7 +185,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       </div>
       @if(hasProfiles)
         <div class="flex gap-1 items-center px-2 pb-2">
-          <button type="button" data-nav-search @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" class="harness-nav-search">
+          <button type="button" data-nav-search @click="openThreadSearch" aria-label="Search threads" title="Search threads" aria-haspopup="dialog" :aria-keyshortcuts="shortcutKeys('thread.search')" class="harness-nav-search">
             <span class="inline-block size-4 i-hugeicons-search-01" aria-hidden="true"></span>
             <span>Search</span>
           </button>
@@ -215,8 +215,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
     </div>
     <div data-navigation-footer>
-      <button type="button" data-account-button data-nav-settings @click="openSettings" aria-label="Settings" :title="settingsShortcutTitle()" class="harness-icon-button">
+      <button type="button" data-account-button data-nav-settings @click="openSettings" :title="settingsShortcutTitle()" class="harness-nav-search">
         <span class="inline-block size-4 i-hugeicons-settings-02" aria-hidden="true"></span>
+        <span>Settings</span>
       </button>
     </div>
   </aside>
@@ -240,15 +241,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   ></div>
 
   <main data-workspace-layout data-details-open="true" :data-details-open="workspaceDetailsOpen()" :data-diff-open="diffOpen()" :inert="!desktopSidebar() && sidebarOpen()" class="flex-1 min-w-0">
-    <header data-workspace-header class="flex relative gap-3 items-center shrink-0 px-4 h-[44px] border-b border-black/5 dark:border-white/5">
+    <header data-workspace-header class="flex relative gap-3 items-center shrink-0 px-4">
       <button type="button" data-sidebar-toggle class="harness-icon-button" ref="sidebarToggleBox" @click="toggleSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
         <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
       </button>
-      <div data-workspace-heading class="flex gap-2 items-center min-w-0">
+      <div data-workspace-heading class="min-w-0">
         @if(workspaceName)
-          <span class="inline-block shrink-0 size-4 i-hugeicons-folder-01" data-workspace-folder aria-hidden="true"></span>
-          <span data-workspace-project class="min-w-0 text-xs text-neutral-600 dark:text-neutral-400 truncate" title="{{ workspaceName }}">{{ workspaceName }}</span>
-          <span class="text-neutral-400" aria-hidden="true">/</span>
+          <span data-workspace-project class="flex gap-1.5 items-center min-w-0 text-xs text-neutral-600 dark:text-neutral-400" title="{{ workspaceName }}">
+            <span class="inline-block shrink-0 size-4 i-hugeicons-folder-01" data-workspace-folder aria-hidden="true"></span>
+            <span class="truncate">{{ workspaceName }}</span>
+          </span>
+          <span data-workspace-separator class="text-neutral-400" aria-hidden="true">/</span>
         @endif
         @if(activeSession)
           <button type="button" data-workspace-title data-thread-actions-trigger ref="threadActionsTriggerBox" @click="openThreadActions" aria-haspopup="dialog" aria-controls="harness-thread-actions" :aria-expanded="threadActionsOpen()" :title="currentThreadTitle()" class="flex gap-1 items-center min-w-0 font-medium text-start text-[13px] rounded-md">
@@ -312,7 +315,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     </header>
 
     <div data-workspace-content>
-    <div data-workspace-lane @if(!activeSession)data-workspace-draft@endif>
+    <div data-workspace-lane @if(!activeSession)data-workspace-draft@endif :inert="workspaceActionsOpen()">
     {{--
       The transcript. Settled turns are plain server-rendered HTML and hydrate
       on `visible`, so scrolling back through a long session costs nothing until
@@ -320,7 +323,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       the socket writes to.
     --}}
     <div data-transcript-viewport :style="transcriptFindOpen() ? '--harness-transcript-top: 56px' : ''" class="relative min-h-0 min-w-0 @if(activeSession)flex-1@endif">
-    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto min-w-0 @if(activeSession)px-4 pt-[var(--harness-transcript-top,12px)] pb-3 h-full@endif">
+    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto min-w-0 @if(activeSession)h-full@endif">
       {{--
         A blank canvas says the app is broken; an empty state says what to do.
         Typing below is the fastest path, so it is the one named first.
@@ -553,24 +556,26 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         :placeholder="composerPlaceholder()"
         class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
-      <div data-composer-provider-controls>
-      @if(activeSessionId && !activeCodex)
-      @include('../partials/harness-driver-picker')
-      @else
-      @include('../partials/harness-model-picker')
-      @endif
-      </div>
-      <div data-composer-actions class="flex flex-wrap gap-2 justify-end">
-        <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :hidden="!showSend()" :disabled="startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
-          <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
-          <span data-send-text :text="sendLabel()">Send</span>
-        </button>
-        <span class="md:hidden" :hidden="!canSteerDraft() || !composerText().trim() || Boolean(editingFollowUp())">
-          <button type="button" :disabled="startPending() || (oppositeFollowUp() === 'steer' && steeringPending())" :text="oppositeFollowUp() === 'steer' ? 'Steer' : 'Queue'" @click="sendPrompt(oppositeFollowUp())" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Steer</button>
-        </span>
-        <button type="button" :hidden="!editingFollowUp()" @click="followUpActions()?.endEdit()" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
-        <button type="button" data-resume-queue :hidden="!showResume()" :disabled="!sessionOnline() || queueActionPending()" @click="followUpActions()?.run('send')" class="px-4 h-8 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-full">Resume</button>
-        <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-8 text-[13px] text-white bg-red-600 rounded-full hover:bg-red-700">Stop</button>
+      <div data-composer-toolbar>
+        <div data-composer-provider-controls>
+        @if(activeSessionId && !activeCodex)
+        @include('../partials/harness-driver-picker')
+        @else
+        @include('../partials/harness-model-picker')
+        @endif
+        </div>
+        <div data-composer-actions class="flex flex-wrap gap-2 justify-end">
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :hidden="!showSend()" :disabled="!composerText().trim() || startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+            <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
+            <span data-send-text :text="sendLabel()">Send</span>
+          </button>
+          <span class="md:hidden" :hidden="!canSteerDraft() || !composerText().trim() || Boolean(editingFollowUp())">
+            <button type="button" :disabled="startPending() || (oppositeFollowUp() === 'steer' && steeringPending())" :text="oppositeFollowUp() === 'steer' ? 'Steer' : 'Queue'" @click="sendPrompt(oppositeFollowUp())" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Steer</button>
+          </span>
+          <button type="button" :hidden="!editingFollowUp()" @click="followUpActions()?.endEdit()" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
+          <button type="button" data-resume-queue :hidden="!showResume()" :disabled="!sessionOnline() || queueActionPending()" @click="followUpActions()?.run('send')" class="px-4 h-8 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-full">Resume</button>
+          <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-8 text-[13px] text-white bg-red-600 rounded-full hover:bg-red-700">Stop</button>
+        </div>
       </div>
     </form>
     @endif
@@ -611,10 +616,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       <button type="button" data-workspace-actions-scrim hidden tabindex="-1" :hidden="!workspaceActionsOpen()" @click="closeWorkspaceActions" aria-label="Close workspace actions"></button>
       <aside data-workspace-rail aria-label="Workspace tools">
         <div id="harness-workspace-actions" data-workspace-actions :data-open="workspaceActionsOpen() ? 'true' : 'false'">
-          @if(activeWorkspaceId)
+          @if(workspaceName || activeScratchSession || draftWithoutProject)
             <div data-workspace-context>
               <span class="inline-block size-4 i-hugeicons-folder-01" aria-hidden="true"></span>
-              <span class="min-w-0 truncate" title="{{ workspaceName || sessionTitle }}">{{ workspaceName || sessionTitle }}</span>
+              <span class="min-w-0 truncate" title="{{ workspaceName || 'No project' }}">{{ workspaceName || 'No project' }}</span>
             </div>
           @endif
         {{--
@@ -1997,13 +2002,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const visual = dialog.ownerDocument.defaultView?.visualViewport
     const top = visual?.offsetTop || 0
     const height = visual?.height || viewport.clientHeight
+    const sidebarEdge = sidebarRef.current?.getBoundingClientRect().right || 0
+    const left = sidebarEdge + 8
     dialog.style.setProperty('--draft-picker-viewport', height + 'px')
+    dialog.style.setProperty('--draft-picker-available-width', (viewport.clientWidth - left - 8) + 'px')
     const bounds = dialog.getBoundingClientRect()
     const below = anchor.bottom + 6
     const above = anchor.top - bounds.height - 6
     const preferred = above >= top + 8 || below + bounds.height > top + height - 8 ? above : below
     dialog.style.setProperty('--draft-picker-top', Math.max(top + 8, Math.min(preferred, top + height - bounds.height - 8)) + 'px')
-    dialog.style.setProperty('--draft-picker-left', Math.max(8, Math.min(anchor.left, viewport.clientWidth - bounds.width - 8)) + 'px')
+    dialog.style.setProperty('--draft-picker-left', Math.max(left, Math.min(anchor.right - bounds.width, viewport.clientWidth - bounds.width - 8)) + 'px')
     revealPickerAccount()
   }
 
@@ -3084,6 +3092,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return termMeasured
   }
 
+  function resizeTerminal() {
+    if (termId === null || !term || !termOpen()) return
+    const { cols, rows } = measureTerm()
+    if (cols === term.cols && rows === term.rows) return
+    sendFrame({ t: 'term-resize', termId, cols, rows })
+    term.resize(cols, rows)
+    renderTerm()
+  }
+
   // Live resize: when the panel's box changes — a narrow window shrinks it —
   // the PTY is told the new size (the shell sees SIGWINCH) and the local grid
   // follows. Watching starts on first open, when the host exists to observe.
@@ -3092,17 +3109,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (termObserver || typeof ResizeObserver === 'undefined') return
     const host = termHostRef.current
     if (!host) return
-    termObserver = new ResizeObserver(() => {
-      if (termId === null) return
-      const before = `${termMeasured.cols}x${termMeasured.rows}`
-      const { cols, rows } = measureTerm()
-      if (`${cols}x${rows}` === before) return
-      sendFrame({ t: 'term-resize', termId, cols, rows })
-      if (term) {
-        term.resize(cols, rows)
-        renderTerm()
-      }
-    })
+    termObserver = new ResizeObserver(resizeTerminal)
     termObserver.observe(host)
   }
 
@@ -3135,9 +3142,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     // Measured after the binding has shown the panel — a display:none box
     // measures zero — and the PTY opens at the size actually on screen.
     requestAnimationFrame(() => {
-      const { cols, rows } = measureTerm()
-      if (termId === null && term === null)
+      if (!termOpen()) return
+      if (termId === null && term === null) {
+        const { cols, rows } = measureTerm()
         sendFrame({ t: 'term-open', workspaceId: Number(activeWorkspaceId) || 0, cols, rows })
+      }
+      else resizeTerminal()
       watchTermSize()
     })
   }
@@ -3301,6 +3311,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       if (frame?.t === 'term-opened') {
         termId = frame.termId
         term = new Terminal({ cols: frame.cols, rows: frame.rows })
+        resizeTerminal()
         if (termPendingInput) {
           sendFrame({ t: 'term-input', termId, data: termPendingInput })
           termPendingInput = ''

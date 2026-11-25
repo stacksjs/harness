@@ -361,17 +361,23 @@ page.on('dialog', async d => d.accept())
 await page.goto(`${baseUrl}/s/${sessionId}`)
 await page.setViewportSize({ width: 390, height: 844 })
 const workspaceActions = page.locator('[data-workspace-actions-toggle]')
-check('mobile keeps the thread title visible and hides contextual actions', await page.locator('[data-workspace-title]').isVisible()
-  && !(await page.locator('[data-diff-toggle]').isVisible()))
+const headerChanges = page.locator('[data-header-pane][aria-controls="harness-changes"]')
+const headerTerminal = page.locator('[data-header-terminal]')
+check('mobile keeps the thread title and the two workspace tools in the header', await page.locator('[data-workspace-title]').isVisible()
+  && await headerChanges.isVisible() && await headerTerminal.isVisible() && !await page.locator('[data-diff-toggle]').isVisible())
 await workspaceActions.click()
-check('mobile workspace actions expose Changes and Terminal', await page.locator('[data-diff-toggle]').isVisible()
-  && await page.locator('[data-terminal-toggle]').isVisible())
+check('mobile workspace actions expose Changes and Terminal and suspend the conversation controls',
+  await page.locator('[data-diff-toggle]').isVisible() && await page.locator('[data-terminal-toggle]').isVisible()
+  && await page.locator('[data-workspace-lane]').getAttribute('inert') !== null)
 await capture('workspace-actions-mobile')
 await page.keyboard.press('Escape')
 check('Escape closes workspace actions and restores focus', await workspaceActions.getAttribute('aria-expanded') === 'false'
   && await workspaceActions.evaluate(el => el === document.activeElement))
 await page.locator('[data-sidebar-toggle]').click()
 await page.waitForFunction(() => document.querySelector('[data-harness-sidebar]')?.getAttribute('data-open') === 'true')
+check('phone navigation drawer has search and Settings', await page.locator('[data-nav-search]').isVisible()
+  && await page.locator('[data-nav-settings]').isVisible())
+await capture('workspace-navigation-mobile')
 check('the open phone navigation drawer makes workspace controls inert',
   await page.locator('[data-workspace-layout]').getAttribute('inert') !== null)
 await page.keyboard.press('Escape')
@@ -432,12 +438,18 @@ const workspaceViewports = [[1440, 900], [1280, 800], [1024, 768], [820, 1180], 
 for (const [width, height] of workspaceViewports) {
   await page.setViewportSize({ width, height })
   check(`workspace header and composer fit at ${width}×${height}`, await page.evaluate(() => {
-    const elements = ['[data-workspace-header]', '[data-composer]', '[data-send]']
+    const elements = ['[data-workspace-header]', '[data-workspace-title]', '[data-composer]', '[data-send]']
     return document.documentElement.scrollWidth === innerWidth
       && elements.every((selector) => {
         const bounds = document.querySelector(selector)?.getBoundingClientRect()
         return Boolean(bounds && bounds.width > 0 && bounds.left >= 0 && bounds.right <= innerWidth + 1)
       })
+  }))
+  check(`the model and send controls sit together at ${width}×${height}`, await page.evaluate(() => {
+    const provider = document.querySelector('[data-composer-provider-controls]')?.getBoundingClientRect()
+    const send = document.querySelector('[data-send]')?.getBoundingClientRect()
+    return Boolean(provider && send && provider.right <= send.left && send.left - provider.right <= 12
+      && Math.abs((send.top + send.bottom) - (provider.top + provider.bottom)) <= 2)
   }))
   await capture(`workspace-layout-${width}x${height}`)
 }
@@ -494,13 +506,30 @@ check('phone Changes owns the workspace while the patch stays visible', await pa
 await capture('changes-workspace-phone')
 await closeChanges.click()
 await page.waitForFunction(() => document.activeElement?.matches('[data-workspace-actions-toggle]'))
-check('closing Changes restores the phone composer and returns focus', await page.locator('[data-composer]').isVisible()
-  && await workspaceActions.evaluate(button => button === document.activeElement))
+await headerChanges.click()
+await closeChanges.waitFor()
+await closeChanges.click()
+await page.waitForFunction(() => document.activeElement?.matches('[data-header-pane][aria-controls="harness-changes"]'))
+check('closing Changes restores the phone composer and returns focus to the phone header',
+  await page.locator('[data-composer]').isVisible() && await headerChanges.evaluate(button => button === document.activeElement))
+await headerTerminal.click()
+const phoneTerminal = page.locator('[data-terminal]')
+await phoneTerminal.waitFor()
+await page.waitForFunction(() => document.querySelector('[data-terminal-screen]')?.textContent?.includes('Harness test terminal'))
+await page.keyboard.type('echo "phone-$(stty size | tr \' \' x)"')
+await page.keyboard.press('Enter')
+await page.waitForFunction(() => /phone-\d+x\d+/.test(document.querySelector('[data-terminal-screen]')?.textContent ?? ''))
+const phoneColumns = await phoneTerminal.evaluate(el => Number(el.textContent?.match(/phone-\d+x(\d+)/)?.[1]))
+await capture('workspace-terminal-phone')
+await phoneTerminal.getByRole('button', { name: 'Close terminal' }).click()
+await page.waitForFunction(() => document.activeElement?.matches('[data-header-terminal]'))
+check('phone Terminal opens directly and returns focus to the header', !await phoneTerminal.isVisible())
 await page.setViewportSize({ width: 1280, height: 800 })
 
 // 4. Terminal.
 await page.click('[data-terminal-toggle]')
-await page.waitForFunction(() => document.querySelector('[data-terminal-screen]')?.textContent?.includes('Harness test terminal'), undefined, { timeout: 8000 })
+await page.waitForFunction(() => document.activeElement?.matches('[data-terminal-host]')
+  && document.querySelector('[data-terminal-screen]')?.textContent?.includes('Harness test terminal'), undefined, { timeout: 8000 })
 await page.keyboard.type('echo "d-$((40+4))"')
 await page.keyboard.press('Enter')
 const termOk = await page.waitForFunction(() => (document.querySelector('[data-terminal]')?.textContent ?? '').includes('d-44'), undefined, { timeout: 10000 }).then(() => true).catch(() => false)
@@ -528,6 +557,7 @@ await page.waitForFunction(() => /s2-\d+x\d+/.test(document.querySelector('[data
 const sizeAfter = await page.evaluate(() => (document.querySelector('[data-terminal]')?.textContent ?? '').match(/s2-(\d+)x(\d+)/))
 const colsBefore = Number(sizeBefore?.[2] ?? 0)
 const colsAfter = Number(sizeAfter?.[2] ?? 0)
+check('reopening the same PTY on desktop applies the desktop width', phoneColumns > 0 && colsBefore > phoneColumns)
 if (!(colsAfter > 0 && colsAfter < colsBefore)) console.log('resize readings:', sizeBefore?.[0], '->', sizeAfter?.[0])
 check('shrinking the window resizes the live PTY', colsAfter > 0 && colsAfter < colsBefore)
 await page.setViewportSize({ width: 1280, height: 720 })
@@ -864,7 +894,8 @@ if (screenshotDir) {
   await capture('workspace-desktop')
   await page.setViewportSize({ width: 390, height: 844 })
   await capture('workspace-mobile')
-  await page.locator('[data-account-button]:visible').click()
+  await page.locator('[data-sidebar-toggle]').click()
+  await page.locator('[data-nav-settings]').click()
   for (const [width, height] of workspaceViewports) {
     await page.setViewportSize({ width: width!, height: height! })
     check(`settings and its navigation fit at ${width}×${height}`, await settingsDialog.evaluate(dialog => {
@@ -1801,7 +1832,7 @@ check('the desktop picker opens alongside the composer without covering the side
   const sidebar = document.querySelector('[data-harness-sidebar]')?.getBoundingClientRect()
   const trigger = document.querySelector('[data-model-picker-trigger]')?.getBoundingClientRect()
   const picker = dialog.getBoundingClientRect()
-  return !!sidebar && !!trigger && picker.left >= sidebar.right && Math.abs(picker.left - trigger.left) <= 1
+  return !!sidebar && !!trigger && picker.left >= sidebar.right && Math.abs(picker.right - trigger.right) <= 1
 }))
 await capture('active-codex-model-desktop')
 await draftDialog.getByRole('button', { name: 'Done' }).click()
