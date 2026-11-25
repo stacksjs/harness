@@ -1,5 +1,19 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.20...v0.0.21)
+
+## ✨ Features
+
+- **composer**: add searchable provider and model picker ([71e5df8](https://github.com/stacksjs/harness/commit/71e5df8)) _(by Chris)_
+
+## 📝 Documentation
+
+- **parity**: inventory reference flags and integration variants ([a328f45](https://github.com/stacksjs/harness/commit/a328f45)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.19...v0.0.20)
 
 ## ✨ Features
