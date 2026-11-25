@@ -55,9 +55,20 @@ export interface ProbeResult {
   models?: ProviderModel[]
 }
 
+export interface HistoricalContext {
+  items: Array<{
+    type: 'message'
+    role: 'user' | 'assistant'
+    content: Array<{ type: 'input_text' | 'output_text', text: string }>
+  }>
+  inlinePrompt: string
+}
+
 export interface StartTurnInput {
   text: string
   codexSelection?: CodexTurnSelection
+  /** Attributed history for a fresh native conversation. */
+  historicalContext?: HistoricalContext
   /** Provider's own session id, when resuming rather than starting fresh. */
   providerSessionId?: string
 }
@@ -70,6 +81,8 @@ export interface ForkInput {
 }
 
 export interface ProviderInstance {
+  /** Accepts structured history and can fall back to the attributed prompt. */
+  acceptsHistoricalContext?: boolean
   /** Stream one turn. Ends when the provider says the turn is over. */
   startTurn: (input: StartTurnInput) => AsyncIterable<ProviderEvent>
   /** Create a separate conversation through the selected response. */

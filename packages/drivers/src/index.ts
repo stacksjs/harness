@@ -12,6 +12,7 @@ export type {
   Driver,
   DriverConfig,
   ForkInput,
+  HistoricalContext,
   ResolvedMcpServer,
   ProbeResult,
   ProviderEvent,

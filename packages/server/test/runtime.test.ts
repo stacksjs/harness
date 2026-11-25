@@ -235,6 +235,7 @@ describe('provider handoff', () => {
       async create(config) {
         return {
           ...await driver.create(config),
+          acceptsHistoricalContext: kind === 'codex',
           async *startTurn(input) {
             const attempt = inputs.push(input)
             if (attempt === 1) {
@@ -266,8 +267,8 @@ describe('provider handoff', () => {
       expect(await client.waitFor('session.provider-switched')).toMatchObject({ afterTurnId: 1, driverKind: 'codex' })
       expect(await client.waitFor('session.failed')).toMatchObject({ message: 'The provider disconnected.' })
       expect(inputs[1]?.providerSessionId).toBeUndefined()
-      expect(inputs[1]?.text).toContain('The original answer.')
-      expect(inputs[1]?.text).toEndWith('New user request:\nContinue elsewhere.')
+      expect(inputs[1]?.text).toBe('Continue elsewhere.')
+      expect(JSON.stringify(inputs[1]?.historicalContext?.items)).toContain('The original answer.')
 
       client.close()
       harness.stop()
@@ -280,8 +281,9 @@ describe('provider handoff', () => {
       send('handoff-retry', { type: 'session.turn.start', sessionId, text: 'Retry the continuation.' })
       expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 3)).toMatchObject({ turnId: 3 })
       expect(inputs[2]?.providerSessionId).toBeUndefined()
-      expect(inputs[2]?.text).toContain('The original request.')
-      expect(inputs[2]?.text).not.toContain('Continue elsewhere.')
+      expect(inputs[2]?.text).toBe('Retry the continuation.')
+      expect(JSON.stringify(inputs[2]?.historicalContext?.items)).toContain('The original request.')
+      expect(JSON.stringify(inputs[2]?.historicalContext?.items)).not.toContain('Continue elsewhere.')
       send('handoff-follow-up', { type: 'session.turn.start', sessionId, text: 'Follow up without repeating context.' })
       expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 4)).toMatchObject({ turnId: 4 })
       expect(inputs[3]).toMatchObject({ text: 'Follow up without repeating context.', providerSessionId: 'replacement-native-id' })

@@ -213,6 +213,7 @@ export function usageOf(tokenUsage: any): { tokensIn: number, tokensOut: number 
 }
 
 class CodexInstance implements ProviderInstance {
+  readonly acceptsHistoricalContext = true
   private child: ChildProcessWithoutNullStreams | null = null
   private broker: Awaited<ReturnType<typeof openManagedChatGptBroker>> | undefined
   private generation = 0
@@ -563,7 +564,11 @@ class CodexInstance implements ProviderInstance {
   }
 
   private async run(input: StartTurnInput, queue: EventQueue): Promise<void> {
+    if (input.historicalContext && (this.threadId || input.providerSessionId))
+      throw new Error('Saved context requires a fresh Codex conversation.')
+
     await this.ensureProcess()
+    if (queue.closed || this.queue !== queue) return
 
     // Resume the provider's own thread when we have one, so a restarted server
     // continues the conversation instead of starting a stranger.
@@ -602,11 +607,28 @@ class CodexInstance implements ProviderInstance {
       queue.push({ type: 'session-bound', providerSessionId: this.threadId })
     }
 
+    if (queue.closed || this.queue !== queue) return
+    let text = input.text
+    if (input.historicalContext) {
+      const injection = await this.request('thread/inject_items', {
+        threadId: this.threadId,
+        items: input.historicalContext.items,
+      }, 15_000)
+      if (queue.closed || this.queue !== queue) return
+      // Unknown method means the request was never applied. Other errors can
+      // leave history partially imported, so retry only in a fresh thread.
+      if (injection.error?.code === -32601) text = input.historicalContext.inlinePrompt
+      else if (injection.error || injection.transportError || injection.result === undefined) {
+        queue.finish({ type: 'error', message: 'Codex could not confirm the history transfer. Send again to retry in a fresh conversation.' })
+        return
+      }
+    }
+
     const selection = input.codexSelection
     const { effort, serviceTier } = this.config.codexTurnOptions ?? {}
     const turn = await this.request('turn/start', {
       threadId: this.threadId,
-      input: [{ type: 'text', text: input.text }],
+      input: [{ type: 'text', text }],
       ...(selection
         ? { model: selection.model, effort: selection.effort ?? null, serviceTier: selection.serviceTier ?? null }
         : { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) }),
@@ -694,9 +716,13 @@ class CodexInstance implements ProviderInstance {
   }
 
   async interrupt(): Promise<void> {
-    // No turn, no process, nothing to stop — the user pressing stop just as a
-    // turn lands is a race, not an error.
-    if (!this.child || !this.threadId || !this.turnId) return
+    if (!this.turnId) {
+      // Launch and history import can be in flight before Codex assigns the
+      // turn ID. Close the stream before the new request can be sent.
+      if (this.queue && !this.queue.closed) await this.stop()
+      return
+    }
+    if (!this.child || !this.threadId) return
     const interrupted = this.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId })
     this.cancelInputs()
     this.cancelMcpConsents()

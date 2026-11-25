@@ -1,3 +1,4 @@
+import type { StartTurnInput } from '../src/types'
 import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -55,6 +56,69 @@ for await (const line of createInterface({ input: process.stdin })) {
         expect(requests.map(request => request.method)).toEqual(methods)
         expect(requests.slice(1).every(request => request.params.threadId === 'native-thread')).toBe(true)
         if (shouldResume) expect(requests.at(-1)?.params).toMatchObject({ model: 'second-model', effort: 'high', serviceTier: null })
+      }
+      finally {
+        await instance.stop()
+      }
+    }
+    finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('codex provider handoff', () => {
+  it.each(['native', 'legacy', 'ambiguous', 'stopped'] as const)('starts the new request correctly with %s history delivery', async (mode) => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-handoff-'))
+    const binaryPath = join(workspacePath, 'codex-fixture')
+    try {
+      writeFileSync(binaryPath, `#!${process.execPath}
+import { appendFileSync } from 'node:fs'
+import { createInterface } from 'node:readline'
+const mode = ${JSON.stringify(mode)}
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined) continue
+  appendFileSync('requests.log', JSON.stringify({ method, params }) + '\\n')
+  const respond = payload => console.log(JSON.stringify({ id, ...payload }))
+  if (method === 'thread/start') respond({ result: { thread: { id: 'new-native-thread' } } })
+  else if (method === 'thread/inject_items') {
+    if (mode === 'legacy') respond({ error: { code: -32601 } })
+    else if (mode === 'ambiguous') respond({ error: { code: -32603 } })
+    else if (mode !== 'stopped') respond({ result: {} })
+  }
+  else if (method === 'turn/start') respond({ result: { turn: { id: 'new-native-turn' } } })
+  else respond({ result: {} })
+}
+`, { mode: 0o755 })
+      const instance = await CodexDriver.create({ binaryPath, workspacePath })
+      try {
+        const input: StartTurnInput = {
+          text: 'The current request stays separate.',
+          historicalContext: {
+            items: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Original assistant response.' }] }],
+            inlinePrompt: 'Previous response.\n\nThe current request stays separate.',
+          },
+        }
+        const events = instance.startTurn(input)[Symbol.asyncIterator]()
+        expect((await events.next()).value).toEqual({ type: 'session-bound', providerSessionId: 'new-native-thread' })
+        if (mode === 'stopped') {
+          const log = Bun.file(join(workspacePath, 'requests.log'))
+          for (let attempt = 0; attempt < 100 && !(await log.text()).includes('thread/inject_items'); attempt++) await Bun.sleep(10)
+          await instance.interrupt()
+          expect((await events.next()).done).toBe(true)
+        }
+        else if (mode === 'ambiguous') {
+          expect((await events.next()).value).toMatchObject({ type: 'error', message: expect.stringContaining('retry in a fresh conversation') })
+          expect((await events.next()).done).toBe(true)
+        }
+        else expect((await events.next()).value).toEqual({ type: 'steering-ready' })
+        const requests = readFileSync(join(workspacePath, 'requests.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+        expect(requests.map(request => request.method)).toEqual([
+          'initialize', 'thread/start', 'thread/inject_items', ...(mode === 'ambiguous' || mode === 'stopped' ? [] : ['turn/start']),
+        ])
+        expect(requests[2]?.params).toEqual({ threadId: 'new-native-thread', items: input.historicalContext?.items })
+        if (mode === 'native' || mode === 'legacy') expect(requests[3]?.params.input).toEqual([{ type: 'text', text: mode === 'legacy' ? input.historicalContext?.inlinePrompt : input.text }])
       }
       finally {
         await instance.stop()

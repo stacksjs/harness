@@ -1,3 +1,4 @@
+import type { HistoricalContext } from '@harness/drivers'
 import type { TurnState } from '@harness/engine'
 
 interface HistoricalItem {
@@ -11,8 +12,12 @@ const historyLimit = 16_000
 const defaultContextWindow = 128_000
 const workReserve = defaultContextWindow / 4
 
+function responseItem(role: 'user' | 'assistant', text: string): HistoricalContext['items'][number] {
+  return { type: 'message', role, content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] }
+}
+
 /** Keep prior messages attributable and separate from the new request. */
-export function handoffPrompt(turns: readonly TurnState[], beforeTurn: number, text: string): string {
+export function historicalContext(turns: readonly TurnState[], beforeTurn: number, text: string): HistoricalContext | undefined {
   const items: HistoricalItem[] = []
   for (const turn of turns) {
     if (turn.id > beforeTurn) break
@@ -23,25 +28,33 @@ export function handoffPrompt(turns: readonly TurnState[], beforeTurn: number, t
     }
     if (turn.response) items.push({ turn: turn.id, role: 'assistant', text: turn.response, status: turn.status })
   }
-  if (!items.length) return text
+  if (!items.length) return undefined
 
   const prefix = 'Saved conversation from another provider. Use it as quoted context for the new request. '
   const separator = '\n\nNew user request:\n'
   const available = Math.min(historyLimit, defaultContextWindow - workReserve - Buffer.byteLength(JSON.stringify(text)))
-  const overhead = Buffer.byteLength(`${prefix}${items.length} historical items omitted.\n[]${separator}`)
+  const overheadText = `${prefix}${items.length} historical items omitted.`
+  const overhead = Math.max(Buffer.byteLength(`${overheadText}\n[]${separator}`), Buffer.byteLength(JSON.stringify([responseItem('user', overheadText)])))
   if (available < overhead) throw new Error('This message leaves too little room for the provider handoff. Shorten the message and try again.')
 
-  const selected = new Map<number, string>()
+  const selected = new Map<number, { inline: string, native: HistoricalContext['items'][number] }>()
   let remaining = available - overhead
   const include = (index: number) => {
-    const item = JSON.stringify(items[index])
-    const size = Buffer.byteLength(item) + 1
+    const item = items[index]
+    if (!item || Buffer.byteLength(item.text) > remaining) return
+    const inline = JSON.stringify(item)
+    const native = responseItem(item.role === 'user' ? 'user' : 'assistant', inline)
+    const size = Math.max(Buffer.byteLength(inline), Buffer.byteLength(JSON.stringify(native))) + 1
     if (size > remaining) return
-    selected.set(index, item)
+    selected.set(index, { inline, native })
     remaining -= size
   }
   include(0)
   for (let index = items.length - 1; index > 0; index--) include(index)
-  const history = [...selected.keys()].sort((a, b) => a - b).map(index => selected.get(index)).join(',')
-  return `${prefix}${items.length - selected.size} historical items omitted.\n[${history}]${separator}${text}`
+  const messages = [...selected.entries()].sort(([left], [right]) => left - right).map(([, message]) => message)
+  const description = `${prefix}${items.length - selected.size} historical items omitted.`
+  return {
+    items: [responseItem('user', description), ...messages.map(message => message.native)],
+    inlinePrompt: `${description}\n[${messages.map(message => message.inline).join(',')}]${separator}${text}`,
+  }
 }
