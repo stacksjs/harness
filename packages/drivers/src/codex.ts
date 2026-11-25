@@ -570,9 +570,12 @@ class CodexInstance implements ProviderInstance {
       queue.push({ type: 'session-bound', providerSessionId: this.threadId })
     }
 
+    const { effort, serviceTier } = this.config.codexTurnOptions ?? {}
     const turn = await this.request('turn/start', {
       threadId: this.threadId,
       input: [{ type: 'text', text: input.text }],
+      ...(effort ? { effort } : {}),
+      ...(serviceTier ? { serviceTier } : {}),
     })
     if (turn.error) {
       queue.finish({ type: 'error', message: this.providerError(turn.error.message ?? 'turn/start failed') })

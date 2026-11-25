@@ -517,6 +517,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
       <div data-composer-provider-controls>
+      @if(activeSessionId)
       <select
         data-driver-picker
         ref="driverPickerBox"
@@ -531,10 +532,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="grok">Grok</option>
         <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
       </select>
-      <select data-model-picker aria-label="Model for the new thread" hidden :hidden="!composerModels().length" :value="draftModel()" @change="draftModel.set($event.target.value)" class="px-2 h-8 min-w-0 text-xs bg-transparent border border-transparent rounded-md hover:border-black/15 dark:hover:border-white/20">
-        <option value="">Provider default</option>
-        <option :for="model in composerModels()" :key="model.id" :value="model.id" :text="model.name"></option>
-      </select>
+      @else
+      @include('../partials/harness-model-picker')
+      @endif
       </div>
       <div class="flex flex-wrap gap-2 justify-end">
         <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" :text="sendLabel()" class="px-4 h-8 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-full">Send</button>
@@ -1799,15 +1799,158 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const KNOWN_DRIVERS = ['claude', 'codex', 'opencode', 'cursor', 'grok']
   const DRIVER_LABELS = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
   const providerAccounts = state([])
-  const defaultProviderModels = state({})
-  const draftProvider = state('')
+  const defaultProviders = state([])
+  const providerCatalog = state('loading')
+  const draftProvider = state(defaultDriver())
   const draftModel = state('')
-  const composerModels = derived(() => {
-    if (activeSessionId) return []
-    const value = draftProvider()
-    return (value.includes(':') ? providerAccounts().find(account => account.value === value)?.models : defaultProviderModels()[value]) || []
+  const draftEffort = state('')
+  const draftSpeed = state('')
+  const composerProviders = derived(() => [...defaultProviders(), ...providerAccounts()])
+  const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
+  const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
+  const draftPickerLabel = derived(() => {
+    const model = selectedDraftModel()
+    const effort = draftEffort()
+    const speed = model?.speedTiers.find(tier => tier.id === draftSpeed())?.name
+    return model ? [model.name, effort ? pickerEffortLabel(effort) : '', speed].filter(Boolean).join(' · ')
+      : selectedDraftAccount()?.name || DRIVER_LABELS[draftProvider()]
   })
   const activeDriverValue = sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`
+
+  const draftPickerTrigger = useRef('draftPickerTriggerBox')
+  const draftPickerDialog = useRef('draftPickerDialogBox')
+  const draftPickerSearch = useRef('draftPickerSearchBox')
+  const draftPickerResults = useRef('draftPickerResultsBox')
+  const draftPickerAccounts = useRef('draftPickerAccountsBox')
+  const draftPickerOpen = state(false)
+  const pickerAccount = state('')
+  const pickerQuery = state('')
+  const pickerIndex = state(0)
+  const pickerOptionModel = derived(() => {
+    const model = selectedDraftModel()
+    return pickerAccount() === draftProvider() && draftProvider().split(':')[0] === 'codex'
+      && (model?.reasoningEfforts.length || model?.speedTiers.length) ? model : undefined
+  })
+  const pickerResults = derived(() => {
+    const search = pickerQuery().toLowerCase().trim().split(/\s+/).filter(Boolean)
+    const accounts = composerProviders().filter(account => account.status === 'ready' && (search.length || account.value === pickerAccount()))
+    return accounts.flatMap(account => {
+      const rows = [{ id: '', name: 'Provider default' }, ...(account.models || [])]
+      return rows.filter(model => {
+        const text = `${model.name} ${model.id} ${account.name}`.toLowerCase()
+        return search.every(word => text.includes(word))
+      }).map(model => ({ id: model.id, name: model.name, account: account.value, accountName: account.name, key: `${account.value}/${model.id}` }))
+    })
+  })
+  const pickerStatus = derived(() => {
+    if (providerCatalog() === 'failed') return 'Could not load provider accounts.'
+    if (providerCatalog() === 'loading') return 'Checking provider accounts…'
+    if (!pickerQuery().trim() && !pickerResults().length) return 'Choose an available account.'
+    return 'No matching models'
+  })
+
+  function pickerEffortLabel(effort) {
+    return effort === 'xhigh' ? 'Extra high' : effort.charAt(0).toUpperCase() + effort.slice(1)
+  }
+
+  function positionDraftPicker() {
+    const trigger = draftPickerTrigger.current
+    const dialog = draftPickerDialog.current
+    if (!trigger || !dialog?.open) return
+    const anchor = trigger.getBoundingClientRect()
+    const viewport = dialog.ownerDocument.documentElement
+    const visual = dialog.ownerDocument.defaultView?.visualViewport
+    const top = visual?.offsetTop || 0
+    const height = visual?.height || viewport.clientHeight
+    dialog.style.setProperty('--draft-picker-viewport', height + 'px')
+    const bounds = dialog.getBoundingClientRect()
+    const below = anchor.bottom + 6
+    const above = anchor.top - bounds.height - 6
+    const preferred = above >= top + 8 || below + bounds.height > top + height - 8 ? above : below
+    dialog.style.setProperty('--draft-picker-top', Math.max(top + 8, Math.min(preferred, top + height - bounds.height - 8)) + 'px')
+    dialog.style.setProperty('--draft-picker-left', Math.max(8, Math.min(anchor.right - bounds.width, viewport.clientWidth - bounds.width - 8)) + 'px')
+    revealPickerAccount()
+  }
+
+  function openDraftPicker(event) {
+    const dialog = draftPickerDialog.current
+    if (!dialog || dialog.open) return
+    pickerQuery.set('')
+    pickerAccount.set(draftProvider())
+    pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.id === draftModel())))
+    draftPickerOpen.set(true)
+    dialog.showModal()
+    void nextTick(() => {
+      positionDraftPicker()
+      if (event?.pointerType !== 'touch') draftPickerSearch.current?.focus()
+    })
+  }
+
+  function closeDraftPicker() {
+    draftPickerDialog.current?.close()
+    draftPickerOpen.set(false)
+    draftPickerTrigger.current?.focus()
+  }
+
+  function browsePickerAccount(value) {
+    pickerAccount.set(value)
+    pickerQuery.set('')
+    pickerIndex.set(0)
+    void nextTick(revealPickerAccount)
+  }
+
+  function revealPickerAccount() {
+    draftPickerAccounts.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
+
+  function updatePickerQuery(event) {
+    pickerQuery.set(event.currentTarget.value)
+    pickerIndex.set(0)
+  }
+
+  function pickerSearchKeydown(event) {
+    if (event.isComposing || event.keyCode === 229) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closeDraftPicker()
+      return
+    }
+    const rows = pickerResults()
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (rows[pickerIndex()]) pickDraftModel(rows[pickerIndex()])
+    }
+    if (rows.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      const next = (pickerIndex() + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length
+      pickerIndex.set(next)
+      draftPickerResults.current?.querySelector(`#draft-model-result-${next}`)?.scrollIntoView({ block: 'nearest' })
+    }
+  }
+
+  function pickDraftModel(result) {
+    if (draftProvider() !== result.account || draftModel() !== result.id) {
+      draftProvider.set(result.account)
+      draftModel.set(result.id)
+      draftEffort.set('')
+      draftSpeed.set('')
+    }
+    if (!result.account.includes(':')) localStorage.setItem('harness.defaultDriver', result.account)
+    browsePickerAccount(result.account)
+    pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.id === result.id)))
+    if (!pickerOptionModel()) closeDraftPicker()
+    else void nextTick(positionDraftPicker)
+  }
+
+  useEventListener('resize', positionDraftPicker)
+  onMount(() => {
+    const viewport = draftPickerTrigger.current?.ownerDocument.defaultView?.visualViewport
+    if (viewport) {
+      useEventListener('resize', positionDraftPicker, { target: viewport })
+      useEventListener('scroll', positionDraftPicker, { target: viewport })
+    }
+  })
 
   function driverStateLabel(status, version) {
     if (status === 'ready') return version ? `ready · ${version}` : 'ready'
@@ -1840,17 +1983,24 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // the answer in their option labels, with unusable agents disabled — a
   // driver you cannot run should not be one click from a dead session.
   async function annotateDriverPickers() {
+    if (!defaultProviders().length) providerCatalog.set('loading')
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
     const modelsQuery = !activeSessionId && canCompose ? '&models=1' : ''
     const response = await fetch(`/drivers?workspace=${workspace}${modelsQuery}`).catch(() => null)
-    if (!response?.ok) return
+    if (!response?.ok) {
+      if (!defaultProviders().length) providerCatalog.set('failed')
+      return
+    }
     const { drivers, accounts = [] } = await response.json()
     if (sessionProviderInstanceId !== null && !accounts.some(account => account.id === sessionProviderInstanceId)) {
       accounts.push({ id: sessionProviderInstanceId, kind: sessionDriver, name: 'Saved account', status: 'deleted' })
     }
     const picker = driverPickerRef.current
     const selection = picker?.value || activeDriverValue || defaultDriver()
-    defaultProviderModels.set(Object.fromEntries(drivers.map(info => [info.kind, info.models])))
+    defaultProviders.set(drivers.map(info => ({
+      ...info, value: info.kind, name: DRIVER_LABELS[info.kind] || info.kind,
+      stateText: driverStateLabel(info.status, info.version),
+    })))
     providerAccounts.set(accounts.map(account => {
       const managed = account.auth === 'chatgpt'
       const stateText = managed && account.status === 'unauthenticated'
@@ -1862,8 +2012,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }))
     void nextTick(() => {
       if (picker) picker.value = selection
-      if (!activeSessionId) draftProvider.set(selection)
     })
+    providerCatalog.set('ready')
+    if (draftPickerOpen()) void nextTick(positionDraftPicker)
     for (const info of drivers) {
       const stateText = driverStateLabel(info.status, info.version)
       for (const boxName of ['driverPickerBox', 'settingsDriverBox']) {
@@ -1916,12 +2067,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const picker = event.currentTarget
     const value = picker.value
     const choice = agentChoice(value)
-    if (!activeSessionId) {
-      if (choice.providerInstanceId === undefined) localStorage.setItem('harness.defaultDriver', choice.driverKind)
-      draftProvider.set(value)
-      draftModel.set('')
-      return
-    }
     if (value === activeDriverValue) return
     const label = providerAccounts().find(account => account.value === value)?.name || DRIVER_LABELS[choice.driverKind]
     if (await stxConfirm(`Start a new session with ${label} in this workspace?`)) {
@@ -1951,7 +2096,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   requestAnimationFrame(() => {
     const picker = driverPickerRef.current
     if (picker) picker.value = activeDriverValue || defaultDriver()
-    if (!activeSessionId) draftProvider.set(picker?.value || defaultDriver())
     annotateDriverPickers()
 
     restorePrompt()
@@ -2493,17 +2637,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       if (!draftProject?.trusted && !draftWithoutProject) return
       startPending.set(true)
       try {
-        const picker = driverPickerRef.current
-        if (picker?.selectedOptions[0]?.disabled) throw new Error('Choose an available agent to start this session.')
-        const choice = agentChoice(picker?.value || defaultDriver())
-        const selectedModel = draftModel()
-        const model = composerModels().some(item => item.id === selectedModel) ? { model: selectedModel } : {}
+        const account = selectedDraftAccount()
+        if (providerCatalog() === 'ready' && account?.status !== 'ready') throw new Error('Choose an available agent to start this session.')
+        const choice = agentChoice(draftProvider())
+        const selected = selectedDraftModel()
+        const effort = selected?.reasoningEfforts.includes(draftEffort()) ? draftEffort() : ''
+        const serviceTier = selected?.speedTiers.some(tier => tier.id === draftSpeed()) ? draftSpeed() : ''
+        const model = selected ? { model: selected.id } : {}
+        const options = choice.driverKind === 'codex' && (effort || serviceTier)
+          ? { codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } }
+          : {}
         if (draftWithoutProject) {
           const profileId = Number(activeProfile) || undefined
-          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text, ...model }, commandId)
+          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text, ...model, ...options }, commandId)
         }
         else {
-          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice, ...model }, commandId)
+          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice, ...model, ...options }, commandId)
         }
         const nextSession = derivedSessionId(commandId)
         pendingFirstPrompt.set({ sessionId: nextSession, text: raw })

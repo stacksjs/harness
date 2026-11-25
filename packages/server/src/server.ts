@@ -194,6 +194,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           driverKind: command.driverKind,
           path: scratchWorkspacePath(scratchDirectory, envelope.id, command.label),
           ...(command.model ? { model: command.model } : {}),
+          ...(command.codexTurnOptions === undefined ? {} : { codexTurnOptions: command.codexTurnOptions }),
         }
       }
       if (command.type === 'session.create' && command.providerInstanceId !== undefined) {

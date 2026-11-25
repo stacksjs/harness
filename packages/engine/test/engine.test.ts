@@ -79,7 +79,8 @@ describe('Engine — the M1 exit criterion', () => {
   it('hydrates a fresh engine from the same store to the same state', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)
-    const sessionCmd = envelope({ type: 'session.create', workspaceId, driverKind: 'codex' })
+    const codexTurnOptions = { effort: 'high', serviceTier: 'fast' }
+    const sessionCmd = envelope({ type: 'session.create', workspaceId, driverKind: 'codex', model: 'fixture-model', codexTurnOptions })
     await engine.dispatch(sessionCmd)
 
     // What a server restart actually does.
@@ -88,6 +89,22 @@ describe('Engine — the M1 exit criterion', () => {
 
     expect(restarted.current.sessions.get(derivedId(sessionCmd.id)))
       .toEqual(engine.current.sessions.get(derivedId(sessionCmd.id))!)
+    expect(restarted.current.sessions.get(derivedId(sessionCmd.id))?.codexTurnOptions).toEqual(codexTurnOptions)
+  })
+
+  it('rejects Codex model options on an unselected model, a different provider, or an invalid tier', async () => {
+    const { engine } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const codexTurnOptions = { effort: 'high', serviceTier: 'fast' }
+    await expect(engine.dispatch(envelope({ type: 'session.create', workspaceId, driverKind: 'codex', codexTurnOptions })))
+      .rejects.toThrow('specific Codex model')
+    await expect(engine.dispatch(envelope({ type: 'session.create', workspaceId, driverKind: 'claude', model: 'fixture', codexTurnOptions })))
+      .rejects.toThrow('specific Codex model')
+    await expect(engine.dispatch(envelope({
+      type: 'session.create', workspaceId, driverKind: 'codex', model: 'fixture',
+      codexTurnOptions: { serviceTier: 'bad tier' },
+    }))).rejects.toThrow('valid speed tier')
+    expect(engine.current.sessions.size).toBe(0)
   })
 })
 

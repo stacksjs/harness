@@ -13,7 +13,12 @@ readline.on('line', line => {
   const reply = value => console.log(JSON.stringify({ jsonrpc: '2.0', id: request.id, ...value }))
   if (request.method === 'initialize') reply({ result: {} })
   else if (request.method === 'thread/start') reply({ result: { thread: { id: 'native-thread' } } })
-  else if (request.method === 'turn/start') reply({ result: { turn: { id: 'native-turn' } } })
+  else if (request.method === 'turn/start') {
+    const { effort, serviceTier } = request.params
+    if (effort !== 'high' || serviceTier !== 'fast')
+      return reply({ error: { message: 'The selected Codex turn options were lost' } })
+    reply({ result: { turn: { id: 'native-turn' } } })
+  }
   else if (request.method === 'turn/steer') {
     const { threadId, expectedTurnId, input } = request.params
     if (threadId !== 'native-thread' || expectedTurnId !== 'native-turn' || input.length !== 1 || input[0].type !== 'text')
@@ -32,7 +37,10 @@ it('steers the exact native turn and distinguishes refusal from loss of acknowle
     const binaryPath = join(root, 'codex-fixture')
     writeFileSync(binaryPath, `#!${process.execPath}\n${fixture}`)
     chmodSync(binaryPath, 0o755)
-    const instance = await CodexDriver.create({ binaryPath, workspacePath: root, autoApprove: true })
+    const instance = await CodexDriver.create({
+      binaryPath, workspacePath: root, autoApprove: true, model: 'fixture-model',
+      codexTurnOptions: { effort: 'high', serviceTier: 'fast' },
+    })
     try {
       expect(await instance.steer?.('Too early')).toBe('rejected')
       const events = instance.startTurn({ text: 'Open active turn' })[Symbol.asyncIterator]()

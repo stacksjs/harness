@@ -10,7 +10,7 @@
  * `driverKind: 'harness'` beside `'claude'`, with nothing above it changing.
  */
 
-import type { ApprovalChoice, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, CodexTurnOptions, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
 
 /**
  * What a driver emits while a turn runs.
@@ -94,6 +94,7 @@ export interface DriverConfig {
   home?: string
   binaryPath?: string
   model?: string
+  codexTurnOptions?: CodexTurnOptions
   /** Host-only credentials for a managed Codex connection. */
   chatGptPlan?: {
     accessToken: () => Promise<string>

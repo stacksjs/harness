@@ -6,7 +6,7 @@
  * identical state rather than a similar one.
  */
 
-import type { Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, validInputAnswers } from '@harness/contract'
 import { isTurnActive } from './projections'
 import type { AppendableEvent } from './store'
@@ -41,6 +41,26 @@ function followUpText(value: unknown): string {
   const text = typeof value === 'string' ? value.trim() : ''
   if (!text) throw new InvalidCommand('Enter a message to queue.')
   return text
+}
+
+function sessionModel(command: Extract<Command, { type: 'session.create' | 'thread.scratch.create' }>): {
+  model?: string
+  codexTurnOptions?: CodexTurnOptions
+} {
+  const model = command.model ? { model: command.model } : {}
+  const options = command.codexTurnOptions
+  if (options === undefined) return model
+  if (command.driverKind !== 'codex' || typeof command.model !== 'string' || !command.model.trim()
+    || !options || typeof options !== 'object' || Array.isArray(options)
+    || Object.keys(options).some(key => key !== 'effort' && key !== 'serviceTier'))
+    throw new InvalidCommand('Model options require a specific Codex model.')
+
+  const { effort, serviceTier } = options
+  if (effort !== undefined && (typeof effort !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort)))
+    throw new InvalidCommand('Choose a valid reasoning effort.')
+  if (serviceTier !== undefined && (typeof serviceTier !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(serviceTier)))
+    throw new InvalidCommand('Choose a valid speed tier.')
+  return effort || serviceTier ? { ...model, codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } } : model
 }
 
 function turnStarted(session: SessionState, text: string, queuedId?: string): EventPayload {
@@ -371,7 +391,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
             type: 'session.created',
             workspaceId: sessionId,
             driverKind: command.driverKind,
-            ...(command.model ? { model: command.model } : {}),
+            ...sessionModel(command),
           },
         },
       )
@@ -397,9 +417,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           workspaceId: command.workspaceId,
           driverKind: command.driverKind,
           ...(command.providerInstanceId !== undefined ? { providerInstanceId: command.providerInstanceId } : {}),
-          // Omitted rather than sent empty, so "no preference" and "the empty
-          // model" cannot be confused on replay.
-          ...(command.model ? { model: command.model } : {}),
+          ...sessionModel(command),
           ...(command.isolate ? { isolate: true } : {}),
         },
       }]

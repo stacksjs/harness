@@ -215,6 +215,7 @@ const driver: Driver = {
 }
 let fixtureCodexReady = false
 let fixtureCodexLaunchModel: string | undefined
+let fixtureCodexLaunchOptions: { effort?: string, serviceTier?: string } | undefined
 const codexDriver: Driver = {
   ...driver,
   kind: 'codex',
@@ -224,11 +225,16 @@ const codexDriver: Driver = {
     const id = homeModel ? 'fixture-fast' : 'fixture-default'
     return {
       status: 'ready',
-      ...(includeModels ? { models: [{ id, name: homeModel ? 'Fixture Fast' : 'Fixture Default', isDefault: true, reasoningEfforts: [], speedTiers: [] }] } : {}),
+      ...(includeModels ? { models: [{
+        id, name: homeModel ? 'Fixture Fast' : 'Fixture Default', isDefault: true,
+        reasoningEfforts: ['medium', 'high'], defaultReasoningEffort: 'medium',
+        speedTiers: [{ id: 'fast', name: 'Fast' }],
+      }] } : {}),
     }
   },
   async create(config) {
     fixtureCodexLaunchModel = config.model
+    fixtureCodexLaunchOptions = config.codexTurnOptions
     return driver.create(config)
   },
 }
@@ -655,7 +661,9 @@ await page.locator('[data-draft-project]').selectOption(String(secondWorkspaceId
 await page.waitForURL(`**/?workspace=${secondWorkspaceId}`)
 await capture('onboarding-selected-project')
 await page.setViewportSize({ width: 1280, height: 800 })
-await page.selectOption('[data-driver-picker]', 'claude:2')
+await page.getByRole('button', { name: 'Choose agent and model' }).click()
+await page.getByRole('button', { name: /Claude Code.*Personal/ }).click()
+await page.getByRole('option', { name: 'Provider default' }).click()
 await page.fill('[data-prompt]', 'typed with no session open')
 await page.click('[data-send]')
 await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
@@ -1535,17 +1543,59 @@ await conversationFind.getByRole('button', { name: 'Close find' }).click()
     .run(4, providerProfileId, 'codex', '{"name":"Catalog fixture"}', 'model-fixture-home')
 }
 await page.goto(`${baseUrl}/?workspace=${workspaceId}`)
-const draftAgent = page.locator('[data-driver-picker]')
-const draftModelPicker = page.getByRole('combobox', { name: 'Model for the new thread' })
-await draftAgent.selectOption('codex:4')
-await page.locator('[data-model-picker] option[value="fixture-fast"]').waitFor({ state: 'attached' })
-check('choosing a named account exposes its own model catalog',
-  await draftModelPicker.isVisible() && await draftModelPicker.locator('option[value="fixture-default"]').count() === 0)
-await draftModelPicker.selectOption('fixture-fast')
+await page.setViewportSize({ width: 1280, height: 800 })
+const draftPicker = page.getByRole('button', { name: 'Choose agent and model' })
+const draftDialog = page.getByRole('dialog', { name: 'Agent and model' })
+const draftSearch = draftDialog.getByRole('combobox', { name: 'Search models' })
+await draftPicker.click()
+await draftDialog.getByRole('button', { name: /Codex.*Catalog fixture/ }).click()
+check('browsing a named account exposes its own model catalog',
+  await draftDialog.getByRole('option', { name: 'Fixture Fast' }).isVisible()
+  && await draftDialog.getByRole('option', { name: 'Fixture Default' }).count() === 0)
+await draftSearch.fill('No such model')
+await draftDialog.getByText('No matching models').waitFor()
+await draftSearch.press('Escape')
+await draftDialog.waitFor({ state: 'hidden' })
+check('Escape returns focus after browsing and leaves the draft selection unchanged',
+  await draftPicker.evaluate(button => button === document.activeElement && !button.textContent?.includes('Fixture Fast')))
+await draftPicker.click()
+await draftSearch.fill('fixture-fast')
+await draftDialog.getByRole('option', { name: /Fixture Fast/ }).waitFor()
+await draftSearch.press('ArrowDown')
+check('model search keeps keyboard focus on the combobox and exposes the highlighted result',
+  await draftSearch.evaluate(input => {
+    const option = document.getElementById(input.getAttribute('aria-activedescendant') ?? '')
+    return input === document.activeElement && option?.textContent?.includes('Fixture Fast') === true
+  }))
+await draftSearch.press('Enter')
+await draftDialog.getByRole('button', { name: 'High', exact: true }).click()
+await draftDialog.getByRole('button', { name: 'Fast', exact: true }).click()
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  const fitted = await page.waitForFunction(() => {
+    const box = document.querySelector('[data-draft-model-dialog]')?.getBoundingClientRect()
+    return !!box && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight
+  }, undefined, { timeout: 2000 }).then(() => true, () => false)
+  check(`the model picker stays within the ${width}×${height} viewport`, fitted)
+  await capture(`model-picker-${width}x${height}`)
+}
+check('the selected named account is visible in the phone account strip', await draftDialog.evaluate(dialog => {
+  const accounts = dialog.querySelector('[data-draft-model-accounts]')?.getBoundingClientRect()
+  const selected = dialog.querySelector('[data-draft-model-account][aria-pressed="true"]')?.getBoundingClientRect()
+  return !!accounts && !!selected && selected.left >= accounts.left - 1 && selected.right <= accounts.right + 1
+}))
+await page.setViewportSize({ width: 360, height: 470 })
+check('the model search and dismissal stay reachable in a short phone viewport',
+  await draftDialog.evaluate(dialog => {
+    const search = dialog.querySelector('[role="combobox"]')?.getBoundingClientRect()
+    const done = dialog.querySelector('footer button')?.getBoundingClientRect()
+    return !!search && !!done && search.top >= 0 && done.bottom <= innerHeight
+  }))
 await page.setViewportSize({ width: 360, height: 800 })
-check('provider, model and send fit in the narrow composer', await page.evaluate(() => {
+await draftDialog.getByRole('button', { name: 'Done' }).click()
+check('the selected model and send fit in the narrow composer', await page.evaluate(() => {
   const composer = document.querySelector('[data-composer]')?.getBoundingClientRect()
-  return !!composer && [...document.querySelectorAll('[data-driver-picker], [data-model-picker], [data-send]')].every((control) => {
+  return !!composer && [...document.querySelectorAll('[data-model-picker-trigger], [data-send]')].every((control) => {
     const bounds = control.getBoundingClientRect()
     return bounds.width > 0 && bounds.left >= composer.left && bounds.right <= composer.right
   }) && document.documentElement.scrollWidth === innerWidth
@@ -1565,8 +1615,10 @@ await page.locator('[data-send]').click()
 await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
 await page.locator('[data-turn]').getByText('Use the selected named model.').waitFor()
 const catalogSession = harness.engine.current.sessions.get(Number(new URL(page.url()).pathname.split('/').at(-1)))
-check('a new thread launches with the selected account and model',
-  catalogSession?.providerInstanceId === 4 && catalogSession.model === 'fixture-fast' && fixtureCodexLaunchModel === 'fixture-fast')
+check('a new thread launches with the selected account, model and turn options',
+  catalogSession?.providerInstanceId === 4 && catalogSession.model === 'fixture-fast' && fixtureCodexLaunchModel === 'fixture-fast'
+  && catalogSession.codexTurnOptions?.effort === 'high' && catalogSession.codexTurnOptions.serviceTier === 'fast'
+  && fixtureCodexLaunchOptions?.effort === 'high' && fixtureCodexLaunchOptions.serviceTier === 'fast')
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

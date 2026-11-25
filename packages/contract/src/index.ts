@@ -13,6 +13,7 @@ export type {
   ApprovalScope,
   ConnectorApproval,
   ClientCommand,
+  CodexTurnOptions,
   Command,
   CommandEnvelope,
   CommandType,

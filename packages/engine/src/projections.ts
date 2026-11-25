@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, InputQuestion, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
 import { applyFollowUpEvent } from '@harness/contract'
 
@@ -25,6 +25,7 @@ export interface SessionState {
   providerInstanceId?: number
   /** Model override for this session. Empty means the provider's own default. */
   model: string
+  codexTurnOptions?: CodexTurnOptions
   providerSessionId: string
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastSeq: number
@@ -322,6 +323,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         driverKind: p.driverKind,
         ...(p.providerInstanceId !== undefined ? { providerInstanceId: p.providerInstanceId } : {}),
         model: p.model ?? '',
+        ...(p.codexTurnOptions ? { codexTurnOptions: p.codexTurnOptions } : {}),
         providerSessionId: '',
         state: 'idle',
         lastSeq: 0,

@@ -204,6 +204,7 @@ export class ProviderRuntime {
       workspacePath,
       autoApprove: this.options.autoApprove,
       model: session?.model || undefined,
+      ...(session?.codexTurnOptions ? { codexTurnOptions: session.codexTurnOptions } : {}),
     }
     const probe = await driver.probe(launch)
     if (probe.status !== 'ready') {
