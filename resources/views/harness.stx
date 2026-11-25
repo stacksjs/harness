@@ -19,6 +19,8 @@ export const initialSettingsSection = $props.settingsSection || ''
 export const settingsSections = $props.settingsSections || []
 // The keyboard registry, with both platform spellings of every default chord.
 export const keybindings = $props.keybindings || []
+// Settings this host owns, shared by every client connected to it.
+export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue' }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -136,6 +138,16 @@ export const initialSteerable = liveTurn?.steerable === true
 export const initialInputActivity = liveTurn?.inputRequests || []
 </script>
 
+{{--
+  The shared browser module, fetched and compiled while the page paints rather
+  than on the first dynamic import that needs it. Everything interactive here
+  waits on it: the socket, the command sender, the transcript finder, and the
+  keyboard registry that answers the window chords. Without the hint, a chord
+  pressed in the first moments after a load found no registry and did nothing.
+--}}
+@if(codecUrl)
+  <link rel="modulepreload" href="{{ codecUrl }}">
+@endif
 <div data-harness-shell :data-sidebar-collapsed="sidebarCollapsed()" class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
   {{--
     `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
@@ -790,6 +802,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       <select
         id="settings-driver"
         ref="settingsDriverBox"
+        :value="settings().defaultDriver"
         @change="saveDriverChoice"
         class="mb-2 px-3 py-2 w-full text-[13px] bg-white dark:bg-neutral-950 border border-black/10 outline-none rounded-[8px] dark:border-white/10"
       >
@@ -804,6 +817,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="queue">Queue for the next turn</option>
         <option value="steer">Steer the active turn</option>
       </select>
+      <p data-host-settings-note class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">These apply to every client of this host. Appearance and keyboard shortcuts stay with this browser.</p>
+      <p data-settings-error role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
       </section>
       <section :hidden="settingsSelection() !== 'providers'" data-settings-pane>
       <h3 data-settings-section="providers" tabindex="-1">Providers</h3>
@@ -1001,7 +1016,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
   const followUps = state(initialFollowUps)
   const steeringMessage = useRef('steeringMessageBox')
-  const followUpPreference = useLocalStorage('harness.follow-up-behavior.v1', 'queue')
+  // Host settings, seeded from the render and kept here so a change shows at
+  // once rather than after the round trip. They are not in `localStorage`:
+  // the phone and the laptop pointed at one host must agree about which agent
+  // a new thread starts with, and the browser store cannot give them that.
+  const settings = state({ ...hostSettings })
+  const settingsSaveError = state('')
+  const followUpPreference = derived(() => settings().followUpBehavior)
   const oppositeFollowUp = derived(() => followUpPreference() === 'steer' ? 'queue' : 'steer')
   const steeringPending = derived(() => followUps().entries.some(entry => entry.steering))
   const localFollowUps = useLocalStorage(`harness.follow-ups.v1:${activeProfile || 0}:${promptScope}`, [], { listenToStorageChanges: false })
@@ -1174,7 +1195,28 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return followUpActions()?.run('send', id)
   }
   function setFollowUpPreference(event) {
-    followUpPreference.set(event.target.value === 'steer' ? 'steer' : 'queue')
+    void updateSettings({ followUpBehavior: event.target.value === 'steer' ? 'steer' : 'queue' })
+  }
+
+  /**
+   * Write host settings, optimistically.
+   *
+   * The select already shows the new value, so the state moves first and is
+   * put back if the host refuses. Leaving the control ahead of the host would
+   * have the next reload silently undo the change.
+   */
+  async function updateSettings(changes) {
+    const previous = settings()
+    if (Object.entries(changes).every(([key, value]) => previous[key] === value)) return
+    settings.set({ ...previous, ...changes })
+    settingsSaveError.set('')
+    try {
+      await sendCommand({ type: 'settings.update', changes })
+    }
+    catch (error) {
+      settings.set(previous)
+      settingsSaveError.set(error.message || 'Could not save that setting.')
+    }
   }
   // Stop hides the moment it is clicked, before the log settles the turn.
   const stopPressed = state(false)
@@ -1295,12 +1337,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         const names = resolved.rejected.map(entry => keybindingRow(entry.id)?.label || entry.id)
         keybindingStatus.set(`Restored the default shortcut for ${names.join(', ')}.`)
       }
+      // Announced on the document, because "the chords work now" is not
+      // visible on screen: a test, or a person watching, otherwise cannot
+      // tell a chord that did nothing from one that arrived too early.
+      document.documentElement.dataset.harnessKeyboard = 'ready'
     }
     catch {
       // No registry means no rebinding and no window chords; Escape and every
       // on-screen control still work.
     }
   }
+
+  // Started here rather than on mount: the import is the only thing between a
+  // painted page and a working chord, so it begins as early as the island can
+  // begin anything.
+  void loadKeybindings()
 
   function recordKeybinding(id) {
     if (!keybindingStore) return
@@ -2128,6 +2179,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const picker = event.currentTarget
     const value = picker.value
     const choice = agentChoice(value)
+    if (!activeSessionId) {
+      if (choice.providerInstanceId === undefined) void updateSettings({ defaultDriver: choice.driverKind })
+      return
+    }
     if (value === activeDriverValue) return
     const label = providerAccounts().find(account => account.value === value)?.name || DRIVER_LABELS[choice.driverKind]
     if (await stxConfirm(`Start a new session with ${label} in this workspace?`)) {
@@ -2163,7 +2218,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   })
 
   function defaultDriver() {
-    const stored = localStorage.getItem('harness.defaultDriver')
+    const stored = settings().defaultDriver
     return KNOWN_DRIVERS.includes(stored) ? stored : 'claude'
   }
 
@@ -2239,7 +2294,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   })
 
   onMount(() => {
-    void loadKeybindings()
     if (initialSettingsSection) openSettings(undefined, initialSettingsSection, false)
   })
 
@@ -2333,7 +2387,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function saveDriverChoice() {
     const box = settingsDriverRef.current
-    if (box) localStorage.setItem('harness.defaultDriver', box.value)
+    if (box) void updateSettings({ defaultDriver: box.value })
   }
 
   // The desktop app menu's Settings… item (Cmd+,): craft evaluates this

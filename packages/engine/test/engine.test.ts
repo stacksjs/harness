@@ -325,6 +325,50 @@ describe('Engine — the client/internal boundary', () => {
   })
 })
 
+describe('Host settings', () => {
+  it('records only what changed and replays to the same state', async () => {
+    const { engine, store } = await bootedEngine()
+    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue' })
+
+    await engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'queue' } }))
+    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue' })
+
+    // `followUpBehavior` was already queue, so the log records the one field
+    // that moved. Restating the rest would make the log unable to answer what
+    // this command changed.
+    const events = await store.read(0)
+    const updates = events.filter(event => event.payload.type === 'settings.updated')
+    expect(updates).toHaveLength(1)
+    expect(updates[0]!.payload).toEqual({ type: 'settings.updated', changes: { defaultDriver: 'codex' } })
+
+    expect(replay(events).settings).toEqual(engine.current.settings)
+  })
+
+  it('refuses an update that changes nothing, including one made of junk', async () => {
+    const { engine } = await bootedEngine()
+    await expect(engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'claude' } })))
+      .rejects.toThrow(/changes nothing/)
+    // Unknown keys and unusable values are dropped, which leaves nothing to
+    // record rather than a settings row with a field no build understands.
+    await expect(engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'emacs', nonsense: 1 } as never })))
+      .rejects.toThrow(/changes nothing/)
+    expect(engine.current.settings.defaultDriver).toBe('claude')
+  })
+
+  it('falls back to the default for a value a later build stopped accepting', () => {
+    // Written by a build that still had this driver. Replaying it verbatim
+    // would put the projection somewhere its own type forbids.
+    const state = replay([{
+      seq: 1,
+      sessionId: 0,
+      commandId: 'cmd_old',
+      at: clock,
+      payload: { type: 'settings.updated', changes: { defaultDriver: 'retired-agent', followUpBehavior: 'steer' } as never },
+    }], emptyState())
+    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer' })
+  })
+})
+
 describe('Engine — rules the reducer enforces', () => {
   it('refuses a session in an untrusted workspace', async () => {
     const { engine } = await bootedEngine()

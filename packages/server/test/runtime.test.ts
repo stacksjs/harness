@@ -1058,6 +1058,66 @@ describe('thread wake scheduling', () => {
   })
 })
 
+describe('host settings belong to the host', () => {
+  it('reaches a second client and survives a restart, and a second host keeps its own', async () => {
+    const database = join(dir, 'test.sqlite')
+    const { driver } = fakeDriver([])
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+
+    const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer' } } } })
+    expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer' })
+
+    // The page a second client is served carries the same answer. This is the
+    // difference from a browser-stored preference: the phone and the laptop
+    // pointed at one host no longer disagree.
+    //
+    // The template resolves from cwd and the resolution is memoized for the
+    // process, so this renders from the repo root the way the render-cache
+    // test does. Fetching `/` from the package directory would not merely
+    // fail here, it would pin "no view" for every later test in the file set.
+    const previousCwd = process.cwd()
+    process.chdir(join(import.meta.dir, '../../..'))
+    let page: string
+    try {
+      page = await fetch(`http://127.0.0.1:${port}/`).then(response => response.text())
+    }
+    finally {
+      process.chdir(previousCwd)
+    }
+    expect(page).toMatch(/defaultDriver\\?["']\s*:\s*\\?["']codex/)
+    first.close()
+    harness.stop()
+
+    // The setting is in the log, so a fresh process over the same database
+    // still has it.
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer' })
+    harness.stop()
+
+    // A different host, which is a different log: independent by construction
+    // rather than by a rule someone has to remember.
+    const otherDatabase = join(dir, 'other.sqlite')
+    prepareDatabase(otherDatabase)
+    harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue' })
+  })
+
+  it('rejects a settings command that carries nothing this host accepts', async () => {
+    const { driver } = fakeDriver([])
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+
+    client.send({ t: 'dispatch', envelope: { id: 'c_bad', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'emacs' } } } })
+    const receipt: any = await client.waitForDispatch('c_bad')
+    expect(receipt?.t).toBe('rejected')
+    // Recovery is the default, not a stored value no build understands.
+    expect(harness.engine.current.settings.defaultDriver).toBe('claude')
+    client.close()
+  })
+})
+
 describe('a restart does not strand a turn', () => {
   it('interrupts a turn that was running when the process stopped', async () => {
     // A turn only runs because a provider instance is running it, and those die

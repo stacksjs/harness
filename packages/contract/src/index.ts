@@ -32,5 +32,8 @@ export type { QuestionAttachment } from './input'
 export { applyFollowUpEvent } from './follow-ups'
 export type { FollowUpQueue, QueuedFollowUp, SteeringOutcome } from './follow-ups'
 
+export { acceptedSettings, defaultHostSettings, hostSettings, settingsDelta } from './settings'
+export type { FollowUpBehavior, HostSettings } from './settings'
+
 export { maximumThreadSnooze, pinOrder, threadDisplayTitle } from './thread-navigation'
 export type { ThreadNavigation, ThreadOrganizationAction } from './thread-navigation'

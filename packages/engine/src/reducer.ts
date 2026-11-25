@@ -7,7 +7,7 @@
  */
 
 import type { CodexTurnOptions, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
-import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, validInputAnswers } from '@harness/contract'
+import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
 import { isTurnActive, modelFavoriteIndex } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -133,6 +133,18 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
   const commandId = envelope.id
 
   switch (command.type) {
+    case 'settings.update': {
+      // Only what actually moves. A client that re-sends the whole settings
+      // object on every keystroke would otherwise fill the log with events
+      // that changed nothing, and "when did this change?" would stop having
+      // an answer.
+      const changes = settingsDelta(state.settings, command.changes)
+      if (Object.keys(changes).length === 0)
+        throw new InvalidCommand('settings.update changes nothing')
+
+      return [{ sessionId: GLOBAL_SESSION_ID, commandId, at, payload: { type: 'settings.updated', changes } }]
+    }
+
     case 'profile.create': {
       const profileId = derivedId(commandId)
       return [{

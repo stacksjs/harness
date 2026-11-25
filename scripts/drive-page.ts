@@ -276,7 +276,13 @@ async function capture(name: string, target = page): Promise<void> {
 }
 
 const pageErrors: string[] = []
-page.on('pageerror', e => pageErrors.push(e.message))
+// Printed as it happens, not only counted at the end: an island that throws
+// takes every later interaction with it down, and the drive then fails tens
+// of checks later at something unrelated.
+page.on('pageerror', (e) => {
+  pageErrors.push(e.message)
+  console.log('[pageerror]', e.message)
+})
 
 // The first visit has no profiles or workspaces. The flow works in a plain
 // browser even when the native directory picker is unavailable.
@@ -493,18 +499,44 @@ await page.setViewportSize({ width: 1280, height: 720 })
 // and the desktop menu's `craft:settings` event reaches the same modal.
 const settingsDialog = page.getByRole('dialog', { name: 'Settings' })
 const settingsReturn = page.url()
+/**
+ * Press a window chord, once the page can answer one.
+ *
+ * The island reads the chords from a module it imports, so for the first
+ * moments after a load there is a painted page that ignores them. A person
+ * presses the chord again; a drive pressed it once, 30 seconds before failing
+ * at something unrelated.
+ */
+async function pressChord(keys: string, target = page): Promise<void> {
+  await target.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready', undefined, { timeout: 10000 })
+  await target.keyboard.press(keys)
+}
+
+/** Wait for a host setting to land in the log, which the UI writes through. */
+async function waitForHostSetting(driver: string, timeoutMs = 4000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (harness.engine.current.settings.defaultDriver === driver) return true
+    await page.waitForTimeout(50)
+  }
+  return false
+}
+
 /** Whether the thread search sheet is open right now, without waiting for it. */
 const searchDialogVisible = (): Promise<boolean> =>
   page.evaluate(() => document.querySelector('[data-thread-search]')?.hasAttribute('open') === true)
-await page.keyboard.press('Meta+,')
+await pressChord('Meta+,')
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 await page.waitForURL(url => url.pathname === '/settings/general')
 check('Cmd+, opens the settings modal at its General route', true)
 await page.selectOption('#settings-driver', 'opencode')
 await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
 await page.waitForURL(settingsReturn)
-const storedDriver = await page.evaluate(() => localStorage.getItem('harness.defaultDriver'))
-check('driver choice persists', storedDriver === 'opencode')
+// The driver choice is the host's, not this browser's: it reaches the event
+// log, so a client that was never told about it still reads it.
+check('the driver choice reaches the host rather than this browser',
+  await waitForHostSetting('opencode')
+  && await page.evaluate(() => localStorage.getItem('harness.defaultDriver')) === null)
 await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:settings')))
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 const reopenedShowsChoice = await page.evaluate(() => (document.querySelector('#settings-driver') as HTMLSelectElement | null)?.value)
@@ -543,7 +575,7 @@ check('a chord another command owns is refused by the command that owns it',
   && await page.evaluate(() => localStorage.getItem('harness.keybindings.v1')) === null)
 
 // Still recording, so the next press is a second attempt at the same row.
-await page.keyboard.press('Meta+Shift+K')
+await pressChord('Meta+Shift+K')
 await page.waitForFunction(
   () => (document.querySelector('[data-keybinding-row="thread.search"] [data-keybinding-chord]')?.textContent ?? '').trim() !== '',
   undefined,
@@ -572,10 +604,10 @@ await keyboardReload.close()
 // The window answers the new chord and no longer answers the old one.
 await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
 await page.waitForURL(settingsReturn)
-await page.keyboard.press('Meta+K')
+await pressChord('Meta+K')
 await page.waitForTimeout(250)
 const staleChordOpened = await searchDialogVisible()
-await page.keyboard.press('Meta+Shift+K')
+await pressChord('Meta+Shift+K')
 const reboundSearch = page.getByRole('dialog', { name: 'Search threads' })
 await reboundSearch.waitFor({ state: 'visible', timeout: 4000 })
 check('the window answers the rebound chord and ignores the original', !staleChordOpened)
@@ -583,7 +615,7 @@ await page.keyboard.press('Escape')
 await reboundSearch.waitFor({ state: 'hidden', timeout: 4000 })
 
 // Reset all, so the rest of the drive runs on the documented defaults.
-await page.keyboard.press('Meta+,')
+await pressChord('Meta+,')
 await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
 await settingsNavigation.getByRole('button', { name: 'Keyboard' }).click()
 await page.getByRole('button', { name: 'Reset all shortcuts' }).click()
@@ -616,10 +648,24 @@ const directSettings = settingsDeepLink.getByRole('dialog', { name: 'Settings' }
 await directSettings.getByRole('heading', { name: 'General', exact: true }).waitFor()
 check('a direct settings URL opens its modal and canonicalizes the index',
   new URL(settingsDeepLink.url()).pathname === '/settings/general')
+check('a second client is served the host setting, not its own default',
+  await settingsDeepLink.evaluate(() => (document.querySelector('#settings-driver') as HTMLSelectElement | null)?.value) === 'opencode')
 await directSettings.getByRole('button', { name: 'Close settings' }).click()
 await settingsDeepLink.waitForURL(url => url.pathname === new URL(settingsReturn).pathname)
 await settingsDeepLink.close()
-await page.evaluate(() => localStorage.removeItem('harness.defaultDriver'))
+
+// Put the host back to the documented default, the way a person would, and
+// confirm the client-scoped preferences did not follow the host setting into
+// the log.
+await pressChord('Meta+,')
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
+await page.selectOption('#settings-driver', 'claude')
+const hostReset = await waitForHostSetting('claude')
+await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+await page.waitForURL(settingsReturn)
+check('settings scope splits host preferences from this browser',
+  hostReset
+  && await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('harness.')).some(key => key.includes('defaultDriver'))) === false)
 
 // 10. The composer's agent picker: preselected with the session's driver,
 // backed by live probes, and switching offers a fresh session honestly.
@@ -822,7 +868,7 @@ if (screenshotDir) {
 const searchDialog = page.getByRole('dialog', { name: 'Search threads' })
 const threadSearch = searchDialog.getByRole('combobox')
 await page.setViewportSize({ width: 1280, height: 800 })
-await page.keyboard.press('Control+k')
+await pressChord('Control+k')
 await searchDialog.waitFor({ state: 'visible', timeout: 4000 })
 check('search shortcut focuses the search input', await threadSearch.evaluate(input => document.activeElement === input))
 await threadSearch.fill('run the drive')
@@ -857,7 +903,7 @@ await threadSearch.press('Enter')
 await page.waitForURL(url => url.pathname === `/s/${sessionId}` && url.hash.startsWith('#turn-'), { timeout: 8000 })
 check('search opens the matching turn', await page.evaluate(() => Boolean(document.getElementById(location.hash.slice(1)))))
 
-await page.keyboard.press('Control+Alt+n')
+await pressChord('Control+Alt+n')
 await page.waitForURL(url => url.searchParams.get('project') === 'none', { timeout: 8000 })
 check('projectless draft keeps the profile and offers its registered projects', await page.locator('[data-draft-project]').inputValue() === 'none'
   && await page.locator('[data-draft-project] option').count() === 3)
@@ -1326,7 +1372,7 @@ await page.reload()
 await steeringReady.waitFor()
 await originalTurn.getByText('Steer from a queued row.').waitFor()
 check('the original turn retains its steer after a reload', await originalTurn.locator('[data-steered-message]').count() === 1)
-await page.keyboard.press('Control+,')
+await pressChord('Control+,')
 await page.locator('#settings-follow-up').selectOption('steer')
 await page.keyboard.press('Escape')
 await promptBox.focus()
@@ -1471,13 +1517,13 @@ await page.locator('[data-thread-archived]').waitFor()
 await page.locator('[data-composer]').waitFor({ state: 'hidden' })
 check('archiving keeps the old link readable and removes the thread from navigation',
   !await page.locator(`[data-sidebar-item][href="/s/${steerSessionId}"]`).count())
-await page.keyboard.press('Control+k')
+await pressChord('Control+k')
 await searchDialog.waitFor()
 await threadSearch.fill('Parity release review')
 await searchDialog.getByText('No matching threads.').waitFor()
 await page.keyboard.press('Escape')
 await searchDialog.waitFor({ state: 'hidden' })
-await page.keyboard.press('Meta+,')
+await pressChord('Meta+,')
 await settingsDialog.waitFor()
 await settingsNavigation.getByRole('button', { name: 'Archive' }).click()
 const archivedThread = settingsDialog.locator(`[data-archived-thread="${steerSessionId}"]`)
@@ -1536,7 +1582,7 @@ await conversationQuery.press('Escape')
 await conversationFind.waitFor({ state: 'hidden' })
 check('closing find restores focus and removes its highlights',
   await threadActionsTrigger.evaluate(button => button === document.activeElement && !CSS.highlights?.has('harness-find-current')))
-await page.keyboard.press('Control+f')
+await pressChord('Control+f')
 await conversationQuery.waitFor()
 check('Control+F reopens find with cleared results', await findCount.textContent() === '')
 await conversationFind.getByRole('button', { name: 'Close find' }).click()

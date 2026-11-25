@@ -109,6 +109,23 @@ describe('viewProps — shaping the read model for the page', () => {
     expect(stacks.sessions.map(s => s.id)).toEqual([200])
   })
 
+  it('renders the host settings and the keyboard defaults the page needs', () => {
+    const state = stateWith()
+    state.settings = { defaultDriver: 'codex', followUpBehavior: 'steer' }
+    const props = viewProps(state, { serverUrl: 'ws://x/ws' })
+
+    // Rendered, not read from the browser store: the page must paint this
+    // host's answer rather than one client's and then correct itself.
+    expect(props.hostSettings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer' })
+    // A copy, so a later render cannot be served a settings object the page
+    // mutated.
+    expect(props.hostSettings).not.toBe(state.settings)
+
+    const search = props.keybindings.find(binding => binding.id === 'thread.search')!
+    expect([search.chord, search.apple, search.other, search.aria])
+      .toEqual(['Mod+K', '⌘K', 'Ctrl+K', 'Meta+K Control+K'])
+  })
+
   it('names a session by its first prompt', () => {
     const props = viewProps(stateWith(), { serverUrl: 'ws://x/ws' })
     expect(props.profiles.find(p => p.name === 'Personal')!.sessions[0]!.title)
