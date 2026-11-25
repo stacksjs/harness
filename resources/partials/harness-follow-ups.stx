@@ -14,6 +14,7 @@
         class="flex flex-wrap gap-1.5 items-center justify-between px-2.5 py-1.5 min-w-0 text-[12px] border border-black/15 border-dashed rounded-lg dark:border-white/20">
         <p class="overflow-y-auto max-h-20 min-w-0 break-words whitespace-pre-wrap" :text="entry.text"></p>
         <div class="flex flex-wrap gap-1 items-center">
+          <span data-queued-model :hidden="!entry.codexSelection || matchesActiveCodexSelection(entry.codexSelection)" :text="entry.codexSelection?.model || ''" class="text-neutral-600 dark:text-neutral-300"></span>
           <span :hidden="editingFollowUp()?.id !== entry.id" class="text-neutral-600 dark:text-neutral-300">Editing in composer</span>
           <span :hidden="!entry.local" class="text-neutral-600 dark:text-neutral-300" :text="entry.local ? (entry.error || 'Waiting to sync') : ''"></span>
           <button type="button" :hidden="!entry.local || !entry.error" :disabled="!!outboxSending()" @click="followUpActions()?.flush(true)" class="px-2 min-h-8 font-medium hover:bg-black/5 dark:hover:bg-white/10 rounded-md">Retry</button>

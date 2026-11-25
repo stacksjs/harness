@@ -13,7 +13,7 @@
  * defaults to playwright's cached build; point PLAYWRIGHT_CHROMIUM elsewhere
  * if yours lives somewhere else.
  */
-import type { Driver, ProviderEvent, ProviderInstance } from '../packages/drivers/src/types'
+import type { Driver, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
@@ -218,6 +218,7 @@ const driver: Driver = {
   },
 }
 let fixtureCodexReady = false
+const fixtureCodexTurns: StartTurnInput[] = []
 let fixtureCodexLaunchModel: string | undefined
 let fixtureCodexLaunchOptions: { effort?: string, serviceTier?: string } | undefined
 const codexDriver: Driver = {
@@ -233,13 +234,20 @@ const codexDriver: Driver = {
         id, name: homeModel ? 'Fixture Fast' : 'Fixture Default', isDefault: true,
         reasoningEfforts: ['medium', 'high'], defaultReasoningEffort: 'medium',
         speedTiers: [{ id: 'fast', name: 'Fast' }],
-      }] } : {}),
+      }, ...(homeModel ? [{ id: 'fixture-balanced', name: 'Fixture Balanced', reasoningEfforts: ['low', 'medium'], defaultReasoningEffort: 'medium', speedTiers: [] }] : [])] } : {}),
     }
   },
   async create(config) {
     fixtureCodexLaunchModel = config.model
     fixtureCodexLaunchOptions = config.codexTurnOptions
-    return driver.create(config)
+    const created = await driver.create(config)
+    return {
+      ...created,
+      startTurn(input) {
+        fixtureCodexTurns.push(input)
+        return created.startTurn(input)
+      },
+    }
   },
 }
 
@@ -1781,6 +1789,76 @@ await page.locator('[data-turn]').getByText('Retry in the original thread.').wai
 check('retry accepts a new turn in the same thread and clears the previous error', await providerError.isHidden()
   && Number(new URL(page.url()).pathname.split('/').at(-1)) === catalogSession?.id)
 
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const activePicker = page.getByRole('button', { name: 'Choose model for the next message' })
+await page.setViewportSize({ width: 1280, height: 800 })
+await activePicker.click()
+await draftDialog.getByRole('button', { name: 'Fixture Balanced', exact: true }).click()
+await draftDialog.getByRole('button', { name: 'Low', exact: true }).click()
+check('the active picker stays scoped to the existing named account',
+  await draftDialog.locator('[data-draft-model-account]').count() === 2)
+check('the desktop picker opens alongside the composer without covering the sidebar', await draftDialog.evaluate(dialog => {
+  const sidebar = document.querySelector('[data-harness-sidebar]')?.getBoundingClientRect()
+  const trigger = document.querySelector('[data-model-picker-trigger]')?.getBoundingClientRect()
+  const picker = dialog.getBoundingClientRect()
+  return !!sidebar && !!trigger && picker.left >= sidebar.right && Math.abs(picker.left - trigger.left) <= 1
+}))
+await capture('active-codex-model-desktop')
+await draftDialog.getByRole('button', { name: 'Done' }).click()
+await page.locator('[data-prompt]').fill('Send with the balanced model.')
+await page.reload()
+await page.waitForFunction(() => document.querySelector('[data-prompt]')?.value === 'Send with the balanced model.')
+check('an unsent model choice reloads alongside the draft', (await activePicker.innerText()).includes('fixture-balanced · Low'))
+await page.locator('[data-send]').click()
+await page.locator('[data-model-change]').filter({ hasText: 'fixture-balanced · Low' }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const activeInput = fixtureCodexTurns.find(turn => turn.text === 'Send with the balanced model.')
+check('an active model switch reaches the original provider conversation',
+  activeInput?.providerSessionId === 'ps-drive' && activeInput.codexSelection?.model === 'fixture-balanced'
+  && activeInput.codexSelection.effort === 'low' && activeInput.codexSelection.serviceTier === undefined)
+
+await page.locator('[data-prompt]').fill('exercise active steering')
+await page.locator('[data-send]').click()
+await page.getByText('Ready for active steering.', { exact: true }).waitFor()
+await page.setViewportSize({ width: 390, height: 844 })
+await activePicker.click()
+await draftDialog.getByRole('button', { name: 'Fixture Fast', exact: true }).click()
+await draftDialog.getByRole('button', { name: 'High', exact: true }).click()
+await draftDialog.getByRole('button', { name: 'Fast', exact: true }).click()
+await capture('active-codex-model-phone')
+await draftDialog.getByRole('button', { name: 'Done' }).click()
+await page.locator('[data-prompt]').fill('Queue with the fast model.')
+await page.locator('[data-send]').click()
+const switchedQueue = page.locator('[data-follow-up]').filter({ hasText: 'Queue with the fast model.' })
+await switchedQueue.locator('[data-queued-model]').waitFor()
+check('a queued model change cannot steer the in-flight model', await switchedQueue.getByRole('button', { name: 'Send now' }).isHidden())
+await page.reload()
+await switchedQueue.locator('[data-queued-model]').waitFor()
+releaseSteering?.()
+await page.locator('[data-model-change]').filter({ hasText: 'fixture-fast · High · Fast' }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+const switchedInput = fixtureCodexTurns.find(turn => turn.text === 'Queue with the fast model.')
+check('a queued model change survives reload and runs with the saved options',
+  switchedInput?.providerSessionId === 'ps-drive' && switchedInput.codexSelection?.model === 'fixture-fast'
+  && switchedInput.codexSelection.effort === 'high' && switchedInput.codexSelection.serviceTier === 'fast')
+await capture('active-codex-queued-transition')
+await activePicker.click()
+const otherAgent = draftDialog.getByRole('combobox', { name: 'Start with another agent or account' })
+await otherAgent.locator('option[value="claude:1"]').waitFor({ state: 'attached' })
+await otherAgent.selectOption('claude:1')
+const switchConfirm = page.getByRole('alertdialog')
+await switchConfirm.getByRole('button', { name: 'Cancel', exact: true }).click()
+await switchConfirm.waitFor({ state: 'hidden' })
+check('cancelling an account change leaves the original conversation open', Number(new URL(page.url()).pathname.split('/').at(-1)) === catalogSession?.id)
+await activePicker.click()
+check('the account picker restores the original selection on cancel', await otherAgent.inputValue() === 'codex:4')
+await otherAgent.selectOption('claude:1')
+await switchConfirm.getByRole('button', { name: 'OK', exact: true }).click()
+await page.waitForURL(url => url.pathname.startsWith('/s/') && url.pathname !== `/s/${catalogSession?.id}`)
+const alternateThread = harness.engine.current.sessions.get(Number(new URL(page.url()).pathname.split('/').at(-1)))
+check('an explicit account change can start its own thread from the model picker',
+  alternateThread?.driverKind === 'claude' && alternateThread.providerInstanceId === 1
+  && harness.engine.current.sessions.get(catalogSession!.id)?.providerSessionId === 'ps-drive')
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

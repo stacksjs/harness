@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { CodexTurnOptions, ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
 import { acceptedSettings, applyFollowUpEvent, hostSettings } from '@harness/contract'
 
@@ -95,6 +95,8 @@ export interface TurnState {
   id: number
   role: 'user' | 'assistant'
   status: 'pending' | 'running' | 'complete' | 'interrupted' | 'failed'
+  codexSelection?: CodexTurnSelection
+  modelChanged?: boolean
   /** What the user asked. Set once, at `turn.started`. */
   prompt: string
   steerable?: boolean
@@ -403,6 +405,11 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session) break
       session.state = 'running'
       delete session.lastError
+      if (p.codexSelection) {
+        const { model, ...options } = p.codexSelection
+        session.model = model
+        session.codexTurnOptions = options
+      }
       if (session.navigation?.settledAt || session.navigation?.snoozedUntil) {
         session.navigation.settledAt = null
         session.navigation.snoozedUntil = null
@@ -413,6 +420,8 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         role: p.role,
         status: 'running',
         prompt: p.text ?? '',
+        ...(p.codexSelection ? { codexSelection: p.codexSelection } : {}),
+        ...(p.modelChanged ? { modelChanged: true } : {}),
         response: '',
         toolCalls: [],
         tokensIn: 0,

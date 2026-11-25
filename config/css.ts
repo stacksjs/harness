@@ -260,7 +260,9 @@ const RESPONSIVE_SHELL = `
 [data-draft-model-layout] :focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
 [data-draft-model-options] fieldset { margin: 0 0 8px; }
 [data-draft-model-options] legend { padding: 0 5px 4px; font-size: 11px; opacity: .8; }
-[data-draft-model-footer] { grid-column: 1 / -1; display: flex; justify-content: flex-end; padding: 6px 8px; border-top: 1px solid var(--workspace-line); }
+[data-draft-model-footer] { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--workspace-line); }
+[data-draft-model-new-thread] { flex-shrink: 0; font-size: 12px; }
+[data-draft-model-footer] [data-driver-picker] { margin-inline-end: auto; max-inline-size: calc(100% - 64px); }
 [data-draft-model-footer] button { width: auto; min-width: 55px; justify-content: center; border: 1px solid var(--workspace-line); }
 @media (max-width: 600px) {
   [data-draft-model-dialog] { height: min(29rem, calc(var(--draft-picker-viewport, 100dvh) - 16px)); }

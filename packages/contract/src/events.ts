@@ -6,7 +6,7 @@
  * be wrong is corrected by a later fact. That is what makes replay meaningful.
  */
 
-import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, ConnectorApproval, DriverKind, ModelFavorite } from './commands'
+import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, ModelFavorite } from './commands'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
 import type { HostSettings } from './settings'
@@ -27,7 +27,7 @@ export type EventPayload =
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation> }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
-  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string }
+  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean }
   | { type: 'queue.added', entry: QueuedFollowUp }
   | { type: 'queue.edited', id: string, text: string }
   | { type: 'queue.removed', id: string }

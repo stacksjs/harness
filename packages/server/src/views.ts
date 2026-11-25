@@ -8,6 +8,7 @@
  */
 
 import type { HostSettings, ThreadNavigation } from '@harness/contract'
+import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -194,6 +195,8 @@ export function viewProps(state: HarnessState, options: {
           // Which agent this session runs — shown in the header and preselected
           // in the composer's picker, so switching has a visible ground truth.
           driverKind: active.driverKind,
+          model: active.model,
+          codexTurnOptions: active.codexTurnOptions,
           providerInstanceId: active.providerInstanceId,
           lastSeq: active.lastSeq,
           // For the terminal: a shell opens in the session's workspace, and
@@ -215,6 +218,7 @@ export function viewProps(state: HarnessState, options: {
             prompt: turn.prompt,
             response: turn.response,
             status: turn.status,
+            modelChange: turn.modelChanged && turn.codexSelection ? codexSelectionLabel(turn.codexSelection) : undefined,
             steerable: turn.steerable === true,
             steered: turn.steered ?? [],
             inputRequests: (turn.inputRequests ?? []).map(request => ({

@@ -6,7 +6,7 @@
  * identical state rather than a similar one.
  */
 
-import type { CodexTurnOptions, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
 import { isTurnActive, modelFavoriteIndex } from './projections'
 import type { AppendableEvent } from './store'
@@ -43,7 +43,7 @@ function followUpText(value: unknown): string {
   return text
 }
 
-function sessionModel(command: Extract<Command, { type: 'session.create' | 'thread.scratch.create' }>): {
+function sessionModel(command: { driverKind: unknown, model?: string, codexTurnOptions?: CodexTurnOptions }): {
   model?: string
   codexTurnOptions?: CodexTurnOptions
 } {
@@ -63,10 +63,26 @@ function sessionModel(command: Extract<Command, { type: 'session.create' | 'thre
   return effort || serviceTier ? { ...model, codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } } : model
 }
 
-function turnStarted(session: SessionState, text: string, queuedId?: string): EventPayload {
+function requestedCodexSelection(session: SessionState, selection: CodexTurnSelection | undefined): CodexTurnSelection | undefined {
+  if (selection === undefined) return undefined
+  if (session.driverKind !== 'codex' || !selection || typeof selection.model !== 'string'
+    || !selection.model.trim() || selection.model.length > 200)
+    throw new InvalidCommand('Choose a model for this Codex conversation.')
+  const { model, ...options } = selection
+  const { codexTurnOptions } = sessionModel({ driverKind: session.driverKind, model, codexTurnOptions: options })
+  return { model, ...codexTurnOptions }
+}
+
+function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string): EventPayload {
+  const selection = codexSelection ?? (session.driverKind === 'codex' && session.model
+    ? { model: session.model, ...session.codexTurnOptions } : undefined)
+  const modelChanged = selection && session.turns.length > 0 && (selection.model !== session.model
+    || selection.effort !== session.codexTurnOptions?.effort || selection.serviceTier !== session.codexTurnOptions?.serviceTier)
   return {
     type: 'turn.started', turnId: session.turns.length + 1, role: 'user', text,
     ...(queuedId ? { queuedId } : {}),
+    ...(selection ? { codexSelection: selection } : {}),
+    ...(modelChanged ? { modelChanged: true } : {}),
   }
 }
 
@@ -557,7 +573,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before sending a message.')
 
-      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, command.text) }]
+      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection)) }]
     }
 
     case 'session.queue.add':
@@ -574,7 +590,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           throw new InvalidCommand('Restore this thread before queuing a message.')
         if (!state.workspaces.get(session.workspaceId)?.trusted)
           throw new InvalidCommand('Trust this workspace before queuing a message.')
-        return emit({ type: 'queue.added', entry: { id: commandId, text: followUpText(command.text) } })
+        const codexSelection = requestedCodexSelection(session, command.codexSelection)
+        return emit({ type: 'queue.added', entry: { id: commandId, text: followUpText(command.text), ...(codexSelection ? { codexSelection } : {}) } })
       }
 
       const index = entries.findIndex(entry => entry.id === command.id)
@@ -619,6 +636,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         ? entries.find(entry => entry.id === command.id)
         : { id: commandId, text: followUpText(command.text) }
       if (!entry) throw new InvalidCommand('This message is no longer queued.')
+      const selection = 'codexSelection' in entry ? entry.codexSelection : undefined
+      if (selection && (selection.model !== session.model || selection.effort !== session.codexTurnOptions?.effort
+        || selection.serviceTier !== session.codexTurnOptions?.serviceTier))
+        throw new InvalidCommand('This message is queued for a different model or settings.')
       if (entry.steeringIssue === 'uncertain')
         throw new InvalidCommand('Review this message before sending it again.')
       return [
@@ -675,7 +696,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         if (!id || command.confirmResend !== true)
           throw new InvalidCommand('Use Send again on the message whose delivery could not be confirmed.')
       }
-      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.id) }]
+      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.codexSelection, entry.id) }]
     }
 
     case 'session.turn.interrupt': {

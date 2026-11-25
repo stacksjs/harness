@@ -20,6 +20,17 @@ export interface CodexTurnOptions {
   serviceTier?: string
 }
 
+export interface CodexTurnSelection extends CodexTurnOptions {
+  model: string
+}
+
+export function codexSelectionLabel(selection: CodexTurnSelection): string {
+  const { model, effort, serviceTier } = selection
+  const display = (value: string) => value.charAt(0).toUpperCase() + value.slice(1)
+  return [model, effort && (effort === 'xhigh' ? 'Extra high' : display(effort)), serviceTier && display(serviceTier)]
+    .filter(Boolean).join(' · ')
+}
+
 export interface ModelFavorite {
   driverKind: DriverKind
   providerInstanceId?: number
@@ -59,9 +70,9 @@ export type ClientCommand =
       providerInstanceId?: number
     }
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
-  | { type: 'session.turn.start', sessionId: number, text: string }
+  | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
   | { type: 'session.turn.interrupt', sessionId: number }
-  | { type: 'session.queue.add', sessionId: number, text: string }
+  | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection }
   | { type: 'session.queue.edit', sessionId: number, id: string, text: string, previousText: string }
   | { type: 'session.queue.remove', sessionId: number, id: string }
   | { type: 'session.queue.move', sessionId: number, id: string, direction: 'up' | 'down' }

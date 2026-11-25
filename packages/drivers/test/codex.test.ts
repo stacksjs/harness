@@ -35,7 +35,10 @@ for await (const line of createInterface({ input: process.stdin })) {
 `, { mode: 0o755 })
       const instance = await CodexDriver.create({ binaryPath, workspacePath, autoApprove: true })
       try {
-        const events = instance.startTurn({ text: 'Continue the original conversation', providerSessionId: 'native-thread' })[Symbol.asyncIterator]()
+        const events = instance.startTurn({
+          text: 'Continue the original conversation', providerSessionId: 'native-thread',
+          codexSelection: { model: 'second-model', effort: 'high' },
+        })[Symbol.asyncIterator]()
         const wasArchived = outcome === 'archived' || outcome === 'moved-with-error'
         const shouldResume = outcome === 'ready' || wasArchived
         if (shouldResume) {
@@ -51,6 +54,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         if (shouldResume) methods.push('turn/start')
         expect(requests.map(request => request.method)).toEqual(methods)
         expect(requests.slice(1).every(request => request.params.threadId === 'native-thread')).toBe(true)
+        if (shouldResume) expect(requests.at(-1)?.params).toMatchObject({ model: 'second-model', effort: 'high', serviceTier: null })
       }
       finally {
         await instance.stop()

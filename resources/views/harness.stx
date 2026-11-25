@@ -130,6 +130,9 @@ export const sessionDriver = activeSession ? (activeSession.driverKind || '') : 
 export const sessionProviderInstanceId = activeSession?.providerInstanceId ?? null
 export const promptPlaceholder = 'Ask the agent…'
 export const activeSessionId = activeSession ? activeSession.id : 0
+export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
+export const initialCodexSelection = activeCodex && activeSession.model
+  ? { model: activeSession.model, ...activeSession.codexTurnOptions } : null
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
 export const activeScratchSession = activeSession?.scratch === true
 export const workspaceName = activeSession && !activeScratchSession
@@ -346,6 +349,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @endif
       @foreach(settledTurns as turn)
         <article stx-hydrate="visible" class="mb-5" data-turn="{{ turn.id }}" id="turn-{{ turn.id }}">
+          @if(turn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ turn.modelChange }}</p>@endif
           <div class="sr-only">You</div>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
           @foreach(turn.steered as message)
@@ -398,6 +402,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
       @if(liveTurn)
         <article class="mb-5" data-turn="{{ liveTurn.id }}" id="turn-{{ liveTurn.id }}" data-live>
+          @if(liveTurn.modelChange)<p data-model-change class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300">Switched to {{ liveTurn.modelChange }}</p>@endif
           <div class="sr-only">You</div>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
           <div data-steering-history>
@@ -472,6 +477,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       --}}
       <template :for="turn in liveTurns" :key="turn.id">
         <article class="mb-5" :data-turn="turn.id" :id="'turn-' + turn.id">
+          <p data-model-change :hidden="!turn.modelChange" :text="turn.modelChange ? 'Switched to ' + turn.modelChange : ''" class="mb-3 text-center text-neutral-600 text-xs dark:text-neutral-300"></p>
           <div class="sr-only">You</div>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
           <div data-steering-history></div>
@@ -548,21 +554,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
       <div data-composer-provider-controls>
-      @if(activeSessionId)
-      <select
-        data-driver-picker
-        ref="driverPickerBox"
-        @change="driverPicked"
-        title="Agent for this session"
-        class="px-2 h-8 max-w-[170px] min-w-0 text-xs bg-transparent border border-transparent rounded-md hover:border-black/15 dark:hover:border-white/20"
-      >
-        <option value="claude">Claude Code</option>
-        <option value="codex">Codex</option>
-        <option value="opencode">OpenCode</option>
-        <option value="cursor">Cursor</option>
-        <option value="grok">Grok</option>
-        <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
-      </select>
+      @if(activeSessionId && !activeCodex)
+      @include('../partials/harness-driver-picker')
       @else
       @include('../partials/harness-model-picker')
       @endif
@@ -572,7 +565,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
           <span data-send-text :text="sendLabel()">Send</span>
         </button>
-        <span class="md:hidden" :hidden="!canSteer() || !composerText().trim() || Boolean(editingFollowUp())">
+        <span class="md:hidden" :hidden="!canSteerDraft() || !composerText().trim() || Boolean(editingFollowUp())">
           <button type="button" :disabled="startPending() || (oppositeFollowUp() === 'steer' && steeringPending())" :text="oppositeFollowUp() === 'steer' ? 'Steer' : 'Queue'" @click="sendPrompt(oppositeFollowUp())" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Steer</button>
         </span>
         <button type="button" :hidden="!editingFollowUp()" @click="followUpActions()?.endEdit()" class="px-3 h-[36px] text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
@@ -1211,12 +1204,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const showSend = derived(() => !showResume() && Boolean(!uiBusy() || composerText().trim() || editingFollowUp()))
   const sendLabel = derived(() => {
     if (editingFollowUp()) return 'Save edit'
-    if (canSteer() && followUpPreference() === 'steer') return 'Steer'
+    if (canSteerDraft() && followUpPreference() === 'steer') return 'Steer'
     return sessionId && (uiBusy() || !sessionOnline()) ? 'Queue' : 'Send'
   })
   function showQueueSend(entry) {
     return !entry.local && !entry.steering && entry.steeringIssue !== 'uncertain'
-      && editingFollowUp()?.id !== entry.id && (!uiBusy() || canSteer())
+      && editingFollowUp()?.id !== entry.id && (!uiBusy() || (canSteer() && matchesActiveCodexSelection(entry.codexSelection)))
   }
   function sendQueuedFollowUp(id) {
     if (canSteer()) return followUpActions()?.steerQueued(id, runningTurnId())
@@ -1894,11 +1887,37 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const providerCatalog = state('loading')
   const modelFavorites = state([])
   let modelFavoritesRevision = 0
-  const draftProvider = state(defaultDriver())
-  const draftModel = state('')
-  const draftEffort = state('')
-  const draftSpeed = state('')
-  const composerProviders = derived(() => [...defaultProviders(), ...providerAccounts()])
+  let providerCatalogRequest = 0
+  const activeDriverValue = sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`
+  const appliedCodexSelection = state(initialCodexSelection)
+  const draftProvider = state(activeCodex ? activeDriverValue : defaultDriver())
+  const draftModel = state(initialCodexSelection?.model || '')
+  const draftEffort = state(initialCodexSelection?.effort || '')
+  const draftSpeed = state(initialCodexSelection?.serviceTier || '')
+  const composerProviders = derived(() => [...defaultProviders(), ...providerAccounts()]
+    .filter(account => !activeCodex || account.value === activeDriverValue))
+  function draftCodexSelection() {
+    if (!activeCodex || !draftModel()) return undefined
+    return {
+      model: draftModel(),
+      ...(draftEffort() ? { effort: draftEffort() } : {}),
+      ...(draftSpeed() ? { serviceTier: draftSpeed() } : {}),
+    }
+  }
+  function sameCodexSelection(left, right) {
+    return left?.model === right?.model && left?.effort === right?.effort && left?.serviceTier === right?.serviceTier
+  }
+  function matchesActiveCodexSelection(selection) {
+    return !selection || sameCodexSelection(selection, appliedCodexSelection())
+  }
+  function showDraftCodexSelection(selection) {
+    draftModel.set(selection.model)
+    draftEffort.set(typeof selection.effort === 'string' ? selection.effort : '')
+    draftSpeed.set(typeof selection.serviceTier === 'string' ? selection.serviceTier : '')
+  }
+  function canSteerDraft() {
+    return canSteer() && matchesActiveCodexSelection(draftCodexSelection())
+  }
   const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
   const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
   const draftPickerLabel = derived(() => {
@@ -1906,9 +1925,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const effort = draftEffort()
     const speed = model?.speedTiers.find(tier => tier.id === draftSpeed())?.name
     return model ? [model.name, effort ? pickerEffortLabel(effort) : '', speed].filter(Boolean).join(' · ')
-      : selectedDraftAccount()?.name || DRIVER_LABELS[draftProvider()]
+      : draftModel() ? [draftModel(), effort ? pickerEffortLabel(effort) : '', draftSpeed()].filter(Boolean).join(' · ')
+        : selectedDraftAccount()?.name || DRIVER_LABELS[sessionDriver || draftProvider()]
   })
-  const activeDriverValue = sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`
 
   const draftPickerTrigger = useRef('draftPickerTriggerBox')
   const draftPickerDialog = useRef('draftPickerDialogBox')
@@ -1936,7 +1955,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const favoriteKeys = pickerFavoriteKeys()
     const accounts = composerProviders().filter(account => account.status === 'ready' && (favoritesOnly || search.length || account.value === pickerAccount()))
     return accounts.flatMap(account => {
-      const rows = favoritesOnly ? account.models || [] : [{ id: '', name: 'Provider default' }, ...(account.models || [])]
+      const rows = favoritesOnly || activeCodex ? account.models || [] : [{ id: '', name: 'Provider default' }, ...(account.models || [])]
       return rows.filter(model => {
         if (favoritesOnly && !favoriteKeys.has(`${account.value}/${model.id}`)) return false
         const text = `${model.name} ${model.id} ${account.name}`.toLowerCase()
@@ -1948,9 +1967,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (providerCatalog() === 'failed') return 'Could not load provider accounts.'
     if (providerCatalog() === 'loading') return 'Checking provider accounts…'
     if (pickerAccount() === 'favorites' && !pickerQuery().trim()) return 'No favorite models available.'
-    if (!pickerQuery().trim() && !pickerResults().length) return 'Choose an available account.'
+    if (!pickerQuery().trim() && !pickerResults().length) return activeCodex ? 'No models are available for this account.' : 'Choose an available account.'
     return 'No matching models'
   })
+
+  const pickerEfforts = derived(() => {
+    const model = pickerOptionModel()
+    return (model?.reasoningEfforts || []).filter(effort => !activeCodex || effort !== model?.defaultReasoningEffort)
+  })
+
+  function pickerUsesDefaultEffort() {
+    return !draftEffort() || (activeCodex && draftEffort() === pickerOptionModel()?.defaultReasoningEffort)
+  }
+
+  function chooseDefaultEffort() {
+    draftEffort.set(activeCodex ? pickerOptionModel()?.defaultReasoningEffort || '' : '')
+  }
 
   function pickerEffortLabel(effort) {
     return effort === 'xhigh' ? 'Extra high' : effort.charAt(0).toUpperCase() + effort.slice(1)
@@ -1971,7 +2003,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const above = anchor.top - bounds.height - 6
     const preferred = above >= top + 8 || below + bounds.height > top + height - 8 ? above : below
     dialog.style.setProperty('--draft-picker-top', Math.max(top + 8, Math.min(preferred, top + height - bounds.height - 8)) + 'px')
-    dialog.style.setProperty('--draft-picker-left', Math.max(8, Math.min(anchor.right - bounds.width, viewport.clientWidth - bounds.width - 8)) + 'px')
+    dialog.style.setProperty('--draft-picker-left', Math.max(8, Math.min(anchor.left, viewport.clientWidth - bounds.width - 8)) + 'px')
     revealPickerAccount()
   }
 
@@ -1984,7 +2016,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.id === draftModel())))
     draftPickerOpen.set(true)
     dialog.showModal()
-    if (providerCatalog() === 'ready') void annotateDriverPickers()
+    if (activeCodex || providerCatalog() === 'ready') void annotateDriverPickers()
     void nextTick(() => {
       positionDraftPicker()
       if (event?.pointerType !== 'touch') draftPickerSearch.current?.focus()
@@ -1994,6 +2026,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   function closeDraftPicker() {
     draftPickerDialog.current?.close()
     draftPickerOpen.set(false)
+    rememberPrompt()
     draftPickerTrigger.current?.focus()
   }
 
@@ -2076,10 +2109,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (draftProvider() !== result.account || draftModel() !== result.id) {
       draftProvider.set(result.account)
       draftModel.set(result.id)
-      draftEffort.set('')
+      draftEffort.set(activeCodex ? selectedDraftModel()?.defaultReasoningEffort || '' : '')
       draftSpeed.set('')
     }
-    if (!result.account.includes(':')) localStorage.setItem('harness.defaultDriver', result.account)
+    if (!activeCodex && !result.account.includes(':')) localStorage.setItem('harness.defaultDriver', result.account)
     if (pickerAccount() !== 'favorites') browsePickerAccount(result.account)
     pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.key === result.key)))
     if (!pickerOptionModel()) closeDraftPicker()
@@ -2126,14 +2159,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // the answer in their option labels, with unusable agents disabled — a
   // driver you cannot run should not be one click from a dead session.
   async function annotateDriverPickers() {
+    const request = ++providerCatalogRequest
     if (!defaultProviders().length) providerCatalog.set('loading')
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
-    const modelsQuery = !activeSessionId && canCompose ? '&models=1' : ''
+    const modelsQuery = canCompose && (!activeSessionId || (activeCodex && draftPickerOpen())) ? '&models=1' : ''
     const favoritesRevision = modelFavoritesRevision
     const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`)
       .then(response => response.ok ? response.json() : null).catch(() => null)
+    if (request !== providerCatalogRequest) return
     if (!catalog) {
-      if (!defaultProviders().length) providerCatalog.set('failed')
+      if (modelsQuery || !defaultProviders().length) providerCatalog.set('failed')
       return
     }
     const { drivers, accounts = [], favorites = [] } = catalog
@@ -2218,6 +2253,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
     if (value === activeDriverValue) return
+    if (activeCodex) closeDraftPicker()
     const label = providerAccounts().find(account => account.value === value)?.name || DRIVER_LABELS[choice.driverKind]
     if (await stxConfirm(`Start a new session with ${label} in this workspace?`)) {
       try {
@@ -2722,9 +2758,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
     const { value: text, selectionStart: start, selectionEnd: end, selectionDirection: direction } = box
-    if (previous?.text === text && previous.start === start && previous.end === end && previous.direction === direction) return
+    const codexSelection = draftCodexSelection()
+    if (previous?.text === text && previous.start === start && previous.end === end && previous.direction === direction
+      && sameCodexSelection(previous.codexSelection, codexSelection)) return
     composerDraft.set({
       text, start, end, direction,
+      ...(codexSelection ? { codexSelection } : {}),
       ...(previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
     })
   }
@@ -2738,6 +2777,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (first) pendingFirstPrompt.set(null)
     const current = typeof saved?.text === 'string' ? saved : first
     if (!current?.text) return
+    if (activeCodex && typeof current.codexSelection?.model === 'string') showDraftCodexSelection(current.codexSelection)
     box.value = current.text
     const start = Number.isInteger(current.start) ? current.start : box.value.length
     const end = Number.isInteger(current.end) ? current.end : start
@@ -2767,7 +2807,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const commandId = draft?.commandId ?? newCommandId()
     if (draft) composerDraft.set({ ...draft, commandId })
 
-    if (canSteer() && mode === 'steer') {
+    const codexSelection = draftCodexSelection()
+    if (canSteerDraft() && mode === 'steer') {
       if (steeringPending()) return
       startPending.set(true)
       try {
@@ -2790,7 +2831,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (sessionId && (uiBusy() || (!sessionOnline() && !sessionConnecting()) || localFollowUps()?.length)) {
       const actions = followUpActions()
       if (!actions) return
-      actions.stage({ id: commandId, text })
+      actions.stage({ id: commandId, text, ...(codexSelection ? { codexSelection } : {}) })
       box.value = ''
       composerText.set('')
       composerDraft.set(null)
@@ -2841,7 +2882,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
     startPending.set(true)
     try {
-      await sendCommand({ type: 'session.turn.start', sessionId, text }, commandId)
+      await sendCommand({ type: 'session.turn.start', sessionId, text, ...(codexSelection ? { codexSelection } : {}) }, commandId)
       if (box.value === raw) {
         box.value = ''
         composerText.set('')
@@ -2858,7 +2899,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function promptKeydown(event) {
     if (event.isComposing || event.keyCode === 229) return
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && canSteer() && !editingFollowUp()) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && (event.shiftKey ? canSteer() : canSteerDraft()) && !editingFollowUp()) {
       event.preventDefault()
       if (event.shiftKey) {
         const entry = followUps().entries[0]
@@ -3204,7 +3245,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
+    const { applyFollowUpEvent, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
@@ -3303,6 +3344,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       }
       if (payload.type === 'turn.started') {
         sessionError.set('')
+        if (payload.codexSelection) {
+          const useApplied = matchesActiveCodexSelection(draftCodexSelection())
+          appliedCodexSelection.set(payload.codexSelection)
+          if (useApplied) showDraftCodexSelection(payload.codexSelection)
+        }
         // Only the user's half opens a new exchange; the assistant's turn is
         // the reply within it.
         if (payload.role === 'user') {
@@ -3315,6 +3361,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
             prompt: payload.text ?? '',
+            modelChange: payload.modelChanged && payload.codexSelection ? codexSelectionLabel(payload.codexSelection) : '',
             tools: [],
             inputRequests: [],
             hasResponse: false,

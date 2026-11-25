@@ -1,3 +1,4 @@
+import type { CodexTurnSelection } from './commands'
 import type { EventPayload } from './events'
 
 export type SteeringOutcome = 'delivered' | 'rejected' | 'uncertain'
@@ -5,6 +6,7 @@ export type SteeringOutcome = 'delivered' | 'rejected' | 'uncertain'
 export interface QueuedFollowUp {
   id: string
   text: string
+  codexSelection?: CodexTurnSelection
   steering?: { requestId: string, turnId: number }
   steeringIssue?: Exclude<SteeringOutcome, 'delivered'>
 }
@@ -35,7 +37,7 @@ export function applyFollowUpEvent(queue: FollowUpQueue, event: EventPayload): F
       return {
         ...queue,
         entries: queue.entries.map(entry => entry.id === event.id
-          ? { id: entry.id, text: entry.text, steering: { requestId: event.requestId, turnId: event.turnId } }
+          ? { id: entry.id, text: entry.text, ...(entry.codexSelection ? { codexSelection: entry.codexSelection } : {}), steering: { requestId: event.requestId, turnId: event.turnId } }
           : entry),
       }
     case 'turn.steer.resolved': {
@@ -44,7 +46,7 @@ export function applyFollowUpEvent(queue: FollowUpQueue, event: EventPayload): F
       return {
         held: true,
         entries: queue.entries.map(entry => entry.id === id
-          ? { id, text: entry.text, steeringIssue: outcome }
+          ? { id, text: entry.text, ...(entry.codexSelection ? { codexSelection: entry.codexSelection } : {}), steeringIssue: outcome }
           : entry),
       }
     }

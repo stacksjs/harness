@@ -114,6 +114,31 @@ describe('Engine — the M1 exit criterion', () => {
     expect(restarted.current.sessions.get(derivedId(sessionCmd.id))?.codexTurnOptions).toEqual(codexTurnOptions)
   })
 
+  it('keeps a queued Codex model change through replay and rejects steering it into the old model', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const session = envelope({ type: 'session.create', workspaceId, driverKind: 'codex', model: 'first', codexTurnOptions: { effort: 'medium' } })
+    const sessionId = derivedId(session.id)
+    await engine.dispatch(session)
+    await engine.dispatch(envelope({ type: 'session.turn.start', sessionId, text: 'First model' }))
+    await engine.dispatchInternal(envelope({ type: 'thread.steer.ready', sessionId, turnId: 1 }))
+    const codexSelection = { model: 'second', effort: 'high', serviceTier: 'fast' }
+    const entry = envelope({ type: 'session.queue.add', sessionId, text: 'Use another model', codexSelection })
+    await engine.dispatch(entry)
+    await expect(engine.dispatch(envelope({ type: 'session.turn.steer', sessionId, turnId: 1, id: entry.id })))
+      .rejects.toThrow('queued for a different model')
+    await engine.dispatchInternal(envelope({ type: 'thread.turn.complete', sessionId, turnId: 1, tokensIn: 1, tokensOut: 1, cost: 0 }))
+
+    const reopened = new Engine({ store, reducer: reduce })
+    await reopened.hydrate()
+    const turn = await reopened.dispatch(envelope({ type: 'session.queue.send', sessionId, id: entry.id }))
+    expect(turn.events[0]?.payload).toMatchObject({ type: 'turn.started', queuedId: entry.id, codexSelection, modelChanged: true })
+    const current = reopened.current.sessions.get(sessionId)!
+    expect(current.turns.map(item => item.codexSelection)).toEqual([{ model: 'first', effort: 'medium' }, codexSelection])
+    expect(current.model).toBe('second')
+    expect(current.followUps.entries).toEqual([])
+  })
+
   it('rejects Codex model options on an unselected model, a different provider, or an invalid tier', async () => {
     const { engine } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)

@@ -10,7 +10,7 @@
  * `driverKind: 'harness'` beside `'claude'`, with nothing above it changing.
  */
 
-import type { ApprovalChoice, CodexTurnOptions, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
 
 /**
  * What a driver emits while a turn runs.
@@ -57,6 +57,7 @@ export interface ProbeResult {
 
 export interface StartTurnInput {
   text: string
+  codexSelection?: CodexTurnSelection
   /** Provider's own session id, when resuming rather than starting fresh. */
   providerSessionId?: string
 }

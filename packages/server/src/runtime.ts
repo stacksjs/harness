@@ -292,6 +292,7 @@ export class ProviderRuntime {
     try {
       for await (const event of running.instance.startTurn({
         text,
+        codexSelection: session.turns.at(-1)?.codexSelection,
         // The projection stores '' for "not bound yet"; the driver wants
         // undefined, so an empty string must not be passed through as a resume
         // target.

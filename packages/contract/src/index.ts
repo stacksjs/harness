@@ -14,6 +14,7 @@ export type {
   ConnectorApproval,
   ClientCommand,
   CodexTurnOptions,
+  CodexTurnSelection,
   Command,
   CommandEnvelope,
   CommandType,
@@ -21,7 +22,7 @@ export type {
   InternalCommand,
   ModelFavorite,
 } from './commands'
-export { isClientCommand } from './commands'
+export { codexSelectionLabel, isClientCommand } from './commands'
 export type { EventBase, EventPayload, EventType, HarnessEvent } from './events'
 export { GLOBAL_SESSION_ID, isGlobalEvent } from './events'
 export type { InputAnswer, InputOption, InputQuestion, InputResponse } from './input'
