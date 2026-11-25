@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.13...v0.0.14)
+
+## ✨ Features
+
+- align the responsive workspace with the reference layout ([0d2902b](https://github.com/stacksjs/harness/commit/0d2902b)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.12...v0.0.13)
 
 ## ✨ Features
