@@ -1,5 +1,19 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.12...v0.0.13)
+
+## ✨ Features
+
+- steer active Codex turns from the follow-up queue ([fde4dca](https://github.com/stacksjs/harness/commit/fde4dca)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## ✅ Tests
+
+- wait for the host before steering the queued item ([8fe1233](https://github.com/stacksjs/harness/commit/8fe1233)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.11...v0.0.12)
 
 ## ✨ Features
