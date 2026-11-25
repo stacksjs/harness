@@ -1,5 +1,26 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.24...v0.0.25)
+
+## ✨ Features
+
+- **ui**: bring the workspace shell closer to the reference ([ef0d984](https://github.com/stacksjs/harness/commit/ef0d984)) _(by Chris)_
+- **settings**: move the General section onto the host ([18c879f](https://github.com/stacksjs/harness/commit/18c879f)) _(by glennmichael123)_
+- **settings**: serve host settings to the page ([a0fcd85](https://github.com/stacksjs/harness/commit/a0fcd85)) _(by glennmichael123)_
+- **settings**: record host settings in the event log ([d6bc30e](https://github.com/stacksjs/harness/commit/d6bc30e)) _(by glennmichael123)_
+- **settings**: define host settings in the contract ([6038542](https://github.com/stacksjs/harness/commit/6038542)) _(by glennmichael123)_
+
+## 🎉 Miscellaneous
+
+- Merge pull request #48 from stacksjs/feat/host-settings ([48e6354](https://github.com/stacksjs/harness/commit/48e6354)) _(by Glenn Michael Torregosa)_ ([#48](https://github.com/stacksjs/harness/issues/48))
+- Merge main into the host settings branch ([6f00aa2](https://github.com/stacksjs/harness/commit/6f00aa2)) _(by glennmichael123)_
+
+## Contributors
+
+- _Chris_
+- _Glenn Michael Torregosa_
+- _glennmichael123_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.23...v0.0.24)
 
 ## 🐛 Bug Fixes
