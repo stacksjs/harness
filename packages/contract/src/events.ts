@@ -9,6 +9,7 @@
 import type { ApprovalDecision, ApprovalScope, ConnectorApproval, DriverKind } from './commands'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
+import type { HostSettings } from './settings'
 import type { ThreadNavigation } from './thread-navigation'
 
 export interface EventBase {
@@ -65,6 +66,8 @@ export type EventPayload =
   /** This session got its own checkout and branch. */
   | { type: 'session.isolated', worktreePath: string, branch: string }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number }
+  /** Only the settings that actually changed, for the same reason as below. */
+  | { type: 'settings.updated', changes: Partial<HostSettings> }
   | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
   /**
    * Only the fields that changed. Absent means "leave it alone", which is what
@@ -114,6 +117,7 @@ export type EventType = EventPayload['type']
 export const GLOBAL_SESSION_ID = 0
 
 const GLOBAL_EVENT_TYPES: ReadonlySet<string> = new Set<EventType>([
+  'settings.updated',
   'profile.created',
   'profile.updated',
   'profile.deleted',

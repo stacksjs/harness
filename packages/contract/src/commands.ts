@@ -9,6 +9,7 @@
  */
 
 import type { SteeringOutcome } from './follow-ups'
+import type { HostSettings } from './settings'
 import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
 import type { ThreadOrganizationAction } from './thread-navigation'
 
@@ -59,6 +60,15 @@ export type ClientCommand =
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
   | { type: 'session.stop', sessionId: number }
   | ({ type: 'session.organize', sessionId: number } & ThreadOrganizationAction)
+  /**
+   * Change one or more host settings.
+   *
+   * Client-dispatchable, like every other preference in this list: a setting
+   * that every client of the host shares still has to be changeable from any
+   * of them. Unknown keys are dropped rather than refused, so a newer client
+   * may send a setting this host has not heard of.
+   */
+  | { type: 'settings.update', changes: Partial<HostSettings> }
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
   | { type: 'profile.update', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
   | { type: 'profile.delete', profileId: number }
@@ -159,6 +169,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'mcp.setEnabled',
   'session.stop',
   'session.organize',
+  'settings.update',
   'profile.create',
   'profile.update',
   'profile.delete',
