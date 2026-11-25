@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.16...v0.0.17)
+
+## ✨ Features
+
+- find text within a thread ([f1d01ff](https://github.com/stacksjs/harness/commit/f1d01ff)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.15...v0.0.16)
 
 ## ✨ Features
