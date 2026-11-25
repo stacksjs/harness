@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.27...v0.0.28)
+
+## ✨ Features
+
+- **terminal**: integrate Den in the workspace dock ([e210b94](https://github.com/stacksjs/harness/commit/e210b94)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.26...v0.0.27)
 
 ## ✨ Features
