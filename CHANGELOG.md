@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.19...v0.0.20)
+
+## ✨ Features
+
+- **composer**: align drafts and discover Codex account models ([9773677](https://github.com/stacksjs/harness/commit/9773677)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.18...v0.0.19)
 
 ## ✨ Features
