@@ -266,9 +266,12 @@ describe('a turn drives the provider', () => {
       databasePath,
       resolveDriver: () => ({
         ...driver,
-        probe(config) {
+        async probe(config, options) {
           probed.push(config)
-          return driver.probe(config)
+          const result = await driver.probe(config)
+          return options?.includeModels && config.home?.endsWith('/work-account')
+            ? { ...result, models: [{ id: 'fixture-work', name: 'Fixture Work', isDefault: true, reasoningEfforts: [], speedTiers: [] }] }
+            : result
         },
         create(config) {
           launched.push(config)
@@ -291,8 +294,9 @@ describe('a turn drives the provider', () => {
       expect(addSavedProvider(databasePath, profileId, { kind: 'codex', name: 'Codex' })).toBe(4)
       expect(removeSavedProvider(databasePath, otherProfileId, 2)).toBe(false)
       await harness.engine.dispatch({ id: 'configured-workspace', at: 2, command: { type: 'workspace.add', profileId, path: dir } })
-      const catalog = () => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}`).then(response => response.json())
-      expect(await catalog()).toMatchObject({ accounts: [] })
+      const catalog = (includeModels = false) => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}${includeModels ? '&models=1' : ''}`)
+        .then(response => response.json())
+      expect(await catalog(true)).toMatchObject({ accounts: [] })
       await harness.engine.dispatch({ id: 'trust-configured-workspace', at: 3, command: { type: 'workspace.trust', workspaceId, trusted: true } })
       const profileCatalog = await catalog()
       expect(profileCatalog.accounts).toEqual([
@@ -302,6 +306,17 @@ describe('a turn drives the provider', () => {
       ])
       expect(JSON.stringify(profileCatalog)).not.toContain('/fixture/')
       expect(probed).toContainEqual({ workspacePath: dir, binaryPath: join(dir, 'bin/claude'), home: join(dir, 'work-account') })
+      const withModels = await catalog(true)
+      expect(withModels.accounts.map((account: { id: number, models?: Array<{ id: string }> }) => [account.id, account.models?.map(model => model.id)]))
+        .toEqual([[1, ['fixture-work']], [2, undefined], [4, undefined]])
+      expect(JSON.stringify(withModels)).not.toContain('/fixture/')
+      const favorite = { driverKind: 'claude', providerInstanceId: 1, model: 'fixture-work' }
+      const favoriteCommand = { type: 'profile.model-favorite.set', profileId, favorite, selected: true }
+      client.send({ t: 'dispatch', envelope: { id: 'save-work-favorite', at: 4, command: favoriteCommand } })
+      expect(await client.waitFor('profile.model-favorite.changed')).toMatchObject({ profileId, favorite, selected: true })
+      expect((await catalog(true)).favorites).toEqual([favorite])
+      client.send({ t: 'dispatch', envelope: { id: 'other-profile-favorite', at: 4, command: { ...favoriteCommand, profileId: otherProfileId } } })
+      expect(await client.waitForRejection('other-profile-favorite')).toMatchObject({ message: expect.stringContaining('unavailable in the selected profile') })
       probed.length = 0
       for (const id of [3, 4, 99]) {
         await expect(harness.engine.dispatch({
@@ -402,13 +417,21 @@ describe('a turn drives the provider', () => {
       await harness.engine.dispatch({ id: key, at: 1, command: { type: 'workspace.register', path: dir, trusted: true } })
       const accountId = addSavedProvider(databasePath, workspaceId, { kind: 'codex', name: 'Fixture plan', chatGptClientId: clientId })
       const pick = { type: 'session.create', workspaceId, driverKind: 'codex', providerInstanceId: accountId } as const
-      const catalog = (token: string) => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}`, {
+      const catalog = (token: string, includeModels = false) => fetch(`http://127.0.0.1:${port}/drivers?workspace=${workspaceId}${includeModels ? '&models=1' : ''}`, {
         headers: { authorization: `Bearer ${token}` },
       }).then(res => res.json())
       const listed = await catalog(access.localToken)
       expect(listed.accounts).toEqual([{ id: accountId, kind: 'codex', name: 'Fixture plan', status: 'ready', auth: 'chatgpt' }])
       expect(JSON.stringify(listed)).not.toContain(clientId)
       expect((await catalog(paired.token)).accounts).toEqual([])
+      const favorite = { driverKind: 'codex', providerInstanceId: accountId, model: 'fixture-plan-model' }
+      const favoriteCommand = { type: 'profile.model-favorite.set', profileId: workspaceId, favorite, selected: true }
+      device.send({ t: 'dispatch', envelope: { id: 'device-save-favorite', at: 2, command: favoriteCommand } })
+      expect(await device.waitForRejection('device-save-favorite')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })
+      host.send({ t: 'dispatch', envelope: { id: 'host-save-favorite', at: 2, command: favoriteCommand } })
+      expect(await host.waitFor('profile.model-favorite.changed')).toMatchObject({ favorite })
+      expect((await catalog(access.localToken, true)).favorites).toEqual([favorite])
+      expect((await catalog(paired.token, true)).favorites).toEqual([])
 
       device.send({ t: 'dispatch', envelope: { id: 'device-create', at: 2, command: pick } })
       expect(await device.waitForRejection('device-create')).toMatchObject({ message: expect.stringContaining('only on the Harness host') })
@@ -1049,7 +1072,20 @@ describe('host settings belong to the host', () => {
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
     // pointed at one host no longer disagree.
-    const page = await fetch(`http://127.0.0.1:${port}/`).then(response => response.text())
+    //
+    // The template resolves from cwd and the resolution is memoized for the
+    // process, so this renders from the repo root the way the render-cache
+    // test does. Fetching `/` from the package directory would not merely
+    // fail here, it would pin "no view" for every later test in the file set.
+    const previousCwd = process.cwd()
+    process.chdir(join(import.meta.dir, '../../..'))
+    let page: string
+    try {
+      page = await fetch(`http://127.0.0.1:${port}/`).then(response => response.text())
+    }
+    finally {
+      process.chdir(previousCwd)
+    }
     expect(page).toMatch(/defaultDriver\\?["']\s*:\s*\\?["']codex/)
     first.close()
     harness.stop()

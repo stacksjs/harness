@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, HostSettings, InputQuestion, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, ConnectorApproval, DriverKind, FollowUpQueue, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
 import { acceptedSettings, applyFollowUpEvent, hostSettings } from '@harness/contract'
 
@@ -25,8 +25,10 @@ export interface SessionState {
   providerInstanceId?: number
   /** Model override for this session. Empty means the provider's own default. */
   model: string
+  codexTurnOptions?: CodexTurnOptions
   providerSessionId: string
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
+  lastError?: string
   lastSeq: number
   navigation?: ThreadNavigation
   turns: TurnState[]
@@ -143,6 +145,12 @@ export interface ProfileState {
   workspaceIds: number[]
   /** In the order they were attached. */
   mcpServers: McpServerState[]
+  modelFavorites?: ModelFavorite[]
+}
+
+export function modelFavoriteIndex(favorites: readonly ModelFavorite[], favorite: ModelFavorite): number {
+  return favorites.findIndex(entry => entry.driverKind === favorite.driverKind
+    && entry.providerInstanceId === favorite.providerInstanceId && entry.model === favorite.model)
 }
 
 export interface WorkspaceState {
@@ -242,6 +250,16 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       break
     }
 
+    case 'profile.model-favorite.changed': {
+      const profile = state.profiles.get(p.profileId)
+      if (!profile) break
+      const favorites = profile.modelFavorites ??= []
+      const index = modelFavoriteIndex(favorites, p.favorite)
+      if (p.selected && index < 0) favorites.push(p.favorite)
+      else if (!p.selected && index >= 0) favorites.splice(index, 1)
+      break
+    }
+
     case 'profile.deleted':
       state.profiles.delete(p.profileId)
       // `?? []` so a `profile.deleted` written before the cascade existed still
@@ -333,6 +351,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         driverKind: p.driverKind,
         ...(p.providerInstanceId !== undefined ? { providerInstanceId: p.providerInstanceId } : {}),
         model: p.model ?? '',
+        ...(p.codexTurnOptions ? { codexTurnOptions: p.codexTurnOptions } : {}),
         providerSessionId: '',
         state: 'idle',
         lastSeq: 0,
@@ -374,6 +393,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (active?.status === 'running') active.status = 'failed'
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'failed'
+      session.lastError = p.message
       clearTurnRequests(session)
       break
     }
@@ -382,6 +402,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'running'
+      delete session.lastError
       if (session.navigation?.settledAt || session.navigation?.snoozedUntil) {
         session.navigation.settledAt = null
         session.navigation.snoozedUntil = null

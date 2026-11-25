@@ -6,9 +6,9 @@
  * identical state rather than a similar one.
  */
 
-import type { Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
+import type { CodexTurnOptions, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
-import { isTurnActive } from './projections'
+import { isTurnActive, modelFavoriteIndex } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
 
@@ -41,6 +41,26 @@ function followUpText(value: unknown): string {
   const text = typeof value === 'string' ? value.trim() : ''
   if (!text) throw new InvalidCommand('Enter a message to queue.')
   return text
+}
+
+function sessionModel(command: Extract<Command, { type: 'session.create' | 'thread.scratch.create' }>): {
+  model?: string
+  codexTurnOptions?: CodexTurnOptions
+} {
+  const model = command.model ? { model: command.model } : {}
+  const options = command.codexTurnOptions
+  if (options === undefined) return model
+  if (command.driverKind !== 'codex' || typeof command.model !== 'string' || !command.model.trim()
+    || !options || typeof options !== 'object' || Array.isArray(options)
+    || Object.keys(options).some(key => key !== 'effort' && key !== 'serviceTier'))
+    throw new InvalidCommand('Model options require a specific Codex model.')
+
+  const { effort, serviceTier } = options
+  if (effort !== undefined && (typeof effort !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort)))
+    throw new InvalidCommand('Choose a valid reasoning effort.')
+  if (serviceTier !== undefined && (typeof serviceTier !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(serviceTier)))
+    throw new InvalidCommand('Choose a valid speed tier.')
+  return effort || serviceTier ? { ...model, codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } } : model
 }
 
 function turnStarted(session: SessionState, text: string, queuedId?: string): EventPayload {
@@ -163,6 +183,31 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         commandId,
         at,
         payload: { type: 'profile.updated', profileId: command.profileId, ...changed },
+      }]
+    }
+
+    case 'profile.model-favorite.set': {
+      const profile = state.profiles.get(command.profileId)
+      if (!profile) throw new InvalidCommand('This profile is unavailable.')
+      const { favorite, selected } = command
+      if (!favorite || typeof favorite.driverKind !== 'string' || !favorite.driverKind
+        || typeof favorite.model !== 'string' || !favorite.model.trim() || favorite.model.length > 200
+        || typeof selected !== 'boolean' || (favorite.providerInstanceId !== undefined
+          && (!Number.isSafeInteger(favorite.providerInstanceId) || favorite.providerInstanceId <= 0)))
+        throw new InvalidCommand('Choose a model to save.')
+
+      const favorites = profile.modelFavorites ?? []
+      const exists = modelFavoriteIndex(favorites, favorite) >= 0
+      if (exists === selected) return []
+      const { driverKind, providerInstanceId, model } = favorite
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: {
+          type: 'profile.model-favorite.changed', profileId: profile.id, selected,
+          favorite: { driverKind, model, ...(providerInstanceId === undefined ? {} : { providerInstanceId }) },
+        },
       }]
     }
 
@@ -376,7 +421,16 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       events.push(
         { ...event, payload: { type: 'workspace.added', workspaceId: sessionId, profileId, path: command.path, scratch: true } },
         { ...event, payload: { type: 'workspace.trust-changed', workspaceId: sessionId, trusted: true } },
-        { ...event, sessionId, payload: { type: 'session.created', workspaceId: sessionId, driverKind: command.driverKind } },
+        {
+          ...event,
+          sessionId,
+          payload: {
+            type: 'session.created',
+            workspaceId: sessionId,
+            driverKind: command.driverKind,
+            ...sessionModel(command),
+          },
+        },
       )
       return events
     }
@@ -400,9 +454,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           workspaceId: command.workspaceId,
           driverKind: command.driverKind,
           ...(command.providerInstanceId !== undefined ? { providerInstanceId: command.providerInstanceId } : {}),
-          // Omitted rather than sent empty, so "no preference" and "the empty
-          // model" cannot be confused on replay.
-          ...(command.model ? { model: command.model } : {}),
+          ...sessionModel(command),
           ...(command.isolate ? { isolate: true } : {}),
         },
       }]

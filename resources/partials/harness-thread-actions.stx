@@ -1,4 +1,4 @@
-<dialog id="harness-thread-actions" ref="threadActionsDialogBox" aria-labelledby="harness-thread-actions-title" @cancel="closeThreadActions" @click.self="closeThreadActions()" class="m-0 p-0 overflow-auto text-neutral-900 bg-white border border-black/15 rounded-lg shadow-xl dark:text-neutral-100 dark:bg-neutral-900 dark:border-white/15">
+<dialog id="harness-thread-actions" ref="threadActionsDialogBox" aria-labelledby="harness-thread-actions-title" @cancel="closeThreadActions" @click.self="closeThreadActions()" @scroll="positionThreadSnooze" class="m-0 p-0 overflow-auto text-neutral-900 bg-white border border-black/15 rounded-lg shadow-xl dark:text-neutral-100 dark:bg-neutral-900 dark:border-white/15">
   <div class="p-1">
     <h2 id="harness-thread-actions-title" class="sr-only">Thread actions</h2>
     <p role="alert" class="px-2 py-1 text-sm text-red-700 dark:text-red-300" :hidden="!threadActionError()" :text="threadActionError()"></p>
@@ -30,15 +30,34 @@
       <button type="button" data-thread-action :hidden="!threadNavigation().snoozedUntil" @click="organizeThread('wake')" :disabled="threadActionBusy()">
         <span class="i-hugeicons-alarm-clock" aria-hidden="true"></span>Wake thread
       </button>
-      <button type="button" data-thread-action :hidden="Boolean(threadNavigation().snoozedUntil)" :aria-expanded="threadActionForm() === 'snooze'" aria-controls="thread-snooze-form" @click="openThreadActionForm('snooze')" :disabled="threadActionBusy()">
+      <button type="button" ref="threadSnoozeTriggerBox" data-thread-action :hidden="Boolean(threadNavigation().snoozedUntil)" :aria-expanded="threadActionForm() === 'snooze' || threadActionForm() === 'custom-snooze'" aria-controls="thread-snooze-form" @click="openThreadActionForm('snooze')" :disabled="threadActionBusy()">
         <span class="i-hugeicons-clock-01" aria-hidden="true"></span>Snooze
+        <span data-snooze-arrow class="i-hugeicons-arrow-right-01" aria-hidden="true"></span>
       </button>
-      <form id="thread-snooze-form" :hidden="threadActionForm() !== 'snooze'" @submit.prevent="snoozeThread()" class="grid gap-2 p-2">
-        <button type="button" @click="snoozeThread(1)" :disabled="threadActionBusy()" class="px-2 py-1 text-sm text-start border border-black/15 rounded-md dark:border-white/20">For one hour</button>
-        <label for="thread-wake-time" class="text-xs font-medium">Custom wake time</label>
-        <input id="thread-wake-time" type="datetime-local" ref="threadWakeTimeBox" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
-        <button type="submit" :disabled="threadActionBusy()" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Set wake time</button>
-      </form>
+      <div id="thread-snooze-form" ref="threadSnoozePanelBox" :hidden="threadActionForm() !== 'snooze' && threadActionForm() !== 'custom-snooze'">
+        <div :hidden="threadActionForm() !== 'snooze'">
+          <template :for="choice in threadSnoozePresets()" :key="choice.id">
+            <button type="button" data-thread-action @click="snoozeFromPreset(choice)" :disabled="threadActionBusy()">
+              <span data-snooze-label :text="choice.label"></span>
+              <span data-snooze-detail :text="choice.detail"></span>
+            </button>
+          </template>
+          <button type="button" data-thread-action @click="openThreadActionForm('custom-snooze')">Custom wake time</button>
+        </div>
+        <form :hidden="threadActionForm() !== 'custom-snooze'" @submit.prevent="snoozeThread()" class="grid gap-2 p-2">
+          <label for="thread-wake-mode" class="text-xs font-medium">Wake after</label>
+          <select id="thread-wake-mode" :value="threadSnoozeMode()" @change="threadSnoozeMode.set($event.target.value)" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20">
+            <option value="date">Date and time</option>
+            <option value="minutes">Minutes</option>
+            <option value="hours">Hours</option>
+            <option value="days">Days</option>
+          </select>
+          <input type="datetime-local" ref="threadWakeTimeBox" aria-label="Wake date and time" :hidden="threadSnoozeMode() !== 'date'" :disabled="threadSnoozeMode() !== 'date'" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
+          <input type="number" min="1" step="1" ref="threadWakeDurationBox" aria-label="Wake duration" :hidden="threadSnoozeMode() === 'date'" :disabled="threadSnoozeMode() === 'date'" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
+          <button type="submit" :disabled="threadActionBusy()" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Set wake time</button>
+          <button type="button" data-thread-action @click="openThreadActionForm('snooze')">Back to wake choices</button>
+        </form>
+      </div>
       <button type="button" data-thread-action :aria-expanded="threadActionForm() === 'rename'" aria-controls="thread-rename-form" @click="openThreadActionForm('rename')" :disabled="threadActionBusy()">
         <span class="i-hugeicons-pencil-edit-02" aria-hidden="true"></span>Rename thread
       </button>

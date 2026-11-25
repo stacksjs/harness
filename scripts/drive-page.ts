@@ -104,6 +104,10 @@ const instance: ProviderInstance = {
       yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
       return
     }
+    if (input.text === 'exercise provider resume rejection') {
+      yield { type: 'error', message: 'Codex could not resume this conversation. Check the selected account and retry. <div data-error-injection>' }
+      return
+    }
     if (input.text.startsWith('Follow-up fixture:')) {
       followUpDelivery.push(input.text)
       yield { type: 'assistant-delta', text: 'Received the queued message.' }
@@ -214,10 +218,29 @@ const driver: Driver = {
   },
 }
 let fixtureCodexReady = false
+let fixtureCodexLaunchModel: string | undefined
+let fixtureCodexLaunchOptions: { effort?: string, serviceTier?: string } | undefined
 const codexDriver: Driver = {
   ...driver,
   kind: 'codex',
-  async probe() { return { status: fixtureCodexReady ? 'ready' : 'unauthenticated' } },
+  async probe(config, { includeModels } = {}) {
+    const homeModel = config.home?.endsWith('/model-fixture-home')
+    if (!homeModel && !fixtureCodexReady) return { status: 'unauthenticated' }
+    const id = homeModel ? 'fixture-fast' : 'fixture-default'
+    return {
+      status: 'ready',
+      ...(includeModels ? { models: [{
+        id, name: homeModel ? 'Fixture Fast' : 'Fixture Default', isDefault: true,
+        reasoningEfforts: ['medium', 'high'], defaultReasoningEffort: 'medium',
+        speedTiers: [{ id: 'fast', name: 'Fast' }],
+      }] } : {}),
+    }
+  },
+  async create(config) {
+    fixtureCodexLaunchModel = config.model
+    fixtureCodexLaunchOptions = config.codexTurnOptions
+    return driver.create(config)
+  },
 }
 
 const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
@@ -226,6 +249,11 @@ const harness = await serve({
   resolveDriver: kind => kind === 'codex' ? codexDriver : driver,
 })
 const baseUrl = `http://localhost:${port}`
+// Compile the fixture's template before starting the browser's network drive.
+// The performance drive measures cold rendering separately.
+const warmup = await harness.server.fetch(new Request(baseUrl))
+if (!warmup.ok) throw new Error(`Could not render the browser fixture: HTTP ${warmup.status}`)
+await warmup.body?.cancel()
 const screenshotDir = process.env.HARNESS_SCREENSHOT_DIR
 if (screenshotDir) mkdirSync(screenshotDir, { recursive: true })
 
@@ -239,11 +267,11 @@ const browserContext = await browser.newContext({ colorScheme, reducedMotion })
 const page = await browserContext.newPage()
 const captures: Array<{ name: string, width: number, height: number }> = []
 
-async function capture(name: string): Promise<void> {
+async function capture(name: string, target = page): Promise<void> {
   if (!screenshotDir) return
-  const viewport = page.viewportSize()
+  const viewport = target.viewportSize()
   if (!viewport) throw new Error('The screenshot drive requires an explicit viewport.')
-  await page.screenshot({ path: join(screenshotDir, `${name}.png`), animations: 'disabled' })
+  await target.screenshot({ path: join(screenshotDir, `${name}.png`), animations: 'disabled' })
   captures.push({ name, ...viewport })
 }
 
@@ -683,7 +711,9 @@ await page.locator('[data-draft-project]').selectOption(String(secondWorkspaceId
 await page.waitForURL(`**/?workspace=${secondWorkspaceId}`)
 await capture('onboarding-selected-project')
 await page.setViewportSize({ width: 1280, height: 800 })
-await page.selectOption('[data-driver-picker]', 'claude:2')
+await page.getByRole('button', { name: 'Choose agent and model' }).click()
+await page.getByRole('button', { name: /Claude Code.*Personal/ }).click()
+await page.getByRole('grid', { name: 'Models' }).getByRole('button', { name: 'Provider default' }).click()
 await page.fill('[data-prompt]', 'typed with no session open')
 await page.click('[data-send]')
 await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
@@ -1438,8 +1468,43 @@ check('closing thread actions returns focus to its button', await threadActionsT
 await page.setViewportSize({ width: 1280, height: 800 })
 await threadActionsTrigger.click()
 await threadActions.getByRole('button', { name: 'Snooze', exact: true }).click()
-await threadActions.getByRole('button', { name: 'For one hour', exact: true }).click()
+await threadActions.getByRole('button', { name: /^In 1 hour/ }).waitFor()
+await threadActions.getByRole('button', { name: /^In 3 hours/ }).waitFor()
+const snoozeChoices = threadActions.locator('#thread-snooze-form')
+check('snooze opens beside the desktop thread menu', await snoozeChoices.evaluate(panel => {
+  const menu = panel.closest('dialog')?.getBoundingClientRect()
+  const bounds = panel.getBoundingClientRect()
+  const choice = panel.querySelector('button')?.getBoundingClientRect()
+  return Boolean(menu && choice && bounds.left >= menu.right - 2 && bounds.right <= innerWidth
+    && panel.contains(document.elementFromPoint(choice.x + choice.width / 2, choice.y + choice.height / 2)))
+}))
+await capture('thread-snooze-presets')
+await page.setViewportSize({ width: 360, height: 800 })
+await page.waitForFunction(() => document.querySelector('#harness-thread-actions')?.getAttribute('data-snooze-side') === 'false')
+check('snooze stays inside the thread menu on a phone', await snoozeChoices.evaluate(panel => {
+  const menu = panel.closest('dialog')?.getBoundingClientRect()
+  const bounds = panel.getBoundingClientRect()
+  return Boolean(menu && bounds.left >= menu.left && bounds.right <= menu.right && bounds.right <= innerWidth)
+}))
+await capture('thread-snooze-phone')
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.waitForFunction(() => document.querySelector('#harness-thread-actions')?.getAttribute('data-snooze-side') === 'true')
+await threadActions.getByRole('button', { name: 'Custom wake time' }).click()
+await threadActions.getByLabel('Wake after').selectOption('minutes')
+await threadActions.getByRole('spinbutton', { name: 'Wake duration' }).fill('20')
+const earliestWake = Date.now() + 20 * 60_000
+await threadActions.getByRole('button', { name: 'Set wake time' }).click()
 const snoozedThread = page.locator('[data-section-id^="snoozed-"]').getByText('Parity release review', { exact: true })
+await snoozedThread.waitFor()
+const wake = harness.engine.current.sessions.get(steerSessionId)?.navigation?.snoozedUntil
+check('custom snooze duration starts when the wake is confirmed',
+  typeof wake === 'number' && wake >= earliestWake && wake < earliestWake + 10000)
+await threadActionsTrigger.click()
+await threadActions.getByRole('button', { name: 'Wake thread', exact: true }).click()
+await pinnedThreads.getByText('Parity release review', { exact: true }).waitFor()
+await threadActionsTrigger.click()
+await threadActions.getByRole('button', { name: 'Snooze', exact: true }).click()
+await threadActions.getByRole('button', { name: /^In 1 hour/ }).click()
 await snoozedThread.waitFor()
 await threadActionsTrigger.click()
 await threadActions.getByRole('button', { name: 'Wake thread', exact: true }).click()
@@ -1478,9 +1543,8 @@ const conversationQuery = conversationFind.getByRole('searchbox', { name: 'Find 
 const findCount = conversationFind.locator('[data-find-counter]')
 await threadActionsTrigger.click()
 await threadActions.getByRole('button', { name: 'Find in thread', exact: true }).click()
-await conversationQuery.waitFor()
-check('Find in thread opens from the title menu and focuses its input',
-  await conversationQuery.evaluate(input => input === document.activeElement))
+await page.waitForFunction(() => document.activeElement?.matches('[data-transcript-find] input[type="search"]') === true)
+check('Find in thread opens from the title menu and focuses its input', true)
 await conversationQuery.fill('ACTIVE STEERING')
 await conversationFind.getByText('1/2', { exact: true }).waitFor()
 check('the first result clears the find bar', await page.evaluate(() => {
@@ -1522,6 +1586,164 @@ await pressChord('Control+f')
 await conversationQuery.waitFor()
 check('Control+F reopens find with cleared results', await findCount.textContent() === '')
 await conversationFind.getByRole('button', { name: 'Close find' }).click()
+
+{
+  using db = new Database(databasePath)
+  db.query('INSERT INTO provider_instances (id, profile_id, driver_kind, config, resolved_home) VALUES (?, ?, ?, ?, ?)')
+    .run(4, providerProfileId, 'codex', '{"name":"Catalog fixture"}', 'model-fixture-home')
+}
+await page.goto(`${baseUrl}/?workspace=${workspaceId}`)
+await page.setViewportSize({ width: 1280, height: 800 })
+const draftPicker = page.getByRole('button', { name: 'Choose agent and model' })
+const draftDialog = page.getByRole('dialog', { name: 'Agent and model' })
+const draftSearch = draftDialog.getByRole('combobox', { name: 'Search models' })
+const modelGrid = draftDialog.getByRole('grid', { name: 'Models' })
+const fastModel = modelGrid.locator('[data-draft-model-option]').filter({ hasText: 'Fixture Fast' })
+await draftPicker.click()
+await draftDialog.getByRole('button', { name: /Codex.*Catalog fixture/ }).click()
+check('browsing a named account exposes its own model catalog',
+  await fastModel.isVisible()
+  && await modelGrid.getByRole('button', { name: 'Fixture Default', exact: true }).count() === 0)
+const favoriteFast = modelGrid.getByRole('button', { name: /^Favorite Fixture Fast on Codex/ })
+await favoriteFast.press('Space')
+await page.waitForFunction(() => document.querySelector('[data-draft-model-star][aria-pressed="true"]') !== null)
+check('favoriting a model keeps the draft selection and scopes the flag to its account',
+  (await draftPicker.textContent())?.includes('Fixture Fast') === false
+  && harness.engine.current.profiles.get(providerProfileId)?.modelFavorites?.some(model => model.model === 'fixture-fast' && model.providerInstanceId === 4) === true)
+await draftDialog.getByRole('button', { name: 'Favorites', exact: true }).click()
+check('the Favorites filter shows the starred account and model',
+  await fastModel.isVisible() && await modelGrid.getByRole('button', { name: 'Provider default', exact: true }).count() === 0)
+await capture('model-favorites-desktop')
+const favoritesClient = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme, reducedMotion })
+try {
+  const phoneFavorites = await favoritesClient.newPage()
+  await phoneFavorites.goto(`${baseUrl}/?workspace=${workspaceId}`)
+  await phoneFavorites.getByRole('button', { name: 'Choose agent and model' }).click()
+  await phoneFavorites.getByRole('button', { name: 'Favorites', exact: true }).click()
+  const phoneStar = phoneFavorites.locator('[data-draft-model-star][aria-pressed="true"]')
+  await phoneStar.waitFor()
+  check('another client sees the saved model and a visible star on a narrow screen', await phoneStar.evaluate(star => {
+    const rect = star.getBoundingClientRect()
+    const glyph = star.querySelector('.i-f7-star-fill')
+    return rect.left >= 0 && rect.right <= innerWidth && Boolean(glyph && getComputedStyle(glyph).maskImage !== 'none')
+  }))
+  await capture('model-favorites-phone', phoneFavorites)
+}
+finally {
+  await favoritesClient.close()
+}
+await page.reload()
+await draftPicker.click()
+await draftDialog.getByRole('button', { name: 'Favorites', exact: true }).click()
+await fastModel.waitFor()
+check('favorites reload from the host', await favoriteFast.getAttribute('aria-pressed') === 'true')
+await favoriteFast.click()
+await draftDialog.getByText('No favorite models available.').waitFor()
+check('removing a favorite leaves focus in the picker and clears the saved flag',
+  await draftSearch.evaluate(input => input === document.activeElement)
+  && harness.engine.current.profiles.get(providerProfileId)?.modelFavorites?.length === 0)
+await draftDialog.getByRole('button', { name: /Codex.*Catalog fixture/ }).click()
+await draftSearch.fill('No such model')
+await draftDialog.getByText('No matching models').waitFor()
+await draftSearch.press('Escape')
+await draftDialog.waitFor({ state: 'hidden' })
+check('Escape returns focus after browsing and leaves the draft selection unchanged',
+  await draftPicker.evaluate(button => button === document.activeElement && !button.textContent?.includes('Fixture Fast')))
+await draftPicker.click()
+await draftSearch.fill('fixture-fast')
+await fastModel.waitFor()
+await draftSearch.press('ArrowDown')
+check('model search keeps keyboard focus on the combobox and exposes the highlighted result',
+  await draftSearch.evaluate(input => {
+    const option = document.getElementById(input.getAttribute('aria-activedescendant') ?? '')
+    return input === document.activeElement && option?.textContent?.includes('Fixture Fast') === true
+  }))
+await draftSearch.press('Enter')
+await draftDialog.getByRole('button', { name: 'High', exact: true }).click()
+await draftDialog.getByRole('button', { name: 'Fast', exact: true }).click()
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  const fitted = await page.waitForFunction(() => {
+    const box = document.querySelector('[data-draft-model-dialog]')?.getBoundingClientRect()
+    return !!box && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight
+  }, undefined, { timeout: 2000 }).then(() => true, () => false)
+  check(`the model picker stays within the ${width}×${height} viewport`, fitted)
+  if (width <= 390) {
+    const accountVisible = await page.waitForFunction(() => {
+      const strip = document.querySelector('[data-draft-model-accounts]')
+      const account = strip?.querySelector('[data-draft-model-account][aria-pressed="true"]')
+      if (!strip || !account) return false
+      const bounds = strip.getBoundingClientRect()
+      const selected = account.getBoundingClientRect()
+      const left = bounds.left + strip.clientLeft
+      return selected.left >= left - 1 && selected.right <= left + strip.clientWidth + 1
+    }, undefined, { timeout: 2000 }).then(() => true, () => false)
+    check(`the selected named account is visible at ${width}px`, accountVisible)
+  }
+  await capture(`model-picker-${width}x${height}`)
+}
+await page.setViewportSize({ width: 360, height: 470 })
+check('the model search and dismissal stay reachable in a short phone viewport',
+  await draftDialog.evaluate(dialog => {
+    const search = dialog.querySelector('[role="combobox"]')?.getBoundingClientRect()
+    const done = dialog.querySelector('footer button')?.getBoundingClientRect()
+    return !!search && !!done && search.top >= 0 && done.bottom <= innerHeight
+  }))
+await page.setViewportSize({ width: 360, height: 800 })
+await draftDialog.getByRole('button', { name: 'Done' }).click()
+check('the selected model and send fit in the narrow composer', await page.evaluate(() => {
+  const composer = document.querySelector('[data-composer]')?.getBoundingClientRect()
+  return !!composer && [...document.querySelectorAll('[data-model-picker-trigger], [data-send]')].every((control) => {
+    const bounds = control.getBoundingClientRect()
+    return bounds.width > 0 && bounds.left >= composer.left && bounds.right <= composer.right
+  }) && document.documentElement.scrollWidth === innerWidth
+}))
+check('the draft prompt, composer and project controls stay grouped on a phone', await page.evaluate(() => {
+  const intro = document.querySelector('[data-empty-state]')?.getBoundingClientRect()
+  const composer = document.querySelector('[data-composer]')?.getBoundingClientRect()
+  const context = document.querySelector('[data-draft-context]')?.getBoundingClientRect()
+  return Boolean(intro && composer && context && intro.bottom <= composer.top
+    && composer.top - intro.bottom <= 32 && composer.bottom <= context.top && context.bottom < innerHeight * 0.8)
+}))
+await capture('named-model-draft-phone')
+await page.setViewportSize({ width: 1280, height: 800 })
+await capture('named-model-draft-desktop')
+await page.locator('[data-prompt]').fill('Use the selected named model.')
+await page.locator('[data-send]').click()
+await page.waitForURL(/\/s\/\d+/, { timeout: 8000 })
+await page.locator('[data-turn]').getByText('Use the selected named model.').waitFor()
+const catalogSession = harness.engine.current.sessions.get(Number(new URL(page.url()).pathname.split('/').at(-1)))
+check('a new thread launches with the selected account, model and turn options',
+  catalogSession?.providerInstanceId === 4 && catalogSession.model === 'fixture-fast' && fixtureCodexLaunchModel === 'fixture-fast'
+  && catalogSession.codexTurnOptions?.effort === 'high' && catalogSession.codexTurnOptions.serviceTier === 'fast'
+  && fixtureCodexLaunchOptions?.effort === 'high' && fixtureCodexLaunchOptions.serviceTier === 'fast')
+
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+await page.locator('[data-prompt]').fill('exercise provider resume rejection')
+await page.locator('[data-send]').click()
+const providerError = page.locator('[data-session-error]')
+await providerError.waitFor()
+check('resume errors give a recovery action in the active thread', await providerError.evaluate(element =>
+  element.getAttribute('role') === 'alert' && element.textContent?.includes('Check the selected account and retry') === true))
+await capture('provider-resume-error-desktop')
+await page.setViewportSize({ width: 390, height: 844 })
+await page.reload()
+await providerError.waitFor()
+check('the resume error survives reload as plain text with a usable composer', await page.evaluate(() => {
+  const error = document.querySelector('[data-session-error]')
+  const alertBounds = error?.getBoundingClientRect()
+  const composer = document.querySelector('[data-composer]')?.getBoundingClientRect()
+  const send = document.querySelector('[data-send]')?.getBoundingClientRect()
+  return error?.textContent?.includes('<div data-error-injection>') === true && !error.querySelector('[data-error-injection]')
+    && !!alertBounds && !!composer && Math.abs(alertBounds.left - composer.left) < 1 && Math.abs(alertBounds.right - composer.right) < 1
+    && !!send && send.top >= 0 && send.bottom <= innerHeight
+}))
+await capture('provider-resume-error-phone')
+await page.locator('[data-prompt]').fill('Retry in the original thread.')
+await page.locator('[data-send]').click()
+await page.locator('[data-turn]').getByText('Retry in the original thread.').waitFor()
+check('retry accepts a new turn in the same thread and clears the previous error', await providerError.isHidden()
+  && Number(new URL(page.url()).pathname.split('/').at(-1)) === catalogSession?.id)
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

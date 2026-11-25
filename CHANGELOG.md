@@ -1,5 +1,94 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.23...v0.0.24)
+
+## 🐛 Bug Fixes
+
+- **codex**: preserve the original conversation on resume ([675e0bc](https://github.com/stacksjs/harness/commit/675e0bc)) _(by Chris)_
+
+## 📝 Documentation
+
+- **parity**: record model favorites and resume evidence ([7a9389d](https://github.com/stacksjs/harness/commit/7a9389d)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.22...v0.0.23)
+
+## ✨ Features
+
+- **composer**: save model favorites by provider account ([d57c497](https://github.com/stacksjs/harness/commit/d57c497)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.21...v0.0.22)
+
+## 🐛 Bug Fixes
+
+- **lint**: exclude Buddy-synced Stacks defaults ([4473b2e](https://github.com/stacksjs/harness/commit/4473b2e)) _(by Chris)_
+- **composer**: keep the active account visible on resize ([e473e73](https://github.com/stacksjs/harness/commit/e473e73)) _(by Chris)_
+
+## 🔧 Chores
+
+- **deps**: upgrade Harness to Stacks 0.75.685 ([2ec01ab](https://github.com/stacksjs/harness/commit/2ec01ab)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.20...v0.0.21)
+
+## ✨ Features
+
+- **composer**: add searchable provider and model picker ([71e5df8](https://github.com/stacksjs/harness/commit/71e5df8)) _(by Chris)_
+
+## 📝 Documentation
+
+- **parity**: inventory reference flags and integration variants ([a328f45](https://github.com/stacksjs/harness/commit/a328f45)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.19...v0.0.20)
+
+## ✨ Features
+
+- **composer**: align drafts and discover Codex account models ([9773677](https://github.com/stacksjs/harness/commit/9773677)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.18...v0.0.19)
+
+## ✨ Features
+
+- **threads**: add preset and custom snooze choices ([9082add](https://github.com/stacksjs/harness/commit/9082add)) _(by Chris)_
+- **keyboard**: rebind workspace shortcuts from settings ([3450cf7](https://github.com/stacksjs/harness/commit/3450cf7)) _(by glennmichael123)_
+- **settings**: add the Keyboard section and serve its registry ([2f31159](https://github.com/stacksjs/harness/commit/2f31159)) _(by glennmichael123)_
+- **keyboard**: declare every window chord in one registry ([70143d6](https://github.com/stacksjs/harness/commit/70143d6)) _(by glennmichael123)_
+
+## 🐛 Bug Fixes
+
+- **performance**: adopt the published stx template scan fix ([401b67c](https://github.com/stacksjs/harness/commit/401b67c)) _(by Chris)_
+- **ci**: add the labeler config the triage job reads ([425695b](https://github.com/stacksjs/harness/commit/425695b)) _(by Glenn Michael Torregosa)_
+
+## 📝 Documentation
+
+- **parity**: record the WebKit drives for the keyboard row ([3c60ee0](https://github.com/stacksjs/harness/commit/3c60ee0)) _(by glennmichael123)_
+- catalog native reference entry points ([bfae43b](https://github.com/stacksjs/harness/commit/bfae43b)) _(by Chris)_
+- inventory pinned T3 Code reference surfaces ([06f30f7](https://github.com/stacksjs/harness/commit/06f30f7)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+- _Glenn Michael Torregosa_
+- _glennmichael123_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.17...v0.0.18)
 
 ## ✨ Features

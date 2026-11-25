@@ -16,11 +16,12 @@
  * from, which is how a harness session survives a server restart.
  */
 
-import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
+import type { DriverConfig, Driver, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
 import type { ApprovalChoice, InputAnswer, SteeringOutcome } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { codexEnvironment } from './account-environment'
+import { parseCodexModelPage } from './codex-models'
 import { managedChatGptArgs, openManagedChatGptBroker } from './chatgpt/token-broker'
 import { probeBinary } from './cli-driver'
 import { EventQueue } from './event-queue'
@@ -295,14 +296,41 @@ class CodexInstance implements ProviderInstance {
     return readableError(message)
   }
 
-  async readAccount(): Promise<ProbeResult> {
+  private async probeResponse<T>(read: Promise<T>, timeout: number): Promise<T | undefined> {
     let deadline: ReturnType<typeof setTimeout> | undefined
     try {
-      const request = this.ensureProcess().then(() => this.request('account/read', {}))
-      const response = await Promise.race([
-        request,
-        new Promise<null>(resolve => { deadline = setTimeout(() => resolve(null), 5000) }),
+      return await Promise.race([
+        read,
+        new Promise<undefined>(resolve => { deadline = setTimeout(() => resolve(undefined), timeout) }),
       ])
+    }
+    finally {
+      clearTimeout(deadline)
+    }
+  }
+
+  private async readModels(): Promise<ProviderModel[]> {
+    // Match the upstream app-server pagination. A repeated cursor cannot make
+    // forward progress, so abort that read without changing account status.
+    const models = new Map<string, ProviderModel>()
+    const cursors = new Set<string>()
+    let cursor: string | undefined
+    do {
+      if (cursor && cursors.has(cursor)) throw new Error('Codex repeated a model list cursor.')
+      if (cursor) cursors.add(cursor)
+      const response = await this.request('model/list', cursor ? { cursor } : {})
+      if (response.error) throw new Error('Codex did not return a model catalog.')
+      const page = parseCodexModelPage(response.result)
+      for (const model of page.models) models.set(model.id, model)
+      cursor = page.cursor
+    } while (cursor)
+    return [...models.values()]
+  }
+
+  async readAccount(includeModels: boolean): Promise<ProbeResult> {
+    try {
+      const request = this.ensureProcess().then(() => this.request('account/read', {}))
+      const response = await this.probeResponse(request, 5000)
       if (!response) return { status: 'failed', message: 'Codex did not report account status within 5 seconds.' }
 
       const accountResponse = response.result
@@ -313,13 +341,25 @@ class CodexInstance implements ProviderInstance {
       // 902d369808c5c30ae9b178c6c6f86587b8f4f336. See T3CODE-LICENSE.md.
       if (!accountResponse.account && accountResponse.requiresOpenaiAuth)
         return { status: 'unauthenticated', message: 'Run `codex login` on this machine.' }
-      return { status: 'ready' }
+      const models = includeModels ? await this.probeResponse(this.readModels(), 2500).catch(() => undefined) : undefined
+      return { status: 'ready', ...(models ? { models } : {}) }
     }
     catch {
       return { status: 'failed', message: 'Could not initialize codex app-server while checking account status.' }
     }
     finally {
-      clearTimeout(deadline)
+      await this.stop()
+    }
+  }
+
+  async readManagedModels(): Promise<ProviderModel[] | undefined> {
+    try {
+      return await this.probeResponse(this.ensureProcess().then(() => this.readModels()), 5000)
+    }
+    catch {
+      return undefined
+    }
+    finally {
       await this.stop()
     }
   }
@@ -509,11 +549,24 @@ class CodexInstance implements ProviderInstance {
     // Resume the provider's own thread when we have one, so a restarted server
     // continues the conversation instead of starting a stranger.
     if (input.providerSessionId && !this.threadId) {
-      const resumed = await this.request('thread/resume', { threadId: input.providerSessionId })
-      this.threadId = resumed.result?.thread?.id ?? null
-      // A thread Codex has forgotten (pruned, or another machine's) must not
-      // take the turn down — falling through starts a fresh one.
-      if (resumed.error) this.threadId = null
+      const threadId = input.providerSessionId
+      const resume = () => this.request('thread/resume', { threadId, excludeTurns: true }, 15_000)
+      let resumed = await resume()
+      if (queue.closed || this.queue !== queue) return
+      if (/\bsession \S+ is archived\b|\bcodex unarchive\b/i.test(resumed.error?.message ?? '')) {
+        // Some Codex versions can move the archived thread and still fail to
+        // read it for the response. Verify the outcome by resuming the same ID.
+        await this.request('thread/unarchive', { threadId }, 15_000)
+        if (queue.closed || this.queue !== queue) return
+        resumed = await resume()
+      }
+      if (queue.closed || this.queue !== queue) return
+      if (resumed.error || resumed.result?.thread?.id !== threadId) {
+        const detail = resumed.error && !this.config.chatGptPlan ? ` ${this.providerError(resumed.error.message)}` : ''
+        queue.finish({ type: 'error', message: `Codex could not resume this conversation. Check the selected account and retry, or use New thread to start separately.${detail}` })
+        return
+      }
+      this.threadId = threadId
     }
 
     if (!this.threadId) {
@@ -530,9 +583,12 @@ class CodexInstance implements ProviderInstance {
       queue.push({ type: 'session-bound', providerSessionId: this.threadId })
     }
 
+    const { effort, serviceTier } = this.config.codexTurnOptions ?? {}
     const turn = await this.request('turn/start', {
       threadId: this.threadId,
       input: [{ type: 'text', text: input.text }],
+      ...(effort ? { effort } : {}),
+      ...(serviceTier ? { serviceTier } : {}),
     })
     if (turn.error) {
       queue.finish({ type: 'error', message: this.providerError(turn.error.message ?? 'turn/start failed') })
@@ -627,17 +683,18 @@ class CodexInstance implements ProviderInstance {
 export const CodexDriver: Driver = {
   kind: 'codex',
 
-  async probe(config: DriverConfig): Promise<ProbeResult> {
+  async probe(config: DriverConfig, { includeModels = false } = {}): Promise<ProbeResult> {
     const result = await probeBinary(config.binaryPath ?? 'codex')
     if (result.status !== 'ready') return result
 
     if (config.chatGptPlan) {
-      return await config.chatGptPlan.connected()
-        ? result
-        : { ...result, status: 'unauthenticated', message: 'Reconnect the ChatGPT plan on this host.' }
+      if (!await config.chatGptPlan.connected())
+        return { ...result, status: 'unauthenticated', message: 'Reconnect the ChatGPT plan on this host.' }
+      const models = includeModels ? await new CodexInstance(config).readManagedModels() : undefined
+      return { ...result, ...(models ? { models } : {}) }
     }
 
-    const account = await new CodexInstance(config).readAccount()
+    const account = await new CodexInstance(config).readAccount(includeModels)
     return { ...result, ...account }
   },
 

@@ -1,8 +1,66 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { approvalLabel, CodexDriver, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from '../src/codex'
+
+describe('codex thread resume', () => {
+  it.each(['ready', 'archived', 'moved-with-error', 'missing', 'different'] as const)('preserves the original conversation when an account reports %s', async (outcome) => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-resume-'))
+    const binaryPath = join(workspacePath, 'codex-fixture')
+    try {
+      writeFileSync(binaryPath, `#!${process.execPath}
+import { appendFileSync } from 'node:fs'
+import { createInterface } from 'node:readline'
+const outcome = ${JSON.stringify(outcome)}
+let archived = outcome === 'archived' || outcome === 'moved-with-error'
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined) continue
+  appendFileSync('requests.log', JSON.stringify({ method, params }) + '\\n')
+  const respond = payload => console.log(JSON.stringify({ id, ...payload }))
+  if (method === 'initialize') respond({ result: {} })
+  else if (method === 'thread/resume') {
+    if (archived) respond({ error: { message: 'session native-thread is archived' } })
+    else if (outcome === 'missing') respond({ error: { message: 'session unavailable in this account' } })
+    else respond({ result: { thread: { id: outcome === 'different' ? 'wrong-thread' : 'native-thread' } } })
+  }
+  else if (method === 'thread/unarchive') {
+    archived = false
+    respond(outcome === 'moved-with-error' ? { error: { message: 'failed to read unarchived thread' } } : { result: {} })
+  }
+  else if (method === 'turn/start') respond({ result: { turn: { id: 'native-turn' } } })
+  else respond({ error: { message: 'unexpected request' } })
+}
+`, { mode: 0o755 })
+      const instance = await CodexDriver.create({ binaryPath, workspacePath, autoApprove: true })
+      try {
+        const events = instance.startTurn({ text: 'Continue the original conversation', providerSessionId: 'native-thread' })[Symbol.asyncIterator]()
+        const wasArchived = outcome === 'archived' || outcome === 'moved-with-error'
+        const shouldResume = outcome === 'ready' || wasArchived
+        if (shouldResume) {
+          expect((await events.next()).value).toEqual({ type: 'steering-ready' })
+        }
+        else {
+          expect((await events.next()).value).toMatchObject({ type: 'error', message: expect.stringContaining('Check the selected account and retry') })
+          expect((await events.next()).done).toBe(true)
+        }
+        const requests = readFileSync(join(workspacePath, 'requests.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+        const methods = ['initialize', 'thread/resume']
+        if (wasArchived) methods.push('thread/unarchive', 'thread/resume')
+        if (shouldResume) methods.push('turn/start')
+        expect(requests.map(request => request.method)).toEqual(methods)
+        expect(requests.slice(1).every(request => request.params.threadId === 'native-thread')).toBe(true)
+      }
+      finally {
+        await instance.stop()
+      }
+    }
+    finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('codex account detection', () => {
   it('probes app-server from the same account directory used to run Codex', async () => {
@@ -19,9 +77,31 @@ if (process.argv.includes('--version')) {
   for await (const line of createInterface({ input: process.stdin })) {
     const frame = JSON.parse(line);
     if (frame.method === 'initialize') console.log(JSON.stringify({ id: frame.id, result: {} }));
-    if (frame.method !== 'account/read') continue;
+    if (frame.method !== 'account/read' && frame.method !== 'model/list') continue;
     const path = process.env.CODEX_HOME;
     if (!path || realpathSync(dirname(path)) !== process.cwd()) process.exit(1);
+    if (frame.method === 'model/list') {
+      if (basename(path) === 'model-error') {
+        console.log(JSON.stringify({ id: frame.id, error: { code: 4, message: 'fixture catalog expired' } }));
+        continue;
+      }
+      const result = frame.params.cursor === 'second'
+        ? { data: [{ model: basename(path) + '-small', additionalSpeedTiers: ['fast'] }] }
+        : {
+            nextCursor: 'second',
+            data: [
+              {
+                model: basename(path), displayName: 'Fixture default', isDefault: true,
+                supportedReasoningEfforts: [{ reasoningEffort: 'medium' }], defaultReasoningEffort: 'medium',
+                serviceTiers: [{ id: 'fast', name: 'Faster' }], defaultServiceTier: 'fast',
+                privatePath: path,
+              },
+              { model: 'internal', hidden: true },
+            ],
+          };
+      console.log(JSON.stringify({ id: frame.id, result }));
+      continue;
+    }
     console.log(JSON.stringify({
       id: frame.id,
       result: { account: null, requiresOpenaiAuth: basename(path) === 'signed-out' },
@@ -34,6 +114,21 @@ if (process.argv.includes('--version')) {
         .toMatchObject({ status: 'unauthenticated', message: 'Run \`codex login\` on this machine.' })
       expect(await CodexDriver.probe({ binaryPath, workspacePath, home: 'no-login-required' }))
         .toMatchObject({ status: 'ready' })
+      const catalogs = await Promise.all(['work-account', 'personal-account'].map(home =>
+        CodexDriver.probe({ binaryPath, workspacePath, home }, { includeModels: true })))
+      expect(catalogs[0].models).toEqual([
+        {
+          id: 'work-account', name: 'Fixture default', isDefault: true,
+          reasoningEfforts: ['medium'], defaultReasoningEffort: 'medium',
+          speedTiers: [{ id: 'fast', name: 'Faster' }], defaultSpeedTier: 'fast',
+        },
+        { id: 'work-account-small', name: 'work-account-small', isDefault: false, reasoningEfforts: [], speedTiers: [{ id: 'fast', name: 'Fast' }] },
+      ])
+      expect(catalogs[1].models?.map(model => model.id)).toEqual(['personal-account', 'personal-account-small'])
+      expect((await CodexDriver.probe({ binaryPath, workspacePath, home: 'signed-out' }, { includeModels: true })).models).toBeUndefined()
+      const failedCatalog = await CodexDriver.probe({ binaryPath, workspacePath, home: 'model-error' }, { includeModels: true })
+      expect(failedCatalog.status).toBe('ready')
+      expect(failedCatalog.models).toBeUndefined()
     }
     finally {
       rmSync(workspacePath, { recursive: true, force: true })

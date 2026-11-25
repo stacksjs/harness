@@ -6,7 +6,7 @@
  * be wrong is corrected by a later fact. That is what makes replay meaningful.
  */
 
-import type { ApprovalDecision, ApprovalScope, ConnectorApproval, DriverKind } from './commands'
+import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, ConnectorApproval, DriverKind, ModelFavorite } from './commands'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
 import type { HostSettings } from './settings'
@@ -22,7 +22,7 @@ export interface EventBase {
 }
 
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, isolate?: boolean }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean }
   | { type: 'session.stopped' }
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation> }
   | { type: 'session.failed', message: string }
@@ -75,6 +75,7 @@ export type EventPayload =
    * that has to restate everything.
    */
   | { type: 'profile.updated', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
+  | { type: 'profile.model-favorite.changed', profileId: number, favorite: ModelFavorite, selected: boolean }
   /**
    * The workspaces and sessions removed along with it.
    *
@@ -120,6 +121,7 @@ const GLOBAL_EVENT_TYPES: ReadonlySet<string> = new Set<EventType>([
   'settings.updated',
   'profile.created',
   'profile.updated',
+  'profile.model-favorite.changed',
   'profile.deleted',
   'workspace.added',
   'workspace.promoted',

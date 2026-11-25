@@ -48,6 +48,28 @@ describe('Engine — the M1 exit criterion', () => {
     expect(engine.current.profiles.get(derivedId(cmd.id))?.name).toBe('Personal')
   })
 
+  it('replays model favorites by profile and account without flipping a retried selection', async () => {
+    const { engine, store } = await bootedEngine()
+    const { profileId } = await withWorkspace(engine)
+    const otherProfile = envelope({ type: 'profile.create', name: 'Other team' })
+    await engine.dispatch(otherProfile)
+    const defaultModel = { driverKind: 'codex', model: 'fixture-model' } as const
+    const accountModel = { ...defaultModel, providerInstanceId: 42 }
+    const change = (favorite: typeof defaultModel | typeof accountModel, selected: boolean) =>
+      envelope({ type: 'profile.model-favorite.set', profileId, favorite, selected })
+    const original = change(defaultModel, true)
+    await engine.dispatch(original)
+    expect((await engine.dispatch(original)).replayed).toBe(true)
+    expect((await engine.dispatch(change(defaultModel, true))).events).toHaveLength(0)
+    await engine.dispatch(change(accountModel, true))
+    await engine.dispatch(change(defaultModel, false))
+
+    const restarted = new Engine({ store, reducer: reduce })
+    await restarted.hydrate()
+    expect(restarted.current.profiles.get(profileId)?.modelFavorites).toEqual([accountModel])
+    expect(restarted.current.profiles.get(derivedId(otherProfile.id))?.modelFavorites).toBeUndefined()
+  })
+
   it('replays its log to an identical state', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)
@@ -79,7 +101,8 @@ describe('Engine — the M1 exit criterion', () => {
   it('hydrates a fresh engine from the same store to the same state', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)
-    const sessionCmd = envelope({ type: 'session.create', workspaceId, driverKind: 'codex' })
+    const codexTurnOptions = { effort: 'high', serviceTier: 'fast' }
+    const sessionCmd = envelope({ type: 'session.create', workspaceId, driverKind: 'codex', model: 'fixture-model', codexTurnOptions })
     await engine.dispatch(sessionCmd)
 
     // What a server restart actually does.
@@ -88,6 +111,22 @@ describe('Engine — the M1 exit criterion', () => {
 
     expect(restarted.current.sessions.get(derivedId(sessionCmd.id)))
       .toEqual(engine.current.sessions.get(derivedId(sessionCmd.id))!)
+    expect(restarted.current.sessions.get(derivedId(sessionCmd.id))?.codexTurnOptions).toEqual(codexTurnOptions)
+  })
+
+  it('rejects Codex model options on an unselected model, a different provider, or an invalid tier', async () => {
+    const { engine } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const codexTurnOptions = { effort: 'high', serviceTier: 'fast' }
+    await expect(engine.dispatch(envelope({ type: 'session.create', workspaceId, driverKind: 'codex', codexTurnOptions })))
+      .rejects.toThrow('specific Codex model')
+    await expect(engine.dispatch(envelope({ type: 'session.create', workspaceId, driverKind: 'claude', model: 'fixture', codexTurnOptions })))
+      .rejects.toThrow('specific Codex model')
+    await expect(engine.dispatch(envelope({
+      type: 'session.create', workspaceId, driverKind: 'codex', model: 'fixture',
+      codexTurnOptions: { serviceTier: 'bad tier' },
+    }))).rejects.toThrow('valid speed tier')
+    expect(engine.current.sessions.size).toBe(0)
   })
 })
 

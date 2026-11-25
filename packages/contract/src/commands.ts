@@ -15,6 +15,17 @@ import type { ThreadOrganizationAction } from './thread-navigation'
 
 export type DriverKind = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok'
 
+export interface CodexTurnOptions {
+  effort?: string
+  serviceTier?: string
+}
+
+export interface ModelFavorite {
+  driverKind: DriverKind
+  providerInstanceId?: number
+  model: string
+}
+
 export type ApprovalDecision = 'allowed' | 'denied' | 'cancelled'
 export type ApprovalScope = 'once' | 'session' | 'workspace' | 'always'
 
@@ -36,6 +47,7 @@ export type ClientCommand =
       workspaceId: number
       driverKind: DriverKind
       model?: string
+      codexTurnOptions?: CodexTurnOptions
       /**
        * Run this session in a git worktree of its own.
        *
@@ -46,7 +58,7 @@ export type ClientCommand =
       isolate?: boolean
       providerInstanceId?: number
     }
-  | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string }
+  | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'session.turn.start', sessionId: number, text: string }
   | { type: 'session.turn.interrupt', sessionId: number }
   | { type: 'session.queue.add', sessionId: number, text: string }
@@ -71,6 +83,7 @@ export type ClientCommand =
   | { type: 'settings.update', changes: Partial<HostSettings> }
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
   | { type: 'profile.update', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
+  | { type: 'profile.model-favorite.set', profileId: number, favorite: ModelFavorite, selected: boolean }
   | { type: 'profile.delete', profileId: number }
   /**
    * Attach an MCP server to a profile.
@@ -120,7 +133,7 @@ export type InternalCommand =
   | { type: 'thread.steer.settle', sessionId: number, id: string, requestId: string, outcome: SteeringOutcome }
   | { type: 'thread.queue.advance', sessionId: number }
   | { type: 'thread.queue.hold', sessionId: number }
-  | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string }
+  | { type: 'thread.scratch.create', profileId?: number, driverKind: DriverKind, path: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'thread.message.assistant.delta', sessionId: number, turnId: number, text: string }
   | { type: 'thread.message.assistant.complete', sessionId: number, turnId: number }
   | { type: 'thread.tool.call.begin', sessionId: number, turnId: number, callId: string, toolName: string, args: unknown }
@@ -172,6 +185,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'settings.update',
   'profile.create',
   'profile.update',
+  'profile.model-favorite.set',
   'profile.delete',
   'workspace.add',
   'workspace.register',

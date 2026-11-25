@@ -110,6 +110,7 @@ export const hasProfiles = profiles.length > 0
 export const turns = activeSession ? activeSession.turns : []
 export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : draftProject?.name || (draftWithoutProject ? 'New session' : 'Harness')
 export const sessionState = activeSession ? activeSession.state : 'idle'
+export const initialSessionError = activeSession?.lastError || ''
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const sessionDriver = activeSession ? (activeSession.driverKind || '') : ''
@@ -294,21 +295,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     </header>
 
     <div data-workspace-content>
-    <div data-workspace-lane>
+    <div data-workspace-lane @if(!activeSession)data-workspace-draft@endif>
     {{--
       The transcript. Settled turns are plain server-rendered HTML and hydrate
       on `visible`, so scrolling back through a long session costs nothing until
       you actually scroll. The live tail hydrates eagerly — it is the only part
       the socket writes to.
     --}}
-    <div data-transcript-viewport :style="transcriptFindOpen() ? '--harness-transcript-top: 56px' : ''" class="relative flex-1 min-h-0 min-w-0">
-    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto px-4 pt-[var(--harness-transcript-top,12px)] pb-3 h-full min-w-0">
+    <div data-transcript-viewport :style="transcriptFindOpen() ? '--harness-transcript-top: 56px' : ''" class="relative min-h-0 min-w-0 @if(activeSession)flex-1@endif">
+    <div data-transcript ref="transcriptBox" @scroll="trackTranscriptPosition" @click="handleTranscriptControl" @keydown="handleTranscriptKeyboard" tabindex="0" role="region" aria-label="Conversation" class="overflow-y-auto min-w-0 @if(activeSession)px-4 pt-[var(--harness-transcript-top,12px)] pb-3 h-full@endif">
       {{--
         A blank canvas says the app is broken; an empty state says what to do.
         Typing below is the fastest path, so it is the one named first.
       --}}
       @if(turns.length === 0)
-        <div data-empty-state :hidden="liveTurns().length > 0" class="flex flex-col gap-2 items-center justify-center h-full text-center">
+        <div data-empty-state :hidden="liveTurns().length > 0" class="flex flex-col gap-2 items-center justify-center text-center @if(activeSession)h-full@endif">
           @if(activeSession)
             <p class="text-[14px] font-medium">Start the conversation</p>
             <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Send a prompt to the agent below.</p>
@@ -327,17 +328,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Add a folder from the host to start working with an agent.</p>
             <button type="button" data-first-project @click="openProjectPicker" class="mt-2 px-4 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
             <button type="button" data-start-without-project @click="startWithoutProject" class="px-3 h-9 text-[13px] underline underline-offset-4">Start without a project</button>
-          @endif
-          @if(!activeSession && draftProjectChoices.length)
-            <label class="flex gap-2 items-center mt-4 text-[12px] text-neutral-600 dark:text-neutral-300">
-              Project
-              <select data-draft-project @change="chooseProject" class="px-2 h-8 max-w-[190px] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-[6px] dark:border-white/20">
-                <option value="none" @if(draftWithoutProject)selected@endif>No project</option>
-                @foreach(draftProjectChoices as workspace)
-                  <option value="{{ workspace.id }}" @if(workspace.id === draftProject?.id)selected@endif>{{ workspace.name }}</option>
-                @endforeach
-              </select>
-            </label>
           @endif
         </div>
       @endif
@@ -520,6 +510,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @includeWhen(activeSession, '../partials/harness-approval-card')
     @includeWhen(activeSession, '../partials/harness-question-card')
 
+    @if(activeSession)
+      <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
+    @endif
+
     @if(canCompose)
     <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt)hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt)" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
       {{--
@@ -539,12 +533,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         :placeholder="composerPlaceholder()"
         class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
-      {{--
-        The agent picker, where every LLM surface puts its model switch. It
-        shows the session's own driver; picking another offers a fresh session
-        with it — a different CLI cannot resume this one's conversation, and
-        pretending otherwise would silently drop the context.
-      --}}
+      <div data-composer-provider-controls>
+      @if(activeSessionId)
       <select
         data-driver-picker
         ref="driverPickerBox"
@@ -559,6 +549,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <option value="grok">Grok</option>
         <option :for="account in providerAccounts()" :key="account.id" :value="account.value" :disabled="account.status !== 'ready'" :text="account.label"></option>
       </select>
+      @else
+      @include('../partials/harness-model-picker')
+      @endif
+      </div>
       <div class="flex flex-wrap gap-2 justify-end">
         <button type="submit" data-send :hidden="!showSend()" :disabled="startPending() || sessionConnecting() || (sendLabel() === 'Steer' && steeringPending())" :text="sendLabel()" class="px-4 h-8 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-full">Send</button>
         <span class="md:hidden" :hidden="!canSteer() || !composerText().trim() || Boolean(editingFollowUp())">
@@ -569,6 +563,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-8 text-[13px] text-white bg-red-600 rounded-full hover:bg-red-700">Stop</button>
       </div>
     </form>
+    @endif
+    @if(!activeSession && draftProjectChoices.length)
+      <div data-draft-context>
+        <label class="flex gap-2 items-center px-3 text-[12px] text-neutral-600 dark:text-neutral-300">
+          Project
+          <select data-draft-project @change="chooseProject" class="px-2 h-8 max-w-[190px] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-[6px] dark:border-white/20">
+            <option value="none" @if(draftWithoutProject)selected@endif>No project</option>
+            @foreach(draftProjectChoices as workspace)
+              <option value="{{ workspace.id }}" @if(workspace.id === draftProject?.id)selected@endif>{{ workspace.name }}</option>
+            @endforeach
+          </select>
+        </label>
+      </div>
     @endif
     @if(activeWorkspaceId)
     <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
@@ -1039,6 +1046,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // made a session waiting on *you* look idle. Seeded from the server render;
   // the chip, Send/Stop and the revert buttons all bind to it.
   const uiState = state(sessionState || 'idle')
+  const sessionError = state(initialSessionError)
   const runningTurnId = state(initialResponseTurn)
   const steerableTurn = state(initialSteerable ? initialResponseTurn : 0)
   const canSteer = derived(() => sessionOnline() && uiState() === 'running' && steerableTurn() !== 0 && steerableTurn() === runningTurnId())
@@ -1046,12 +1054,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const threadNavigation = state(initialNavigation)
   const threadActionsOpen = state(false)
   const threadActionForm = state('')
+  const threadSnoozePresets = state([])
+  const threadSnoozeMode = state('date')
   const threadActionBusy = state(false)
   const threadActionError = state('')
   const threadTitleDraft = state('')
   const threadActionsDialog = useRef('threadActionsDialogBox')
   const threadActionsTrigger = useRef('threadActionsTriggerBox')
+  const threadSnoozeTrigger = useRef('threadSnoozeTriggerBox')
+  const threadSnoozePanel = useRef('threadSnoozePanelBox')
   const threadWakeTime = useRef('threadWakeTimeBox')
+  const threadWakeDuration = useRef('threadWakeDurationBox')
   const threadTitleEdit = useRef('threadTitleEditBox')
 
   function positionThreadActions() {
@@ -1063,6 +1076,23 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const width = dialog.getBoundingClientRect().width
     dialog.style.setProperty('--thread-menu-top', anchor.bottom + 5 + 'px')
     dialog.style.setProperty('--thread-menu-left', Math.max(8, Math.min(anchor.left, viewport - width - 8)) + 'px')
+    positionThreadSnooze()
+  }
+
+  function positionThreadSnooze() {
+    const dialog = threadActionsDialog.current
+    const trigger = threadSnoozeTrigger.current
+    const panel = threadSnoozePanel.current
+    if (!dialog?.open || !trigger || !panel) return
+    const viewport = dialog.ownerDocument.documentElement
+    const left = dialog.getBoundingClientRect().right - 1
+    const beside = viewport.clientWidth >= 768 && viewport.clientWidth - left >= 208
+    dialog.dataset.snoozeSide = String(beside)
+    if (beside) {
+      const top = Math.max(8, Math.min(trigger.getBoundingClientRect().top, viewport.clientHeight - panel.scrollHeight - 10))
+      dialog.style.setProperty('--thread-snooze-top', top + 'px')
+      dialog.style.setProperty('--thread-snooze-left', left + 'px')
+    }
   }
 
   function openThreadActions() {
@@ -1091,6 +1121,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     threadActionError.set('')
     threadActionForm.set(form)
     if (form === 'rename') void nextTick(() => threadTitleEdit.current?.select())
+    if (form === 'snooze' || form === 'custom-snooze') void nextTick(positionThreadSnooze)
+    if (form === 'snooze' && codecUrl) {
+      void import(codecUrl).then(({ threadSnoozeChoices }) => {
+        if (threadActionForm() !== 'snooze') return
+        threadSnoozePresets.set(threadSnoozeChoices(new Date()))
+        void nextTick(positionThreadSnooze)
+      }).catch(() => {})
+    }
   }
 
   useEventListener('resize', positionThreadActions)
@@ -1114,9 +1152,26 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     void organizeThread('rename', { title: threadTitleDraft() })
   }
 
-  function snoozeThread(hours) {
-    const until = hours ? Date.now() + hours * 60 * 60 * 1000 : Date.parse(threadWakeTime.current?.value ?? '')
-    if (!Number.isFinite(until) || until <= Date.now()) {
+  async function snoozeFromPreset(choice) {
+    if (!codecUrl) return
+    const { chosenSnoozeTime } = await import(codecUrl)
+    const until = chosenSnoozeTime(choice, Date.now())
+    if (!until) {
+      threadActionError.set('That wake time has passed. Choose another time.')
+      return
+    }
+    void organizeThread('snooze', { until })
+  }
+
+  function snoozeThread() {
+    const mode = threadSnoozeMode()
+    const duration = Number(threadWakeDuration.current?.value)
+    const units = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 }
+    const now = Date.now()
+    const until = mode === 'date'
+      ? Date.parse(threadWakeTime.current?.value ?? '')
+      : Number.isSafeInteger(duration) && duration > 0 ? now + duration * units[mode] : NaN
+    if (!Number.isFinite(until) || until <= now) {
       threadActionError.set('Choose a wake time in the future.')
       return
     }
@@ -1801,7 +1856,210 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const KNOWN_DRIVERS = ['claude', 'codex', 'opencode', 'cursor', 'grok']
   const DRIVER_LABELS = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', cursor: 'Cursor', grok: 'Grok' }
   const providerAccounts = state([])
+  const defaultProviders = state([])
+  const providerCatalog = state('loading')
+  const modelFavorites = state([])
+  let modelFavoritesRevision = 0
+  const draftProvider = state(defaultDriver())
+  const draftModel = state('')
+  const draftEffort = state('')
+  const draftSpeed = state('')
+  const composerProviders = derived(() => [...defaultProviders(), ...providerAccounts()])
+  const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
+  const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
+  const draftPickerLabel = derived(() => {
+    const model = selectedDraftModel()
+    const effort = draftEffort()
+    const speed = model?.speedTiers.find(tier => tier.id === draftSpeed())?.name
+    return model ? [model.name, effort ? pickerEffortLabel(effort) : '', speed].filter(Boolean).join(' · ')
+      : selectedDraftAccount()?.name || DRIVER_LABELS[draftProvider()]
+  })
   const activeDriverValue = sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`
+
+  const draftPickerTrigger = useRef('draftPickerTriggerBox')
+  const draftPickerDialog = useRef('draftPickerDialogBox')
+  const draftPickerSearch = useRef('draftPickerSearchBox')
+  const draftPickerResults = useRef('draftPickerResultsBox')
+  const draftPickerAccounts = useRef('draftPickerAccountsBox')
+  const draftPickerOpen = state(false)
+  const pickerAccount = state('')
+  const pickerQuery = state('')
+  const pickerIndex = state(0)
+  const favoritePending = state(false)
+  const favoriteError = state('')
+  const pickerFavoriteKeys = derived(() => new Set(modelFavorites().map(favorite => {
+    const account = favorite.providerInstanceId === undefined ? favorite.driverKind : `${favorite.driverKind}:${favorite.providerInstanceId}`
+    return `${account}/${favorite.model}`
+  })))
+  const pickerOptionModel = derived(() => {
+    const model = selectedDraftModel()
+    return (pickerAccount() === draftProvider() || pickerAccount() === 'favorites') && draftProvider().split(':')[0] === 'codex'
+      && (model?.reasoningEfforts.length || model?.speedTiers.length) ? model : undefined
+  })
+  const pickerResults = derived(() => {
+    const search = pickerQuery().toLowerCase().trim().split(/\s+/).filter(Boolean)
+    const favoritesOnly = pickerAccount() === 'favorites'
+    const favoriteKeys = pickerFavoriteKeys()
+    const accounts = composerProviders().filter(account => account.status === 'ready' && (favoritesOnly || search.length || account.value === pickerAccount()))
+    return accounts.flatMap(account => {
+      const rows = favoritesOnly ? account.models || [] : [{ id: '', name: 'Provider default' }, ...(account.models || [])]
+      return rows.filter(model => {
+        if (favoritesOnly && !favoriteKeys.has(`${account.value}/${model.id}`)) return false
+        const text = `${model.name} ${model.id} ${account.name}`.toLowerCase()
+        return search.every(word => text.includes(word))
+      }).map(model => ({ id: model.id, name: model.name, account: account.value, accountName: account.name, key: `${account.value}/${model.id}` }))
+    })
+  })
+  const pickerStatus = derived(() => {
+    if (providerCatalog() === 'failed') return 'Could not load provider accounts.'
+    if (providerCatalog() === 'loading') return 'Checking provider accounts…'
+    if (pickerAccount() === 'favorites' && !pickerQuery().trim()) return 'No favorite models available.'
+    if (!pickerQuery().trim() && !pickerResults().length) return 'Choose an available account.'
+    return 'No matching models'
+  })
+
+  function pickerEffortLabel(effort) {
+    return effort === 'xhigh' ? 'Extra high' : effort.charAt(0).toUpperCase() + effort.slice(1)
+  }
+
+  function positionDraftPicker() {
+    const trigger = draftPickerTrigger.current
+    const dialog = draftPickerDialog.current
+    if (!trigger || !dialog?.open) return
+    const anchor = trigger.getBoundingClientRect()
+    const viewport = dialog.ownerDocument.documentElement
+    const visual = dialog.ownerDocument.defaultView?.visualViewport
+    const top = visual?.offsetTop || 0
+    const height = visual?.height || viewport.clientHeight
+    dialog.style.setProperty('--draft-picker-viewport', height + 'px')
+    const bounds = dialog.getBoundingClientRect()
+    const below = anchor.bottom + 6
+    const above = anchor.top - bounds.height - 6
+    const preferred = above >= top + 8 || below + bounds.height > top + height - 8 ? above : below
+    dialog.style.setProperty('--draft-picker-top', Math.max(top + 8, Math.min(preferred, top + height - bounds.height - 8)) + 'px')
+    dialog.style.setProperty('--draft-picker-left', Math.max(8, Math.min(anchor.right - bounds.width, viewport.clientWidth - bounds.width - 8)) + 'px')
+    revealPickerAccount()
+  }
+
+  function openDraftPicker(event) {
+    const dialog = draftPickerDialog.current
+    if (!dialog || dialog.open) return
+    pickerQuery.set('')
+    favoriteError.set('')
+    pickerAccount.set(draftProvider())
+    pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.id === draftModel())))
+    draftPickerOpen.set(true)
+    dialog.showModal()
+    if (providerCatalog() === 'ready') void annotateDriverPickers()
+    void nextTick(() => {
+      positionDraftPicker()
+      if (event?.pointerType !== 'touch') draftPickerSearch.current?.focus()
+    })
+  }
+
+  function closeDraftPicker() {
+    draftPickerDialog.current?.close()
+    draftPickerOpen.set(false)
+    draftPickerTrigger.current?.focus()
+  }
+
+  function browsePickerAccount(value) {
+    pickerAccount.set(value)
+    pickerQuery.set('')
+    pickerIndex.set(0)
+    void nextTick(revealPickerAccount)
+  }
+
+  async function toggleModelFavorite(result) {
+    if (!Number(activeProfile) || !result.id || favoritePending()) return
+    const favorite = { ...agentChoice(result.account), model: result.id }
+    const selected = !pickerFavoriteKeys().has(result.key)
+    favoritePending.set(true)
+    favoriteError.set('')
+    try {
+      await sendCommand({ type: 'profile.model-favorite.set', profileId: Number(activeProfile), favorite, selected })
+      modelFavoritesRevision++
+      modelFavorites.update(entries => selected ? [...entries, favorite] : entries.filter(entry => entry.driverKind !== favorite.driverKind
+        || entry.providerInstanceId !== favorite.providerInstanceId || entry.model !== favorite.model))
+      if (!selected && pickerAccount() === 'favorites') {
+        pickerIndex.set(Math.max(0, Math.min(pickerIndex(), pickerResults().length - 1)))
+        void nextTick(() => draftPickerSearch.current?.focus({ preventScroll: true }))
+      }
+    }
+    catch (error) {
+      favoriteError.set(error.message || 'Could not save this favorite.')
+    }
+    finally {
+      favoritePending.set(false)
+    }
+  }
+
+  function revealPickerAccount() {
+    const list = draftPickerAccounts.current
+    const selected = list?.querySelector('[aria-pressed="true"]')
+    if (!selected) return
+    const selection = selected.getBoundingClientRect()
+    const bounds = list.getBoundingClientRect()
+    const left = bounds.left + list.clientLeft
+    const top = bounds.top + list.clientTop
+    const right = left + list.clientWidth
+    const bottom = top + list.clientHeight
+    // Keep scrolling inside the account list as the dialog changes layout.
+    // WebKit can otherwise scroll the wider dialog when resizing a focused picker.
+    if (selection.left < left) list.scrollLeft += selection.left - left
+    else if (selection.right > right) list.scrollLeft += selection.right - right
+    if (selection.top < top) list.scrollTop += selection.top - top
+    else if (selection.bottom > bottom) list.scrollTop += selection.bottom - bottom
+  }
+
+  function updatePickerQuery(event) {
+    pickerQuery.set(event.currentTarget.value)
+    pickerIndex.set(0)
+  }
+
+  function pickerSearchKeydown(event) {
+    if (event.isComposing || event.keyCode === 229) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closeDraftPicker()
+      return
+    }
+    const rows = pickerResults()
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (rows[pickerIndex()]) pickDraftModel(rows[pickerIndex()])
+    }
+    if (rows.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      const next = (pickerIndex() + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length
+      pickerIndex.set(next)
+      draftPickerResults.current?.querySelector(`#draft-model-result-${next}`)?.scrollIntoView({ block: 'nearest' })
+    }
+  }
+
+  function pickDraftModel(result) {
+    if (draftProvider() !== result.account || draftModel() !== result.id) {
+      draftProvider.set(result.account)
+      draftModel.set(result.id)
+      draftEffort.set('')
+      draftSpeed.set('')
+    }
+    if (!result.account.includes(':')) localStorage.setItem('harness.defaultDriver', result.account)
+    if (pickerAccount() !== 'favorites') browsePickerAccount(result.account)
+    pickerIndex.set(Math.max(0, pickerResults().findIndex(row => row.key === result.key)))
+    if (!pickerOptionModel()) closeDraftPicker()
+    else void nextTick(positionDraftPicker)
+  }
+
+  useEventListener('resize', positionDraftPicker)
+  onMount(() => {
+    const viewport = draftPickerTrigger.current?.ownerDocument.defaultView?.visualViewport
+    if (viewport) {
+      useEventListener('resize', positionDraftPicker, { target: viewport })
+      useEventListener('scroll', positionDraftPicker, { target: viewport })
+    }
+  })
 
   function driverStateLabel(status, version) {
     if (status === 'ready') return version ? `ready · ${version}` : 'ready'
@@ -1834,15 +2092,27 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // the answer in their option labels, with unusable agents disabled — a
   // driver you cannot run should not be one click from a dead session.
   async function annotateDriverPickers() {
+    if (!defaultProviders().length) providerCatalog.set('loading')
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
-    const response = await fetch(`/drivers?workspace=${workspace}`).catch(() => null)
-    if (!response?.ok) return
-    const { drivers, accounts = [] } = await response.json()
+    const modelsQuery = !activeSessionId && canCompose ? '&models=1' : ''
+    const favoritesRevision = modelFavoritesRevision
+    const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`)
+      .then(response => response.ok ? response.json() : null).catch(() => null)
+    if (!catalog) {
+      if (!defaultProviders().length) providerCatalog.set('failed')
+      return
+    }
+    const { drivers, accounts = [], favorites = [] } = catalog
+    if (modelsQuery && favoritesRevision === modelFavoritesRevision) modelFavorites.set(favorites)
     if (sessionProviderInstanceId !== null && !accounts.some(account => account.id === sessionProviderInstanceId)) {
       accounts.push({ id: sessionProviderInstanceId, kind: sessionDriver, name: 'Saved account', status: 'deleted' })
     }
     const picker = driverPickerRef.current
     const selection = picker?.value || activeDriverValue || defaultDriver()
+    defaultProviders.set(drivers.map(info => ({
+      ...info, value: info.kind, name: DRIVER_LABELS[info.kind] || info.kind,
+      stateText: driverStateLabel(info.status, info.version),
+    })))
     providerAccounts.set(accounts.map(account => {
       const managed = account.auth === 'chatgpt'
       const stateText = managed && account.status === 'unauthenticated'
@@ -1855,6 +2125,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     void nextTick(() => {
       if (picker) picker.value = selection
     })
+    providerCatalog.set('ready')
+    if (draftPickerOpen()) void nextTick(positionDraftPicker)
     for (const info of drivers) {
       const stateText = driverStateLabel(info.status, info.version)
       for (const boxName of ['driverPickerBox', 'settingsDriverBox']) {
@@ -2480,15 +2752,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       if (!draftProject?.trusted && !draftWithoutProject) return
       startPending.set(true)
       try {
-        const picker = driverPickerRef.current
-        if (picker?.selectedOptions[0]?.disabled) throw new Error('Choose an available agent to start this session.')
-        const choice = agentChoice(picker?.value || defaultDriver())
+        const account = selectedDraftAccount()
+        if (providerCatalog() === 'ready' && account?.status !== 'ready') throw new Error('Choose an available agent to start this session.')
+        const choice = agentChoice(draftProvider())
+        const selected = selectedDraftModel()
+        const effort = selected?.reasoningEfforts.includes(draftEffort()) ? draftEffort() : ''
+        const serviceTier = selected?.speedTiers.some(tier => tier.id === draftSpeed()) ? draftSpeed() : ''
+        const model = selected ? { model: selected.id } : {}
+        const options = choice.driverKind === 'codex' && (effort || serviceTier)
+          ? { codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } }
+          : {}
         if (draftWithoutProject) {
           const profileId = Number(activeProfile) || undefined
-          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text }, commandId)
+          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text, ...model, ...options }, commandId)
         }
         else {
-          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice }, commandId)
+          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice, ...model, ...options }, commandId)
         }
         const nextSession = derivedSessionId(commandId)
         pendingFirstPrompt.set({ sessionId: nextSession, text: raw })
@@ -2957,6 +3236,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
       }
       if (payload.type === 'turn.started') {
+        sessionError.set('')
         // Only the user's half opens a new exchange; the assistant's turn is
         // the reply within it.
         if (payload.role === 'user') {
@@ -3048,12 +3328,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         // bindings put Send back while the chip says what happened.
         batch(() => {
           setSessionState('failed')
+          sessionError.set(payload.message || 'The agent could not finish this response.')
           closeConnectorOptions()
           pendingApprovals.set([])
           pendingApprovalId.set(0)
           questionForm()?.interrupt()
         })
-        transcriptAnnouncement.set('The agent could not finish this response.')
+        transcriptAnnouncement.set('')
       }
       else if (payload.type === 'approval.requested') {
         batch(() => {
