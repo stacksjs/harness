@@ -67,6 +67,75 @@ for await (const line of createInterface({ input: process.stdin })) {
   })
 })
 
+describe('codex native compaction', () => {
+  it.each(['confirmed', 'unconfirmed', 'unsupported', 'interrupted'] as const)('reports the %s provider operation without sending a prompt', async mode => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-compact-'))
+    const binaryPath = join(workspacePath, 'codex-fixture')
+    try {
+      writeFileSync(binaryPath, `#!${process.execPath}
+import { appendFileSync } from 'node:fs'
+import { createInterface } from 'node:readline'
+const mode = ${JSON.stringify(mode)}
+const threadId = 'existing-native-thread'
+const turnId = 'native-compact-turn'
+const notify = (method, params) => console.log(JSON.stringify({ method, params }))
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined) continue
+  appendFileSync('requests.log', JSON.stringify({method, params}) + '\\n')
+  const respond = payload => console.log(JSON.stringify({ id, ...payload }))
+  if (method === 'thread/resume') respond({ result: { thread: { id: threadId } } })
+  else if (method === 'thread/compact/start') {
+    if (mode === 'unsupported') {
+      respond({ error: { code: -32601 } })
+      continue
+    }
+    notify('turn/started', { threadId, turn: { id: turnId, status: 'inProgress' } })
+    respond({ result: {} })
+    notify('item/completed', { threadId, turnId: mode === 'confirmed' ? turnId : 'older-turn', item: { type: 'contextCompaction', id: 'compact-item' } })
+    if (mode !== 'interrupted') notify('turn/completed', { threadId, turn: { id: turnId, status: 'completed' } })
+  }
+  else if (method === 'turn/interrupt') {
+    respond({ result: {} })
+    notify('turn/completed', { threadId, turn: { id: turnId, status: 'interrupted' } })
+  }
+  else respond({ result: {} })
+}
+`, { mode: 0o755 })
+      const instance = await CodexDriver.create({ binaryPath, workspacePath })
+      try {
+        const events = instance.compact!('existing-native-thread')[Symbol.asyncIterator]()
+        if (mode === 'interrupted') {
+          const log = Bun.file(join(workspacePath, 'requests.log'))
+          for (let attempt = 0; attempt < 100 && !(await log.exists() && (await log.text()).includes('thread/compact/start')); attempt++)
+            await Bun.sleep(10)
+          await Bun.sleep(25)
+          await instance.interrupt()
+        }
+        const result = (await events.next()).value
+        if (mode === 'confirmed')
+          expect(result).toMatchObject({ type: 'turn-complete', contextCompacted: true, providerTurnId: 'native-compact-turn' })
+        else
+          expect(result).toMatchObject({ type: 'error' })
+        expect((await events.next()).done).toBe(true)
+        const requests = readFileSync(join(workspacePath, 'requests.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+        expect(requests.map(request => request.method)).toEqual([
+          'initialize', 'thread/resume', 'thread/compact/start', ...(mode === 'interrupted' ? ['turn/interrupt'] : []),
+        ])
+        expect(requests[2]?.params).toEqual({ threadId: 'existing-native-thread' })
+        if (mode === 'interrupted')
+          expect(requests[3]?.params).toEqual({ threadId: 'existing-native-thread', turnId: 'native-compact-turn' })
+      }
+      finally {
+        await instance.stop()
+      }
+    }
+    finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('codex provider handoff', () => {
   it.each(['native', 'legacy', 'ambiguous', 'stopped', 'resumed', 'resume-missing'] as const)('starts the new request correctly with %s history delivery', async (mode) => {
     const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-handoff-'))

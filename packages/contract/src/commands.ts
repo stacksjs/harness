@@ -156,7 +156,7 @@ export type InternalCommand =
   | { type: 'thread.input.request', sessionId: number, turnId: number, questions: InputQuestion[] }
   | { type: 'thread.input.cancel', sessionId: number, requestId: string }
   | ({ type: 'thread.input.answer', sessionId: number, requestId: string, attachments: QuestionAttachment[] } & InputResponse)
-  | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string }
+  | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, contextCompacted?: true }
   | { type: 'thread.fork.finished', sessionId: number, providerSessionId: string }
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
@@ -219,6 +219,10 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
  * is client-dispatchable until someone remembers to forbid it, and the failure
  * is silent.
  */
+export function isCompactCommand(text: unknown): boolean {
+  return typeof text === 'string' && text.trim() === '/compact'
+}
+
 export function isClientCommand(type: string): boolean {
   return CLIENT_COMMAND_TYPES.has(type)
 }

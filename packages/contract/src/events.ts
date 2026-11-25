@@ -37,7 +37,7 @@ export type EventPayload =
   | { type: 'session.fork-finished', providerSessionId: string }
   | { type: 'session.fork-failed', message: string }
   | { type: 'session.provider-switched', afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions }
-  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind }
+  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind, compaction?: true }
   | { type: 'queue.added', entry: QueuedFollowUp }
   | { type: 'queue.edited', id: string, text: string }
   | { type: 'queue.removed', id: string }
@@ -46,7 +46,7 @@ export type EventPayload =
   | { type: 'turn.steering-ready', turnId: number }
   | { type: 'turn.steer.requested', turnId: number, id: string, requestId: string, text: string }
   | { type: 'turn.steer.resolved', turnId: number, id: string, outcome: SteeringOutcome, text: string }
-  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, responseForkable?: true }
+  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, responseForkable?: true, contextCompacted?: true }
   | { type: 'turn.interrupted', turnId: number }
   | { type: 'turn.failed', turnId: number, message: string }
   | { type: 'assistant.delta', turnId: number, text: string }

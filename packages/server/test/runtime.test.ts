@@ -224,6 +224,80 @@ describe('fork recovery', () => {
   })
 })
 
+describe('manual compaction', () => {
+  it('queues the provider operation, preserves the native conversation, and replays confirmation', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const prompts: StartTurnInput[] = []
+    const compactions: string[] = []
+    const first = Promise.withResolvers<void>()
+    const { driver } = fakeDriver([])
+    const resolveDriver = () => ({
+      ...driver,
+      async create(config: DriverConfig) {
+        return {
+          ...await driver.create(config),
+          async steer() { return 'delivered' as const },
+          async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+            prompts.push(input)
+            if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'saved-conversation' }
+            if (prompts.length === 1) {
+              yield { type: 'steering-ready' }
+              await first.promise
+            }
+            yield { type: 'assistant-delta', text: 'An existing answer.' }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+          async *compact(providerSessionId: string): AsyncIterable<ProviderEvent> {
+            compactions.push(providerSessionId)
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
+          },
+        }
+      },
+    })
+    harness = await serve({ port, databasePath, resolveDriver })
+    let client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    const send = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 10, command } })
+    try {
+      send('compact-without-conversation', { type: 'session.turn.start', sessionId, text: '/compact' })
+      expect(await client.waitFor('session.failed')).toMatchObject({ message: expect.stringContaining('start this provider conversation') })
+      expect(prompts).toHaveLength(0)
+      expect(compactions).toHaveLength(0)
+
+      send('pre-compact', { type: 'session.turn.start', sessionId, text: 'The first request.' })
+      expect(await client.waitFor('turn.steering-ready')).toMatchObject({ turnId: 2 })
+      const queued = { type: 'session.queue.add', sessionId, text: '/compact' } as const
+      send('queued-compact', queued)
+      expect(await client.waitFor('queue.added')).toMatchObject({ entry: { text: '/compact' } })
+      send('compact-as-steer', { type: 'session.turn.steer', sessionId, turnId: 2, id: 'queued-compact' })
+      expect(await client.waitForRejection('compact-as-steer')).toMatchObject({ message: expect.stringContaining('wait for the current turn') })
+      expect(compactions).toHaveLength(0)
+      first.resolve()
+
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 3)).toMatchObject({ turnId: 3, contextCompacted: true })
+      expect(compactions).toEqual(['saved-conversation'])
+      expect(prompts.map(prompt => prompt.text)).toEqual(['The first request.'])
+      client.close()
+      harness.stop()
+      harness = await serve({ port, databasePath, resolveDriver })
+      client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      client.send({ t: 'subscribe', sessionId })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 3)).toMatchObject({ contextCompacted: true })
+      send('queued-compact', queued)
+      expect(await client.waitForDispatch('queued-compact')).toMatchObject({ replayed: true })
+      send('after-compact', { type: 'session.turn.start', sessionId, text: 'The next request.' })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 4)).toMatchObject({ turnId: 4 })
+      expect(prompts[1]).toMatchObject({ text: 'The next request.', providerSessionId: 'saved-conversation' })
+      expect(compactions).toHaveLength(1)
+      expect(harness.engine.current.sessions.get(sessionId)?.turns[2]).toMatchObject({ prompt: '/compact', contextCompacted: true })
+    }
+    finally {
+      first.resolve()
+      client.close()
+    }
+  })
+})
+
 describe('provider handoff', () => {
   it.each(['resumed', 'missing', 'ambiguous'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
     const databasePath = join(dir, 'test.sqlite')

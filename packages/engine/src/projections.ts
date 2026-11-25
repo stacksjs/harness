@@ -108,6 +108,8 @@ export interface TurnState {
   codexSelection?: CodexTurnSelection
   providerTurnId?: string
   nativeFork?: NativeForkTarget
+  compaction?: true
+  contextCompacted?: true
   modelChanged?: boolean
   switchedProvider?: DriverKind
   /** What the user asked. Set once, at `turn.started`. */
@@ -216,7 +218,7 @@ function forgetProviderConversation(session: SessionState): void {
 }
 
 export function isForkableResponse(turn: TurnState): boolean {
-  return turn.status === 'complete' && Boolean(turn.response.trim())
+  return turn.status === 'complete' && !turn.compaction && Boolean(turn.response.trim())
 }
 
 export function forkResponsePoint(session: SessionState | undefined, turnId: number): TurnState | undefined {
@@ -519,6 +521,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         role: p.role,
         status: 'running',
         prompt: p.text ?? '',
+        ...(p.compaction ? { compaction: true } : {}),
         ...(p.codexSelection ? { codexSelection: p.codexSelection } : {}),
         ...(p.modelChanged ? { modelChanged: true } : {}),
         ...(p.switchedProvider ? { switchedProvider: p.switchedProvider } : {}),
@@ -614,6 +617,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'complete'
+        if (p.contextCompacted) t.contextCompacted = true
         if (session.providerSessionId) {
           if (session.driverKind === 'codex' && t.response.trim()) {
             t.nativeFork = {

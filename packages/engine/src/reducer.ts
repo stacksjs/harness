@@ -7,7 +7,7 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
-import { GLOBAL_SESSION_ID, inputResponseValues, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
+import { GLOBAL_SESSION_ID, inputResponseValues, isCompactCommand, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
 import { forkResponsePoint, isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -74,13 +74,15 @@ function requestedCodexSelection(session: SessionState, selection: CodexTurnSele
 }
 
 function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string): Extract<EventPayload, { type: 'turn.started' }> {
-  const selection = codexSelection ?? (session.driverKind === 'codex' && session.model
+  const compaction = isCompactCommand(text)
+  const selection = compaction ? undefined : codexSelection ?? (session.driverKind === 'codex' && session.model
     ? { model: session.model, ...session.codexTurnOptions } : undefined)
   const modelChanged = selection && session.turns.length > 0 && (selection.model !== session.model
     || selection.effort !== session.codexTurnOptions?.effort || selection.serviceTier !== session.codexTurnOptions?.serviceTier)
   return {
     type: 'turn.started', turnId: session.turns.length + 1, role: 'user', text,
     ...(queuedId ? { queuedId } : {}),
+    ...(compaction ? { compaction: true } : {}),
     ...(selection ? { codexSelection: selection } : {}),
     ...(modelChanged ? { modelChanged: true } : {}),
   }
@@ -620,6 +622,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('Choose another provider, account, or model.')
       if (typeof command.text !== 'string' || !command.text.trim())
         throw new InvalidCommand('Enter a message to switch providers.')
+      if (isCompactCommand(command.text))
+        throw new InvalidCommand('Send a message to switch providers before compacting the new conversation.')
       if (command.model !== undefined && (typeof command.model !== 'string' || !command.model.trim() || command.model.length > 200))
         throw new InvalidCommand('Choose a valid model for this conversation.')
       const model = sessionModel(command)
@@ -719,6 +723,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         ? entries.find(entry => entry.id === command.id)
         : { id: commandId, text: followUpText(command.text) }
       if (!entry) throw new InvalidCommand('This message is no longer queued.')
+      if (isCompactCommand(entry.text))
+        throw new InvalidCommand('Compaction must wait for the current turn to finish.')
       const selection = 'codexSelection' in entry ? entry.codexSelection : undefined
       if (selection && (selection.model !== session.model || selection.effort !== session.codexTurnOptions?.effort
         || selection.serviceTier !== session.codexTurnOptions?.serviceTier))
@@ -900,7 +906,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           tokensOut: command.tokensOut,
           cost: command.cost,
           ...(command.providerTurnId ? { providerTurnId: command.providerTurnId } : {}),
-          ...(turn.response.trim() ? { responseForkable: true } : {}),
+          ...(turn.response.trim() && !turn.compaction ? { responseForkable: true } : {}),
+          ...(command.contextCompacted ? { contextCompacted: true } : {}),
         },
       }]
     }

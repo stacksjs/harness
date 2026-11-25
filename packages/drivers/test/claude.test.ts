@@ -1,7 +1,8 @@
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { DriverKind } from '@harness/contract'
 import { describe, expect, it } from 'bun:test'
-import { claudeAuthStatus, translate } from '../src/claude'
+import { tmpdir } from 'node:os'
+import { ClaudeInstance, claudeAuthStatus, translate } from '../src/claude'
 import { driverKinds, resolveDriver } from '../src/registry'
 
 describe('Claude account detection', () => {
@@ -58,6 +59,27 @@ function successResult(costUsd: number, tokensIn = 10, tokensOut = 20): SDKMessa
     session_id: 'sess_abc',
   } as unknown as SDKMessage
 }
+
+it.each([true, false])('runs Claude’s native command with completion confirmation set to %s', async confirmed => {
+  const instance = new ClaudeInstance({ workspacePath: tmpdir() }, ({ prompt, options }) => {
+    expect(prompt).toBe('/compact')
+    expect(options?.resume).toBe('sess_abc')
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield streamDelta('Compaction summary should not become a reply.')
+        if (confirmed) yield { type: 'system', subtype: 'compact_boundary', session_id: 'sess_abc' }
+        yield successResult(1, 2, 0)
+      },
+      close() {},
+    } as unknown as Query
+  })
+  const events = []
+  for await (const event of instance.compact('sess_abc')) events.push(event)
+  expect(events).toHaveLength(1)
+  expect(events[0]).toMatchObject(confirmed
+    ? { type: 'turn-complete', contextCompacted: true }
+    : { type: 'error', message: 'Claude Code finished without confirming context compaction.' })
+})
 
 describe('Claude driver — translating the SDK stream', () => {
   it('turns a text delta into an assistant delta', () => {

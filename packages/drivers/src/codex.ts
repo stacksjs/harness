@@ -225,6 +225,7 @@ class CodexInstance implements ProviderInstance {
   private readonly inputs = new Map<string, number | string>()
   private threadId: string | null = null
   private turnId: string | null = null
+  private compaction: { confirmed: boolean } | undefined
   private queue: EventQueue | null = null
   private usage = { tokensIn: 0, tokensOut: 0 }
   /**
@@ -276,6 +277,9 @@ class CodexInstance implements ProviderInstance {
     const onFailure = (message: string): void => {
       if (this.child !== child) return
       this.child = null
+      this.threadId = null
+      this.turnId = null
+      this.compaction = undefined
       this.inputs.clear()
       this.finishRequests(message)
       this.queue?.finish({ type: 'error', message })
@@ -476,6 +480,22 @@ class CodexInstance implements ProviderInstance {
     // frames from a previous one must not land in this turn.
     if (frame.params?.threadId && this.threadId && frame.params.threadId !== this.threadId) return
 
+    if (this.compaction) {
+      if (!this.queue || this.queue.closed || frame.params?.threadId !== this.threadId) return
+      if (frame.method === 'turn/started') {
+        const id = frame.params?.turn?.id
+        if (typeof id === 'string' && id && !this.turnId) this.turnId = id
+        return
+      }
+      if (frame.method === 'item/completed') {
+        if (this.turnId && frame.params?.turnId === this.turnId && frame.params.item?.type === 'contextCompaction')
+          this.compaction.confirmed = true
+        return
+      }
+      if (frame.method === 'turn/completed' && (!this.turnId || frame.params?.turn?.id !== this.turnId)) return
+      if (frame.method !== 'turn/completed' && frame.method !== 'thread/tokenUsage/updated' && frame.method !== 'error') return
+    }
+
     switch (frame.method) {
       case 'thread/tokenUsage/updated':
         this.usage = usageOf(frame.params?.tokenUsage)
@@ -501,10 +521,19 @@ class CodexInstance implements ProviderInstance {
         const error = this.turnError ?? frame.params?.turn?.error?.message
         this.turnError = null
         const providerTurnId = frame.params?.turn?.id ?? this.turnId
+        const compaction = this.compaction
         this.turnId = null
-        this.queue?.finish(error
-          ? { type: 'error', message: this.providerError(error) }
-          : { type: 'turn-complete', ...this.usage, costMicros: 0, ...(typeof providerTurnId === 'string' && providerTurnId ? { providerTurnId } : {}) })
+        this.compaction = undefined
+        const failure = error ? this.providerError(error)
+          : compaction && (!compaction.confirmed || frame.params?.turn?.status !== 'completed')
+            ? 'Codex finished without confirming context compaction.' : undefined
+        this.queue?.finish(failure
+          ? { type: 'error', message: failure }
+          : {
+              type: 'turn-complete', ...this.usage, costMicros: 0,
+              ...(typeof providerTurnId === 'string' && providerTurnId ? { providerTurnId } : {}),
+              ...(compaction ? { contextCompacted: true } : {}),
+            })
         return
       }
 
@@ -548,7 +577,16 @@ class CodexInstance implements ProviderInstance {
   }
 
   startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+    return this.beginTurn(input, false)
+  }
+
+  compact(providerSessionId: string): AsyncIterable<ProviderEvent> {
+    return this.beginTurn({ text: '/compact', providerSessionId }, true)
+  }
+
+  private beginTurn(input: StartTurnInput, compacting: boolean): AsyncIterable<ProviderEvent> {
     const queue = new EventQueue()
+    this.compaction = compacting ? { confirmed: false } : undefined
     this.queue = queue
     this.turnId = null
     this.usage = { tokensIn: 0, tokensOut: 0 }
@@ -556,14 +594,16 @@ class CodexInstance implements ProviderInstance {
     this.inputs.clear()
     this.cancelMcpConsents()
 
-    void this.run(input, queue).catch((error: unknown) => {
+    void this.run(input, queue, compacting).catch((error: unknown) => {
       queue.finish({ type: 'error', message: error instanceof Error ? error.message : String(error) })
     })
 
     return queue
   }
 
-  private async run(input: StartTurnInput, queue: EventQueue): Promise<void> {
+  private async run(input: StartTurnInput, queue: EventQueue, compacting: boolean): Promise<void> {
+    if (compacting && (!input.providerSessionId || (this.threadId && this.threadId !== input.providerSessionId)))
+      throw new Error('Open a saved Codex conversation before compacting it.')
     if (input.historicalContext && this.threadId && this.threadId !== input.providerSessionId)
       throw new Error('The saved history belongs to a different Codex conversation.')
 
@@ -612,6 +652,17 @@ class CodexInstance implements ProviderInstance {
     }
 
     if (queue.closed || this.queue !== queue) return
+    if (compacting) {
+      const started = await this.request('thread/compact/start', { threadId: this.threadId }, 15_000)
+      if (queue.closed || this.queue !== queue) return
+      if (started.error || started.transportError || started.result === undefined) {
+        const message = started.error?.code === -32601
+          ? 'This Codex version does not support compaction through its app server.'
+          : this.providerError(started.error?.message ?? 'Codex did not acknowledge compaction.')
+        queue.finish({ type: 'error', message })
+      }
+      return
+    }
     let text = input.text
     if (input.historicalContext) {
       const injection = await this.request('thread/inject_items', {
@@ -786,6 +837,7 @@ class CodexInstance implements ProviderInstance {
     this.child = null
     this.threadId = null
     this.turnId = null
+    this.compaction = undefined
     this.finishRequests('Codex app-server stopped.')
     child?.kill()
     await this.closeBroker()

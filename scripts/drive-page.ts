@@ -227,6 +227,8 @@ const driver: Driver = {
 }
 let fixtureCodexReady = false
 const fixtureCodexTurns: StartTurnInput[] = []
+const fixtureCodexCompactions: string[] = []
+const releaseCodexCompaction = Promise.withResolvers<void>()
 const fixtureCodexForks: ForkInput[] = []
 const releaseCodexFork = Promise.withResolvers<void>()
 let fixtureCodexLaunchModel: string | undefined
@@ -260,6 +262,11 @@ const codexDriver: Driver = {
           if (event.type === 'turn-complete') yield { ...event, providerTurnId: `fixture-turn-${sequence}` }
           else yield event
         }
+      },
+      async *compact(providerSessionId) {
+        fixtureCodexCompactions.push(providerSessionId)
+        await releaseCodexCompaction.promise
+        yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
       },
       async fork(input) {
         fixtureCodexForks.push(input)
@@ -2066,6 +2073,37 @@ check('returning to a named account resumes its native conversation with only th
   && harness.engine.current.sessions.get(sourceId)?.providerInstanceId === 4
   && new URL(page.url()).pathname === `/s/${sourceId}`)
 await capture('handoff-return-completed-phone')
+await page.locator('[data-prompt]').fill('/compact')
+await page.locator('[data-send]').click()
+const compactTurn = page.locator('[data-turn]').filter({ has: page.locator('[data-user-prompt]').getByText('/compact', { exact: true }) })
+await compactTurn.waitFor()
+check('the compact command does not claim success before a provider boundary',
+  await compactTurn.locator('[data-context-compacted]').isHidden()
+  && !fixtureCodexTurns.some(input => input.text === '/compact'))
+await capture('compaction-running-phone')
+releaseCodexCompaction.resolve()
+await compactTurn.getByText('Context compacted', { exact: true }).waitFor()
+await page.reload()
+await compactTurn.getByText('Context compacted', { exact: true }).waitFor()
+check('compaction is recorded once on the existing provider conversation and survives reload',
+  fixtureCodexCompactions.length === 1 && fixtureCodexCompactions[0] === 'ps-drive'
+  && await page.getByText('Continue the Codex work with Claude.', { exact: true }).isVisible()
+  && await compactTurn.getByRole('button', { name: 'Fork from this response' }).isHidden())
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await compactTurn.scrollIntoViewIfNeeded()
+    await capture(`compaction-completed-${width}`)
+  }
+}
+const afterCompaction = 'Continue after context compaction.'
+await page.locator('[data-prompt]').fill(afterCompaction)
+await page.locator('[data-send]').click()
+await page.getByText(afterCompaction, { exact: true }).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+check('the next prompt resumes the compacted provider thread',
+  fixtureCodexTurns.find(input => input.text === afterCompaction)?.providerSessionId === 'ps-drive')
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

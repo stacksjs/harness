@@ -263,7 +263,9 @@ export class ProviderRuntime {
    */
   async runTurn(sessionId: number, turnId: number, text: string): Promise<void> {
     const session = this.options.engine.current.sessions.get(sessionId)
-    if (!session || session.turns.at(-1)?.id !== turnId || session.turns.at(-1)?.status !== 'running') return
+    const turn = session?.turns.at(-1)
+    if (!session || turn?.id !== turnId || turn.status !== 'running') return
+    const compaction = turn.compaction === true
 
     if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted) {
       await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Trust this workspace before sending a message.' })
@@ -271,6 +273,10 @@ export class ProviderRuntime {
     }
 
     const handoff = session.handoff?.pending ? session.handoff : undefined
+    if (compaction && (!session.providerSessionId || handoff)) {
+      await this.emit({ type: 'thread.error', sessionId, turnId, message: 'Send a message to start this provider conversation before compacting it.' })
+      return
+    }
     const returning = handoff && !session.providerSessionId ? providerConversation(session) : undefined
     let history: ReturnType<typeof historicalContext>
     if (handoff) {
@@ -304,7 +310,7 @@ export class ProviderRuntime {
     // is worse than none, because it looks like a safe point and is not. It
     // costs one `git add -A` against a temporary index, and it is skipped
     // silently for a workspace that is not a repository.
-    if (!session.checkpoints.some(checkpoint => checkpoint.kind === 'turn-start' && checkpoint.turnId === turnId))
+    if (!compaction && !session.checkpoints.some(checkpoint => checkpoint.kind === 'turn-start' && checkpoint.turnId === turnId))
       await this.captureCheckpoint(sessionId, turnId, 'turn-start')
     if (running.abandoned || running.interrupted || running.turnId !== turnId) return
 
@@ -318,7 +324,7 @@ export class ProviderRuntime {
       if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted)
         throw new Error('Trust this workspace before sending a message.')
       const nativeHistory = running.instance.acceptsHistoricalContext ? history : undefined
-      for await (const event of running.instance.startTurn({
+      const events = compaction ? running.instance.compact?.(session.providerSessionId) : running.instance.startTurn({
         text: nativeHistory ? text : history?.inlinePrompt ?? text,
         ...(nativeHistory ? { historicalContext: nativeHistory } : {}),
         codexSelection: session.turns.at(-1)?.codexSelection,
@@ -327,7 +333,9 @@ export class ProviderRuntime {
         // target.
         providerSessionId: running.providerSessionId ?? (session.providerSessionId || undefined),
         ...(returning ? { requireResume: true } : {}),
-      })) {
+      })
+      if (!events) throw new Error('This provider does not support manual compaction in Harness.')
+      for await (const event of events) {
         // A stopped session's remaining events are dropped rather than logged:
         // appending to a session the user has torn down writes history nobody
         // asked for, against a projection that has moved on.
@@ -432,7 +440,9 @@ export class ProviderRuntime {
             // An isolated session records each turn as a commit on its branch,
             // so the branch is something you can merge rather than an empty
             // pointer beside a dirty worktree.
-            await this.commitIsolatedTurn(sessionId, turnId)
+            if (compaction && !event.contextCompacted)
+              throw new Error('The provider finished without confirming compaction.')
+            if (!compaction) await this.commitIsolatedTurn(sessionId, turnId)
             await this.emit({
               type: 'thread.turn.complete',
               sessionId,
@@ -441,6 +451,7 @@ export class ProviderRuntime {
               tokensOut: event.tokensOut,
               cost: event.costMicros,
               ...(event.providerTurnId ? { providerTurnId: event.providerTurnId } : {}),
+              ...(event.contextCompacted ? { contextCompacted: true } : {}),
             })
             break
 

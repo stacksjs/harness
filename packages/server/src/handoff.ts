@@ -21,7 +21,7 @@ export function historicalContext(turns: readonly TurnState[], beforeTurn: numbe
   const items: HistoricalItem[] = []
   for (const turn of turns) {
     if (turn.id > beforeTurn) break
-    if (turn.id <= throughTurn) continue
+    if (turn.id <= throughTurn || turn.compaction) continue
     if (turn.prompt) items.push({ turn: turn.id, role: 'user', text: turn.prompt })
     for (const message of turn.steered ?? []) items.push({ turn: turn.id, role: 'user', text: message.text })
     for (const call of turn.toolCalls) {

@@ -182,15 +182,24 @@ export class ClaudeInstance implements ProviderInstance {
   }
 
   startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+    return this.beginTurn(input, false)
+  }
+
+  compact(providerSessionId: string): AsyncIterable<ProviderEvent> {
+    return this.beginTurn({ text: '/compact', providerSessionId, requireResume: true }, true)
+  }
+
+  private beginTurn(input: StartTurnInput, compacting: boolean): AsyncIterable<ProviderEvent> {
     const queue = new EventQueue()
     this.activeQueue = queue
-    void this.run(input, queue)
+    void this.run(input, queue, compacting)
     return queue
   }
 
-  private async run(input: StartTurnInput, queue: EventQueue): Promise<void> {
+  private async run(input: StartTurnInput, queue: EventQueue, compacting: boolean): Promise<void> {
     let run: Query | undefined
     let bound = input.providerSessionId ?? null
+    let compacted = false
 
     try {
       const query = this.queryFactory ?? (await import('@anthropic-ai/claude-agent-sdk')).query
@@ -207,12 +216,19 @@ export class ClaudeInstance implements ProviderInstance {
           queue.push({ type: 'session-bound', providerSessionId: message.session_id })
         }
 
+        if (compacting && message.type === 'system' && message.subtype === 'compact_boundary') compacted = true
         for (const event of translate(message)) {
-          if (event.type === 'turn-complete' || event.type === 'error') {
+          if (event.type === 'turn-complete') {
+            queue.finish(!compacting ? event : compacted
+              ? { ...event, contextCompacted: true }
+              : { type: 'error', message: 'Claude Code finished without confirming context compaction.' })
+            return
+          }
+          if (event.type === 'error') {
             queue.finish(event)
             return
           }
-          queue.push(event)
+          if (!compacting || event.type !== 'assistant-delta') queue.push(event)
         }
       }
       queue.finish({ type: 'error', message: 'Claude Code ended before reporting a turn result.' })
