@@ -78,10 +78,10 @@
   },
   "dependencies": {
     "@harness/ansi": "workspace:*",
-    "@stacksjs/components": "^0.2.939",
-    "@stacksjs/stx": "^0.2.939",
-    "bun-plugin-stx": "^0.2.939",
-    "stacks": "^0.75.674"
+    "@stacksjs/components": "^0.2.941",
+    "@stacksjs/stx": "^0.2.941",
+    "bun-plugin-stx": "^0.2.941",
+    "stacks": "^0.75.685"
   },
   "workspaces": [
     "packages/*",

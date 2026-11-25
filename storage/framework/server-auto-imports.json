@@ -58,6 +58,7 @@
     "GiftCard": true,
     "HttpError": true,
     "I18n": true,
+    "Inspire": true,
     "Job": true,
     "Label": true,
     "LicenseActivation": true,
