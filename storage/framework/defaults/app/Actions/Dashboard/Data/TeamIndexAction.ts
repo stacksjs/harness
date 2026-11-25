@@ -1,16 +1,20 @@
-import { Action } from '@stacksjs/actions'
+import type { RequestInstance } from '@stacksjs/types'
+import { Action } from '@stacksjs/actions/runtime'
 import { Team } from '@stacksjs/orm'
 import { safeGet } from '../../../../resources/functions/dashboard/data'
-import { dateValue, daysAgoIso, numberValue, textValue } from './data-records'
+import { dashboardOperationalError } from '../dashboard-response'
+import { dateValue, daysAgoIso, numberValue, statsOnly, textValue } from './data-records'
 
 export default new Action({
   name: 'TeamIndexAction',
   description: 'Returns teams and native team statistics for the dashboard.',
   method: 'GET',
   apiResponse: true,
-  async handle() {
+  async handle(request: RequestInstance) {
     try {
-      const rows = await Team.orderByDesc('created_at').limit(100).get()
+      // The page that shows these numbers lists its rows through the model
+      // browser, and asks here for the numbers alone.
+      const rows = statsOnly(request) ? [] : await Team.orderByDesc('created_at').limit(100).get()
       const teams = rows.map(row => ({
         id: numberValue(safeGet(row, 'id', 0)),
         name: textValue(safeGet(row, 'name'), 'Unnamed team'),
@@ -39,11 +43,7 @@ export default new Action({
       }
     }
     catch (error) {
-      return {
-        teams: [],
-        stats: { total: 0, active: 0, members: 0, newThisMonth: 0 },
-        error: error instanceof Error ? error.message : 'Teams could not be loaded.',
-      }
+      return dashboardOperationalError(error, 'Teams could not be loaded.', 'TeamIndexAction')
     }
   },
 })

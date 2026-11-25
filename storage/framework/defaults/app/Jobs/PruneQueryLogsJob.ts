@@ -30,14 +30,15 @@ export default class PruneQueryLogsJob {
     try {
       log.info('Running query logs pruning job')
 
-      // Skip if query logging is disabled
-      if (!config.database?.queryLogging?.enabled) {
-        log.info('Query logging is disabled, skipping pruning job')
-        return
-      }
-
+      // Not skipped when logging is off: switching it off stops new rows, and
+      // the ones already written still have to expire. The query logger also
+      // prunes on its own while it writes, so this job is a backstop for apps
+      // that schedule it, not the only thing standing between a busy app and
+      // an unbounded table.
       // Prune old query logs
-      const result = await QueryController.pruneQueryLogs()
+      // `pruneQueryLogs` is an instance method - the routes reach it through
+      // 'Controllers/QueryController@method', which instantiates for them.
+      const result = await new QueryController().pruneQueryLogs()
 
       log.info(`Successfully pruned ${result.pruned} query logs older than ${result.retentionDays} days`)
 

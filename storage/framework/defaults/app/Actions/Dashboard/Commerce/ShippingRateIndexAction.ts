@@ -1,6 +1,6 @@
-import { Action } from '@stacksjs/actions'
+import { Action } from '@stacksjs/actions/runtime'
 import { ShippingMethod, ShippingRate, ShippingZone } from '@stacksjs/orm'
-import { response } from '@stacksjs/router'
+import { dashboardOperationalError } from '../dashboard-response'
 import {
   indexShippingRateMethods,
   indexShippingRateZones,
@@ -15,21 +15,21 @@ export default new Action({
 
   async handle() {
     try {
-      const rates = await ShippingRate.orderBy('weight_from', 'asc').limit(500).get()
+      // Read whole: store configuration, which the page searches in full. The
+      // first 500 left the rest unlisted and unsearchable (stacksjs/stacks#3218).
+      const rates = await ShippingRate.orderBy('weight_from', 'asc').get()
       const methodIds = [...new Set(rates.map(rate => rate.get('shipping_method_id')).filter(Boolean))]
       const zoneIds = [...new Set(rates.map(rate => rate.get('shipping_zone_id')).filter(Boolean))]
       const [methods, zones] = await Promise.all([
-        methodIds.length ? ShippingMethod.where('id', 'in', methodIds).get() : [],
-        zoneIds.length ? ShippingZone.where('id', 'in', zoneIds).get() : [],
+        methodIds.length ? ShippingMethod.whereIn('id', methodIds).get() : [],
+        zoneIds.length ? ShippingZone.whereIn('id', zoneIds).get() : [],
       ])
       const methodsById = indexShippingRateMethods(methods)
       const zonesById = indexShippingRateZones(zones)
       return rates.map(rate => normalizeShippingRateRecord(rate, methodsById, zonesById))
     }
     catch (error) {
-      return response.json({
-        message: error instanceof Error ? error.message : 'Shipping rate records could not be read.',
-      }, 503)
+      return dashboardOperationalError(error, 'Shipping rate records could not be read.', 'ShippingRateIndexAction')
     }
   },
 })

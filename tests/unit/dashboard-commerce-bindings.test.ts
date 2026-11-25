@@ -30,8 +30,9 @@ describe('commerce dashboard filter bindings', () => {
         'utf8',
       )
 
-      expect(source).toContain('x-model="search"')
-      expect(source).toContain('x-model="sort"')
+      // The shared search box and dropdown, bound both ways (stacksjs/stacks#3310).
+      expect(source).toContain('<SearchFilter v-model:searchValue="search"')
+      expect(source).toMatch(/<Select v-model:value="sort"/)
       expect(source).not.toMatch(/function update(?:Search|Sort)\(/)
       expect(source).not.toMatch(/:value="search\(\)"[^>]+@input=/)
       expect(source).not.toMatch(/:value="sort\(\)"[^>]+@change=/)
@@ -51,8 +52,8 @@ describe('commerce dashboard filter bindings', () => {
         'utf8',
       )
 
-      expect(source).toContain('x-model="search"')
-      expect(source).toContain('x-model="status"')
+      expect(source).toContain('<SearchFilter v-model:searchValue="search"')
+      expect(source).toContain('<Select v-model:value="status"')
       expect(source).not.toMatch(/function update(?:Search|Status)\(/)
     }
   })
@@ -64,13 +65,14 @@ describe('commerce dashboard filter bindings', () => {
     const catalog = readFileSync(resolve(componentRoot, 'CommercePosCatalog.stx'), 'utf8')
     const dashboard = readFileSync(resolve(componentRoot, 'CommercePosDashboard.stx'), 'utf8')
 
-    expect(catalog).toContain('x-model="search"')
-    expect(catalog).toContain('emit(\'search\', $event.target.value)')
+    expect(catalog).toContain('<SearchFilter v-model:searchValue="search"')
+    expect(catalog).toContain('@search="emit(\'search\', $event)"')
+    expect(catalog).toContain('@change="emit(\'category\', $event)"')
     expect(dashboard).toContain('@search="search.set($event)"')
     expect(dashboard).not.toMatch(/function update(?:Search|Category|Availability)\(/)
   })
 
-  test('simple entity dialogs use native field models', () => {
+  test('simple entity dialogs bind their fields to signals', () => {
     for (const component of [
       'CommerceManufacturerDialog.stx',
       'CommerceUnitDialog.stx',
@@ -85,14 +87,14 @@ describe('commerce dashboard filter bindings', () => {
         'utf8',
       )
 
-      expect(source).toContain('x-model=')
+      expect(source).toMatch(/(?:x-model(?:\.\w+)?|v-model:(?:value|checked))="/)
       expect(source).not.toMatch(/function update[A-Z]\w*\(event: Event\)/)
       expect(source).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
       expect(source).not.toMatch(/:checked="[^"]+\(\)"[^>]+@change=/)
     }
   })
 
-  test('customer, review, and refund dialogs use native field models', () => {
+  test('customer, review, and refund dialogs bind their fields to signals', () => {
     for (const component of [
       'CommerceCustomerDialog.stx',
       'CommerceReviewEditDialog.stx',
@@ -106,7 +108,7 @@ describe('commerce dashboard filter bindings', () => {
         'utf8',
       )
 
-      expect(source).toContain('x-model=')
+      expect(source).toMatch(/(?:x-model(?:\.\w+)?|v-model:(?:value|checked))="/)
       expect(source).not.toMatch(/function update[A-Z]\w*\(event: Event\)/)
       expect(source).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
       expect(source).not.toMatch(/:checked="[^"]+\(\)"[^>]+@change=/)
@@ -119,10 +121,13 @@ describe('commerce dashboard filter bindings', () => {
       ),
       'utf8',
     )
-    expect(review).toContain('x-model.number="rating"')
+    // A string model, so the select can hold "No rating" as well as 1 to 5
+    // (stacksjs/stacks#2999); the dialog converts it to a number or null.
+    expect(review).toContain('v-model:value="rating"')
+    expect(review).toContain("{ value: '', label: 'No rating' }")
   })
 
-  test('gift card dialog uses native field models with isolated balance syncing', () => {
+  test('gift card dialog binds its fields to signals with isolated balance syncing', () => {
     const source = readFileSync(
       resolve(
         'storage/framework/defaults/resources/components/Dashboard/Commerce',
@@ -131,15 +136,15 @@ describe('commerce dashboard filter bindings', () => {
       'utf8',
     )
 
-    expect(source).toContain('x-model="initialBalance"')
+    expect(source).toContain('v-model:value="initialBalance"')
     expect(source).toContain('@input="syncCurrentBalance($event)"')
-    expect(source).toContain('x-model="currentBalance"')
+    expect(source).toContain('v-model:value="currentBalance"')
     expect(source).toContain('let previousInitialBalance')
     expect(source).not.toMatch(/function update[A-Z]\w*\(event: Event\)/)
     expect(source).not.toMatch(/:checked="[^"]+\(\)"[^>]+@change=/)
   })
 
-  test('category, printer, and waitlist forms use native field models', () => {
+  test('category, printer, and waitlist forms bind their fields to signals', () => {
     for (const component of [
       'CommerceCategoryDialog.stx',
       'PrintDeviceDialog.stx',
@@ -154,7 +159,7 @@ describe('commerce dashboard filter bindings', () => {
         'utf8',
       )
 
-      expect(source).toContain('x-model=')
+      expect(source).toMatch(/(?:x-model(?:\.\w+)?|v-model:(?:value|checked))="/)
       expect(source).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
       expect(source).not.toMatch(/:checked="[^"]+\(\)"[^>]+@change=/)
     }
@@ -179,13 +184,13 @@ describe('commerce dashboard filter bindings', () => {
         ),
         'utf8',
       )
-      expect(source).toContain('x-model="customerId"')
+      expect(source).toContain('v-model:value="customerId"')
       expect(source).toContain('@change="hydrateCustomer($event)"')
       expect(source).not.toContain('customerId.set(selectedId)')
     }
   })
 
-  test('coupon, checkout, and overview controls use native field models', () => {
+  test('coupon, checkout, and overview controls bind to signals', () => {
     for (const component of [
       'CommerceCouponDialog.stx',
       'CommercePosCheckoutDialog.stx',
@@ -199,7 +204,7 @@ describe('commerce dashboard filter bindings', () => {
         'utf8',
       )
 
-      expect(source).toContain('x-model=')
+      expect(source).toMatch(/(?:x-model(?:\.\w+)?|v-model:(?:value|checked))="/)
       expect(source).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
       expect(source).not.toMatch(/:checked="[^"]+\(\)"[^>]+@change=/)
     }
@@ -211,11 +216,13 @@ describe('commerce dashboard filter bindings', () => {
       ),
       'utf8',
     )
-    expect(overview).toContain('reloadSelectedRange($event)')
+    // The dropdown hands the handler the range chosen.
+    expect(overview).toContain('@change="reloadSelectedRange"')
+    expect(overview).toContain('function reloadSelectedRange(next: string): void {')
     expect(overview).not.toContain('range.set(')
   })
 
-  test('product and order forms use native field models', () => {
+  test('product and order forms bind their fields to signals', () => {
     for (const component of [
       'CommerceProductDialog.stx',
       'CommerceOrderDialog.stx',
@@ -228,7 +235,7 @@ describe('commerce dashboard filter bindings', () => {
         'utf8',
       )
 
-      expect(source).toContain('x-model=')
+      expect(source).toMatch(/(?:x-model(?:\.\w+)?|v-model:(?:value|checked))="/)
       expect(source).not.toContain('function inputValue(')
       expect(source).not.toMatch(/function (?:set|toggle)[A-Z]\w*\(event: Event\)/)
     }

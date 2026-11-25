@@ -60,6 +60,12 @@ The managed ChatGPT preview opens account consent in the system browser on a mac
 ./buddy harness:provider-chatgpt-disconnect PROFILE_ID ACCOUNT_ID
 ```
 
+## Stacks upgrade
+
+Buddy synced the framework defaults from [Stacks source `7f6ee07`](https://github.com/stacksjs/stacks/commit/7f6ee0702b1f1779997ca50a012a48df705fa838). The frozen Bun 1.3.14 install resolves the published `stacks` 0.75.674 and stx, components, and Bun plugin 0.2.937. The source and the installed packages have independent version histories.
+
+Use `./buddy migrate` before running the updated framework on an existing database. A fresh SQLite database and a copy of a populated Harness v0.0.1 database passed migration and integrity checks. The original thread URL, its transcript, and all seven historical events survived the upgrade. The team-invitation migration tests also cover deduplicating pending invitations while retaining their history.
+
 ## Work packages
 
 ### Browser fixture evidence

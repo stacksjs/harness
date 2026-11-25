@@ -1,4 +1,7 @@
-import { Action } from '@stacksjs/actions'
+import type { RequestInstance } from '@stacksjs/types'
+import { Action } from '@stacksjs/actions/runtime'
+import { response } from '@stacksjs/router'
+import { destroyModelRow, requestAccountId, rowRefusalResponse } from './model-row-writes'
 import { parseRowId, resolveWritableModel } from './model-write'
 
 /**
@@ -6,31 +9,24 @@ import { parseRowId, resolveWritableModel } from './model-write'
  *
  * Deletes one row from the dashboard's generic model browser. Goes through
  * the model rather than the table so soft deletes, observers and cascade
- * behaviour all apply exactly as they would anywhere else in the app.
+ * behaviour all apply exactly as they would anywhere else in the app. A user
+ * other records still point at is anonymized instead: see `./model-destroy`.
  */
 export default new Action({
   name: 'Dashboard Model Destroy',
   description: 'Deletes one row of a model from the dashboard model browser.',
   method: 'DELETE',
   apiResponse: true,
-  async handle(req: { getParam?: (name: string) => unknown, route?: { params?: { slug?: string, id?: string } } }) {
-    const resolved = await resolveWritableModel(String(req?.getParam?.('slug') ?? req?.route?.params?.slug ?? ''), 'destroy')
+  async handle(request: RequestInstance) {
+    const resolved = await resolveWritableModel(request.getParam('slug'), 'destroy')
     if ('error' in resolved)
-      return { ok: false, error: resolved.error }
+      return response.json({ message: resolved.error }, resolved.status)
 
-    const id = parseRowId(req?.getParam?.('id') ?? req?.route?.params?.id)
+    const id = parseRowId(request.getParam('id'))
     if (id === null)
-      return { ok: false, error: 'A numeric row id is required.' }
+      return response.json({ message: 'A numeric row id is required.' }, 400)
 
-    try {
-      const row = await resolved.Model.find(id)
-      if (!row)
-        return { ok: false, error: `${resolved.modelName} ${id} not found.` }
-      await row.delete()
-      return { ok: true, id }
-    }
-    catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) }
-    }
+    const result = await destroyModelRow(resolved, id, await requestAccountId(request))
+    return result.ok ? { ok: true, id, anonymized: result.anonymized } : rowRefusalResponse(result)
   },
 })

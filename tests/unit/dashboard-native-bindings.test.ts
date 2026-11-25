@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { describeAuthError, isLoginResponse, isTwoFactorChallenge, safeAuthRedirect } from '../../storage/framework/defaults/functions/auth'
 
 const dashboardComponents = resolve(
   'storage/framework/defaults/resources/components/Dashboard',
@@ -17,6 +18,70 @@ const dashboardComponentBarrel = resolve(
 
 function componentSource(path: string): string {
   return readFileSync(resolve(dashboardComponents, path), 'utf8')
+}
+
+function staticClassLists(source: string): string[][] {
+  return Array.from(source.matchAll(/(?:^|\s)class="([^"]*)"/g), match => match[1]!.split(/\s+/).filter(Boolean))
+}
+
+interface TestSignal<T> {
+  (): T
+  set: (value: T) => void
+}
+
+function testSignal<T>(initial: T): TestSignal<T> {
+  let value = initial
+  const signal = (() => value) as TestSignal<T>
+  signal.set = (next: T) => { value = next }
+  return signal
+}
+
+function loginDashboardHarness(options: {
+  login: (credentials: unknown) => Promise<unknown>
+  verify: (challengeToken: string, code: string) => Promise<unknown>
+  redirect?: string
+  next?: string
+  navigate?: (target: string, options: unknown) => void
+}) {
+  const source = componentSource('Auth/LoginDashboard.stx')
+  const script = source.match(/<script client>([\s\S]*?)<\/script>/)?.[1]
+  if (!script)
+    throw new Error('LoginDashboard client script is missing')
+
+  const body = script.replace(/^import .*$/gm, '')
+  const transpiler = new Bun.Transpiler({ loader: 'ts', target: 'bun' })
+  const compiled = transpiler.transformSync(`
+    function createHarness(useAuth, useRoute, state, navigate, describeAuthError, isLoginResponse, isTwoFactorChallenge, safeAuthRedirect, useReactiveProp) {
+      ${body}
+      return { challengeToken, error, handleLogin, handleTwoFactor, isLoading, restartLogin }
+    }
+  `)
+  const createHarness = new Function(`${compiled}; return createHarness`)() as (...args: unknown[]) => {
+    challengeToken: TestSignal<string>
+    error: TestSignal<string>
+    handleLogin: (credentials: unknown) => Promise<void>
+    handleTwoFactor: (code: string) => Promise<void>
+    isLoading: TestSignal<boolean>
+    restartLogin: () => void
+  }
+  const navigations: string[] = []
+  const harness = createHarness(
+    () => ({ login: options.login, verifyTwoFactorLogin: options.verify }),
+    () => ({ query: options.next ? { next: options.next } : { redirect: options.redirect ?? '/dashboard' } }),
+    testSignal,
+    (target: string, navigationOptions: unknown) => {
+      navigations.push(target)
+      options.navigate?.(target, navigationOptions)
+    },
+    describeAuthError,
+    isLoginResponse,
+    isTwoFactorChallenge,
+    safeAuthRedirect,
+    // A prop the page did not pass reads as its fallback.
+    (_name: string, fallback: unknown) => () => fallback,
+  )
+
+  return { ...harness, navigations }
 }
 
 describe('dashboard native STX bindings', () => {
@@ -81,6 +146,56 @@ describe('dashboard native STX bindings', () => {
     expect(barrel).not.toMatch(/from '\.\/(?:Card|Table|Chart)\.stx'/)
   })
 
+  test('the shared table renders badges and per-column empty text declaratively', () => {
+    // stacksjs/stacks#2916: 31 of the 70 hand-rolled tables have a status
+    // pill, which was the single most common cell the component could not
+    // express. Per-column SLOTS were the obvious answer and are not
+    // available: stx matches a slot name literally
+    // (`<slot name="..."` / `#name`), so a name computed from column.key
+    // never resolves and the caller's content is dropped silently. Verified
+    // against a static named slot as a control, which does resolve.
+    //
+    // So the pill is a column type with two maps instead. Maps rather than
+    // functions for the same reason `type` is a string: props cross an
+    // attribute boundary that a function does not survive.
+    const table = componentSource('UI/Table.stx')
+    expect(table).toContain("| 'badge'")
+    expect(table).toContain('badgeClasses?: Record<string, string>')
+    expect(table).toContain('badgeLabels?: Record<string, string>')
+    expect(table).toContain("column.type === 'badge'")
+
+    // An unmapped value still renders a pill rather than bare text, so a
+    // status nobody styled does not look like a bug.
+    expect(table).toContain('BADGE_NEUTRAL')
+    expect(table).toContain('?? BADGE_NEUTRAL')
+
+    // Empty text is the column's, because "-" is not always the right word.
+    expect(table).toContain('emptyText?: string')
+    expect(table).toContain("column.emptyText ?? '-'")
+  })
+
+  test('the shared table formats money through commerce, not Intl directly', () => {
+    // stacksjs/stacks#2916: Table rendered a `currency` column by calling
+    // toLocaleString on the stored value. Stacks stores money in MINOR units,
+    // so a 1200 cent rate rendered as $1,200.00 rather than $12.00 - silent,
+    // and wrong by the currency's exponent.
+    //
+    // Pinned on the source because the fix is a delegation: the arithmetic
+    // lives in @stacksjs/commerce/money, where currencyExponent knows that
+    // JPY has no decimals and KWD has three. A future simplification back to
+    // Intl would look tidier and reintroduce both bugs at once.
+    const table = componentSource('UI/Table.stx')
+    expect(table).toContain("import { formatCurrency } from '@stacksjs/commerce/money'")
+    expect(table).toContain('return formatCurrency(amount, code)')
+    expect(table).not.toContain("style: 'currency'")
+    expect(table).not.toContain("currency: 'USD'")
+
+    // The code comes from the row when it varies, else the column, else the
+    // helper's own default.
+    expect(table).toContain('currencyKey')
+    expect(table).toContain('column.currency')
+  })
+
   test('routes primary action links through the shared Button component', () => {
     const paths = readdirSync(dashboardComponents, { recursive: true })
       .map(path => String(path))
@@ -103,8 +218,10 @@ describe('dashboard native STX bindings', () => {
   test('analytics page header models its local selection across the component boundary', () => {
     const source = componentSource('Analytics/AnalyticsPageHeader.stx')
 
-    expect(source).toContain('x-model="selectedRange"')
-    expect(source).toContain('emitRange($event)')
+    // The shared dropdown, bound both ways, handing the handler the range chosen.
+    expect(source).toContain('<Select v-model:value="selectedRange"')
+    expect(source).toContain('@change="emitRange"')
+    expect(source).toContain('function emitRange(next: string): void {')
     expect(source).not.toContain(':value="range()"')
 
     const webView = readFileSync(
@@ -158,26 +275,57 @@ describe('dashboard native STX bindings', () => {
 
   test('content dashboards use native filters and form models', () => {
     for (const component of [
-      'Content/AuthorsDashboard.stx',
+      'Content/AuthorEditorDialog.stx',
       'Content/CommentsDashboard.stx',
-      'Content/ContentTaxonomyDashboard.stx',
-      'Content/PagesDashboard.stx',
+      'Content/TaxonomyEditorDialog.stx',
+      'Content/PageEditorDialog.stx',
       'Content/BlogDashboard.stx',
+      'Content/BlogPostEditorDialog.stx',
       'Content/SeoDashboard.stx',
     ]) {
       const source = componentSource(component)
-      expect(source).toContain('x-model=')
+      // Bound both ways: a native control by `x-model`, a shared one by
+      // `v-model:value` (stacksjs/stacks#3310), never a value and a handler.
+      expect(source).toMatch(/x-model=|v-model:value=/)
       expect(source).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
       expect(source).not.toMatch(/:checked="[^"]+\(\)"[^>]+@change=/)
       expect(source).not.toMatch(/function update[A-Z]\w*\(event: Event\)/)
     }
 
+    const authors = componentSource('Content/AuthorsDashboard.stx')
+    const authorEditor = componentSource('Content/AuthorEditorDialog.stx')
+    expect(authors).toContain('<AuthorEditorDialog')
+    expect(authors).toContain('<ConfirmDialog')
+    expect(authors).not.toContain('fixed inset-y-0')
+    expect(authorEditor).toContain('<Modal')
+    expect(authorEditor).toContain('form="author-editor-form"')
+
+    const comments = componentSource('Content/CommentsDashboard.stx')
+    expect(comments).toContain('<ConfirmDialog')
+    expect(comments).not.toContain('fixed inset-y-0')
+
+    const pages = componentSource('Content/PagesDashboard.stx')
+    const pageEditor = componentSource('Content/PageEditorDialog.stx')
+    expect(pages).toContain('<PageEditorDialog')
+    expect(pages).toContain('<ConfirmDialog')
+    expect(pages).not.toContain('fixed inset-y-0')
+    expect(pageEditor).toContain('<Modal')
+    expect(pageEditor).toContain('form="page-editor-form"')
+
     const taxonomy = componentSource('Content/ContentTaxonomyDashboard.stx')
-    expect(taxonomy).toContain(".normalize('NFKD')")
-    expect(taxonomy).toContain('@input="markSlugTouched"')
-    expect(taxonomy).toContain('@blur="normalizeSlug"')
-    expect(taxonomy).toContain('class="min-w-0 max-w-full space-y-6"')
-    expect(taxonomy).toContain('class="overflow-x-auto max-w-full w-full"')
+    const taxonomyEditor = componentSource('Content/TaxonomyEditorDialog.stx')
+    expect(taxonomy).toContain('<TaxonomyEditorDialog')
+    expect(taxonomy).toContain('<ConfirmDialog')
+    expect(taxonomy).not.toContain('fixed inset-y-0')
+    expect(staticClassLists(taxonomy)).toContainEqual(expect.arrayContaining(['min-w-0', 'max-w-full', 'space-y-6']))
+    // The horizontal scroll container moved into `UI/Table`, which owns its
+    // own overflow wrapper, so the taxonomy view no longer has one of its own.
+    // See stacksjs/stacks#2925.
+    expect(taxonomy).toMatch(/<Table\b/)
+    expect(taxonomyEditor).toContain(".normalize('NFKD')")
+    expect(taxonomyEditor).toContain('@input="markSlugTouched"')
+    expect(taxonomyEditor).toContain('@blur="normalizeSlug"')
+    expect(taxonomyEditor).toContain('form="taxonomy-editor-form"')
 
     const blogView = readFileSync(
       resolve('storage/framework/defaults/views/dashboard/content/blog/index.stx'),
@@ -186,15 +334,53 @@ describe('dashboard native STX bindings', () => {
     const blog = componentSource('Content/BlogDashboard.stx')
     expect(blogView).toContain('<BlogDashboard />')
     expect(blogView).not.toContain('<script')
-    expect(blog).toContain('mx-auto min-w-0 max-w-7xl w-full')
-    expect(blog).toContain('class="overflow-x-auto max-w-full w-full"')
+    expect(staticClassLists(blog)).toContainEqual(expect.arrayContaining(['mx-auto', 'min-w-0', 'max-w-7xl', 'w-full']))
+    expect(staticClassLists(blog)).toContainEqual(expect.arrayContaining(['overflow-x-auto', 'max-w-full', 'w-full']))
+    expect(blog).toContain("publicApplicationUrl('/blog')")
+    expect(blog).toContain('href="{{ blogUrl }}"')
+    // The view link reaches the public site through publicPostUrl, computed
+    // per row now that the list is a UI/Table (stacksjs/stacks#2925).
+    expect(blog).toContain('publicUrl: publicPostUrl(post.slug)')
+    expect(blog).toContain(':href="row.publicUrl"')
+    expect(blog).toContain('encodeURIComponent(String(slug))')
+    expect(blog).not.toContain('href="/blog"')
+    expect(blog).toContain('<BlogPostEditorDialog')
+    expect(blog).toContain('<ConfirmDialog')
+    expect(blog).not.toContain('fixed inset-0')
+    const blogEditor = componentSource('Content/BlogPostEditorDialog.stx')
+    expect(blogEditor).toContain('<Modal')
+    expect(blogEditor).toContain('form="blog-post-editor-form"')
+    expect(blogEditor).toContain(':disabled="bodyLoading() || bodyLoadFailed()"')
+    expect(blogEditor).toContain("emit('retry')")
+
+    const posts = componentSource('Content/PostsDashboard.stx')
+    const postEditor = componentSource('Content/PostEditorDialog.stx')
+    expect(posts).toContain("publicApplicationUrl('/blog')")
+    expect(posts).toContain('href="{{ blogUrl }}"')
+    expect(posts).not.toContain('href="/blog"')
+    expect(posts).toContain('<PostEditorDialog')
+    expect(posts).toContain('<ConfirmDialog')
+    expect(posts).not.toContain('fixed inset-y-0')
+    expect(postEditor).toContain('<Modal')
+    expect(postEditor).toContain('form="post-editor-form"')
+    // Several of many: a shared checkbox per option, ticked when its id is in
+    // the list and adding or removing it as it is ticked (stacksjs/stacks#3310).
+    expect(postEditor).toContain(':checked="categoryIds().includes(categoryOption.id)" @update:checked="chooseCategory(categoryOption.id, $event)"')
+    expect(postEditor).toContain(':checked="tagIds().includes(tagOption.id)" @update:checked="chooseTag(tagOption.id, $event)"')
 
     const seoView = readFileSync(
       resolve('storage/framework/defaults/views/dashboard/content/seo/index.stx'),
       'utf8',
     )
+    const seo = componentSource('Content/SeoDashboard.stx')
+    const seoEditor = componentSource('Content/SeoEditorDialog.stx')
     expect(seoView).toContain('<SeoDashboard />')
     expect(seoView).not.toContain('<script')
+    expect(seo).toContain('<SeoEditorDialog')
+    expect(seo).not.toContain('fixed inset-0')
+    expect(seoEditor).toContain('<Modal')
+    expect(seoEditor).toContain('form="seo-editor-form"')
+    expect(seoEditor).toContain('<Textarea v-model:value="metaDescription"')
   })
 
   test('content overview is a thin component backed by persisted metrics', () => {
@@ -211,7 +397,7 @@ describe('dashboard native STX bindings', () => {
     expect(view).toContain('<ContentDashboard />')
     expect(view).not.toContain('<script client>')
     expect(component).toContain("dashboardApi<ContentOverview>(`/api/dashboard/content/overview?days=${selectedRange()}`)")
-    expect(component).toContain('x-model="selectedRange"')
+    expect(component).toContain('<Select v-model:value="selectedRange"')
     expect(component).toContain('@change="changeRange"')
     expect(component).toContain("import { useChart }")
     expect(component).not.toContain('Math.random')
@@ -243,8 +429,8 @@ describe('dashboard native STX bindings', () => {
     expect(preview).toContain('referrerpolicy="no-referrer"')
 
     const list = componentSource('Email/InboxMessageList.stx')
-    expect(list).toContain('x-model="search"')
-    expect(list).toContain("emit('search', $event.target.value)")
+    expect(list).toContain('<SearchFilter v-model:searchValue="search"')
+    expect(list).toContain(`@search="emit('search', $event)"`)
     expect(list).not.toContain('function updateSearch(')
 
     const settings = componentSource('Email/InboxSettingsDashboard.stx')
@@ -301,6 +487,20 @@ describe('dashboard native STX bindings', () => {
     expect(toggle).toContain('role="switch"')
     expect(toggle).toContain("emit('update:checked', checked)")
     expect(toggle).toContain("useId('toggle')")
+    // The input sits beside the track, not inside it: a ring asked for with
+    // `focus-within` on the track could never show (stacksjs/stacks#3297).
+    expect(toggle).toContain('class="sr-only peer"')
+    expect(toggle).toContain('peer-focus-visible:ring-2')
+    expect(toggle).not.toContain('focus-within')
+    // A refused save's message takes the description's place.
+    expect(toggle).toContain('<span :if="liveDescription() && !liveError()"')
+    expect(toggle).toContain('<span :if="liveError()" role="alert"')
+    expect(toggle).toContain(':aria-invalid="liveError() ? \'true\' : null"')
+    // The thumb is given one position, never both: with both, which one won was
+    // the order of the page's stylesheet, and a switch that was on could keep
+    // its thumb on the left (stacksjs/stacks#3300).
+    expect(toggle).toContain('liveChecked() ? checkedTranslations[liveSize()] || checkedTranslations.md : \'translate-x-0.5\'')
+    expect(toggle).not.toContain('inline-block translate-x-0.5')
     expect(toggle).not.toContain('Math.random')
 
     const textarea = componentSource('UI/Textarea.stx')
@@ -330,21 +530,59 @@ describe('dashboard native STX bindings', () => {
 
     const login = componentSource('Auth/Login.stx')
     expect(login).toContain('x-model="rememberMe"')
+    expect(login).toContain('remember: rememberMe()')
+    expect(login).not.toContain('rememberMe: rememberMe()')
+
+    const loginDashboard = componentSource('Auth/LoginDashboard.stx')
+    expect(loginDashboard).toContain('verifyTwoFactorLogin(challengeToken(), code)')
+    expect(loginDashboard).toContain('challengeToken.set(result.challenge_token)')
+    expect(loginDashboard).toContain('<TwoFactorLogin')
+    expect(loginDashboard).toContain(':if="!challengeToken()"')
+    expect(loginDashboard).toContain(':if="challengeToken()"')
+    expect(loginDashboard).toContain('@submit="handleTwoFactor"')
+    expect(loginDashboard).toContain('@restart="restartLogin"')
+
+    const twoFactorLogin = componentSource('Auth/TwoFactorLogin.stx')
+    expect(twoFactorLogin).toContain('autocomplete="one-time-code"')
+    expect(twoFactorLogin).toContain('@submit.prevent="submit"')
+    expect(twoFactorLogin).toContain('v-model:value="code"')
+    expect(twoFactorLogin).toContain("emit('submit', code())")
+    expect(twoFactorLogin).toContain("emit('restart')")
 
     const register = componentSource('Auth/Register.stx')
     expect(register).toContain('x-model="agreeToTerms"')
 
     const forgotPassword = componentSource('Auth/ForgotPassword.stx')
     expect(forgotPassword).toContain("emit('retry')")
-    expect(forgotPassword).toContain('i-hugeicons-cube')
     expect(forgotPassword).not.toContain('<svg')
     expect(forgotPassword).not.toContain('<script server>')
+
+    // The logo moved into the shared card these four pages now sit in
+    // (stacksjs/stacks#2917). Asserted where the markup lives, rather than
+    // dropped: the point was that the mark is an Iconify class and not a
+    // hand-rolled SVG, and that is still worth pinning.
+    const authCard = componentSource('Auth/AuthCard.stx')
+    expect(authCard).toContain('i-hugeicons-cube')
+    expect(authCard).not.toContain('<svg')
+    expect(authCard).toContain('<slot />')
+    for (const page of ['Auth/Login.stx', 'Auth/Register.stx', 'Auth/ForgotPassword.stx', 'Auth/ResetPassword.stx'])
+      expect(componentSource(page), page).toContain('<AuthCard')
 
     const forgotPasswordDashboard = componentSource('Auth/ForgotPasswordDashboard.stx')
     expect(forgotPasswordDashboard).toContain("dashboardApi('/password/forgot', {")
     expect(forgotPasswordDashboard).toContain("method: 'POST'")
     expect(forgotPasswordDashboard).toContain('auth: false')
     expect(forgotPasswordDashboard).not.toContain("fetch('/forgot-password'")
+
+    for (const component of [
+      'Auth/LoginDashboard.stx',
+      'Auth/RegisterDashboard.stx',
+      'Auth/ForgotPasswordDashboard.stx',
+    ]) {
+      const source = componentSource(component)
+      expect(source).toContain('err instanceof Error ? err.message')
+      expect(source).not.toContain('console.error')
+    }
 
     const authRoutes = [
       ['login.stx', '<LoginDashboard />'],
@@ -358,8 +596,130 @@ describe('dashboard native STX bindings', () => {
     }
 
     const accessTokens = componentSource('Auth/AccessTokens.stx')
-    expect(accessTokens).toContain('@submit.prevent="createAccessToken"')
+    const accessTokenCreate = componentSource('Auth/AccessTokenCreateDialog.stx')
+    expect(accessTokens).toContain('<AccessTokenCreateDialog')
+    expect(accessTokens).toContain('<ConfirmDialog')
+    expect(accessTokens).toContain('@submit="createAccessToken($event)"')
+    expect(accessTokens).toContain('@confirm="revokeToken"')
+    expect(accessTokens).not.toContain('Confirm Revoke')
+    expect(accessTokens).not.toContain('fixed inset-0')
+    expect(accessTokenCreate).toContain('<Modal')
+    expect(accessTokenCreate).toContain('@submit.prevent="submit"')
+    expect(accessTokenCreate).toContain('form="access-token-create-form"')
+    // The shared controls, bound both ways (stacksjs/stacks#3310).
+    expect(accessTokenCreate).toContain('<Input v-model:value="tokenName"')
+    expect(accessTokenCreate).toContain('<Select v-model:value="expiryMinutes"')
+    expect(accessTokens).toContain("import { authStore } from '../../../../views/dashboard/stores/auth'")
+    expect(accessTokens).toContain('await authStore.load()')
+    expect(accessTokens).toContain('if (authStore.unauthenticated())')
+    expect(accessTokens.indexOf('await authStore.load()')).toBeLessThan(accessTokens.indexOf("dashboardApi<TokenListResponse>('/auth/tokens')"))
     expect(accessTokens).not.toContain('event.preventDefault()')
+  })
+
+  test('dashboard login completes the two-factor challenge before navigating', async () => {
+    const session = {
+      access_token: 'access-1',
+      token: 'access-1',
+      token_type: 'Bearer',
+      expires_in: 3600,
+      user: { id: 1, email: 'person@example.com', name: 'Person' },
+    }
+    let verification: unknown = { token: null, user: null }
+    const flow = loginDashboardHarness({
+      login: async () => ({ requires_two_factor: true, challenge_token: 'challenge-1' }),
+      verify: async () => verification,
+    })
+
+    await flow.handleLogin({ email: 'person@example.com', password: 'secret', remember: true })
+    expect(flow.challengeToken()).toBe('challenge-1')
+    expect(flow.navigations).toEqual([])
+    expect(flow.isLoading()).toBe(false)
+
+    await flow.handleTwoFactor('000000')
+    expect(flow.challengeToken()).toBe('')
+    expect(flow.navigations).toEqual([])
+    expect(flow.error()).toBe('Invalid or expired login attempt. Please sign in again.')
+    expect(flow.isLoading()).toBe(false)
+
+    await flow.handleLogin({ email: 'person@example.com', password: 'secret', remember: true })
+    flow.restartLogin()
+    expect(flow.challengeToken()).toBe('')
+    expect(flow.error()).toBe('')
+
+    await flow.handleLogin({ email: 'person@example.com', password: 'secret', remember: true })
+    verification = session
+    await flow.handleTwoFactor('123456')
+    expect(flow.navigations).toEqual(['/dashboard'])
+    expect(flow.isLoading()).toBe(true)
+  })
+
+  test('dashboard login stays busy from the first submit until the next document opens', async () => {
+    const authentication = Promise.withResolvers<unknown>()
+    let requests = 0
+    const flow = loginDashboardHarness({
+      login: () => {
+        requests++
+        return authentication.promise
+      },
+      verify: async () => null,
+      navigate: (target, options) => {
+        expect(target).toBe('/dashboard')
+        expect(options).toEqual({ replace: true, reload: true })
+        expect(flow.isLoading()).toBe(true)
+      },
+    })
+    const credentials = { email: 'runner@example.test', password: 'synthetic-fixture' }
+    const first = flow.handleLogin(credentials)
+    await flow.handleLogin(credentials)
+    expect(requests).toBe(1)
+    expect(flow.isLoading()).toBe(true)
+    authentication.resolve({
+      token: 'fixture-token',
+      user: { id: 1, email: credentials.email, name: 'Fixture Runner' },
+    })
+    await first
+    expect(flow.navigations).toEqual(['/dashboard'])
+    expect(flow.isLoading()).toBe(true)
+  })
+
+  test('dashboard login normalizes an unsafe post-auth redirect', async () => {
+    const flow = loginDashboardHarness({
+      login: async () => ({
+        access_token: 'access-1',
+        token: 'access-1',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        user: { id: 1, email: 'person@example.com', name: 'Person' },
+      }),
+      verify: async () => ({ token: null, user: null }),
+      redirect: '/\\evil.example/login',
+    })
+
+    await flow.handleLogin({ email: 'person@example.com', password: 'secret' })
+    expect(flow.navigations).toEqual(['/'])
+  })
+
+  test('dashboard login returns to the page the stx gate sent the visitor from', async () => {
+    const flow = loginDashboardHarness({
+      login: async () => ({
+        access_token: 'access-1',
+        token: 'access-1',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        user: { id: 1, email: 'person@example.com', name: 'Person' },
+      }),
+      verify: async () => ({ token: null, user: null }),
+      next: '/play',
+    })
+
+    await flow.handleLogin({ email: 'person@example.com', password: 'secret' })
+    expect(flow.navigations).toEqual(['/play'])
+  })
+
+  test('registration reads the same redirect parameters as sign-in', () => {
+    const source = componentSource('Auth/RegisterDashboard.stx')
+
+    expect(source).toContain('safeAuthRedirect(route.query.redirect ?? route.query.next)')
   })
 
   test('dashboard stores share the authenticated API client', () => {
@@ -372,6 +732,13 @@ describe('dashboard native STX bindings', () => {
       expect(source).toContain("import { dashboardApi } from '../../../functions/dashboard-api'")
       expect(source).not.toContain('fetch(')
     }
+
+    const auth = readFileSync(resolve(dashboardViews, 'stores', 'auth.ts'), 'utf8')
+    expect(auth).toContain('let pendingLoad: Promise<void> | null = null')
+    expect(auth).toContain('if (pendingLoad)')
+    expect(auth).toContain('return pendingLoad')
+    expect(auth).toContain('pendingLoad = resolveIdentity().finally(() => {')
+    expect(auth).not.toContain('if (loading() || loaded()) return')
   })
 
   test('Buddy prompt uses a native textarea model and submit prevention', () => {
@@ -385,7 +752,8 @@ describe('dashboard native STX bindings', () => {
 
   test('shared buttons and modals use native icons and dialog semantics', () => {
     const button = componentSource('UI/Button.stx')
-    expect(button).toContain('from-blue-500 to-blue-600')
+    expect(button).toContain('buttonVariantClasses[variant]')
+    expect(button).toContain(':class="variantToggles()"')
     expect(button).toContain("useReactiveProp('href', '')")
     expect(button).toContain(':aria-busy=')
     expect(button).toContain(':aria-disabled=')
@@ -398,6 +766,39 @@ describe('dashboard native STX bindings', () => {
     expect(card).not.toContain('action.onClick')
     expect(card).not.toMatch(/@click="\{\{/)
 
+    const sharedModal = componentSource('UI/Modal.stx')
+    expect(sharedModal).toContain("const dialog = useRef<HTMLDialogElement>('dashboardModalDialog')")
+    expect(sharedModal).toContain('const scrollLocked = useScrollLock()')
+    expect(sharedModal).toContain('const activeElement = useActiveElement()')
+    expect(sharedModal).toContain('const focused = peek(() => activeElement.value)')
+    expect(sharedModal).toContain('element.showModal()')
+    expect(sharedModal).toContain("element.querySelector<HTMLElement>('[autofocus]:not([disabled])')")
+    expect(sharedModal).toContain('autofocusTarget.focus()')
+    expect(sharedModal).toContain('element.contains(currentFocus)')
+    expect(sharedModal).toContain('dialog.current.close()')
+    expect(sharedModal).toContain('event.preventDefault()')
+    expect(sharedModal).toContain("type ModalCloseReason = 'backdrop' | 'button' | 'escape'")
+    expect(sharedModal).toContain("emit('close', reason)")
+    expect(sharedModal).toContain('void nextTick(() => target.focus())')
+    expect(sharedModal).toContain("top: 'items-start justify-center px-4 pb-4 pt-[15vh]'")
+    expect(sharedModal).toContain("useReactiveProp('showCloseButton', true)")
+    expect(sharedModal).toContain('{{ panelClassName }}')
+    expect(sharedModal).toContain('{{ contentClassName }}')
+    expect(sharedModal).toContain('<dialog')
+    expect(sharedModal).toContain('@cancel="handleCancel"')
+    expect(sharedModal).toContain('.dashboard-modal-dialog::backdrop')
+
+    const sharedDrawer = componentSource('UI/Drawer.stx')
+    expect(sharedDrawer).toContain("const dialog = useRef<HTMLDialogElement>('dashboardDrawerDialog')")
+    expect(sharedDrawer).toContain('const scrollLocked = useScrollLock()')
+    expect(sharedDrawer).toContain('const activeElement = useActiveElement()')
+    expect(sharedDrawer).toContain('element.showModal()')
+    expect(sharedDrawer).toContain('dialog.current.close()')
+    expect(sharedDrawer).toContain('void nextTick(() => target.focus())')
+    expect(sharedDrawer).toContain('<dialog')
+    expect(sharedDrawer).toContain('@cancel="handleCancel"')
+    expect(sharedDrawer).toContain('.dashboard-drawer-dialog::backdrop')
+
     const tabs = componentSource('UI/Tabs.stx')
     expect(tabs).toContain("emit('update:activeTab', tab.id)")
     expect(tabs).toContain("emit('change', tab.id, tab)")
@@ -405,18 +806,20 @@ describe('dashboard native STX bindings', () => {
     expect(tabs).toContain('@click="selectTab(tab)"')
     expect(tabs).not.toContain('data-tab-id')
 
-    const filterBar = componentSource('UI/FilterBar.stx')
-    expect(filterBar).toContain('x-model="searchValue"')
-    expect(filterBar).toContain('x-model.number="itemsPerPage"')
-    expect(filterBar).toContain("emit('update:searchValue', value)")
-    expect(filterBar).toContain("emit('update:itemsPerPage', value)")
-    expect(filterBar).toContain(':aria-label="searchPlaceholder()"')
-    expect(filterBar).not.toContain('data-filter-search')
-    expect(filterBar).not.toContain('data-items-per-page')
-
-    const deliverySearch = componentSource('Commerce/Delivery/SearchFilter.stx')
-    expect(deliverySearch).toContain(':placeholder="placeholder()"')
-    expect(deliverySearch).toContain(':aria-label="placeholder()"')
+    // `UI/FilterBar.stx` is gone. It offered this input plus a slot for sibling
+    // filters and an items-per-page select, and had no callers at all, while
+    // the plainer `SearchFilter` had seven - callers lay out their own filter
+    // grid and want one input to drop into it. Promoted to `UI/` and kept as
+    // the single search input. See stacksjs/stacks#2924.
+    const search = componentSource('UI/SearchFilter.stx')
+    // Drawn with the shared input, so it matches the dropdowns beside it
+    // (stacksjs/stacks#3310), and it reports only what the person types.
+    expect(search).toContain('<Input v-model:value="term" type="search"')
+    expect(search).toContain(':placeholder="placeholder()"')
+    expect(search).toContain(':ariaLabel="ariaLabel() || placeholder()"')
+    expect(search).toContain("emit('update:searchValue', value)")
+    expect(search).toContain('if (value === known)')
+    expect(search).not.toContain('data-filter-search')
 
     const quickLinks = componentSource('UI/QuickLinks.stx')
     expect(quickLinks).toContain('const validLinks = derived(() => links().filter')
@@ -430,7 +833,19 @@ describe('dashboard native STX bindings', () => {
     expect(table).toContain("emit('update:selectedKeys', next)")
     expect(table).toContain("emit('selection-change', next)")
     expect(table).toContain(':indeterminate="someSelected()"')
+    // The actions column has two branches - the slot, or the declarative
+    // `rowActions` prop (stacksjs/stacks#2924) - and the `$slots` check sits on
+    // the enclosing `<td>` rather than on the slot, because `$slots` does not
+    // resolve inside a compound condition (stacksjs/stx#2098). What this pins
+    // is that the slot still receives the row.
     expect(table).toContain('<slot name="actions" :row="row" />')
+    expect(table).toContain('<td :if="$slots.actions"')
+    expect(table).toContain("emit('row-action', { action: action.action, row })")
+    expect(table).toContain('const exportUrl = useObjectUrl(exportBlob)')
+    expect(table).toContain('tag="a"')
+    expect(table).toContain(':download="exportDownload()"')
+    expect(table).not.toMatch(/\b(?:document|window)\./)
+    expect(table).not.toContain('createObjectURL')
     expect(table).not.toContain('data-select-all')
     expect(table).not.toContain('data-row-select')
 
@@ -453,6 +868,12 @@ describe('dashboard native STX bindings', () => {
     expect(windowControls).not.toContain('<script server>')
     expect(existsSync(resolve(dashboardComponents, 'WindowControls.stx'))).toBe(false)
 
+    // Replicas yield to the platform's own buttons. Craft sets
+    // `--craft-window-controls-replicas: none` on every window that has real
+    // ones, so drawing these there would put six circles in the corner; a
+    // browser publishes nothing and still gets the fallback.
+    expect(windowControls.match(/display: var\(--craft-window-controls-replicas, flex\)/g)).toHaveLength(2)
+
     const deliveryComponents = resolve(dashboardComponents, 'Commerce/Delivery')
     for (const file of readdirSync(deliveryComponents).filter(file => file.endsWith('.stx'))) {
       const source = readFileSync(resolve(deliveryComponents, file), 'utf8')
@@ -465,8 +886,12 @@ describe('dashboard native STX bindings', () => {
       'Content/CommentsDashboard.stx',
       'Content/ContentTaxonomyDashboard.stx',
       'Content/FileManagerDashboard.stx',
+      'Content/FileDetailsDrawer.stx',
+      'Content/CreateFolderDialog.stx',
+      'Content/FileUploadDialog.stx',
       'Content/PagesDashboard.stx',
       'Content/PostsDashboard.stx',
+      'Content/PostEditorDialog.stx',
     ]) {
       const source = componentSource(file)
       expect(source).not.toMatch(/<button[^>]+bg-(?:blue|red)-600/)
@@ -505,23 +930,90 @@ describe('dashboard native STX bindings', () => {
     expect(componentSource('Transaction/index.stx')).not.toContain('href="#"')
 
     const modal = componentSource('UI/Modal.stx')
-    expect(modal).toContain('role="dialog"')
+    expect(modal).toContain(':role="liveRole()"')
     expect(modal).toContain('aria-modal="true"')
-    expect(modal).toContain(`:aria-label="liveTitle() || 'Dialog'"`)
+    expect(modal).toContain(`:aria-label="liveAriaLabel() || liveTitle() || 'Dialog'"`)
+    expect(modal).toContain('<slot name="header-leading" />')
+    expect(modal).toContain('<slot name="header-trailing" />')
+
+    for (const file of [
+      'Commerce/CommerceCategoryDetailsDialog.stx',
+      'Commerce/CommerceCouponDetailsDialog.stx',
+      'Commerce/CommerceCustomerDetailsDialog.stx',
+      'Commerce/CommerceGiftCardDetailsDialog.stx',
+      'Commerce/CommerceOrderDetailsDialog.stx',
+      'Commerce/PaymentDetailsDialog.stx',
+      'Commerce/PrintDeviceDetailsDialog.stx',
+      'Commerce/PrintLogDetailsDialog.stx',
+      'Commerce/CommercePosReceiptDialog.stx',
+      'Marketing/CampaignDeliveryDialog.stx',
+      'Infrastructure/CloudDetailsDialog.stx',
+      'Infrastructure/DnsRecordDialog.stx',
+      'Infrastructure/LogDetailsDialog.stx',
+      'Infrastructure/MailboxDetailsDialog.stx',
+      'Notifications/NotificationDeliveryDialog.stx',
+    ]) {
+      const source = componentSource(file)
+      expect(source).toContain('<Modal')
+      expect(source).not.toContain('fixed inset-0')
+      expect(source).not.toContain('role="dialog"')
+    }
+
+    for (const [file, formId] of [
+      ['Commerce/Delivery/DeliveryRouteDialog.stx', 'delivery-route-form'],
+      ['Commerce/Delivery/DigitalDeliveryDialog.stx', 'digital-delivery-form'],
+      ['Commerce/Delivery/CourierDialog.stx', 'courier-form'],
+      ['Commerce/Delivery/LicenseKeyDialog.stx', 'license-key-form'],
+      ['Commerce/Delivery/ShippingMethodDialog.stx', 'shipping-method-form'],
+      ['Commerce/Delivery/ShippingRateDialog.stx', 'shipping-rate-form'],
+      ['Commerce/Delivery/ShippingZoneDialog.stx', 'shipping-zone-form'],
+      ['Commerce/CommerceManufacturerDialog.stx', 'manufacturer-form'],
+      ['Commerce/CommerceTaxDialog.stx', 'tax-rate-form'],
+      ['Commerce/CommerceUnitDialog.stx', 'product-unit-form'],
+      ['Commerce/CommerceVariantDialog.stx', 'product-variant-form'],
+      ['Commerce/CommerceCustomerDialog.stx', 'customer-form'],
+      ['Commerce/CommerceReviewEditDialog.stx', 'review-form'],
+      ['Commerce/PrintDeviceDialog.stx', 'print-device-form'],
+      ['Commerce/PaymentRefundDialog.stx', 'payment-refund-form'],
+      ['Commerce/CommerceCategoryDialog.stx', 'category-form'],
+      ['Commerce/CommerceCouponDialog.stx', 'coupon-form'],
+      ['Commerce/CommerceGiftCardDialog.stx', 'gift-card-form'],
+      ['Commerce/CommerceProductDialog.stx', 'product-form'],
+      ['Commerce/CommerceOrderDialog.stx', 'order-form'],
+      ['Commerce/CommercePosCheckoutDialog.stx', 'pos-checkout-form'],
+      ['Commerce/ProductWaitlistEntryDialog.stx', 'product-waitlist-entry-form'],
+      ['Commerce/RestaurantWaitlistEntryDialog.stx', 'restaurant-waitlist-entry-form'],
+      ['Auth/AccessTokenCreateDialog.stx', 'access-token-create-form'],
+      ['Marketing/MarketingListDialog.stx', 'marketing-list-form'],
+      ['Marketing/SocialPostDialog.stx', 'social-post-form'],
+      ['Marketing/CampaignDialog.stx', 'campaign-form'],
+    ]) {
+      const source = componentSource(file)
+      expect(source).toContain('<Modal')
+      expect(source).toContain(`id="${formId}"`)
+      expect(source).toContain(`form="${formId}"`)
+      expect(source).not.toContain('fixed inset-0')
+      expect(source).not.toContain('role="dialog"')
+    }
 
     const baseModal = componentSource('Modals/BaseModal.stx')
     expect(baseModal).toContain("const generatedId = useId('modal')")
     expect(baseModal).toContain("emit('update:show', false)")
     expect(baseModal).toContain("emit('close', reason)")
-    expect(baseModal).toContain('role="dialog"')
+    expect(baseModal).toContain('<Modal')
+    expect(baseModal).toContain('<slot name="body" />')
+    expect(baseModal).toContain('<slot name="actions" />')
+    expect(baseModal).not.toContain('fixed inset-0')
+    expect(baseModal).not.toContain('role="dialog"')
     expect(baseModal).not.toContain('Math.random')
     expect(baseModal).not.toContain('<svg')
 
     const alert = componentSource('Modals/Popups/Alert.stx')
-    expect(alert).toContain("const titleId = useId('alert-title')")
+    expect(alert).toContain('<Modal')
     expect(alert).toContain('role="alertdialog"')
     expect(alert).toContain("emit('update:show', false)")
     expect(alert).toContain("emit(event)")
+    expect(alert).not.toContain('fixed inset-0')
     expect(alert).not.toContain('<svg')
 
     const toast = componentSource('Modals/Popups/Toast.stx')
@@ -560,16 +1052,58 @@ describe('dashboard native STX bindings', () => {
 
     const confirmation = componentSource('UI/ConfirmDialog.stx')
     expect(confirmation).toContain("const open = useReactiveProp('isOpen', false)")
+    expect(confirmation).toContain('<Modal')
     expect(confirmation).toContain('role="alertdialog"')
+    expect(confirmation).toContain(':closable="!busy()"')
+    expect(confirmation).toContain('<template #header-leading>')
+    expect(confirmation).toContain("const error = useReactiveProp('error', '')")
+    expect(confirmation).toContain("const disabled = useReactiveProp('disabled', false)")
+    expect(confirmation).toContain("const warning = useReactiveProp('warning', '')")
+    expect(confirmation).toContain('role="note"')
     expect(confirmation).toContain("emit('confirm')")
     expect(confirmation).toContain("emit('close')")
+    expect(confirmation).not.toContain('fixed inset-0')
     expect(confirmation).not.toContain('.remove()')
     expect(confirmation).not.toContain('<svg')
+
+    for (const file of [
+      'Marketing/CampaignDeleteDialog.stx',
+      'Marketing/MarketingListDeleteDialog.stx',
+      'Marketing/SocialPostDeleteDialog.stx',
+      'Commerce/CommerceCategoryDeleteDialog.stx',
+      'Commerce/CommerceCouponDeleteDialog.stx',
+      'Commerce/CommerceCustomerDeleteDialog.stx',
+      'Commerce/CommerceGiftCardDeleteDialog.stx',
+      'Commerce/CommerceOrderDeleteDialog.stx',
+      'Commerce/PrintDeviceDeleteDialog.stx',
+      'Commerce/PrintLogDeleteDialog.stx',
+      'Commerce/CommerceManufacturerDeleteDialog.stx',
+      'Commerce/CommerceProductDeleteDialog.stx',
+      'Commerce/CommerceReviewDeleteDialog.stx',
+      'Commerce/CommerceTaxDeleteDialog.stx',
+      'Commerce/CommerceUnitDeleteDialog.stx',
+      'Commerce/CommerceVariantDeleteDialog.stx',
+      'Commerce/ProductWaitlistDeleteDialog.stx',
+      'Commerce/RestaurantWaitlistDeleteDialog.stx',
+      'Commerce/Delivery/DeliveryRouteDeleteDialog.stx',
+      'Commerce/Delivery/DigitalDeliveryDeleteDialog.stx',
+      'Commerce/Delivery/CourierDeleteDialog.stx',
+      'Commerce/Delivery/LicenseKeyDeleteDialog.stx',
+      'Commerce/Delivery/ShippingMethodDeleteDialog.stx',
+      'Commerce/Delivery/ShippingRateDeleteDialog.stx',
+      'Commerce/Delivery/ShippingZoneDeleteDialog.stx',
+    ]) {
+      const source = componentSource(file)
+      expect(source).toContain('<ConfirmDialog')
+      expect(source).not.toContain('fixed inset-0')
+      expect(source).not.toContain('role="dialog"')
+    }
 
   })
 
   test('operational dashboards use native filter models', () => {
     for (const component of [
+      'App/RequestsOverview.stx',
       'Deployments/DeploymentList.stx',
       'Jobs/JobHistory.stx',
       'Monitoring/ErrorDashboard.stx',
@@ -587,13 +1121,34 @@ describe('dashboard native STX bindings', () => {
     expect(deployments).toContain('v-model:value="environment"')
     expect(deployments).toContain('v-model:value="domain"')
 
+    const requests = componentSource('App/RequestsOverview.stx')
+    const requestDetails = componentSource('App/RequestDetailsDialog.stx')
+    expect(requests).toContain('<RequestDetailsDialog')
+    expect(requests).not.toContain('fixed inset-0')
+    expect(requestDetails).toContain('<Modal')
+    expect(requestDetails).toContain('Recorded')
+
+    // Search stays debounced, but the timer belongs to the shared server list
+    // rather than the component, so a hand-rolled timer id plus teardown here
+    // is the thing to guard against, not the thing to require (#2290).
     const jobs = componentSource('Jobs/JobHistory.stx')
-    expect(jobs).toContain('setTimeout(reloadFilters, 250)')
-    expect(jobs).toContain('onDestroy(')
+    expect(jobs).toContain('useServerList<DashboardJob>')
+    expect(jobs).toContain("searchParam: 'search'")
+    expect(jobs).not.toMatch(/setTimeout|clearTimeout/)
 
     const queries = componentSource('Queries/QueryDashboard.stx')
-    expect(queries).toContain('const itemsPerPage = state(50)')
-    expect(queries).toContain(':for="query in visibleQueries()"')
+    // Fifty a page, the endpoint's default, through the shared server list.
+    expect(queries).toContain('useServerList<DashboardQueryLog>')
+    expect(queries).toContain('perPage: itemsPerPage')
+    expect(queries).toContain('perPage: 50')
+    // The rows are one page the server chose (#3204), not a slice of a
+    // capped download the page filtered itself.
+    expect(queries).toContain(':for="query in queries"')
+    expect(queries).toContain('fetchDashboardQueries(query)')
+    expect(queries).not.toContain('filteredQueries')
+    expect(queries).toContain('<a :href="queryDetailsPath(query.id)"')
+    expect(queries).toContain('encodeURIComponent(String(id))')
+    expect(queries).not.toContain("<StxLink :to=\"'/queries/' + query.id\"")
     expect(queries).toContain('<Pagination')
   })
 
@@ -611,7 +1166,7 @@ describe('dashboard native STX bindings', () => {
 
     expect(view).toContain('<EnvironmentDashboard />')
     expect(view).not.toContain('<script')
-    expect(page).toContain("dashboardApi<EnvironmentResponse>('/api/dashboard/environment')")
+    expect(page).toContain("dashboardApi<EnvironmentResponse>(`/api/dashboard/environment?file=${encodeURIComponent(file())}`)")
     expect(page).toContain('v-model:value="envValues"')
     expect(page).toContain("useEventListener('keydown', handlePageKeydown)")
     expect(page).toContain('<Modal')
@@ -639,9 +1194,23 @@ describe('dashboard native STX bindings', () => {
     expect(view).toContain('<SettingsDashboard />')
     expect(view).not.toContain('<script')
     expect(page).toContain('const drafts = reactive<')
-    expect(page).toContain('x-model="query"')
+    expect(page).toContain('<SearchFilter v-model:searchValue="configQuery"')
     expect(page).toContain('x-model="drafts[field.key]"')
     expect(page).toContain('x-model.number="drafts[field.key]"')
+    // A yes or no is the shared switch, bound to its draft the same way.
+    expect(page).toContain('v-model:checked="drafts[field.key]"')
+    expect(page).not.toContain('type="checkbox"')
+    expect(page).toContain('<div :for="field in fields"')
+    expect(page).toContain("@if(field.type === 'boolean' && field.editable)")
+    expect(page).toContain('@elseif(field.editable)')
+    expect(page).toContain('@endif')
+    expect(page).not.toContain('<template :if="field.type === \'boolean\' && field.editable">')
+    expect(page).toContain('const isDirty = derived(')
+    expect(page).toContain("useEventListener('beforeunload', handleBeforeUnload)")
+    expect(page).toContain('@click="requestSelectFile(file.name)"')
+    expect(page).toContain('<ConfirmDialog')
+    expect(page).toContain('title="Discard unsaved changes?"')
+    expect(page).toContain('|| !isDirty()')
     expect(page).toContain("dashboardApi<ConfigUpdateResponse>('/api/config/update'")
     expect(page).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
     expect(page).not.toContain('setDraft(')
@@ -683,15 +1252,30 @@ describe('dashboard native STX bindings', () => {
       'utf8',
     )
     const component = componentSource('Library/ComponentsDashboard.stx')
+    const functions = componentSource('Library/FunctionsDashboard.stx')
+    const scaffold = componentSource('Library/SourceScaffoldDialog.stx')
 
     expect(view).toContain('<ComponentsDashboard />')
     expect(view).not.toContain('<script client>')
     expect(component).toContain("dashboardApi<ComponentsResponse>('/api/dashboard/library/components')")
     expect(component).toContain("await dashboardApi('/api/dashboard/library/components'")
-    expect(component).toContain('x-model="search"')
-    expect(component).toContain('x-model="selectedCategory"')
-    expect(component).toContain('x-model.trim="componentName"')
-    expect(component).toContain('@submit.prevent="createComponent()"')
+    // The search box moved into `UI/Table` (`searchable`), so this component
+    // no longer owns one - what stays its own is the category filter, which is
+    // specific to components. See stacksjs/stacks#2925.
+    expect(component).toContain('<Select v-model:value="selectedCategory"')
+    expect(component).toContain('searchable')
+    expect(component).toContain('<SourceScaffoldDialog')
+    expect(component).not.toContain('fixed inset-y-0')
+    expect(functions).toContain('<SourceScaffoldDialog')
+    expect(functions).not.toContain('fixed inset-y-0')
+    expect(scaffold).toContain('<Modal')
+    // The shared input reports text; the name is trimmed where it is checked and sent.
+    expect(scaffold).toContain('<Input v-model:value="sourceName"')
+    expect(scaffold).toContain(`emit('submit', sourceName().trim())`)
+    expect(scaffold).toContain('const actionLabel = derived(')
+    expect(scaffold).toContain('{{ actionLabel() }}')
+    expect(scaffold).toContain('@submit.prevent="submit"')
+    expect(scaffold).toContain('form="source-scaffold-form"')
     expect(component).not.toContain('Math.random')
     expect(component).not.toContain('fetch(')
     expect(component).not.toContain('<canvas')
@@ -706,6 +1290,10 @@ describe('dashboard native STX bindings', () => {
       resolve('storage/framework/defaults/resources/components/Dashboard/Ci/CiDashboard.stx'),
       'utf8',
     )
+    const drawer = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Ci/CiRunHistoryDrawer.stx'),
+      'utf8',
+    )
 
     expect(ciView).toContain('<CiDashboard />')
     expect(ciView).not.toContain('<script')
@@ -714,7 +1302,12 @@ describe('dashboard native STX bindings', () => {
     expect(ci).toContain('i-hugeicons-loading-03')
     expect(ci).toContain('i-hugeicons-checkmark-circle-02')
     expect(ci).toContain('i-hugeicons-cancel-circle')
-    expect(ci).toContain('i-hugeicons-cancel-01')
+    expect(ci).toContain('<CiRunHistoryDrawer')
+    expect(ci).toContain('repo.buddyBotPRs')
+    expect(ci).toContain('buddy-bot:')
+    expect(ci).not.toContain('renovate')
+    expect(drawer).toContain('<Drawer')
+    expect(drawer).toContain('i-hugeicons-cancel-circle')
   })
 
   test('kanban uses native reactive drag, dialogs, and form models', () => {
@@ -724,6 +1317,10 @@ describe('dashboard native STX bindings', () => {
     )
     const board = readFileSync(
       resolve('storage/framework/defaults/resources/components/Dashboard/Kanban/KanbanBoardDashboard.stx'),
+      'utf8',
+    )
+    const cardDialog = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Kanban/KanbanCardDialog.stx'),
       'utf8',
     )
     const indexView = readFileSync(
@@ -749,10 +1346,11 @@ describe('dashboard native STX bindings', () => {
     expect(board).toContain('@drop.prevent="dropOnColumn(col.id)"')
     expect(board).toContain('await kanban.reorderColumns(currentBoard.id, order)')
     expect(board).toContain('<ConfirmDialog')
+    expect(board).toContain('<KanbanCardDialog')
     expect(board).toContain('x-model="draftCardTitle"')
-    expect(board).toContain('x-model="commentDraft"')
+    expect(board).not.toContain('fixed inset-0')
     expect(board).toContain('<StxLink to="/kanban"')
-    expect(board).toContain("import { kanbanStore } from '~/storage/framework/defaults/views/dashboard/stores/kanban'")
+    expect(board).toContain("import { kanbanStore } from '@stacksjs/defaults/views/dashboard/stores/kanban'")
     expect(board).toContain('const kanban = kanbanStore')
     expect(board).not.toContain("useStore('kanban')")
     expect(board).not.toMatch(/\b(?:document|window)\./)
@@ -760,6 +1358,29 @@ describe('dashboard native STX bindings', () => {
     expect(board).not.toContain('https://esm.sh')
     expect(board).not.toContain('<svg')
     expect(board).not.toContain('onUnmount(')
+    expect(cardDialog).toContain('<Modal')
+    expect(cardDialog).toContain('<ConfirmDialog')
+    // The shared controls hand their keys over as the event (stacksjs/stacks#3310).
+    expect(cardDialog).toContain('<Input v-model:value="titleDraft"')
+    expect(cardDialog).toContain('<Textarea v-model:value="commentDraft"')
+    expect(cardDialog).toContain('<Input v-model:value="dueDateDraft"')
+    expect(cardDialog).toContain('@keydown="editCommentKey(comment.id, $event)"')
+    expect(cardDialog).toContain('    cancelCommentEditWithoutClosing()\n    return')
+    expect(cardDialog).toContain('useTimeoutFn(cancelCommentEdit, 50, { immediate: false })')
+    expect(cardDialog).toContain(':closable="!deleting && editingCommentId === null"')
+    expect(cardDialog).toContain("if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {\n    event.preventDefault()\n    void saveCommentEdit(commentId)")
+    expect(cardDialog).toContain("if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey))\n    return\n  event.preventDefault()\n  void submitComment()")
+    expect(cardDialog).toContain('const cardComments = derived(() => openCard()?.comments ?? [])')
+    expect(cardDialog).toContain('const cardLabels = derived(() => openCard()?.labels ?? [])')
+    expect(cardDialog).toContain('const cardAssignees = derived(() => openCard()?.assignees ?? [])')
+    expect(cardDialog).toContain(':for="comment in cardComments"')
+    expect(cardDialog).toContain(':for="label in cardLabels"')
+    expect(cardDialog).toContain(':for="assignee in cardAssignees"')
+    expect(cardDialog).not.toMatch(/:for="\w+ in openCard\./)
+    expect(cardDialog).toContain('autofocus')
+    expect(cardDialog).not.toMatch(/\b(?:document|window)\./)
+    expect(cardDialog).not.toContain('useEventListener(')
+    expect(cardDialog).not.toContain('fixed inset-0')
 
     expect(indexView).toContain('<KanbanBoardsDashboard />')
     expect(indexView).not.toContain('<script')
@@ -768,7 +1389,7 @@ describe('dashboard native STX bindings', () => {
     expect(index).toContain('x-model="draftName"')
     expect(index).toContain('x-model="draftDescription"')
     expect(index).toContain(':to="`/kanban/${board.id}`"')
-    expect(index).toContain("import { kanbanStore } from '~/storage/framework/defaults/views/dashboard/stores/kanban'")
+    expect(index).toContain("import { kanbanStore } from '@stacksjs/defaults/views/dashboard/stores/kanban'")
     expect(index).toContain('const kanban = kanbanStore')
     expect(index).not.toContain("useStore('kanban')")
     expect(index).not.toMatch(/\b(?:document|window)\./)
@@ -815,19 +1436,30 @@ describe('dashboard native STX bindings', () => {
       'newPermName',
       'newPermDescription',
       'newPermGuard',
-      'roleFilter',
-      'permissionFilter',
-      'userFilter',
-      'selectedUserGuard',
     ])
       expect(page).toContain(`x-model="${model}"`)
+    // The list filters are the shared search box (stacksjs/stacks#3310).
+    for (const model of ['roleFilter', 'permissionFilter', 'userFilter'])
+      expect(page).toContain(`<SearchFilter v-model:searchValue="${model}"`)
 
+    const assignmentDrawer = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Management/AssignmentDrawer.stx'),
+      'utf8',
+    )
     expect(page).toContain('<ConfirmDialog')
+    expect(page).toContain('<AssignmentDrawer')
+    expect(page).not.toContain('fixed inset-0')
+    expect(assignmentDrawer).toContain('<Drawer')
+    expect(assignmentDrawer).toContain('x-model="guardValue"')
+    expect(assignmentDrawer).toContain("emit('save', [...selected()])")
     expect(page).toContain('@click="requestRoleDelete(role)"')
     expect(page).toContain('@click="requestPermissionDelete(perm)"')
     expect(page).toContain('@click="selectUser(u)"')
     expect(page).toContain('@click="selectRole(role)"')
-    expect(page).toContain('useEventListener(\'keydown\', handleKeydown)')
+    expect(page).not.toContain('useEventListener(\'keydown\', handleKeydown)')
+    expect(page).toContain("import { rbacStore } from '@stacksjs/defaults/views/dashboard/stores/rbac'")
+    expect(page).toContain('const rbac = rbacStore')
+    expect(page).not.toContain("useStore('rbac')")
     expect(page).not.toMatch(/\b(?:document|window)\./)
     expect(page).not.toContain('window.confirm')
     expect(page).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
@@ -843,5 +1475,25 @@ describe('dashboard native STX bindings', () => {
     expect(usersAction).not.toContain('db.unsafe')
     expect(userRolesAction).toContain('if (!await User.find(userId))')
     expect(userRolesAction).toContain(".filter(role => role.guard_name === guardName)")
+  })
+})
+
+describe('auth branding hooks (stacksjs/stacks#3086)', () => {
+  const card = componentSource('Auth/AuthCard.stx')
+
+  test('the card takes an icon and an eyebrow, and its mark can be replaced through the brand slot, keeping the default cube', () => {
+    expect(card).toContain("useReactiveProp('icon', 'i-hugeicons-cube')")
+    expect(card).toContain("useReactiveProp('eyebrow', '')")
+    expect(card).toMatch(/<slot name="brand">[\s\S]*:class="icon\(\)"[\s\S]*<\/slot>/)
+  })
+
+  test.each(['Login', 'Register', 'ForgotPassword', 'ResetPassword'])('%s takes the branding, passes it on to the card, and its dashboard forwards it', (name) => {
+    const page = componentSource(`Auth/${name}.stx`)
+    expect(page).toContain("useReactiveProp<string>('icon', 'i-hugeicons-cube')")
+    expect(page).toContain("useReactiveProp<string>('eyebrow', '')")
+    expect(page).toMatch(/<AuthCard [^>]*:icon="icon\(\)" :eyebrow="eyebrow\(\)"/)
+    const dashboard = componentSource(`Auth/${name}Dashboard.stx`)
+    expect(dashboard).toContain("useReactiveProp<string>('icon', 'i-hugeicons-cube')")
+    expect(dashboard).toMatch(new RegExp(`<${name}\\s[^>]*:icon="icon\\(\\)"\\s+:eyebrow="eyebrow\\(\\)"`))
   })
 })

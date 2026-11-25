@@ -6,9 +6,9 @@
       "name": "harness",
       "dependencies": {
         "@harness/ansi": "workspace:*",
-        "@stacksjs/components": "^0.2.935",
-        "@stacksjs/stx": "^0.2.935",
-        "bun-plugin-stx": "^0.2.935",
+        "@stacksjs/components": "^0.2.937",
+        "@stacksjs/stx": "^0.2.937",
+        "bun-plugin-stx": "^0.2.937",
         "stacks": "^0.75.674"
       },
       "devDependencies": {

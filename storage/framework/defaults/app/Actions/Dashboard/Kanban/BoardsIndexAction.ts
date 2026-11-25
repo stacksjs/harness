@@ -1,7 +1,7 @@
-import { Action } from '@stacksjs/actions'
-import { db } from '@stacksjs/database'
+import { Action } from '@stacksjs/actions/runtime'
+import { db } from '@stacksjs/database/runtime'
 import { modelBoolean } from './kanban-model'
-import { kanbanError } from './kanban-response'
+import { kanbanActionError } from './kanban-response'
 
 interface BoardRow {
   id: number
@@ -30,8 +30,7 @@ interface BoardRow {
  * group (boards are a dev-mode surface per #1843). The action body
  * doesn't re-check the role; the middleware did.
  *
- * Phase 1 — read-only. Phase 2 lands store / update / destroy + the
- * reorder endpoint that moves a board's position.
+ * Mutations use the sibling store, update, destroy, and reorder actions.
  */
 export default new Action({
   name: 'Kanban Boards Index',
@@ -52,7 +51,7 @@ export default new Action({
         FROM boards b
         WHERE b.archived = false
         ORDER BY b.position ASC, b.id ASC
-      `).execute() as BoardRow[]
+      `).execute() as unknown as BoardRow[]
 
       const boards = (rows ?? []).map(r => ({
         id: r.id,
@@ -71,8 +70,7 @@ export default new Action({
       return { boards }
     }
     catch (err) {
-      console.error('[dashboard/kanban] BoardsIndexAction failed:', err)
-      return kanbanError(err instanceof Error ? err.message : 'unknown error', 500)
+      return kanbanActionError(err, 'BoardsIndexAction')
     }
   },
 })

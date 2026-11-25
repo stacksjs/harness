@@ -8,20 +8,22 @@
  *
  * Commands:
  *   bun browse.ts navigate   <url>
- *   bun browse.ts screenshot <url> [--viewport WxH] [--full] [--element SEL] [--scale N] [--out PATH]
+ *   bun browse.ts screenshot <url> [--viewport WxH] [--full | --element SEL | --scroll-y N] [--scale N] [--out PATH]
  *   bun browse.ts responsive <url> [--out-dir DIR]
  *   bun browse.ts monitor    <url> [--ms 5000]
  *   bun browse.ts snapshot   <url>
- *   bun browse.ts crawl      <url> [--max 500] [--path /extra] [--progress]
+ *   bun browse.ts scenario   <url> --step '{"action":"click","selector":"button"}'
+ *   bun browse.ts crawl      <url> [--viewport 1280x900] [--max 500] [--path /extra] [--progress]
  *
  * Browser discovery order: $BROWSE_BROWSER → PATH (chromium, google-chrome, …)
  * → common macOS app bundles → a Playwright-cached chromium as last resort.
  */
 
 import { spawn } from 'bun'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { chromeHasUpdater, findChrome, prepareMacChrome } from './chrome'
 
 // ── Browser discovery ──────────────────────────────────────────────────────
 
@@ -44,8 +46,11 @@ function collectCandidates(): string[] {
   if (process.env.BROWSE_BROWSER)
     add(process.env.BROWSE_BROWSER)
 
-  for (const bin of ['chromium', 'chromium-browser', 'google-chrome-stable', 'google-chrome', 'brave-browser', 'microsoft-edge', 'chrome'])
+  // Some distribution Chromium launchers answer --version but cannot open a
+  // DevTools target. Prefer an installed Chrome before spending their bounds.
+  for (const bin of ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser', 'brave-browser', 'microsoft-edge', 'chrome'])
     add(which(bin))
+  add(findChrome())
 
   for (const p of [
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -119,7 +124,8 @@ class Cdp {
 
   static connect(wsUrl: string, timeoutMs = 10_000): Promise<Cdp> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(wsUrl)
+      // Uncompressed: loopback gains nothing from permessage-deflate.
+      const ws = new WebSocket(wsUrl, { perMessageDeflate: false })
       const t = setTimeout(() => reject(new Error('CDP connect timeout')), timeoutMs)
       ws.addEventListener('open', () => { clearTimeout(t); resolve(new Cdp(ws)) })
       ws.addEventListener('error', e => { clearTimeout(t); reject(e) })
@@ -173,18 +179,42 @@ class Cdp {
 
 interface Session { proc: ReturnType<typeof spawn>, port: number, userDataDir: string, browser: string }
 
+export async function waitForBrowserPort(proc: { exitCode: number | null }, portFile: string, timeoutMs: number): Promise<number | null> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30_000)
+    throw new TypeError('Browser startup timeout must be an integer between 1 and 30000.')
+  const deadline = performance.now() + timeoutMs
+  while (performance.now() < deadline && proc.exitCode === null) {
+    try {
+      const line = readFileSync(portFile, 'utf8').split('\n')[0]?.trim()
+      const port = Number(line)
+      if (Number.isInteger(port) && port > 0 && port <= 65535) {
+        if (performance.now() >= deadline || proc.exitCode !== null) return null
+        return port
+      }
+    }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const remaining = deadline - performance.now()
+    if (remaining > 0) await Bun.sleep(Math.min(50, remaining))
+  }
+  return null
+}
+
 async function tryLaunch(browser: string): Promise<Session | null> {
+  const executable = chromeHasUpdater(browser) ? prepareMacChrome({ source: browser }).executable : browser
   const userDataDir = join(tmpdir(), `stacks-browse-${process.pid}-${Math.floor(Number(process.hrtime.bigint() % 1000000n))}`)
   mkdirSync(userDataDir, { recursive: true })
 
-  const isHeadlessShell = /chrome-headless-shell|headless_shell/.test(browser)
+  const isHeadlessShell = /chrome-headless-shell|headless_shell/.test(executable)
   const proc = spawn([
-    browser,
+    executable,
     ...(isHeadlessShell ? [] : ['--headless=new']),
     '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
     '--no-first-run',
     '--no-default-browser-check',
+    ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : []),
     '--disable-gpu',
     '--disable-dev-shm-usage',
     '--hide-scrollbars',
@@ -195,16 +225,19 @@ async function tryLaunch(browser: string): Promise<Session | null> {
 
   // Chromium writes the chosen port to <user-data-dir>/DevToolsActivePort.
   const portFile = join(userDataDir, 'DevToolsActivePort')
-  for (let i = 0; i < 80; i++) {
-    if (existsSync(portFile)) {
-      const line = readFileSync(portFile, 'utf8').split('\n')[0]?.trim()
-      if (line)
-        return { proc, port: Number(line), userDataDir, browser }
-    }
-    await Bun.sleep(50)
+  let port: number | null = null
+  try {
+    port = await waitForBrowserPort(proc, portFile, 15_000)
+    if (port !== null) return { proc, port, userDataDir, browser: executable }
   }
-  try { proc.kill() }
-  catch { /* ignore */ }
+  finally {
+    if (port === null) {
+      try { proc.kill() }
+      catch { /* ignore */ }
+      try { rmSync(userDataDir, { recursive: true, force: true }) }
+      catch { /* a failed launch must not mask the next browser candidate */ }
+    }
+  }
   return null
 }
 
@@ -263,17 +296,49 @@ async function createPage(port: number): Promise<BrowserPage> {
   }
 }
 
-async function closePage(port: number, page: BrowserPage): Promise<void> {
-  page.cdp.close()
+async function closePage(port: number, page: BrowserPage): Promise<boolean> {
   try {
-    await fetch(`http://127.0.0.1:${port}/json/close/${encodeURIComponent(page.targetId)}`)
+    const response = await fetch(`http://127.0.0.1:${port}/json/close/${encodeURIComponent(page.targetId)}`)
+    if (!response.ok) {
+      page.cdp.close()
+      return false
+    }
   }
-  catch { /* the target or browser may already have closed */ }
+  catch {
+    page.cdp.close()
+    return false
+  }
+  page.cdp.close()
+
+  // Chromium acknowledges target closure before every renderer/helper has
+  // actually left the target list. Creating the next target immediately can
+  // accumulate closing renderers across a large crawl, eventually dropping
+  // Network and Runtime events. Wait for the target to disappear so each route
+  // starts with the isolation the command promises.
+  for (let attempt = 0; attempt < 40; attempt++) {
+    try {
+      const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as any[]
+      if (!targets.some(target => target.id === page.targetId))
+        return true
+    }
+    catch {
+      return false
+    }
+    await Bun.sleep(25)
+  }
+
+  return false
 }
 
 function kill(s: Session): void {
   try { s.proc.kill() }
   catch { /* ignore */ }
+  // Chromium profiles contain caches, service-worker databases, and copied
+  // extensions. A full crawl can leave tens of megabytes behind, so every
+  // command must reclaim the uniquely owned temporary directory even when a
+  // scenario assertion or navigation throws.
+  try { rmSync(s.userDataDir, { recursive: true, force: true }) }
+  catch { /* process shutdown remains the primary cleanup guarantee */ }
 }
 
 // ── Page helpers ────────────────────────────────────────────────────────────
@@ -286,7 +351,7 @@ interface PageState {
   mainStatus: number | null
 }
 
-async function gotoAndInstrument(cdp: Cdp, url: string, opts: { viewport?: { w: number, h: number }, scale?: number, timeoutMs?: number, cookies?: string[], settleMs?: number, scheme?: string } = {}): Promise<PageState> {
+async function gotoAndInstrument(cdp: Cdp, url: string, opts: { viewport?: { w: number, h: number }, scale?: number, timeoutMs?: number, cookies?: string[], settleMs?: number, scheme?: string, reducedMotion?: boolean } = {}): Promise<PageState> {
   let unsubscribe = () => {}
   const state: PageState = {
     consoleErrors: [],
@@ -329,12 +394,29 @@ async function gotoAndInstrument(cdp: Cdp, url: string, opts: { viewport?: { w: 
   }
 
   // Emulate light/dark so prefers-color-scheme pages can be QA'd in both
-  // schemes without flipping the host OS setting.
-  if (opts.scheme === 'light' || opts.scheme === 'dark') {
-    await cdp.send('Emulation.setEmulatedMedia', {
-      features: [{ name: 'prefers-color-scheme', value: opts.scheme }],
-    })
-  }
+  // schemes without flipping the host OS setting. `reducedMotion` rides the
+  // same call (a second `setEmulatedMedia` would replace this one's features
+  // rather than add to them) - it's set for `--full`/`--element` captures,
+  // which paint beyond the current viewport via `captureBeyondViewport`.
+  // That API paints pixels beyond the viewport WITHOUT moving `scrollY`, so
+  // a scroll-driven CSS reveal (`animation-timeline: view()`) never
+  // resolves past its initial (typically invisible) keyframe for anything
+  // that was never really scrolled past - a `--full` capture would silently
+  // screenshot every such section as blank. `prefers-reduced-motion: reduce`
+  // sidesteps that instead of fighting it with a scroll trick that would
+  // itself misplace `position: sticky`/`fixed` elements: this project's own
+  // marketing CSS already turns every scroll/entrance animation off and
+  // leaves elements at their plain (opaque) resting state under reduced
+  // motion (`@media (prefers-reduced-motion: reduce)`), which is exactly
+  // the already-shipped, already-tested fallback a real accessibility user
+  // gets - reusing it here means nothing new to prove correct.
+  const features: { name: string, value: string }[] = []
+  if (opts.scheme === 'light' || opts.scheme === 'dark')
+    features.push({ name: 'prefers-color-scheme', value: opts.scheme })
+  if (opts.reducedMotion)
+    features.push({ name: 'prefers-reduced-motion', value: 'reduce' })
+  if (features.length)
+    await cdp.send('Emulation.setEmulatedMedia', { features })
 
   unsubscribe = cdp.on((e) => {
     if (e.method === 'Runtime.consoleAPICalled') {
@@ -376,7 +458,27 @@ async function title(cdp: Cdp): Promise<string> {
   return r.result?.value ?? ''
 }
 
-async function captureScreenshot(cdp: Cdp, opts: { full?: boolean, element?: string } = {}): Promise<Buffer> {
+/**
+ * Scroll the real page to `y` and let two animation-frame round-trips settle
+ * before the caller reads pixels back - `behavior: 'instant'` forces the
+ * jump synchronously even when the page sets `scroll-behavior: smooth`,
+ * which would otherwise animate the scroll and leave a screenshot taken
+ * immediately after mid-flight.
+ */
+async function scrollTo(cdp: Cdp, y: number): Promise<void> {
+  const r = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      window.scrollTo({ top: ${y}, left: 0, behavior: 'instant' })
+      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(window.scrollY))))
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  })
+  if (r.exceptionDetails)
+    throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'scrollTo failed')
+}
+
+async function captureScreenshot(cdp: Cdp, opts: { full?: boolean, element?: string, scrollY?: number } = {}): Promise<Buffer> {
   let clip: any
   let captureBeyondViewport = false
 
@@ -396,6 +498,9 @@ async function captureScreenshot(cdp: Cdp, opts: { full?: boolean, element?: str
     clip = { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height), scale: 1 }
     captureBeyondViewport = true
   }
+  else if (opts.scrollY != null) {
+    await scrollTo(cdp, opts.scrollY)
+  }
 
   const r = await cdp.send('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport } : {}) })
   return Buffer.from(r.data, 'base64')
@@ -405,6 +510,14 @@ interface CrawlPage {
   consoleErrors: string[]
   failedRequests: Array<{ status: number, url: string }>
   horizontalOverflowPx: number
+  layout: {
+    bodyScrollWidth: number
+    documentScrollWidth: number
+    mainClientWidth: number | null
+    mainOverflowX: string | null
+    mainScrollWidth: number | null
+    viewportWidth: number
+  }
   overflowingElements: Array<{
     element: string
     left: number
@@ -488,6 +601,240 @@ function parseViewport(value: string | undefined): { w: number, h: number } {
   return { w, h }
 }
 
+export function parseDeviceScale(value: string | boolean | Array<string | boolean> | undefined): number {
+  if (value === undefined) return 1
+  if (typeof value !== 'string' || !value.trim()) throw new TypeError('--scale requires one positive finite device-pixel ratio, for example --scale 2.')
+  const scale = Number(value)
+  if (!Number.isFinite(scale) || scale <= 0) throw new TypeError(`Invalid --scale "${value}". Expected a positive finite device-pixel ratio.`)
+  return scale
+}
+
+/** `--scroll-y` on `screenshot`: an explicit document Y to jump to before
+ *  capturing just the viewport, for content a full-page capture cannot show
+ *  (sticky/fixed elements, scroll-linked animation) at a specific fold. */
+function parseScrollY(value: string | boolean | Array<string | boolean> | undefined): number | null {
+  if (value === undefined)
+    return null
+  if (typeof value !== 'string')
+    throw new TypeError('--scroll-y requires a value, for example --scroll-y 800.')
+
+  const y = Number(value)
+  if (!Number.isFinite(y) || y < 0)
+    throw new TypeError(`Invalid --scroll-y "${value}". Expected a non-negative number of pixels.`)
+
+  return y
+}
+
+type ScenarioAction = 'assert' | 'click' | 'evaluate' | 'fill' | 'focus' | 'press' | 'wait'
+
+interface ScenarioStep {
+  action: ScenarioAction
+  selector?: string
+  text?: string
+  absent?: boolean
+  focused?: boolean
+  expression?: string
+  value?: string
+  key?: string
+  ms?: number
+  settle?: number
+  timeoutMs?: number
+}
+
+class ScenarioAssertionError extends Error {}
+
+export function parseScenarioStep(value: string): ScenarioStep {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  }
+  catch (error) {
+    throw new TypeError(`Invalid scenario step JSON: ${value}`, { cause: error })
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+    throw new TypeError('Each scenario step must be a JSON object.')
+
+  const step = parsed as Record<string, unknown>
+  if (!['assert', 'click', 'evaluate', 'fill', 'focus', 'press', 'wait'].includes(String(step.action)))
+    throw new TypeError(`Unsupported scenario action: ${String(step.action)}`)
+
+  const action = step.action as ScenarioAction
+  if (['assert', 'click', 'fill', 'focus'].includes(action) && typeof step.selector !== 'string')
+    throw new TypeError(`Scenario action "${action}" requires a selector.`)
+  if (action === 'fill' && typeof step.value !== 'string')
+    throw new TypeError('Scenario action "fill" requires a string value.')
+  if (action === 'evaluate' && typeof step.expression !== 'string')
+    throw new TypeError('Scenario action "evaluate" requires an expression.')
+  if (step.absent !== undefined && (action !== 'assert' || typeof step.absent !== 'boolean'))
+    throw new TypeError('Scenario "absent" is a boolean supported only by assert actions.')
+  if (step.focused !== undefined && (action !== 'assert' || typeof step.focused !== 'boolean'))
+    throw new TypeError('Scenario "focused" is a boolean supported only by assert actions.')
+  if (action === 'press' && typeof step.key !== 'string')
+    throw new TypeError('Scenario action "press" requires a key.')
+  if (action === 'wait' && (!Number.isFinite(step.ms) || Number(step.ms) < 0 || Number(step.ms) > 30_000))
+    throw new TypeError('Scenario action "wait" requires ms between 0 and 30000.')
+  if (step.timeoutMs !== undefined && (action !== 'assert' || !Number.isSafeInteger(step.timeoutMs) || Number(step.timeoutMs) < 0 || Number(step.timeoutMs) > 30_000))
+    throw new TypeError('Scenario timeoutMs is supported only by assert actions and must be an integer between 0 and 30000.')
+
+  return step as unknown as ScenarioStep
+}
+
+export async function runScenarioStep(cdp: Pick<Cdp, 'send'>, step: ScenarioStep): Promise<Record<string, unknown>> {
+  if (step.action === 'assert' && step.timeoutMs) {
+    const deadline = performance.now() + step.timeoutMs
+    let last: ScenarioAssertionError | undefined
+    const expired = () => new Error(`${last?.message || `Scenario assert failed (${step.selector || ''})`}; timed out after ${step.timeoutMs}ms`)
+    while (true) {
+      const budget = deadline - performance.now()
+      if (budget <= 0) throw expired()
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      try {
+        const expiry = Promise.withResolvers<never>()
+        timeout = setTimeout(() => expiry.reject(expired()), budget)
+        const answer = await Promise.race([
+          runScenarioStep(cdp, { ...step, timeoutMs: 0 }),
+          expiry.promise,
+        ])
+        if (performance.now() > deadline) throw expired()
+        return answer
+      }
+      catch (error) {
+        if (!(error instanceof ScenarioAssertionError)) throw error
+        last = error
+        const remaining = deadline - performance.now()
+        if (remaining <= 0) throw error
+        await Bun.sleep(Math.min(50, remaining))
+      }
+      finally { if (timeout !== undefined) clearTimeout(timeout) }
+    }
+  }
+  if (step.action === 'wait') {
+    await Bun.sleep(Number(step.ms))
+    return { action: step.action, ms: Number(step.ms), ok: true }
+  }
+
+  if (step.action === 'press') {
+    const key = step.key || ''
+    // CDP's key name alone does not perform native navigation or scrolling.
+    // Supply the matching virtual key on both events, as a real keyboard does.
+    const letter = /^[a-z]$/i.test(key), digit = /^[0-9]$/.test(key)
+    const code = letter ? `Key${key.toUpperCase()}` : digit ? `Digit${key}` : key === ' ' ? 'Space' : key
+    const keyCode = key.length === 1 ? (letter ? key.toUpperCase() : key).charCodeAt(0) : ({
+      Backspace: 8, Tab: 9, Enter: 13, Escape: 27,
+      PageUp: 33, PageDown: 34, End: 35, Home: 36,
+      ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+      Insert: 45, Delete: 46,
+    }[key] || 0)
+    if (!keyCode) throw new Error(`Unsupported scenario key: ${JSON.stringify(key)}`)
+    // Enter's text generates the keypress that activates native buttons/forms.
+    const text = key === 'Enter' ? '\r' : undefined
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text, unmodifiedText: text })
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode })
+    return { action: step.action, key, ok: true }
+  }
+
+  if (step.action === 'evaluate') {
+    const result = await cdp.send('Runtime.evaluate', {
+      expression: step.expression,
+      returnByValue: true,
+      awaitPromise: true,
+    })
+    if (result.exceptionDetails)
+      throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Evaluation failed')
+    return { action: step.action, value: result.result?.value, ok: true }
+  }
+
+  const result = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const step = ${JSON.stringify(step)}
+      const candidates = Array.from(document.querySelectorAll(step.selector))
+      const normalizedText = (element) => (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim()
+      const element = (step.action === 'click' || step.action === 'focus' || step.action === 'assert') && step.text !== undefined
+        ? candidates.find(candidate => normalizedText(candidate) === step.text)
+          || candidates.find(candidate => normalizedText(candidate).includes(step.text))
+        : candidates[0]
+      if (!element && step.action === 'assert' && step.absent)
+        return { ok: true, action: step.action, selector: step.selector, absent: true }
+      if (!element)
+        return { ok: false, error: 'Element not found', selector: step.selector }
+
+      if (step.action === 'click' || step.action === 'focus')
+        element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
+      const rect = element.getBoundingClientRect()
+      const style = getComputedStyle(element)
+      const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+      if (step.action === 'assert' && step.absent) {
+        if (visible)
+          return { ok: false, error: 'Expected element to be absent', selector: step.selector }
+        return { ok: true, action: step.action, selector: step.selector, absent: true }
+      }
+      if (!visible)
+        return { ok: false, error: 'Element is not visible', selector: step.selector }
+
+      if (step.action === 'click') {
+        if (element.disabled || element.getAttribute('aria-disabled') === 'true')
+          return { ok: false, error: 'Element is disabled', selector: step.selector }
+        if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight)
+          return { ok: false, error: 'Element could not be scrolled into the viewport', selector: step.selector }
+      }
+      else if (step.action === 'focus') {
+        if (typeof element.focus !== 'function')
+          return { ok: false, error: 'Element cannot receive focus', selector: step.selector }
+        element.focus()
+        if (document.activeElement !== element)
+          return { ok: false, error: 'Element did not receive focus', selector: step.selector }
+      }
+      else if (step.action === 'fill') {
+        if (!('value' in element))
+          return { ok: false, error: 'Element has no value', selector: step.selector }
+        const prototype = Object.getPrototypeOf(element)
+        const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
+        if (setter)
+          setter.call(element, step.value)
+        else
+          element.value = step.value
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: step.value }))
+        element.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+      else if (step.action === 'assert' && step.text !== undefined) {
+        const content = (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim()
+        if (!content.includes(step.text))
+          return { ok: false, error: 'Expected text was not found', selector: step.selector, expected: step.text, actual: content.slice(0, 240) }
+      }
+
+      if (step.action === 'assert' && step.focused !== undefined) {
+        const focused = document.activeElement === element
+        if (focused !== step.focused)
+          return { ok: false, error: step.focused ? 'Expected element to be focused' : 'Expected element not to be focused', selector: step.selector }
+      }
+
+      return {
+        ok: true,
+        action: step.action,
+        selector: step.selector,
+        tag: element.tagName.toLowerCase(),
+        text: normalizedText(element).slice(0, 160),
+        clickPoint: step.action === 'click' ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : undefined,
+      }
+    })()`,
+    returnByValue: true,
+  })
+  const value = result.result?.value as Record<string, unknown> | undefined
+  if (!value?.ok) {
+    if (step.action === 'assert' && value)
+      throw new ScenarioAssertionError(`Scenario assert failed: ${String(value.error || 'unknown error')} (${step.selector || ''})`)
+    throw new Error(`Scenario ${step.action} failed: ${String(value?.error || 'unknown error')} (${step.selector || step.key || ''})`)
+  }
+  if (step.action === 'click') {
+    const point = value.clickPoint as { x: number, y: number }
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    delete value.clickPoint
+  }
+  return value
+}
+
 const BREAKPOINTS = [
   { device: 'Mobile S', w: 320, h: 568 },
   { device: 'Mobile L', w: 428, h: 926 },
@@ -502,22 +849,37 @@ async function main() {
   const url = positional[0]
 
   if (!command || command === 'help' || !url) {
-    console.log('Usage: bun browse.ts <navigate|screenshot|responsive|monitor|snapshot|crawl> <url> [flags]')
+    console.log('Usage: bun browse.ts <navigate|screenshot|responsive|monitor|snapshot|scenario|crawl> <url> [flags]')
     console.log('  --cookie "name=value"   repeatable; pre-seeds cookies (e.g. coming-soon bypass)')
     console.log('  --settle 1500           ms to wait after load before acting (default 700; stretch for entrance animations)')
-    console.log('  --scheme dark           emulate prefers-color-scheme (light|dark) for QA of theme-aware pages')
+    console.log('  --scheme dark           emulate prefers-color-scheme (light|dark); defaults to light when omitted')
+    console.log('  --scroll-y 800          screenshot: jump to this document Y first, then capture just the viewport')
+    console.log('                          (--full renders beyond-viewport without ever scrolling, so it cannot show a')
+    console.log('                          position:sticky/fixed element overlapping content, or a scroll-linked')
+    console.log('                          animation mid-transition, at a specific fold - --scroll-y can)')
     process.exit(url ? 0 : 1)
   }
 
-  const session = await launch()
+  const scale = parseDeviceScale(flags.scale)
+  let session = await launch()
   const cookies = flagList(flags.cookie)
   const settleMs = flags.settle ? Number(flags.settle) : undefined
-  const scheme = typeof flags.scheme === 'string' ? flags.scheme : undefined
+  // Defaults to 'light' rather than leaving prefers-color-scheme unset:
+  // headless Chromium's own default for that media feature isn't
+  // documented or guaranteed, and was observed reporting 'dark' matches
+  // with nothing here asking for it - every screenshot taken without
+  // --scheme would silently show this site's dark theme instead of its
+  // actual 'colored' (light) default. Forcing 'light' makes an unflagged
+  // capture deterministic and representative of what a visitor with no
+  // saved choice and no OS dark-mode preference actually sees.
+  if (flags.scheme !== undefined && flags.scheme !== 'light' && flags.scheme !== 'dark')
+    throw new TypeError(`Invalid --scheme "${String(flags.scheme)}". Expected "light" or "dark".`)
+  const scheme = typeof flags.scheme === 'string' ? flags.scheme : 'light'
   try {
     if (command === 'navigate' || command === 'go') {
       const cdp = await openPage(session.port)
       const t0 = performance.now()
-      const state = await gotoAndInstrument(cdp, url, { cookies, settleMs, scheme })
+      const state = await gotoAndInstrument(cdp, url, { scale, cookies, settleMs, scheme })
       const loadMs = Math.round(performance.now() - t0)
       console.log(JSON.stringify({
         browser: session.browser,
@@ -535,13 +897,16 @@ async function main() {
     else if (command === 'screenshot') {
       const cdp = await openPage(session.port)
       const viewport = parseViewport(typeof flags.viewport === 'string' ? flags.viewport : undefined)
-      const scale = flags.scale ? Number(flags.scale) : 1
+      const scrollY = parseScrollY(flags['scroll-y'])
+      const modes = [flags.full && 'full', flags.element && 'element', scrollY != null && 'scroll-y'].filter(Boolean)
+      if (modes.length > 1)
+        throw new TypeError(`--full, --element, and --scroll-y are mutually exclusive; got ${modes.join(', ')}.`)
       const out = (flags.out as string) || `storage/framework/runtime/shots/${new URL(url).pathname.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'home'}.png`
       mkdirSync(out.split('/').slice(0, -1).join('/') || '.', { recursive: true })
-      const state = await gotoAndInstrument(cdp, url, { viewport, scale, cookies, settleMs, scheme })
-      const png = await captureScreenshot(cdp, { full: !!flags.full, element: flags.element as string | undefined })
+      const state = await gotoAndInstrument(cdp, url, { viewport, scale, cookies, settleMs, scheme, reducedMotion: !!flags.full || !!flags.element })
+      const png = await captureScreenshot(cdp, { full: !!flags.full, element: flags.element as string | undefined, scrollY: scrollY ?? undefined })
       await Bun.write(out, png)
-      console.log(JSON.stringify({ url, out, viewport: `${viewport.w}x${viewport.h}`, scale, full: !!flags.full, element: flags.element ?? null, bytes: png.length }, null, 2))
+      console.log(JSON.stringify({ url, out, viewport: `${viewport.w}x${viewport.h}`, scale, full: !!flags.full, element: flags.element ?? null, scrollY: scrollY ?? null, bytes: png.length }, null, 2))
       state.dispose()
       cdp.close()
     }
@@ -552,9 +917,11 @@ async function main() {
       const results: any[] = []
       for (const bp of BREAKPOINTS) {
         const cdp = await openPage(session.port)
-        const state = await gotoAndInstrument(cdp, url, { viewport: { w: bp.w, h: bp.h }, cookies, settleMs, scheme })
+        const state = await gotoAndInstrument(cdp, url, { viewport: { w: bp.w, h: bp.h }, scale, cookies, settleMs, scheme, reducedMotion: true })
         const overflow = await cdp.send('Runtime.evaluate', {
-          expression: 'document.documentElement.scrollWidth > window.innerWidth ? document.documentElement.scrollWidth - window.innerWidth : 0',
+          // Mobile Chrome may expand innerWidth to fit overflowing content.
+          // Compare the page with the requested device width, not that expansion.
+          expression: `Math.max(0, Math.max(document.body.scrollWidth, document.documentElement.scrollWidth) - ${bp.w})`,
           returnByValue: true,
         })
         const out = join(outDir, `${bp.device.toLowerCase().replace(/\s+/g, '-')}.png`)
@@ -569,7 +936,7 @@ async function main() {
     else if (command === 'monitor') {
       const cdp = await openPage(session.port)
       const ms = flags.ms ? Number(flags.ms) : 5000
-      const state = await gotoAndInstrument(cdp, url, { cookies, settleMs, scheme })
+      const state = await gotoAndInstrument(cdp, url, { scale, cookies, settleMs, scheme })
       await Bun.sleep(ms)
       const failed = state.responses.filter(r => r.status >= 400)
       const slow = state.responses.filter(r => r.ms > 3000)
@@ -587,7 +954,12 @@ async function main() {
 
     else if (command === 'snapshot') {
       const cdp = await openPage(session.port)
-      await gotoAndInstrument(cdp, url, { cookies, settleMs, scheme })
+      // Captured, not discarded: the `state.dispose()` at the end of this
+      // branch needs it. Without the binding that call resolved to stx's
+      // auto-imported `state` signal factory, which has no `dispose`, so
+      // `browse snapshot` threw on its last line and left the CDP listeners
+      // attached.
+      const state = await gotoAndInstrument(cdp, url, { scale, cookies, settleMs, scheme })
       const expr = `(() => {
         const sel = (q) => Array.from(document.querySelectorAll(q));
         const txt = (e) => (e.innerText || e.textContent || '').trim().slice(0, 80);
@@ -606,9 +978,104 @@ async function main() {
       cdp.close()
     }
 
+    else if (command === 'scenario') {
+      const steps = flagList(flags.step).map(parseScenarioStep)
+      if (!steps.length)
+        throw new TypeError('Scenario requires at least one --step JSON object.')
+
+      const cdp = await openPage(session.port)
+      const viewport = parseViewport(typeof flags.viewport === 'string' ? flags.viewport : undefined)
+      const state = await gotoAndInstrument(cdp, url, { viewport, scale, cookies, settleMs, scheme, reducedMotion: !!flags.full })
+      const results: Record<string, unknown>[] = []
+      await cdp.send('Page.bringToFront')
+      await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          window.__browseFocusHistory = []
+          const describe = (element) => element ? {
+            tag: element.tagName?.toLowerCase() || null,
+            role: element.getAttribute?.('role') || null,
+            ariaLabel: element.getAttribute?.('aria-label') || null,
+            text: (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
+          } : null
+          document.addEventListener('focusin', event => window.__browseFocusHistory.push({ event: 'focusin', target: describe(event.target) }), true)
+          document.addEventListener('focusout', event => window.__browseFocusHistory.push({ event: 'focusout', target: describe(event.target), related: describe(event.relatedTarget) }), true)
+        })()`,
+      })
+
+      let scenarioFailed = false
+      for (const step of steps) {
+        try {
+          results.push(await runScenarioStep(cdp, step))
+        }
+        catch (error) {
+          results.push({ action: step.action, ok: false, step: results.length + 1, error: error instanceof Error ? error.message : String(error) })
+          scenarioFailed = true
+          break
+        }
+        if (step.action !== 'wait')
+          await Bun.sleep(step.settle ?? 250)
+      }
+
+      const collectionErrors: { phase: string, error: string }[] = []
+      let finalState: unknown = null
+      try {
+        const collected = await cdp.send('Runtime.evaluate', {
+          expression: `({
+          url: location.href,
+          title: document.title,
+          focusHistory: window.__browseFocusHistory || [],
+          activeElement: document.activeElement ? {
+            tag: document.activeElement.tagName?.toLowerCase() || null,
+            id: document.activeElement.id || null,
+            role: document.activeElement.getAttribute?.('role') || null,
+            ariaLabel: document.activeElement.getAttribute?.('aria-label') || null,
+            ref: document.activeElement.getAttribute?.('data-stx-ref') || null,
+            text: (document.activeElement.innerText || document.activeElement.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
+          } : null,
+          bodyText: (document.body.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500),
+        })`,
+          returnByValue: true,
+        })
+        finalState = collected.result?.value ?? null
+      }
+      catch (error) {
+        collectionErrors.push({ phase: 'final-state', error: error instanceof Error ? error.message : String(error) })
+      }
+      let screenshot: string | null = null
+      if (typeof flags.out === 'string') {
+        try {
+          const output = flags.out
+          mkdirSync(output.split('/').slice(0, -1).join('/') || '.', { recursive: true })
+          await Bun.write(output, await captureScreenshot(cdp, { full: !!flags.full }))
+          screenshot = output
+        }
+        catch (error) {
+          collectionErrors.push({ phase: 'screenshot', error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+      const failedRequests = state.responses.filter(response => response.status >= 400)
+      console.log(JSON.stringify({
+        url,
+        viewport: `${viewport.w}x${viewport.h}`,
+        scale,
+        steps: results,
+        final: finalState,
+        screenshot,
+        collectionErrors,
+        consoleMessages: state.console,
+        consoleErrors: state.consoleErrors,
+        failedRequests,
+      }, null, 2))
+      if (scenarioFailed || collectionErrors.length || state.consoleErrors.length || failedRequests.length)
+        process.exitCode = 1
+      state.dispose()
+      cdp.close()
+    }
+
     else if (command === 'crawl') {
       const start = new URL(url)
       const max = flags.max ? Number(flags.max) : 500
+      const crawlViewport = parseViewport(typeof flags.viewport === 'string' ? flags.viewport : undefined)
       if (!Number.isInteger(max) || max < 1)
         throw new TypeError(`Invalid crawl max "${String(flags.max)}". Expected a positive integer.`)
 
@@ -624,9 +1091,23 @@ async function main() {
       const crawlSettleMs = settleMs ?? 350
       let browserPage = await createPage(session.port)
       let cdp = browserPage.cdp
+      const createReplacementPage = async (): Promise<BrowserPage> => {
+        try {
+          return await createPage(session.port)
+        }
+        catch {
+          kill(session)
+          session = await launch()
+          return createPage(session.port)
+        }
+      }
       const replacePage = async (): Promise<void> => {
-        await closePage(session.port, browserPage)
-        browserPage = await createPage(session.port)
+        const closed = await closePage(session.port, browserPage)
+        if (!closed) {
+          kill(session)
+          session = await launch()
+        }
+        browserPage = await createReplacementPage()
         cdp = browserPage.cdp
       }
       const inspectPage = async (current: string): Promise<{
@@ -635,6 +1116,7 @@ async function main() {
           links?: string[]
           overflow?: number
           overflowing?: CrawlPage['overflowingElements']
+          layout?: CrawlPage['layout']
           title?: string
         }
       }> => {
@@ -643,15 +1125,28 @@ async function main() {
           let state: PageState | undefined
           try {
             state = await gotoAndInstrument(cdp, current, {
+              scale,
               cookies,
               settleMs: crawlSettleMs,
               scheme,
+              viewport: crawlViewport,
             })
             const inspection = await cdp.send('Runtime.evaluate', {
               expression: `(() => ({
               title: document.title,
               links: Array.from(document.querySelectorAll('a[href]')).map(link => link.href),
-              overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+              overflow: Math.max(0, Math.max(document.body.scrollWidth, document.documentElement.scrollWidth) - ${crawlViewport.w}),
+              layout: (() => {
+                const main = document.querySelector('[data-stx-content]')
+                return {
+                  bodyScrollWidth: document.body.scrollWidth,
+                  documentScrollWidth: document.documentElement.scrollWidth,
+                  mainClientWidth: main?.clientWidth ?? null,
+                  mainOverflowX: main ? getComputedStyle(main).overflowX : null,
+                  mainScrollWidth: main?.scrollWidth ?? null,
+                  viewportWidth: ${crawlViewport.w},
+                }
+              })(),
               overflowing: Array.from(document.querySelectorAll('body *'))
                 .map((element) => {
                   const rect = element.getBoundingClientRect()
@@ -694,8 +1189,8 @@ async function main() {
                     ...(overflowContainer ? { overflowContainer } : {}),
                   }
                 })
-                .filter(item => item.width > 0 && (item.left < -1 || item.right > window.innerWidth + 1))
-                .sort((a, b) => Math.max(b.right - window.innerWidth, -b.left) - Math.max(a.right - window.innerWidth, -a.left))
+                .filter(item => item.width > 0 && (item.left < -1 || item.right > ${crawlViewport.w} + 1))
+                .sort((a, b) => Math.max(b.right - ${crawlViewport.w}, -b.left) - Math.max(a.right - ${crawlViewport.w}, -a.left))
                 .slice(0, 10),
             }))()`,
               returnByValue: true,
@@ -731,6 +1226,14 @@ async function main() {
             consoleErrors: [...new Set(state.consoleErrors)],
             failedRequests,
             horizontalOverflowPx: Number(value.overflow) || 0,
+            layout: value.layout || {
+              bodyScrollWidth: 0,
+              documentScrollWidth: 0,
+              mainClientWidth: null,
+              mainOverflowX: null,
+              mainScrollWidth: null,
+              viewportWidth: 0,
+            },
             overflowingElements: value.overflowing || [],
           })
           if (flags.progress) {
@@ -759,14 +1262,26 @@ async function main() {
         || page.consoleErrors.length > 0
         || page.failedRequests.length > 0
         || page.horizontalOverflowPx > 0)
+      const summaryOnly = Boolean(flags.summary)
+      const reportedFailures = summaryOnly
+        ? failures.map(page => ({
+            path: page.path,
+            status: page.status,
+            consoleErrorCount: page.consoleErrors.length,
+            failedRequestCount: page.failedRequests.length,
+            horizontalOverflowPx: page.horizontalOverflowPx,
+          }))
+        : failures
       console.log(JSON.stringify({
         start: start.href,
         browser: session.browser,
+        viewport: `${crawlViewport.w}x${crawlViewport.h}`,
         crawled: pages.length,
         remaining: queue.length,
         max,
-        paths: pages.map(page => page.path),
-        failures,
+        failureCount: failures.length,
+        ...(!summaryOnly ? { paths: pages.map(page => page.path) } : {}),
+        failures: reportedFailures,
       }, null, 2))
       if (failures.length > 0)
         process.exitCode = 1
@@ -782,7 +1297,7 @@ async function main() {
   }
 }
 
-main().catch((e) => {
+if (import.meta.main) main().catch((e) => {
   console.error('browse error:', e?.message || e)
   process.exit(1)
 })

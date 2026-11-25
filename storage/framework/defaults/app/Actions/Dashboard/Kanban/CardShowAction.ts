@@ -1,7 +1,9 @@
-import { Action } from '@stacksjs/actions'
-import { db } from '@stacksjs/database'
+import type { RequestInstance } from '@stacksjs/types'
+import { Action } from '@stacksjs/actions/runtime'
+import { db, getDatabaseDialect, sqlHelpers } from '@stacksjs/database/runtime'
+import { cardAttachments } from './card-attachments'
 import { modelBoolean } from './kanban-model'
-import { kanbanError } from './kanban-response'
+import { kanbanActionError, kanbanError } from './kanban-response'
 
 interface CardRow {
   id: number
@@ -20,7 +22,7 @@ interface CardRow {
 }
 
 /**
- * `GET /api/dashboard/kanban/cards/:id` (stacksjs/stacks#1846 Phase 3).
+ * `GET /api/dashboard/kanban/cards/:id`.
  *
  * Fetches a single card with everything the detail modal needs in one
  * round-trip: labels, assignees, comments. The board view's cards
@@ -28,58 +30,64 @@ interface CardRow {
  * pivots) — this endpoint is for the case where the user lands
  * directly on a card URL or refreshes mid-modal.
  *
- * Three queries via `Promise.all`:
- *   1. The card itself.
- *   2. Labels via the card_labels pivot (with the label row).
- *   3. Assignees via the card_assignees pivot (with user.name/email).
- *   4. Comments (denormalised user name/email for display).
+ * The card itself, then four in parallel via `Promise.all`:
+ *   1. Labels via the card_labels pivot (with the label row).
+ *   2. Assignees via the card_assignees pivot (with user.name/email).
+ *   3. Comments (denormalised user name/email for display).
+ *   4. Attachments, each with a freshly signed, expiring URL. They live on a
+ *      private disk, so there is no path a browser could fetch.
  */
 export default new Action({
   name: 'Kanban Card Show',
   description: 'Returns a single card with its labels, assignees, and comments thread.',
   method: 'GET',
   apiResponse: true,
-  async handle(request) {
-    const rawId = (request as any)?.params?.id ?? (request as any)?.param?.('id') ?? null
-    const id = Number(rawId)
+  async handle(request: RequestInstance) {
+    const id = Number(request.getParam('id'))
     if (!Number.isFinite(id) || id <= 0) {
       return kanbanError('Invalid card id', 400)
     }
 
     try {
+      // Postgres numbers its parameters, so the `?` these carried bound
+      // nothing there (stacksjs/stacks#2846).
+      const { param } = sqlHelpers(getDatabaseDialect())
       const cardRows = await db.unsafe(
-        'SELECT * FROM cards WHERE id = ? LIMIT 1',
+        `SELECT * FROM cards WHERE id = ${param(1)} LIMIT 1`,
         [id],
-      ).execute() as CardRow[]
+      ).execute() as unknown as CardRow[]
       const card = cardRows?.[0]
       if (!card) {
         return kanbanError('Card not found', 404)
       }
 
-      const [labels, assignees, comments] = await Promise.all([
+      const [labels, assignees, comments, attachments] = await Promise.all([
         db.unsafe(
           `SELECT l.id, l.name, l.color
           FROM card_labels cl
           JOIN labels l ON l.id = cl.label_id
-          WHERE cl.card_id = ?
+          WHERE cl.card_id = ${param(1)}
           ORDER BY l.name ASC`,
           [id],
-        ).execute() as Promise<Array<{ id: number, name: string, color: string }>>,
+        ).execute() as unknown as Array<{ id: number, name: string, color: string }>,
         db.unsafe(
           `SELECT ca.user_id, ca.assigned_by_user_id, ca.created_at, u.name, u.email
           FROM card_assignees ca
           LEFT JOIN users u ON u.id = ca.user_id
-          WHERE ca.card_id = ?`,
+          WHERE ca.card_id = ${param(1)}`,
           [id],
-        ).execute() as Promise<Array<{ user_id: number, assigned_by_user_id: number | null, created_at: string | null, name: string | null, email: string | null }>>,
+        ).execute() as unknown as Array<{ user_id: number, assigned_by_user_id: number | null, created_at: string | null, name: string | null, email: string | null }>,
         db.unsafe(
           `SELECT cc.id, cc.uuid, cc.user_id, cc.body, cc.created_at, cc.updated_at, u.name, u.email
           FROM card_comments cc
           LEFT JOIN users u ON u.id = cc.user_id
-          WHERE cc.card_id = ?
+          WHERE cc.card_id = ${param(1)}
           ORDER BY cc.created_at ASC, cc.id ASC`,
           [id],
-        ).execute() as Promise<Array<{ id: number, uuid: string | null, user_id: number | null, body: string, created_at: string | null, updated_at: string | null, name: string | null, email: string | null }>>,
+        ).execute() as unknown as Array<{ id: number, uuid: string | null, user_id: number | null, body: string, created_at: string | null, updated_at: string | null, name: string | null, email: string | null }>,
+        // Each one carries a freshly signed, expiring URL: the bytes are on a
+        // private disk, so there is no path the browser could fetch.
+        cardAttachments(id),
       ])
 
       return {
@@ -105,6 +113,7 @@ export default new Action({
           assignedByUserId: a.assigned_by_user_id,
           assignedAt: a.created_at,
         })),
+        attachments,
         comments: (comments ?? []).map(c => ({
           id: c.id,
           uuid: c.uuid,
@@ -118,8 +127,7 @@ export default new Action({
       }
     }
     catch (err) {
-      console.error('[dashboard/kanban] CardShowAction failed:', err)
-      return kanbanError(err instanceof Error ? err.message : 'unknown error', 500)
+      return kanbanActionError(err, 'CardShowAction')
     }
   },
 })

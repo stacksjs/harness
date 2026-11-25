@@ -1,8 +1,9 @@
 <script client>
+import { useScrollLock } from '@stacksjs/composables'
 const isOpen = state(false)
 const isDesktop = useMediaQuery('(min-width: 1024px)')
 const scrollLocked = useScrollLock()
-const emit = defineEmits()
+const emit = defineEmits(['open', 'close'])
 const menuButton = useRef<HTMLButtonElement>('dashboardMobileMenuButton')
 const closeButton = useRef<HTMLButtonElement>('dashboardMobileCloseButton')
 const dialog = useRef<HTMLElement>('dashboardMobileNavigation')
@@ -56,16 +57,19 @@ function handlePanelClick(event: MouseEvent): void {
     closeSidebar()
 }
 
+// Widening past the breakpoint closes the drawer the same way a tap does, so
+// the scroll lock is released and the layout gets its `close` to take its
+// sidebar back. Setting the state alone did neither.
 effect(() => {
   if (isDesktop() && isOpen())
-    isOpen.set(false)
+    closeSidebar()
 })
 
 useEventListener('keydown', handleKeydown)
 useEventListener('stx:navigate', closeSidebar)
 </script>
 
-<div class="flex lg:hidden sticky top-0 z-40 gap-3 items-center px-4 h-14 bg-white/95 dark:bg-neutral-950/95 border-b border-neutral-200 dark:border-neutral-800 backdrop-blur-xl">
+<div data-dashboard-mobile-bar class="flex lg:hidden sticky top-0 z-40 gap-3 items-center px-4 h-14 bg-white/95 dark:bg-neutral-950/95 border-b border-neutral-200 dark:border-neutral-800 backdrop-blur-xl">
   <button
     ref="dashboardMobileMenuButton"
     type="button"

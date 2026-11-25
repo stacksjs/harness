@@ -6,6 +6,49 @@
  * automatically be injected into the Bun process.
  */
 
+/**
+ * Every global the runtime defined before this file assigned any.
+ *
+ * Taken first, at module load, because the auto-import loops below write
+ * framework exports onto globalThis, and a name the runtime already owns must
+ * never be one of them. A hand-kept list of such names is how `Worker` slipped
+ * through: `@stacksjs/queue` exports a queue `Worker`, it replaced Bun's Web
+ * Worker in every Stacks process, and anything calling `new Worker(url)` built
+ * a queue worker instead - stx's image warm-up failed silently, an app's own
+ * syntax-highlighter worker broke. `reportError` from `@stacksjs/validation`
+ * was overwriting the web `reportError` the same way.
+ */
+const HOST_GLOBALS: ReadonlySet<string> = new Set(Object.getOwnPropertyNames(globalThis))
+
+/**
+ * Names never auto-imported onto globalThis, even when the runtime does not
+ * define them: another runtime's globals (`window`, `Deno`), module-scope
+ * bindings (`require`, `__dirname`), and the ones listed long before the
+ * snapshot above existed, kept so nothing that relied on them changes.
+ */
+const RESERVED_GLOBALS: ReadonlySet<string> = new Set([
+  'process', 'globalThis', 'global', 'window', 'self',
+  'console', 'require', 'module', 'exports', '__dirname', '__filename',
+  'Buffer', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+  'setImmediate', 'clearImmediate', 'queueMicrotask',
+  'fetch', 'Request', 'Response', 'Headers', 'URL', 'URLSearchParams',
+  'TextEncoder', 'TextDecoder', 'Blob', 'File', 'FormData',
+  'crypto', 'performance', 'navigator', 'location',
+  'Promise', 'Symbol', 'Proxy', 'Reflect', 'WeakMap', 'WeakSet', 'Map', 'Set',
+  'Array', 'Object', 'String', 'Number', 'Boolean', 'Date', 'RegExp', 'Error',
+  'JSON', 'Math', 'Intl', 'eval', 'isNaN', 'isFinite', 'parseInt', 'parseFloat',
+  'encodeURI', 'encodeURIComponent', 'decodeURI', 'decodeURIComponent',
+  'Bun', 'Deno', 'Node',
+])
+
+/**
+ * Whether an auto-import must leave `name` alone: the runtime already defines
+ * it, or it is reserved. `hostGlobals` is injectable for tests.
+ */
+export function isProtectedGlobal(name: string, hostGlobals: ReadonlySet<string> = HOST_GLOBALS): boolean {
+  return RESERVED_GLOBALS.has(name) || hostGlobals.has(name)
+}
+
 // Skip preloader for fast CLI commands (e.g. `buddy dev`, `buddy --version`) to
 // maximize startup speed. We must NOT skip when running a server script directly
 // (e.g. `bun --watch storage/framework/core/actions/src/dev/api.ts`) — Bun
@@ -17,6 +60,9 @@ const fastCommands = [
   'build',
   'test',
   'lint',
+  // Repository documentation tools inspect source without application globals.
+  'docs',
+  'release',
   '--version',
   '-v',
   'version',
@@ -42,7 +88,46 @@ const isRepl = !process.argv[1]
 // otherwise valid. Postinstall scripts are bootstrap work and must stay independent
 // of the application runtime preloader.
 const isPostinstall = process.env.npm_lifecycle_event === 'postinstall'
-const skipPreloader = isRepl || isPostinstall || (args.length > 0 && fastCommands.some(cmd => args[0] === cmd || args[0].startsWith(`${cmd}:`)))
+// runAction starts these framework files directly, with flags rather than a
+// Buddy command in argv[2]. They only inspect/release repository metadata.
+// Match the framework's source and published layouts, never an app action
+// which happens to have the same basename and needs its application globals.
+const entrypoint = (process.argv[1] ?? '').replaceAll('\\', '/')
+const repositoryAction = '(?:release|bump|generate/lib-entries)\\.[jt]s'
+const isRepositoryAction = new RegExp(`(?:^|/)storage/framework/core/actions/src/${repositoryAction}$`).test(entrypoint)
+  || new RegExp(`(?:^|/)(?:node_modules|pantry)/@stacksjs/actions/(?:src|dist(?:/src)?)/${repositoryAction}$`).test(entrypoint)
+
+/**
+ * A `buddy` installed once for the whole machine, started in this project.
+ *
+ * It is only passing through: it finds the project and replaces itself with
+ * the project's own `buddy`, which runs this file again, for real. Everything
+ * below (the env files, the auto-import graph) would be loaded here, thrown
+ * away a moment later, and loaded again: about half a second on every command
+ * typed at a project root.
+ *
+ * Not when this process was itself handed the project (`STACKS_BUDDY_ROOT`):
+ * that one is the last, and does the work.
+ */
+async function isVisitingBuddy(): Promise<boolean> {
+  if (isPostinstall || !/(?:^|\/)buddy\/(?:src\/cli\.ts|dist\/cli\.js)$/.test(entrypoint))
+    return false
+  if (process.env.STACKS_BUDDY_ROOT)
+    return false
+
+  try {
+    const pathPackage = '@stacksjs/' + 'path'
+    const { isVisitingCli } = await import('../../../core/path/src/index.ts').catch(() => import(pathPackage))
+    // An installed @stacksjs/path that predates the helper: carry on as before.
+    return typeof isVisitingCli === 'function' && isVisitingCli(process.cwd(), entrypoint)
+  }
+  catch {
+    return false
+  }
+}
+
+const isPassingThrough = await isVisitingBuddy()
+const skipPreloader = isRepl || isPostinstall || isRepositoryAction || isPassingThrough || (args.length > 0 && fastCommands.some(cmd => args[0] === cmd || args[0].startsWith(`${cmd}:`)))
 
 if (!skipPreloader) {
   // Detect production/deployment commands and set environment accordingly BEFORE loading env files
@@ -83,7 +168,7 @@ if (!skipPreloader) {
 // importing it there can fail (see the isPostinstall note above). The REPL keeps
 // its original skip. The heavy auto-import graph below stays gated separately via
 // `skipAutoImports`.
-if (!isRepl && !isPostinstall) {
+if (!isRepl && !isPostinstall && !isPassingThrough) {
   // Resolve the vendored source first; the package fallback covers non-standard
   // layouts where defaults is consumed outside the framework layout.
   const envPackage = '@stacksjs/' + 'env'
@@ -112,11 +197,19 @@ if (!isRepl && !isPostinstall) {
   // `upgrade` that would fix it. Falling through leaves stx and ts-cloud on
   // their own defaults, which is degraded but recoverable.
   const pathPkg = '@stacksjs/' + 'path'
-  const { applyRuntimeDirectoryEnv } = await import('../../../core/path/src/index.ts')
+  const { applyRuntimeDirectoryEnv, linkPackagedDefaults } = await import('../../../core/path/src/index.ts')
     .catch(() => import(pathPkg))
 
   if (typeof applyRuntimeDirectoryEnv === 'function')
     applyRuntimeDirectoryEnv()
+
+  // An app that does not vendor the framework defaults gets a gitignored
+  // `storage/framework/defaults` link to the installed package. A fresh clone
+  // has no link until something makes one, so boot does: one lstat when it is
+  // already there, and a no-op for a vendored tree. Guarded for the same
+  // published-version reason as the helper above.
+  if (typeof linkPackagedDefaults === 'function')
+    linkPackagedDefaults()
   else
     console.warn('[stacks] installed @stacksjs/path has no applyRuntimeDirectoryEnv; stx and ts-cloud will use their default state directories. Run `buddy upgrade` to refresh the framework packages.')
 }
@@ -128,31 +221,91 @@ if (!isRepl && !isPostinstall) {
 // eslint-disable-next-line antfu/no-top-level-await
 // await import('bun-plugin-stx')
 
+/**
+ * Whether a bare `@stacksjs/*` specifier resolves to something belonging to
+ * THIS project, and is therefore safe to import.
+ *
+ * A bare specifier resolves through node_modules, and when that is missing or
+ * half-installed bun falls back to its GLOBAL install cache. So a project with
+ * a broken install did not fail. It silently booted against whatever published
+ * version happened to be sitting in ~/.bun/install/cache, which is worse than
+ * loading nothing and completely invisible.
+ *
+ * It also hung, and that is how it was found. On Linux the first such
+ * cache-resolved import never settles: no rejection, no active handles, the
+ * process simply stops, so every stage of the preloader after it is silently
+ * unreachable. Both callers wrap their import in a `catch` that assumes a bad
+ * specifier fails FAST. That holds for one that cannot be resolved at all. It
+ * does not hold for one that resolves to a stale copy.
+ *
+ * ## Why this is a directory probe and not `Bun.resolveSync`
+ *
+ * The first version of this guard asked `Bun.resolveSync`, which answers the
+ * question exactly but pays full module resolution to do it. Measured on a
+ * Linux CI runner, a specifier that is NOT in `node_modules` cost **0.9 to 2.0
+ * seconds per call**, because bun walks the entire tree and then scans a global
+ * cache the install had just filled with 600+ packages. Twenty of those is 20
+ * to 40 seconds, so the guard turned a hang into a crawl and the preloader test
+ * kept timing out, intermittently, depending on how loaded the runner was.
+ *
+ * Locating the `node_modules/@stacksjs` directory once and then asking
+ * `existsSync` per package is the same question answered with stat calls:
+ * microseconds, and it never touches the global cache. The walk is memoised
+ * because the answer cannot change within a process.
+ *
+ * Accepted: a package present in this project's `@stacksjs` scope directory,
+ * which covers a real install and a vendored checkout alike (the framework's
+ * own core packages are symlinked into it). Anchored on `import.meta.dir`
+ * rather than the cwd, so running a command from a subdirectory does not change
+ * what loads.
+ */
+let stacksScopeDir: string | null | undefined
+
+async function findStacksScopeDir(): Promise<string | null> {
+  if (stacksScopeDir !== undefined)
+    return stacksScopeDir
+
+  const { existsSync } = await import('node:fs')
+  const { dirname, join } = await import('node:path')
+
+  let dir = import.meta.dir
+  for (;;) {
+    const candidate = join(dir, 'node_modules', '@stacksjs')
+    if (existsSync(candidate)) {
+      stacksScopeDir = candidate
+      return candidate
+    }
+    const parent = dirname(dir)
+    if (parent === dir)
+      break
+    dir = parent
+  }
+
+  stacksScopeDir = null
+  return null
+}
+
+async function belongsToThisProject(specifier: string): Promise<boolean> {
+  const scopeDir = await findStacksScopeDir()
+  if (!scopeDir)
+    return false
+
+  const { existsSync } = await import('node:fs')
+  const { join } = await import('node:path')
+
+  return existsSync(join(scopeDir, specifier.slice('@stacksjs/'.length)))
+}
+
 // Auto-import ALL Stacks framework modules into globalThis
 // This allows using Action, response, Activity, etc. without ANY imports.
 // Exported so server entrypoints (e.g. `dev/api.ts`) can opt back in
 // explicitly when needed — see #1835 root cause 3.
 export async function loadAutoImports() {
   const { Glob } = await import('bun')
+  const { userFunctionFiles } = await import('./user-functions')
   const pathPackage = '@stacksjs/' + 'path'
   const path = await import('../../../core/path/src/index.ts')
     .catch(() => import(pathPackage))
-
-  // CRITICAL: Never overwrite these built-in globals
-  const protectedGlobals = new Set([
-    'process', 'globalThis', 'global', 'window', 'self',
-    'console', 'require', 'module', 'exports', '__dirname', '__filename',
-    'Buffer', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
-    'setImmediate', 'clearImmediate', 'queueMicrotask',
-    'fetch', 'Request', 'Response', 'Headers', 'URL', 'URLSearchParams',
-    'TextEncoder', 'TextDecoder', 'Blob', 'File', 'FormData',
-    'crypto', 'performance', 'navigator', 'location',
-    'Promise', 'Symbol', 'Proxy', 'Reflect', 'WeakMap', 'WeakSet', 'Map', 'Set',
-    'Array', 'Object', 'String', 'Number', 'Boolean', 'Date', 'RegExp', 'Error',
-    'JSON', 'Math', 'Intl', 'eval', 'isNaN', 'isFinite', 'parseInt', 'parseFloat',
-    'encodeURI', 'encodeURIComponent', 'decodeURI', 'decodeURIComponent',
-    'Bun', 'Deno', 'Node',
-  ])
 
   // 1. Load Stacks framework packages into globalThis
   const stacksPackages = [
@@ -190,16 +343,23 @@ export async function loadAutoImports() {
   ]
 
   for (const pkg of stacksPackages) {
+    // See `belongsToThisProject`. Skipping is what the `catch` below always
+    // meant to do; it just never got the chance for a specifier that resolves
+    // to a stale copy instead of failing.
+    if (!(await belongsToThisProject(pkg)))
+      continue
+
     try {
       const module = await import(pkg)
       for (const [name, value] of Object.entries(module)) {
-        // Skip default exports and protected globals
-        if (name === 'default' || protectedGlobals.has(name)) continue
+        // Skip default exports and anything the runtime already owns
+        if (name === 'default' || isProtectedGlobal(name)) continue
         if (typeof value !== 'undefined') {
-          (globalThis as any)[name] = value
+          Reflect.set(globalThis, name, value)
         }
       }
-    } catch {
+    }
+    catch {
       // Package might not exist or not be built yet
     }
   }
@@ -208,23 +368,19 @@ export async function loadAutoImports() {
   const functionsPath = path.resourcesPath('functions')
   const glob = new Glob('**/*.ts')
 
-  for await (const file of glob.scan({
-    cwd: functionsPath,
-    absolute: true,
-    onlyFiles: true,
-  })) {
-    if (file.endsWith('.d.ts')) continue
+  for await (const file of userFunctionFiles(functionsPath)) {
 
     try {
       const module = await import(file)
       for (const [name, value] of Object.entries(module)) {
-        // Skip default exports and protected globals
-        if (name === 'default' || protectedGlobals.has(name)) continue
+        // Skip default exports and anything the runtime already owns
+        if (name === 'default' || isProtectedGlobal(name)) continue
         if (typeof value !== 'undefined') {
-          (globalThis as any)[name] = value
+          Reflect.set(globalThis, name, value)
         }
       }
-    } catch {
+    }
+    catch {
       // Some files may have client-side dependencies, skip them
     }
   }
@@ -234,7 +390,7 @@ export async function loadAutoImports() {
   // Priority: user models (app/Models) override framework defaults
   const modelDirs = [
     path.userModelsPath(),
-    path.storagePath('framework/defaults/app/Models'),
+    path.defaultsPath('app/Models'),
   ]
 
   const loadedModels = new Set<string>()
@@ -249,19 +405,21 @@ export async function loadAutoImports() {
         if (file.endsWith('.d.ts') || file.endsWith('/index.ts')) continue
 
         const modelName = file.split('/').pop()?.replace('.ts', '') || ''
-        if (!modelName || loadedModels.has(modelName) || protectedGlobals.has(modelName)) continue
+        if (!modelName || loadedModels.has(modelName) || isProtectedGlobal(modelName)) continue
 
         try {
           const module = await import(file)
           if (module.default) {
-            (globalThis as any)[modelName] = module.default
+            Reflect.set(globalThis, modelName, module.default)
             loadedModels.add(modelName)
           }
-        } catch {
+        }
+        catch {
           // Model may have unresolved dependencies during bootstrap
         }
       }
-    } catch {
+    }
+    catch {
       // Directory may not exist
     }
   }
@@ -280,19 +438,21 @@ export async function loadAutoImports() {
       if (file.endsWith('.d.ts') || file.endsWith('/index.ts')) continue
 
       const jobName = file.split('/').pop()?.replace('.ts', '') || ''
-      if (!jobName || loadedJobs.has(jobName) || protectedGlobals.has(jobName)) continue
+      if (!jobName || loadedJobs.has(jobName) || isProtectedGlobal(jobName)) continue
 
       try {
         const module = await import(file)
         if (module.default) {
-          (globalThis as any)[jobName] = module.default
+          Reflect.set(globalThis, jobName, module.default)
           loadedJobs.add(jobName)
         }
-      } catch {
+      }
+      catch {
         // Job may have unresolved dependencies during bootstrap
       }
     }
-  } catch {
+  }
+  catch {
     // Directory may not exist
   }
 
@@ -301,7 +461,7 @@ export async function loadAutoImports() {
   // Priority: user controllers > default controllers
   const controllerDirs = [
     path.userControllersPath(),
-    path.storagePath('framework/defaults/app/Controllers'),
+    path.defaultsPath('app/Controllers'),
   ]
   const loadedControllers = new Set<string>()
 
@@ -315,19 +475,21 @@ export async function loadAutoImports() {
         if (file.endsWith('.d.ts') || file.endsWith('/index.ts')) continue
 
         const controllerName = file.split('/').pop()?.replace('.ts', '') || ''
-        if (!controllerName || loadedControllers.has(controllerName) || protectedGlobals.has(controllerName)) continue
+        if (!controllerName || loadedControllers.has(controllerName) || isProtectedGlobal(controllerName)) continue
 
         try {
           const module = await import(file)
           if (module.default) {
-            (globalThis as any)[controllerName] = module.default
+            Reflect.set(globalThis, controllerName, module.default)
             loadedControllers.add(controllerName)
           }
-        } catch {
+        }
+        catch {
           // Controller may have unresolved dependencies during bootstrap
         }
       }
-    } catch {
+    }
+    catch {
       // Directory may not exist
     }
   }
@@ -347,12 +509,14 @@ if (!skipAutoImports) {
   await loadAutoImports()
 
   // Run package auto-discovery after all imports are loaded
-  try {
-    const actionsPackage = '@stacksjs/' + 'actions'
-    const { discoverPackages } = await import(actionsPackage)
-    await discoverPackages()
-  }
-  catch {
-    // Discovery may fail during early bootstrap — not critical
+  const actionsPackage = '@stacksjs/' + 'actions'
+  if (await belongsToThisProject(actionsPackage)) {
+    try {
+      const { discoverPackages } = await import(actionsPackage)
+      await discoverPackages()
+    }
+    catch {
+      // Discovery may fail during early bootstrap — not critical
+    }
   }
 }

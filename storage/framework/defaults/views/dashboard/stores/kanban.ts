@@ -28,6 +28,24 @@ interface CardComment {
   updatedAt: string | null
 }
 
+/**
+ * A file on a card. Today that is a screenshot from a feedback link
+ * (stacksjs/stacks#2872).
+ *
+ * `url` is signed and expires, because the bytes live on a private disk and
+ * there is no path a browser could fetch. It is null when one could not be
+ * minted, which is a listed attachment nobody can open and a different
+ * problem from a card with no attachment.
+ */
+interface CardAttachment {
+  id: number
+  uuid: string | null
+  mimeType: string
+  sizeBytes: number
+  createdAt: string | null
+  url: string | null
+}
+
 interface CardRecord {
   id: number
   uuid: string | null
@@ -41,8 +59,8 @@ interface CardRecord {
   archived: boolean
   createdAt: string | null
   updatedAt: string | null
-  // Optional pivot-derived fields. BoardShowAction populates them
-  // (Phase 3); CardStoreAction's optimistic insert leaves them empty.
+  // Optional pivot-derived fields. BoardShowAction populates them;
+  // CardStoreAction's optimistic insert leaves them empty.
   labels?: CardLabel[]
   assignees?: CardAssignee[]
 }
@@ -53,6 +71,7 @@ interface CardDetail extends CardRecord {
   labels: CardLabel[]
   assignees: CardAssignee[]
   comments: CardComment[]
+  attachments: CardAttachment[]
 }
 
 interface ColumnRecord {
@@ -89,10 +108,9 @@ interface BoardDetail {
 /**
  * Kanban dashboard store (stacksjs/stacks#1846).
  *
- * Phase 1 surface — list of boards for the index page plus the
- * fetch-by-id helper that the board detail page (Phase 2) will use.
- * Drag-and-drop reorder, write mutations, and label/assignee ops land
- * in Phase 2 / Phase 3.
+ * Lists boards for the index page and fetches a board for its detail page.
+ * Drag-and-drop reorder, write mutations, labels, assignees, and comments
+ * share this store so optimistic updates and rollback have one owner.
  *
  * Persistence: only the last-viewed board id is cached in
  * sessionStorage so the user lands back where they left off when they
@@ -108,9 +126,13 @@ export const kanbanStore = defineStore('kanban', () => {
   const loading = state(true)
   const loadingBoard = state(false)
   const error = state<string | null>(null)
+  // Why the last board delete failed. Kept apart from `error`, which means the
+  // board list could not load: a failed delete used to replace the whole list
+  // with "Couldn't load boards" (stacksjs/stacks#3217).
+  const deleteError = state<string | null>(null)
   const errorBoard = state<string | null>(null)
 
-  // Phase 3 — card detail modal state. Holding card + comments here
+  // Card detail modal state. Holding card + comments here
   // (instead of one of column.cards) keeps the modal independent of
   // its source: opening from a card click on the board uses the
   // already-loaded preview; refresh-mid-modal hits /cards/:id and
@@ -119,8 +141,13 @@ export const kanbanStore = defineStore('kanban', () => {
   const openCard = state<CardDetail | null>(null)
   const loadingCard = state(false)
   const errorCard = state<string | null>(null)
+  // The assignee picker's users: one bounded page of a server-side search
+  // (stacksjs/stacks#3216), and how many users matched it.
   const users = state<UserSummary[]>([])
+  const usersTotal = state(0)
+  const userSearch = state('')
   const loadingUsers = state(false)
+  let usersRequest = 0
 
   const hasBoards = derived(() => boards().length > 0)
 
@@ -174,14 +201,14 @@ export const kanbanStore = defineStore('kanban', () => {
     }
   }
 
-  // ─── Mutations (Phase 2) ───────────────────────────────────────────
+  // Mutations
   //
   // Every mutation follows the same shape:
   //   1. Apply optimistically — update the local store immediately so
   //      the UI feels snappy.
   //   2. Fire the network request.
   //   3. On failure, restore the pre-mutation snapshot + set an error
-  //      message. Phase 3 wires a toast helper into the rollback path
+  //      message. The dashboard toast helper handles the rollback path
   //      so the user actually sees the failure.
   //
   // The mutations return the new entity (or null on failure) so
@@ -206,6 +233,7 @@ export const kanbanStore = defineStore('kanban', () => {
 
   async function deleteBoard(id: number): Promise<boolean> {
     const snapshot = boards()
+    deleteError.set(null)
     // Optimistic remove.
     boards.set(snapshot.filter(b => b.id !== id))
     try {
@@ -214,7 +242,7 @@ export const kanbanStore = defineStore('kanban', () => {
     }
     catch (e) {
       boards.set(snapshot)
-      error.set(e instanceof Error ? e.message : String(e))
+      deleteError.set(e instanceof Error ? e.message : String(e))
       return false
     }
   }
@@ -360,7 +388,7 @@ export const kanbanStore = defineStore('kanban', () => {
     }
   }
 
-  // ─── Phase 3 mutations (card detail) ─────────────────────────────
+  // Card detail mutations
 
   /**
    * Helper: project a CardRecord (board view) onto a partial
@@ -374,7 +402,10 @@ export const kanbanStore = defineStore('kanban', () => {
       ...c,
       labels: c.labels ?? [],
       assignees: c.assignees ?? [],
-      comments: [], // hydrated by openCardDetail
+      // Both hydrated by openCardDetail. A signed URL cannot be seeded from
+      // the board view, which never carries one.
+      comments: [],
+      attachments: [],
     }
   }
 
@@ -401,6 +432,7 @@ export const kanbanStore = defineStore('kanban', () => {
         labels?: CardLabel[]
         assignees?: CardAssignee[]
         comments?: CardComment[]
+        attachments?: CardAttachment[]
         error?: string
       }>(`/api/dashboard/kanban/cards/${cardId}`)
       if (data.error || !data.card)
@@ -410,6 +442,7 @@ export const kanbanStore = defineStore('kanban', () => {
         labels: data.labels ?? [],
         assignees: data.assignees ?? [],
         comments: data.comments ?? [],
+        attachments: data.attachments ?? [],
       })
     }
     catch (e) {
@@ -468,18 +501,37 @@ export const kanbanStore = defineStore('kanban', () => {
     }
   }
 
-  async function loadUsers(): Promise<void> {
-    if (loadingUsers() || users().length > 0) return
+  /**
+   * The users matching `search` (name or email, ignoring case), newest request
+   * wins. It used to load the first 500 by name once and never search, so
+   * anyone past the 500th could not be assigned.
+   */
+  async function loadUsers(search = ''): Promise<void> {
+    const term = search.trim()
+    userSearch.set(term)
+    const request = ++usersRequest
     loadingUsers.set(true)
     try {
-      const data = await dashboardApi<{ users?: UserSummary[] }>('/api/dashboard/kanban/users')
+      const params = new URLSearchParams()
+      if (term)
+        params.set('q', term)
+      const suffix = params.toString()
+      const data = await dashboardApi<{ users?: UserSummary[], total?: number }>(`/api/dashboard/kanban/users${suffix ? `?${suffix}` : ''}`)
+      if (request !== usersRequest)
+        return
       users.set(data.users ?? [])
+      usersTotal.set(data.total ?? (data.users?.length ?? 0))
     }
     catch {
-      // Soft-fail — assignee picker just shows empty.
+      // Soft-fail: the picker shows no users rather than an error.
+      if (request === usersRequest) {
+        users.set([])
+        usersTotal.set(0)
+      }
     }
     finally {
-      loadingUsers.set(false)
+      if (request === usersRequest)
+        loadingUsers.set(false)
     }
   }
 
@@ -584,6 +636,43 @@ export const kanbanStore = defineStore('kanban', () => {
     }
   }
 
+  async function updateComment(commentId: number, body: string): Promise<boolean> {
+    const oc = openCard()
+    const trimmed = body.trim()
+    if (!oc || !trimmed) return false
+    const snapshot = oc.comments
+    const existing = snapshot.find(comment => comment.id === commentId)
+    if (!existing || existing.body === trimmed) return true
+
+    patchOpenCard({
+      comments: snapshot.map(comment => comment.id === commentId
+        ? { ...comment, body: trimmed }
+        : comment),
+    })
+    try {
+      const data = await dashboardApi<{ comment?: CardComment, error?: string }>(`/api/dashboard/kanban/comments/${commentId}`, {
+        method: 'PATCH',
+        body: { body: trimmed },
+      })
+      if (data.error || !data.comment)
+        throw new Error(data.error ?? 'Comment update failed')
+      const current = openCard()
+      if (current) {
+        patchOpenCard({
+          comments: current.comments.map(comment => comment.id === commentId
+            ? data.comment as CardComment
+            : comment),
+        })
+      }
+      return true
+    }
+    catch (error) {
+      patchOpenCard({ comments: snapshot })
+      errorCard.set(error instanceof Error ? error.message : String(error))
+      return false
+    }
+  }
+
   // ─── Label CRUD (board scope) ──────────────────────────────────────
 
   async function createLabel(input: { boardId: number, name: string, color?: string }): Promise<LabelRecord | null> {
@@ -640,6 +729,7 @@ export const kanbanStore = defineStore('kanban', () => {
     loading,
     loadingBoard,
     error,
+    deleteError,
     errorBoard,
     hasBoards,
     loadBoards,
@@ -652,11 +742,13 @@ export const kanbanStore = defineStore('kanban', () => {
     deleteCard,
     reorderCards,
     reorderColumns,
-    // Phase 3
+    // Card detail
     openCard,
     loadingCard,
     errorCard,
     users,
+    usersTotal,
+    userSearch,
     loadingUsers,
     openCardDetail,
     closeCardDetail,
@@ -665,6 +757,7 @@ export const kanbanStore = defineStore('kanban', () => {
     syncCardLabels,
     syncCardAssignees,
     addComment,
+    updateComment,
     deleteComment,
     createLabel,
     deleteLabel,

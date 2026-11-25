@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { webSidebarRoleMap } from '../../storage/framework/defaults/resources/functions/dashboard/sidebar'
 
 const layoutSource = readFileSync(
   resolve('storage/framework/defaults/views/dashboard/layouts/default.stx'),
@@ -8,6 +9,10 @@ const layoutSource = readFileSync(
 )
 const guestLayoutSource = readFileSync(
   resolve('storage/framework/defaults/views/dashboard/layouts/guest.stx'),
+  'utf8',
+)
+const notFoundSource = readFileSync(
+  resolve('storage/framework/defaults/resources/components/Dashboard/NotFoundDashboard.stx'),
   'utf8',
 )
 
@@ -20,6 +25,33 @@ describe('dashboard layout client architecture', () => {
     expect(guestLayoutSource).toStartWith('<!DOCTYPE html>')
     expect(guestLayoutSource).toContain('<main data-stx-content>')
     expect(guestLayoutSource).toContain('@yield(\'content\')')
+  })
+
+  test('leaves the traffic lights to the platform', () => {
+    // The window's buttons are AppKit's in every Craft window that is not
+    // frameless. The sidebar header draws none and reserves whatever room the
+    // host says they need — which is nothing in a browser, and nothing in a
+    // window that keeps them in a titlebar of their own.
+    expect(layoutSource).toContain('<SidebarHeader windowControls="native" />')
+    expect(layoutSource).not.toContain('showWindowControls')
+  })
+
+  test('renders the sidebar once and lends it to the mobile drawer', () => {
+    // A second Sidebar for the drawer rendered all its rows again on every
+    // page and doubled each page's first render (stacksjs/stacks#3177).
+    expect(layoutSource.match(/<Sidebar\s/g)?.length).toBe(1)
+    expect(layoutSource.match(/<SidebarHeader\s/g)?.length).toBe(1)
+    expect(layoutSource).toContain('<MobileSidebar @open="showSidebarInDrawer()" @close="returnSidebarFromDrawer()">')
+    // The component wrapper moves, not just the pane: the layout's itemClick
+    // listener is on the wrapper, so a bare pane never navigated.
+    expect(layoutSource).toContain("pane?.closest<HTMLElement>('[data-stx-component-wrapper]')")
+  })
+
+  test('returns missing dashboard routes to the canonical home route', () => {
+    expect(notFoundSource).toContain('<Button tag="a" href="/">')
+    expect(notFoundSource).toContain('<StxLink to="/"')
+    expect(notFoundSource).not.toContain('href="/dashboard"')
+    expect(notFoundSource).not.toContain('to="/dashboard"')
   })
 
   test('declares light and dark dashboard favicons in both shells', () => {
@@ -37,6 +69,27 @@ describe('dashboard layout client architecture', () => {
     expect(layoutSource).toContain('@itemClick="handleSidebarItemClick($event)"')
     expect(layoutSource).toContain('ensureCraftNativeSidebarMarker()')
     expect(layoutSource).toContain('data-dashboard-web-sidebar')
+  })
+
+  test('gives every native select the shared chevron, clear of the border', () => {
+    // The browser's own arrow sat flush against the right edge. One rule
+    // draws UI Select's glyph on every other single select, inset like UI
+    // Select's; UI Select opts out because it renders the icon itself.
+    const rule = layoutSource.slice(layoutSource.indexOf('select:not([multiple])'))
+    expect(rule.startsWith('select:not([multiple]):not([size]):not([data-ui-select]) {')).toBe(true)
+    const body = rule.slice(0, rule.indexOf('}'))
+    expect(body).toContain('appearance: none;')
+    expect(body).toContain("d='M18 9s-4.419 6-6 6s-6-6-6-6'")
+    expect(body).toContain('background-position: right 0.5rem center;')
+    expect(body).toContain('padding-right: 2rem;')
+
+    const select = readFileSync(resolve('storage/framework/defaults/resources/components/Dashboard/UI/Select.stx'), 'utf8')
+    expect(select).toMatch(/<select\s+data-ui-select\b/)
+    expect(select).toContain('i-hugeicons-arrow-down-01')
+  })
+
+  test('contains wide page content inside the dashboard shell', () => {
+    expect(layoutSource).toMatch(/\[data-stx-content\] \{[\s\S]*?overflow-x: hidden;/)
   })
 
   test('does not carry the legacy raw browser wiring', () => {
@@ -63,5 +116,48 @@ describe('dashboard layout client architecture', () => {
     expect(bootstrap).toContain("key: 'colorMode'")
     expect(bootstrap).toContain("attribute: 'color-mode'")
     expect(bootstrap).toContain("default: 'system'")
+  })
+
+  test('bridges appearance navigation metadata into the client controller explicitly', () => {
+    const appearance = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Settings/AppearanceSettingsDashboard.stx'),
+      'utf8',
+    )
+
+    expect(appearance).toContain('export const navSections = buildWebSidebarSections()')
+    expect(appearance).toContain('const sections = {{ navSections }}')
+    expect(appearance).not.toContain('const sections = navSections')
+  })
+
+  // The server-to-client bridge serializes what the server block publishes.
+  // The map was published as JSON.stringify(...), so it arrived as the JSON
+  // TEXT; Object.entries over a string yields index/character pairs, and
+  // `required.some` threw for every signed-in viewer before the filter ran
+  // (stacksjs/campushq vendored that copy). This runs the layout's own
+  // initializer and the client's iteration over what the bridge delivers.
+  test('publishes the sidebar role map as a map the client can iterate', () => {
+    const server = layoutSource.match(/<script server>([\s\S]*?)<\/script>/)?.[1] ?? ''
+    const initializer = server.match(/export const sidebarRoleMap\b[^=]*=\s*(webSidebarRoleMap\(sidebarSections\))/)?.[1]
+    expect(initializer).toBeDefined()
+
+    const js = new Bun.Transpiler({ loader: 'ts' }).transformSync(`export default (sidebarSections, webSidebarRoleMap) => (${initializer})`)
+    // eslint-disable-next-line no-new-func
+    const build = new Function(`${js.replace('export default', 'return')}`)() as (sections: unknown, roleMap: typeof webSidebarRoleMap) => unknown
+    const sections = [
+      { items: [{ id: 'users', roles: ['admin'] }, { id: 'home' }, { id: 'logs', roles: [] }] },
+      { items: [{ id: 'deploys', roles: ['admin', 'dev'] }] },
+    ]
+
+    const received = JSON.parse(JSON.stringify(build(sections, webSidebarRoleMap))) as unknown
+    expect(typeof received).toBe('object')
+    expect(received).toEqual({ users: ['admin'], deploys: ['admin', 'dev'] })
+
+    const roleList = ['dev']
+    const allowed = Object.entries(received as Record<string, string[]>)
+      .map(([itemId, required]) => [itemId, required.some(role => roleList.includes(role))])
+    expect(allowed).toEqual([['users', false], ['deploys', true]])
+
+    // Declared, so `typecheck:views` types the client's view of it.
+    expect(server).toContain('defineClientPayload({ sidebarRoleMap, sidebarSections })')
   })
 })

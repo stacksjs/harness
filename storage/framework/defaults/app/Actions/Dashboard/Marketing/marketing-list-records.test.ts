@@ -3,6 +3,7 @@ import {
   marketingListWriteData,
   normalizeMarketingLists,
   slugifyMarketingList,
+  validateMarketingListWriteData,
 } from './marketing-list-records'
 
 describe('marketing list records', () => {
@@ -64,8 +65,17 @@ describe('marketing list records', () => {
       slug: 'product-news',
       description: 'Weekly updates',
       status: 'active',
-      isPublic: 1,
-      doubleOptIn: 0,
+      isPublic: true,
+      doubleOptIn: false,
     })
+  })
+
+  test('rejects empty and oversized dashboard writes before model defaults apply', () => {
+    expect(validateMarketingListWriteData(marketingListWriteData({})))
+      .toBe('List name must be between 2 and 100 characters.')
+    expect(validateMarketingListWriteData(marketingListWriteData({
+      name: 'Product News',
+      description: 'x'.repeat(501),
+    }))).toBe('List description must be 500 characters or fewer.')
   })
 })

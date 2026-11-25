@@ -35,7 +35,11 @@ describe('dashboard button contract', () => {
 
     expect(existsSync(resolve('storage/framework/defaults/resources/components/Button.stx'))).toBe(false)
     expect(existsSync(resolve('storage/framework/defaults/resources/components/Buttons/BaseButton.stx'))).toBe(false)
-    expect(button).toContain('bg-gradient-to-b from-blue-500 to-blue-600')
+    // The variant colours live in functions/dashboard-button.ts, shared by
+    // the server render and the live `:variant` toggles (stacksjs/stacks#3180).
+    const variants = readFileSync(resolve('storage/framework/defaults/functions/dashboard-button.ts'), 'utf8')
+    expect(variants).toContain('bg-gradient-to-b from-blue-500 to-blue-600')
+    expect(button).toContain("import { buttonVariantClasses } from '../../../../functions/dashboard-button'")
     expect(button).toContain("variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'danger' | 'success' | 'warning'")
     expect(button).toContain("tag?: 'button' | 'a'")
     expect(button).toContain('class?: string')
@@ -43,6 +47,8 @@ describe('dashboard button contract', () => {
     expect(button).toContain('customClass,')
     expect(button).toContain("const liveDownload = useReactiveProp('download', '')")
     expect(button).toContain("const liveType = useReactiveProp('type', 'button')")
+    expect(button).toContain("const liveForm = useReactiveProp('form', '')")
+    expect(button.match(/:form="liveForm\(\) \|\| undefined"/g)).toHaveLength(2)
     expect(button).not.toContain('dataAction')
     expect(button).not.toContain('dataCloseModal')
     expect(button).not.toContain('dataEmailId')
@@ -64,7 +70,7 @@ describe('dashboard button contract', () => {
       'storage/framework/defaults/resources/components/Dashboard/Settings/AppearanceSettingsDashboard.stx',
       'storage/framework/defaults/resources/components/Dashboard/Ci/CiDashboard.stx',
       'storage/framework/defaults/resources/components/Dashboard/Kanban/KanbanBoardsDashboard.stx',
-      'storage/framework/defaults/resources/components/Dashboard/Kanban/KanbanBoardDashboard.stx',
+      'storage/framework/defaults/resources/components/Dashboard/Kanban/KanbanCardDialog.stx',
     ]
 
     for (const file of pressedStateFiles) {
@@ -98,7 +104,7 @@ describe('dashboard button contract', () => {
     ]
     const allowedStyledControls = [
       'aria-label="Close window"',
-      '@click="selectFile(file.name)"',
+      '@click="requestSelectFile(file.name)"',
     ]
 
     for (const file of files) {
@@ -187,7 +193,7 @@ describe('dashboard button contract', () => {
       'PaymentRefundDialog.stx',
       'Delivery/DeliveryOverviewDashboard.stx',
       'Delivery/ShippingMethodsDashboard.stx',
-      'Delivery/DriversDashboard.stx',
+      'Delivery/CouriersDashboard.stx',
       'Delivery/DeliveryRoutesDashboard.stx',
       'Delivery/LicenseKeysDashboard.stx',
       'Delivery/ShippingZonesDashboard.stx',
@@ -197,7 +203,7 @@ describe('dashboard button contract', () => {
       'Delivery/DeliveryRoutesTable.stx',
       'Delivery/LicenseKeysTable.stx',
       'Delivery/ShippingMethodsTable.stx',
-      'Delivery/DriversTable.stx',
+      'Delivery/CouriersTable.stx',
       'Delivery/ShippingZonesTable.stx',
       'Delivery/ShippingRatesTable.stx',
       'Delivery/DeliveryPagination.stx',
@@ -210,7 +216,13 @@ describe('dashboard button contract', () => {
       )
       const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
 
-      expect(source).toContain('<Button')
+      // `<Table` counts: a component that declares its row actions through
+      // `UI/Table`'s `rowActions` prop has no controls of its own, and Table
+      // renders those through `<Button>`. Table is itself held to this
+      // contract, in the shared-controls list below - its sort headers, column
+      // menu and pagination were four raw `<button>` elements until
+      // stacksjs/stacks#2926. See also stacksjs/stacks#2924.
+      expect(source).toMatch(/<(?:Button|ConfirmDialog|Table)\b/)
       expect(nativeButtons.every(button => button.includes('absolute inset-0 bg-black/45'))).toBe(true)
     }
   })
@@ -218,8 +230,10 @@ describe('dashboard button contract', () => {
   test('routes shared dashboard controls through the canonical component', () => {
     const files = [
       'UI/Pagination.stx',
-      'CreateRecordModal.stx',
+      'UI/Table.stx',
+      'Models/ModelRecordCreate.stx',
       'UI/Modal.stx',
+      'UI/Drawer.stx',
       'UI/ConfirmDialog.stx',
       'UI/EmptyState.stx',
       'Auth/ForgotPassword.stx',
@@ -234,11 +248,21 @@ describe('dashboard button contract', () => {
       'Marketing/CampaignsDashboard.stx',
       'Marketing/SocialPostsDashboard.stx',
       'Content/PostsDashboard.stx',
+      'Content/PostEditorDialog.stx',
       'Content/PagesDashboard.stx',
+      'Content/PageEditorDialog.stx',
       'Content/AuthorsDashboard.stx',
+      'Content/AuthorEditorDialog.stx',
       'Content/ContentTaxonomyDashboard.stx',
+      'Content/TaxonomyEditorDialog.stx',
+      'Content/BlogDashboard.stx',
+      'Content/BlogPostEditorDialog.stx',
       'Content/CommentsDashboard.stx',
       'Content/ContentDashboard.stx',
+      'Content/SeoEditorDialog.stx',
+      'Content/FileDetailsDrawer.stx',
+      'Content/CreateFolderDialog.stx',
+      'Content/FileUploadDialog.stx',
       'Notifications/NotificationDeliveryTable.stx',
       'Notifications/NotificationDeliveryDialog.stx',
       'Notifications/NotificationDeliveryHistory.stx',
@@ -246,6 +270,7 @@ describe('dashboard button contract', () => {
       'Notifications/NotificationDeliveryOverview.stx',
       'Billing/BillingSettings.stx',
       'Auth/AccessTokens.stx',
+      'Auth/AccessTokenCreateDialog.stx',
       'Infrastructure/DnsRecordDialog.stx',
       'Infrastructure/LogDetailsDialog.stx',
       'Infrastructure/MailboxDetailsDialog.stx',
@@ -258,8 +283,10 @@ describe('dashboard button contract', () => {
       'Infrastructure/ServerDetailsDashboard.stx',
       'Infrastructure/LogsDashboard.stx',
       'App/RequestsOverview.stx',
+      'App/RequestDetailsDialog.stx',
       'App/SourceInventory.stx',
       'Realtime/RealtimeDashboard.stx',
+      'Ci/CiRunHistoryDrawer.stx',
       'Queue/QueueDashboard.stx',
       'Jobs/JobTable.stx',
       'Jobs/JobDashboard.stx',
@@ -267,13 +294,15 @@ describe('dashboard button contract', () => {
       'Library/ComponentsDashboard.stx',
       'Library/DependenciesDashboard.stx',
       'Library/FunctionsDashboard.stx',
+      'Library/SourceScaffoldDialog.stx',
       'Library/PackagesDashboard.stx',
       'Analytics/AnalyticsPageHeader.stx',
       'Analytics/AnalyticsHub.stx',
       'Analytics/EventAnalytics.stx',
       'Buddy/BuddyAssistant.stx',
       'Models/ModelsOverview.stx',
-      'Data/DataRecords.stx',
+      'Management/AssignmentDrawer.stx',
+      'Data/ActivityLog.stx',
       'Releases/ReleaseDashboard.stx',
       'Teams/TeamPeopleDashboard.stx',
     ]
@@ -285,7 +314,9 @@ describe('dashboard button contract', () => {
       )
       const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
 
-      expect(source).toContain('<Button')
+      // `<Table` counts too: a table that declares its row actions through
+      // UI/Table renders them as Buttons there.
+      expect(source).toMatch(/<(?:Button|Modal|Drawer|Table)\b/)
       expect(nativeButtons.every(button => button.includes('inset-0'))).toBe(true)
     }
   })
@@ -301,7 +332,11 @@ describe('dashboard button contract', () => {
     )
 
     for (const source of [blog, seo]) {
-      expect(source).toContain('<Button')
+      // `<Table` counts, same as in the commerce list above: a component that
+      // declares its row actions through `UI/Table`'s `rowActions` prop has no
+      // controls of its own, and Table renders those through `<Button>`.
+      // `SeoDashboard` has no `<Button>` of its own since stacksjs/stacks#2925.
+      expect(source).toMatch(/<(?:Button|Table)\b/)
       expect(source).not.toMatch(/<button\b/)
     }
   })
@@ -311,6 +346,10 @@ describe('dashboard button contract', () => {
       resolve('storage/framework/defaults/resources/components/Dashboard/Management/PermissionsDashboard.stx'),
       'utf8',
     )
+    const drawer = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Management/AssignmentDrawer.stx'),
+      'utf8',
+    )
     const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
     const semanticControls = [
       "tabClass('roles')",
@@ -318,10 +357,12 @@ describe('dashboard button contract', () => {
       "tabClass('users')",
       "tabClass('matrix')",
       '@click="selectRole(role)"',
-      'fixed inset-0 w-full bg-black/50',
     ]
 
-    expect((source.match(/<Button/g) || []).length).toBeGreaterThanOrEqual(11)
+    expect(source).toContain('<AssignmentDrawer')
+    expect(source).not.toContain('fixed inset-0')
+    expect(drawer).toContain('<Drawer')
+    expect(drawer).toContain('<Button')
     expect(nativeButtons.every(button => semanticControls.some(marker => button.includes(marker)))).toBe(true)
   })
 
@@ -353,9 +394,15 @@ describe('dashboard button contract', () => {
       resolve('storage/framework/defaults/resources/components/Dashboard/Ci/CiDashboard.stx'),
       'utf8',
     )
+    const drawer = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Ci/CiRunHistoryDrawer.stx'),
+      'utf8',
+    )
     const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
 
-    expect(source).toContain('<Button variant="ghost" size="sm" iconOnly ariaLabel="Close run history"')
+    expect(source).toContain('<CiRunHistoryDrawer')
+    expect(source).not.toContain('fixed inset-0')
+    expect(drawer).toContain('<Drawer')
     expect(source).toContain(':aria-selected="String(activeTab() === org)"')
     expect(nativeButtons.every(button => button.includes('tabClass(') || button.includes('filterClass('))).toBe(true)
   })
@@ -365,9 +412,25 @@ describe('dashboard button contract', () => {
       resolve('storage/framework/defaults/resources/components/Dashboard/Models/ModelRecordsDashboard.stx'),
       'utf8',
     )
+    const editor = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Models/ModelRecordEdit.stx'),
+      'utf8',
+    )
+    const actions = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Models/ModelRecordActions.stx'),
+      'utf8',
+    )
     const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
 
-    expect((source.match(/<Button/g) || []).length).toBeGreaterThanOrEqual(12)
+    expect((source.match(/<Button/g) || []).length).toBeGreaterThanOrEqual(7)
+    expect(source).toContain('<ModelRecordActions')
+    // View, edit and delete, the eye offered on every row, and one more
+    // drawn per action the model lists under `dashboard.actions`.
+    expect((actions.match(/<Button/g) || []).length).toBe(4)
+    // Editing is a page of the record's own, not a dialog over the table.
+    expect(source).not.toContain('<EditRecordModal')
+    expect(editor).not.toContain('<Modal')
+    expect(editor).toContain('<Button type="submit" variant="primary"')
     expect(source).toContain('interaction="toggle"')
     expect(source).toContain('@click="goToPage(page() + 1)"')
     expect(source).toContain('@click="goToPage(lastPage())"')
@@ -383,17 +446,26 @@ describe('dashboard button contract', () => {
       resolve('storage/framework/defaults/resources/components/Dashboard/Kanban/KanbanBoardDashboard.stx'),
       'utf8',
     )
+    const cardDialog = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Kanban/KanbanCardDialog.stx'),
+      'utf8',
+    )
     const indexButtons = [...index.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
-    const detailButtons = [...detail.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
+    const detailSource = `${detail}\n${cardDialog}`
+    const detailButtons = [...detailSource.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
+    // The dialog reads its labels and assignees through the cardLabels() /
+    // cardAssignees() derived signals rather than reaching into openCard()
+    // twice. What this test guards is unchanged: every native button in the
+    // dialog still carries the aria that makes it a real control.
     const semanticDetailControls = [
       ':aria-label="\'Open \' + card.title"',
-      ':aria-pressed="String(openCard().labels.some',
-      ':aria-label="\'Use \' + c + \' label color\'"',
-      ':aria-pressed="String(openCard().assignees.some',
+      ':aria-pressed="String(cardLabels().some',
+      ':aria-label="\'Use \' + color + \' label color\'"',
+      ':aria-pressed="String(cardAssignees().some',
     ]
 
     expect((index.match(/<Button/g) || []).length).toBeGreaterThanOrEqual(4)
-    expect((detail.match(/<Button/g) || []).length).toBeGreaterThanOrEqual(17)
+    expect((detailSource.match(/<Button/g) || []).length).toBeGreaterThanOrEqual(17)
     expect(indexButtons.every(button => button.includes('colorButtonClass(c)'))).toBe(true)
     expect(detailButtons.every(button => semanticDetailControls.some(marker => button.includes(marker)))).toBe(true)
   })
@@ -403,18 +475,45 @@ describe('dashboard button contract', () => {
       resolve('storage/framework/defaults/resources/components/Dashboard/Content/FileManagerDashboard.stx'),
       'utf8',
     )
-    const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
+    const details = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Content/FileDetailsDrawer.stx'),
+      'utf8',
+    )
+    const folder = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Content/CreateFolderDialog.stx'),
+      'utf8',
+    )
+    const upload = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Content/FileUploadDialog.stx'),
+      'utf8',
+    )
+    const storagePanel = readFileSync(
+      resolve('storage/framework/defaults/resources/components/Dashboard/Content/FileStoragePanel.stx'),
+      'utf8',
+    )
+    const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g), ...storagePanel.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
     const semanticNavigation = [
       'navRowClass',
       'aria-label="Grid view"',
       'aria-label="List view"',
       ':aria-current',
       'class="flex items-center max-w-md',
-      'inset-0',
     ]
 
     expect((source.match(/<Button/g) || []).length).toBeGreaterThanOrEqual(6)
-    expect(source).toContain('<Button :if="selectedItem()?.url" tag="a" :href="selectedItem()?.url"')
+    expect(source).toContain('<FileDetailsDrawer')
+    expect(source).toContain('<CreateFolderDialog')
+    expect(source).toContain('<FileUploadDialog')
+    expect(source).toContain('<ConfirmDialog')
+    expect(source).not.toContain('fixed inset-0')
+    expect(source).not.toContain('fixed inset-y-0')
+    expect(storagePanel).not.toContain('fixed inset')
+    expect(source).toMatch(/<Drawer :isOpen="storageDrawerOpen\(\)"[^>]*>\s*<FileStoragePanel /)
+    expect(storagePanel).toContain('<Button :disabled="busy()" fullWidth @click="emit(\'upload\')">')
+    expect(details).toContain('<Drawer')
+    expect(details).toContain('<Button :if="item()?.url" tag="a" :href="item()?.url"')
+    expect(folder).toContain('<Modal')
+    expect(upload).toContain('<Modal')
     expect(source).not.toMatch(/<a\b[^>]*bg-blue-/)
     expect(nativeButtons.every(button => semanticNavigation.some(marker => button.includes(marker)))).toBe(true)
   })
@@ -434,8 +533,16 @@ describe('dashboard button contract', () => {
 
       expect(source).toContain('<Button')
       expect(source).not.toMatch(/<StxLink\b[^>]*bg-blue-/)
-      if (file === 'ServersDashboard.stx')
-        expect(source).toContain('<Button tag="a" :href="selectedDetailsPath()"')
+      if (file === 'ServersDashboard.stx') {
+        const inspector = readFileSync(
+          resolve('storage/framework/defaults/resources/components/Dashboard/Infrastructure/ServerInspectorDialog.stx'),
+          'utf8',
+        )
+        expect(source).toContain('<ServerInspectorDialog')
+        expect(source).not.toContain('fixed inset-0')
+        expect(inspector).toContain('<Modal')
+        expect(inspector).toContain('<Button tag="a" :href="detailsPath()"')
+      }
       expect(nativeButtons.every(button => button.includes(':for=') && button.includes('@click="inspect'))).toBe(true)
     }
 
@@ -455,14 +562,14 @@ describe('dashboard button contract', () => {
       resolve('storage/framework/defaults/resources/components/Dashboard/Monitoring/ErrorTable.stx'),
       'utf8',
     )
-    const nativeButtons = [...source.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
-
-    expect((source.match(/<Button/g) || []).length).toBe(4)
-    expect(nativeButtons.every(button =>
-      button.includes("nextSort('")
-      || button.includes("emit('row-click', error)"),
-    )).toBe(true)
-
+    // On UI/Table: sorting is Table's own header buttons and the row actions,
+    // details included, are declared and rendered as Buttons there, so the
+    // component has no native button left to keep semantic.
+    expect(source).toMatch(/<Table(?=[\s/>])/)
+    expect(source).not.toMatch(/<button\b/)
+    for (const action of ['view', 'resolve', 'ignore', 'unresolve', 'delete'])
+      expect(source).toContain(`action: '${action}'`)
+    expect(source).toContain("emit(payload.action === 'view' ? 'row-click' : payload.action, payload.row)")
   })
 
   test('keeps email navigation semantic while sharing compose and message actions', () => {

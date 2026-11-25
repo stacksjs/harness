@@ -52,7 +52,6 @@ export interface JobListFilters {
 
 export interface JobShowResponse {
   job: DashboardJob | null
-  error?: string
 }
 
 export async function fetchJobs(filters: JobListFilters = {}): Promise<JobListResponse> {
@@ -145,4 +144,18 @@ export function useJobs() {
     retryJob: retryOneJob,
     retryFailedJobs: retryAllFailedJobs,
   }
+}
+
+export interface JobDefinition {
+  name: string
+  description: string
+  queue: string
+  tries: number
+  timeout: number | null
+  schedule: string
+  enabled: boolean
+}
+
+export async function fetchJobDefinitions(): Promise<{ data: JobDefinition[] }> {
+  return dashboardApi<{ data: JobDefinition[] }>('/api/dashboard/jobs/definitions')
 }

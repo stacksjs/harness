@@ -1,6 +1,6 @@
 ---
 name: stacks-events
-description: Use when working with the event system in a Stacks application — dispatching events, listening for events, model events, wildcard listeners, the event emitter, or event-driven architecture. Covers @stacksjs/events, app/Events.ts, app/Listener.ts, and app/Listeners/.
+description: Use when working with the event system in a Stacks application - dispatching events, listening for events, model events, wildcard listeners, the event emitter, or event-driven architecture. Covers @stacksjs/events, app/Events.ts, app/Listener.ts, and app/Listeners/.
 license: MIT
 compatibility: Bun >= 1.3.0, TypeScript
 allowed-tools: Read Edit Write Bash Grep Glob
@@ -8,221 +8,106 @@ allowed-tools: Read Edit Write Bash Grep Glob
 
 # Stacks Events
 
-Tiny (~200b) functional event emitter based on mitt, with Stacks-specific model events and action-based listener resolution.
+Use the native event bus for process-local application and model events. Use
+`stacks-realtime` for network broadcasting and `stacks-queue` for durable work.
 
-## Key Paths
-- Core package: `storage/framework/core/events/src/index.ts` (single file -- entire implementation)
-- Application events: `app/Events.ts`
-- Listener setup: `app/Listener.ts`
-- Listeners: `app/Listeners/`
-- Event types: `storage/framework/types/events.ts`
+## Dispatch and completion
 
-## Core mitt Implementation (index.ts)
+`@stacksjs/events` exports `dispatch`, `dispatchAsync`,
+`dispatchAndCollect`, `listen`, `once`, `off` and `emitter`.
 
-The entire event system is a single `mitt()` factory function that returns an `Emitter<Events>` object:
+- `dispatch(name, payload)` invokes handlers immediately and returns void.
+  Async handlers continue without blocking the caller; errors are logged.
+- `await dispatchAsync(name, payload)` awaits matching handlers in sequence.
+  Rejections are logged and appear as undefined results, so this does not prove
+  that every handler succeeded.
+- `await dispatchAndCollect(name, payload)` returns a result for each handler:
+  `{ ok: true, value }` or `{ ok: false, error }`. Inspect failures when
+  downstream work determines the response.
 
-```typescript
-export default function mitt<Events>(all?: EventHandlerMap<Events>): Emitter<Events>
-```
+Payloadless events are supported by the emitter. Exact handlers receive the
+payload; wildcard and glob handlers receive `(eventName, payload)`. In a glob,
+`*` is any run of characters and `.` any one character (`*.created` matches
+`user:created`); every other character is literal.
 
-### Emitter Interface
-```typescript
-interface Emitter<Events> {
-  all: EventHandlerMap<Events>  // Map<keyof Events | '*', Handler[]>
+`emitter.on(name, handler, { priority })` sorts higher priorities first
+within each handler bucket. A priority belongs to that one registration, so
+one handler can run first for one event and last for another. Equal priority
+preserves registration order.
+Exact handlers run before glob buckets, then `*` handlers. Snapshotting keeps
+subscription changes during a dispatch from corrupting iteration.
 
-  on<Key>(type: Key, handler: Handler<Events[Key]>): void
-  on(type: '*', handler: WildcardHandler<Events>): void
+## Typed application events
 
-  off<Key>(type: Key, handler?: Handler<Events[Key]>): void
-  off(type: '*', handler?: WildcardHandler<Events>): void
+`StacksEvents` combines built-in auth events and the augmentable
+`AppEvents` interface. Declare an application event before dispatching it:
 
-  emit<Key>(type: Key, event?: Events[Key]): void
+~~~ts
+import { dispatch, listen } from '@stacksjs/events'
+
+declare module '@stacksjs/events' {
+  interface AppEvents {
+    'invoice:settled': { id: number, total: number }
+  }
 }
-```
 
-### How emit() Works
-1. Gets handlers array from `all.get(type)` -- calls each with `handler(event)`
-2. Gets wildcard handlers from `all.get('*')` -- calls each with `handler(type, event)`
-3. Handlers are called via `.slice()` copy to avoid mutation during iteration
-4. Each handler is wrapped in try-catch with `console.error` logging
-5. Error in one handler does NOT prevent other handlers from executing
-6. Both type-matched AND wildcard handlers run (wildcards run second)
-7. If `event` is `undefined`, handlers are NOT called
-
-### on() / off() Behavior
-- `on(type, handler)`: pushes to handlers array (creates array if first handler)
-- `off(type, handler)`: splices handler from array by index
-- `off(type)` (no handler): replaces handlers array with empty `[]`
-- Handler maps use `Map<string, Array<Handler>>` internally
-
-## Stacks Event System Exports
-
-The package creates a single `mitt<StacksEvents>()` instance and exports multiple aliases:
-
-```typescript
-import { dispatch, listen, off, emitter, events, useEvent, useListen, useEvents, all } from '@stacksjs/events'
-
-// Dispatch an event
-dispatch('user:registered', { id: 1, email: 'user@example.com' })
-
-// Listen for an event
-listen('user:registered', (data) => {
-  console.log('New user:', data.email)
+listen('invoice:settled', invoice => {
+  console.log(invoice.id, invoice.total)
 })
+dispatch('invoice:settled', { id: 1, total: 1200 })
+~~~
 
-// Wildcard listener (catches ALL events)
-listen('*', (type, data) => {
-  console.log(`Event ${type}:`, data)
-})
+Built-in auth names include `user:registered`, `user:logged-in`,
+`user:logged-out`, `user:password-reset` and `user:password-changed`.
+Read their payload types from `core/events/src/index.ts` rather than guessing.
 
-// Remove a specific listener
-off('user:registered', handler)
+## Application listeners
 
-// Direct emitter access
-emitter.on('event', handler)
-emitter.off('event', handler)
-emitter.emit('event', data)
-emitter.all  // Map of all handlers
-```
+`app/Events.ts` default-exports `defineEvents({ event: [listenerName] })`.
+Names resolve against application listeners, application actions, then framework
+defaults. A standalone module in `app/Listeners/` may instead default-export
+`defineListener({ listensTo, handle })`. Its handler is `(payload, eventName)`,
+including for a glob subscription, because the discovery layer adapts the bus.
 
-### Export Aliases
-| Export | Maps To |
-|--------|---------|
-| `dispatch` | `emitter.emit` |
-| `useEvent` | `emitter.emit` (alias for `dispatch`) |
-| `listen` | `emitter.on` |
-| `useListen` | `emitter.on` (alias for `listen`) |
-| `off` | `emitter.off` |
-| `emitter` | the mitt instance |
-| `events` | the mitt instance (alias for `emitter`) |
-| `useEvents` | the mitt instance (alias for `emitter`) |
-| `all` | `emitter.all` (the handler Map) |
-| `mitt` | the factory function itself |
+`registerAppListeners()` loads both conventions at boot and deduplicates each
+event/module pair. `injectGlobalAutoImports()` calls it for HTTP, CLI, scheduler
+and seeding entrypoints. `app/Listener.ts` may call the same registration hook.
+Adding a listener requires a process restart. See `stacks-listeners` for files.
 
-### Type Aliases
-```typescript
-type Dispatch = <Key extends keyof StacksEvents>(type: Key, event: StacksEvents[Key]) => void
-type Listen = <Key extends keyof StacksEvents>(type: Key, handler: Handler<StacksEvents[Key]>) => void
-type Off = <Key extends keyof StacksEvents>(type: Key, handler?: Handler<StacksEvents[Key]>) => void
-```
+## Model lifecycle
 
-## Built-in Event Types (StacksEvents)
+`traits.observe` opts a model into lifecycle events. Before events are
+`saving`, `creating`, `updating` and `deleting`; after events are
+`created`, `updated`, `deleted` and `saved`. Names lowercase the model
+name, for example `teammember:saved`.
 
-```typescript
-interface StacksEvents extends ModelEvents, Record<EventType, unknown> {
-  'user:registered': Record<string, any>
-  'user:logged-in': Record<string, any>
-  'user:logged-out': Record<string, any>
-  'user:password-reset': Record<string, any>
-  'user:password-changed': Record<string, any>
-}
-```
+Before handlers receive the model object, with its row under `.attributes`;
+returning exactly false cancels the write. After handlers receive the row.
+The ORM awaits the before-event result; that is separate from ordinary
+fire-and-forget application dispatch. See `stacks-models` and `stacks-orm`
+for which writes emit hooks, bulk operations and transaction boundaries.
+Model event types derive from the models barrel in
+`storage/framework/types/model-events.d.ts`.
 
-The `Record<EventType, unknown>` intersection allows arbitrary event names beyond the declared ones.
+## Isolation and cleanup
 
-## Model Events
+`createEmitter<EventMap>()` creates an isolated emitter; the compatibility
+`mitt`/default export is its alias. The application singleton uses a global
+symbol so duplicate installed copies share the same bus in one process.
+It is not cross-process messaging.
 
-Every model with `observe: true` trait (in defineModel) emits via `afterCreate`/`afterUpdate`/`afterDelete` hooks:
-- `'{model}:created'` -- after insert
-- `'{model}:updated'` -- after update
-- `'{model}:deleted'` -- after delete
+`once` removes its listener after the first invocation. `off(name, handler)`
+removes by identity; `off(name)` clears that bucket.
+`emitter.removeAllListeners(name?)` removes a bucket or all listeners;
+`listenerCount(name)` counts only the exact bucket, not matching patterns.
+`scopedEvents(prefix)` and `scope(emitter, prefix)` provide prefixed names
+without creating another bus. Read their prefix composition in the source
+before combining them with an application's named events.
 
-Model name is lowercased: `'user:created'`, `'post:updated'`, `'order:deleted'`
+## Source and verification
 
-Events are dispatched via lazy `import('@stacksjs/events').then(({ dispatch }) => dispatch(...))` to avoid circular dependencies. If the import fails (e.g., browser context), errors are silently caught.
-
-The `observe` trait can be:
-- `true` -- emits all three events (create, update, delete)
-- `['create', 'update']` -- emits only specified events
-- `false` / undefined -- no events
-
-Full model list (45+ with events defined in `storage/framework/types/events.ts`):
-Author, Page, Post, User, Activity, Campaign, Cart, CartItem, Category, Comment, Coupon, Customer, DeliveryRoute, DigitalDelivery, Driver, EmailList, GiftCard, LicenseKey, LoyaltyPoint, LoyaltyReward, Manufacturer, Notification, Order, OrderItem, Payment, PrintDevice, Product, ProductUnit, ProductVariant, Receipt, Review, ShippingMethod, ShippingRate, ShippingZone, SocialPost, Subscription, Tag, TaxRate, Transaction, WaitlistProduct, WaitlistRestaurant, Websocket
-
-## Event-to-Listener Mapping (app/Events.ts)
-
-```typescript
-import type { Events } from '@stacksjs/types'
-
-export default {
-  'user:registered': ['SendWelcomeEmail'],
-  'user:created': ['NotifyUser'],
-} satisfies Events
-```
-
-Keys are event names (must match StacksEvents keys). Values are arrays of **Action names** -- these correspond to files in `app/Actions/`.
-
-## Listener Resolution (app/Listener.ts)
-
-The `handleEvents()` function sets up the entire event-to-action pipeline:
-
-### Setup
-```typescript
-export async function handleEvents() {
-  emitter.on('*', listenEvents as WildcardHandler<StacksEvents>)
-}
-```
-Subscribes a single wildcard handler that intercepts ALL events.
-
-### Event Processing Flow
-1. **Fast path**: `eventTypes` Set (pre-computed from `Object.keys(events)`) provides O(1) lookup. Events not in the map are skipped immediately.
-2. **Listener resolution**: For each listener name in the array, `resolveAction(listener)` is called:
-   - Checks `actionCache` Map (in-memory module cache)
-   - Checks `pendingImports` Map (deduplicates concurrent imports of the same action)
-   - Dynamically imports `app/Actions/{listener}.ts`
-   - Validates the module exports a `handle(event)` method
-   - Caches the resolved module in `actionCache`
-3. **Execution**: `processListeners()` iterates listeners sequentially (`for...of`), awaiting each action's `handle(event)` method
-4. **Error handling**: Errors are caught per-listener via `handleError()` from `@stacksjs/error-handling` -- one listener failure does not prevent others
-
-### Caching Details
-```typescript
-const actionCache = new Map<string, { handle: (event: any) => Promise<any> | any }>()
-const pendingImports = new Map<string, Promise<...>>()
-const eventTypes = new Set(Object.keys(events))  // pre-computed at module load
-```
-
-- `actionCache`: stores resolved action modules permanently
-- `pendingImports`: prevents double-importing when multiple events fire simultaneously for the same listener
-- `eventTypes`: O(1) lookup to skip events with no registered listeners
-
-### Listener Type Support
-The listener can also be a function (not just a string):
-```typescript
-if (typeof listener === 'function') {
-  await listener(event)
-  continue
-}
-```
-
-## Implementation Details
-
-### Thread Safety
-- mitt handlers are stored in arrays -- `emit()` calls `.slice()` before iterating to safely handle additions/removals during iteration
-- Wildcard handler registration happens once in `handleEvents()` -- the single handler routes all events
-
-### Synchronous vs Asynchronous
-- **mitt itself is synchronous**: `emit()` calls handlers directly, does not await them
-- **Listener resolution is asynchronous**: `processListeners()` uses `async/await` for dynamic imports and action execution
-- The wildcard handler in `app/Listener.ts` calls `processListeners()` as fire-and-forget (no await) since mitt doesn't support async wildcard handlers
-
-### Memory
-- The emitter is a module-level singleton -- created once at import time
-- Action modules are cached permanently in `actionCache` -- hot-reloading new actions requires server restart
-- The `pendingImports` Map entries are cleaned up in the `finally` block of each import
-
-## Gotchas
-- Events are functional, not class-based -- no need to create event classes
-- The emitter is a **singleton** -- shared across the entire application process
-- Wildcard `'*'` listeners receive `(type, event)` -- regular handlers receive just `(event)`
-- Listeners in `app/Events.ts` are **Action names** (strings), not file paths or handler functions
-- The action module must export a default with a `handle(event)` method
-- Event dispatch via mitt is **synchronous** but listener action resolution (dynamic import) is **asynchronous**
-- Model events only fire when the model has `observe: true` (or array) trait set
-- The event system is ~200 bytes total -- it is intentionally minimal
-- Listener caching means hot-reloading new actions requires server restart
-- If `evt` is `undefined`, handlers are NOT called (mitt checks `if (evt !== undefined)`)
-- The `'*'` event type cannot be manually emitted -- it only receives forwarded events
-- `off(type)` without a handler argument clears ALL handlers for that type (sets to empty array, not delete)
-- The `StacksEvents` interface extends `Record<EventType, unknown>` allowing any string as an event name
-- Error logging in mitt uses `console.error` (not `@stacksjs/logging`) to avoid circular dependencies
+- Public API and async behavior: `storage/framework/core/events/src/index.ts`.
+- Discovery and typed listener adapters: `core/events/src/discover.ts`.
+- Retained tests: `native-emitter.test.ts`, `priority-and-collect.test.ts`,
+  `scope.test.ts`, `register.test.ts`, `shared-emitter.test.ts` under
+  `storage/framework/core/events/tests/`.

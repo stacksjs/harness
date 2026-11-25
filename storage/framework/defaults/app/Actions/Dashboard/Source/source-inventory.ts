@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, join, relative } from 'node:path'
+import { frameworkDefaultsRoot } from '@stacksjs/path'
 
 export interface SourceInventoryItem {
   name: string
@@ -50,8 +51,12 @@ export function parseCommandSource(
   modifiedAt = '',
 ): SourceInventoryItem {
   const command = source.match(/\.command\(\s*['"`]([^'"`]+)['"`]\s*(?:,\s*['"`]([^'"`]+)['"`])?/)
-  const sourceAliases = [...source.matchAll(/\.alias\(\s*['"`]([^'"`]+)['"`]\s*\)/g)].map(match => match[1])
-  const options = [...source.matchAll(/\.option\(\s*['"`]([^'"`]+)['"`]/g)].map(match => match[1])
+  const sourceAliases = [...source.matchAll(/\.alias\(\s*['"`]([^'"`]+)['"`]\s*\)/g)]
+    .map(match => match[1])
+    .filter((alias): alias is string => alias !== undefined)
+  const options = [...source.matchAll(/\.option\(\s*['"`]([^'"`]+)['"`]/g)]
+    .map(match => match[1])
+    .filter((option): option is string => option !== undefined)
 
   return {
     name: command?.[1] || registeredSignature,
@@ -67,7 +72,7 @@ export function parseCommandSource(
 export async function discoverActionSources(projectRoot: string): Promise<SourceInventoryItem[]> {
   const roots: SourceRoot[] = [
     {
-      directory: join(projectRoot, 'storage/framework/defaults/app/Actions'),
+      directory: join(frameworkDefaultsRoot(projectRoot), 'app/Actions'),
       origin: 'Framework',
     },
     {

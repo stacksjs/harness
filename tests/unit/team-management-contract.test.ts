@@ -14,22 +14,27 @@ describe('team management contract', () => {
     expect(member).toContain("table: 'team_members'")
     expect(member).toContain("uri: 'team-members'")
     expect(member).toContain("routes: ['index', 'store', 'show', 'update', 'destroy']")
-    expect(member).toContain("middleware: ['auth']")
+    expect(member).toContain("middleware: ['auth', 'team']")
     expect(member).toContain("columns: ['team_id', 'user_id']")
     expect(member).toContain('unique: true')
 
     expect(invitation).toContain("table: 'team_invitations'")
     expect(invitation).toContain("uri: 'team-invitations'")
     expect(invitation).toContain("routes: ['index', 'show', 'destroy']")
-    expect(invitation).toContain("middleware: ['auth']")
+    expect(invitation).toContain("middleware: ['auth', 'team']")
     expect(invitation).toContain('tokenHash:')
     expect(invitation).toContain('hidden: true')
+    expect(invitation).toContain("name: 'team_invitations_pending_key_unique'")
+    expect(invitation).toContain('pendingKey:')
   })
 
   test('ships model-generated migrations for both team tables', () => {
     const memberMigration = source('database/migrations/0000000163-create-team_members-table.sql')
     const invitationMigration = source('database/migrations/0000000162-create-team_invitations-table.sql')
     const countBackfill = source('database/migrations/0000000166-sync-team-member-counts.sql')
+    const pendingKeyColumn = source('database/migrations/1785502251837-alter-team_invitations-columns.sql')
+    const pendingKeyBackfill = source('database/migrations/1785502251838-backfill-team-invitation-pending-keys.sql')
+    const pendingKeyIndex = source('database/migrations/1785502251839-create-team_invitations_pending_key_unique-index-in-team_invitations.sql')
 
     expect(memberMigration).toContain('CREATE TABLE IF NOT EXISTS "team_members"')
     expect(memberMigration).toContain('REFERENCES "teams"("id")')
@@ -42,6 +47,10 @@ describe('team management contract', () => {
     expect(invitationMigration).toContain('UNIQUE INDEX')
     expect(countBackfill).toContain('COUNT(*)')
     expect(countBackfill).toContain('"team_members"."status" = \'active\'')
+    expect(pendingKeyColumn).toContain('ADD COLUMN "pending_key" TEXT')
+    expect(pendingKeyBackfill).toContain("SET \"pending_key\" = CAST(\"team_id\" AS TEXT) || ':' || LOWER(TRIM(\"email\"))")
+    expect(pendingKeyBackfill).toContain('SELECT MAX("id")')
+    expect(pendingKeyIndex).toContain('CREATE UNIQUE INDEX IF NOT EXISTS "team_invitations_pending_key_unique"')
   })
 
   test('connects dashboard management and secure invitation acceptance routes', () => {
@@ -62,6 +71,71 @@ describe('team management contract', () => {
     expect(acceptance).toContain("where('status', '=', 'pending')")
     expect(acceptance).toContain('token_hash: hashInvitationToken(generateInvitationToken())')
     expect(revocation).toContain('token_hash: hashInvitationToken(generateInvitationToken())')
+  })
+
+  test('keeps invitation creation, acceptance, and membership counts atomic', () => {
+    const invite = source('storage/framework/defaults/app/Actions/Dashboard/Teams/TeamInviteAction.ts')
+    const acceptance = source('storage/framework/defaults/app/Actions/Teams/AcceptInvitationAction.ts')
+    const memberUpdate = source('storage/framework/defaults/app/Actions/Dashboard/Teams/TeamMemberUpdateAction.ts')
+    const memberDestroy = source('storage/framework/defaults/app/Actions/Dashboard/Teams/TeamMemberDestroyAction.ts')
+    const memberCount = source('storage/framework/defaults/app/Actions/Dashboard/Teams/team-member-count.ts')
+
+    expect(invite).toContain('await db.transaction(async (rawTrx) => {')
+    expect(invite).toContain("where('token_hash', '=', tokenHash)")
+    expect(invite).toContain('pending_key: pendingKey')
+    expect(invite).toContain('isUniqueViolation(error)')
+    expect(invite).toContain("where('token_hash', '=', String(pending.token_hash))")
+    expect(invite).toContain('changedRows(expired) !== 1')
+    expect(acceptance).toContain('await db.transaction(async (rawTrx) => {')
+    expect(acceptance).toContain("where('token_hash', '=', tokenHash)")
+    expect(acceptance).toContain("where('status', '=', 'pending')")
+    expect(acceptance).toContain('pending_key: null')
+    expect(acceptance).toContain('await syncTeamMemberCount(teamId, trx)')
+    expect(memberUpdate).toContain('await db.transaction(async (rawTrx) => {')
+    expect(memberUpdate).toContain('await syncTeamMemberCount(teamId, trx)')
+    expect(memberUpdate).toContain("where('role', '!=', 'owner')")
+    // The member is locked before the checks, and the UPDATE's affected-row
+    // count is deliberately not read: MySQL reports rows CHANGED, so an
+    // idempotent save counted 0 and was refused as a conflict (#2639). The
+    // lock is what makes dropping the count safe; team-state-writes.test.ts
+    // shows a concurrent ownership transfer is otherwise reported as success.
+    expect(memberUpdate).toContain('lookup = lookup.lockForUpdate()')
+    expect(memberUpdate).toContain('if (!sqlHelpers(getDatabaseDialect()).isSqlite)')
+    expect(memberUpdate).not.toContain('changedRows(')
+    expect(memberDestroy).toContain('await db.transaction(async (rawTrx) => {')
+    expect(memberDestroy).toContain('await syncTeamMemberCount(teamId, trx)')
+    expect(memberDestroy).toContain("where('role', '!=', 'owner')")
+    expect(memberDestroy).toContain('changedRows(deleted) !== 1')
+    expect(memberDestroy).toContain("throw new TeamStateConflictError('The team member changed before they could be removed.')")
+    expect(memberCount).toContain('Number.isSafeInteger(count)')
+    expect(memberCount).toContain('sql`count(*) as count`')
+    expect(source('storage/framework/defaults/app/Actions/Dashboard/Teams/team-records.ts')).toContain('record.numDeletedRows')
+  })
+
+  test('makes invitation delivery and revocation race safe without persisting provider errors', () => {
+    const delivery = source('storage/framework/defaults/app/Actions/Dashboard/Teams/team-invitation-delivery.ts')
+    const resend = source('storage/framework/defaults/app/Actions/Dashboard/Teams/TeamInvitationResendAction.ts')
+    const revocation = source('storage/framework/defaults/app/Actions/Dashboard/Teams/TeamInvitationDestroyAction.ts')
+    const people = source('storage/framework/defaults/app/Actions/Dashboard/Teams/TeamPeopleIndexAction.ts')
+    const publicInvitation = source('storage/framework/defaults/app/Actions/Teams/ShowInvitationAction.ts')
+    const invitationMail = source('storage/framework/defaults/app/Mail/TeamInvitation.ts')
+
+    expect(delivery).toContain("where('token_hash', '=', input.tokenHash)")
+    expect(delivery).toContain("recordDeliveryFailure(input, 'APP_URL is not configured.')")
+    expect(delivery).toContain("teamOperationalIssue(error, 'Email delivery failed.'")
+    expect(delivery).not.toContain('error instanceof Error ? error.message')
+    expect(resend).toContain("team_invitations.token_hash as token_hash")
+    expect(resend).toContain("where('token_hash', '=', String(invitation.token_hash))")
+    expect(resend).toContain('changedRows(result) !== 1')
+    expect(resend).toContain('isUniqueViolation(error)')
+    expect(revocation).toContain("where('status', '=', 'pending')")
+    expect(revocation).toContain("where('token_hash', '=', String(invitation.token_hash))")
+    expect(revocation).toContain('changedRows(result) !== 1')
+    expect(revocation).toContain('pending_key: null')
+    expect(people).toContain('await Promise.all([')
+    expect(people).toContain('teamOperationalError(error')
+    expect(publicInvitation).toContain('teamOperationalError(error')
+    expect(invitationMail).toContain('mail.sendOrFail({')
   })
 
   test('renders team management through a reusable STX component and canonical buttons', () => {

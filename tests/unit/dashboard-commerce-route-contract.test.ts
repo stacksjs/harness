@@ -42,9 +42,8 @@ describe('dashboard commerce route contract', () => {
       expect(action).toContain('model: Customer')
       expect(action).toContain('await request.validate()')
       expect(action).toContain('toSnakeCaseKeys({')
-      expect(action).toContain("request.get('totalSpent')")
-      expect(action).toContain("request.get('lastOrder')")
-      expect(action).toContain("request.get('avatar')")
+      expect(action).toContain("request.only(['name', 'email', 'phone', 'totalSpent', 'status', 'avatar'])")
+      expect(action).toContain("request.get('lastOrder') && { lastOrder: request.get('lastOrder') }")
     }
 
     expect(storeAction).not.toContain('user_id: 1')

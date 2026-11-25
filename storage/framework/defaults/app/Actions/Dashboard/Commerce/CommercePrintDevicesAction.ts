@@ -1,27 +1,23 @@
-import { Action } from '@stacksjs/actions'
-import { PrintDevice } from '@stacksjs/orm'
-import { response } from '@stacksjs/router'
-import { normalizePrintDeviceRecord, summarizePrintDevices } from './print-device-records'
+import { Action } from '@stacksjs/actions/runtime'
+import { dashboardOperationalError } from '../dashboard-response'
+import { readPrintDevices } from './commerce-print-device-list'
 
+/**
+ * `GET /api/dashboard/commerce/print-devices` - every print device, read whole (commerce-print-device-list.ts,
+ * stacksjs/stacks#3218). This used to send the newest 500.
+ */
 export default new Action({
   name: 'CommercePrintDevicesAction',
-  description: 'Returns persisted PrintDevice records for dashboard management.',
+  description: 'Returns every persisted PrintDevice record for dashboard management.',
   method: 'GET',
   apiResponse: true,
 
   async handle() {
     try {
-      const devices = await PrintDevice.orderByDesc('id').limit(500).get()
-      const records = devices.map(normalizePrintDeviceRecord)
-      return {
-        records,
-        summary: summarizePrintDevices(records),
-      }
+      return await readPrintDevices()
     }
     catch (error) {
-      return response.json({
-        message: error instanceof Error ? error.message : 'Print device records could not be read.',
-      }, 503)
+      return dashboardOperationalError(error, 'Print device records could not be read.', 'CommercePrintDevicesAction')
     }
   },
 })

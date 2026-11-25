@@ -1,6 +1,6 @@
 ---
 name: stacks-api
-description: Use when building, modifying, or debugging API endpoints in a Stacks application — defining routes, handling requests, API middleware, working with the API server, HTTP client (fetcher), API resources, or OpenAPI generation. Covers both @stacksjs/api utilities and the stacks-api server implementation.
+description: Use when building, modifying, or debugging API endpoints in a Stacks application - defining routes, handling requests, API middleware, working with the API server, HTTP client (fetcher), API resources, or OpenAPI generation. Covers both @stacksjs/api utilities and the stacks-api server implementation.
 license: MIT
 compatibility: Bun >= 1.3.0, TypeScript
 allowed-tools: Read Edit Write Bash Grep Glob
@@ -80,7 +80,9 @@ The dev server watches these directories for changes and auto-reloads:
 - `app/Actions/` -- invalidates module cache, hot-reloads actions
 - `app/Controllers/` -- invalidates module cache, hot-reloads controllers
 - `app/Middleware/` -- invalidates module cache, hot-reloads middleware
-- `app/Models/` (user models) -- triggers `buddy generate:model-files`
+- `app/Models/` (user models) -- regenerates the model artifacts (there is no
+  `generate:model-files` command; the dev server does this itself, and
+  `buddy generate:types` is the manual equivalent)
 
 Production build: `bun build.ts` bundles `dev.ts` to `dist/dev.js`.
 
@@ -220,17 +222,20 @@ response.json({ message: 'OK' })
 response.json(data, { status: 200, headers: { 'X-Custom': 'value' }, pretty: true })
 
 // Status shortcuts
-response.created({ id: 1 })              // 201
+response.success(data, 'Saved')          // 200, { success: true, data, message }
+response.created({ id: 1 })              // 201, { success: true, data }
 response.noContent()                      // 204
-response.badRequest({ error: 'Bad' })     // 400
-response.unauthorized()                   // 401 (default: { error: 'Unauthorized' })
-response.forbidden()                      // 403 (default: { error: 'Forbidden' })
-response.notFound()                       // 404 (default: { error: 'Not Found' })
-response.error()                          // 500 (default: { error: 'Internal Server Error' })
+response.badRequest('Bad', errors?)       // 400
+response.unauthorized()                   // 401
+response.forbidden()                      // 403
+response.notFound()                       // 404
+response.validationError(errors)          // 422
+response.error('Conflict', 409)           // (message, status = 400, errors?)
+response.serverError()                    // 500
 
 // Other content types
-response.text('Hello', { status: 200 })
-response.html('<h1>Hello</h1>')
+response.text('Hello', 200)
+response.view('<h1>Hello</h1>')           // HTML; there is no response.html()
 response.redirect('/new-url', 302)        // 301 | 302 | 303 | 307 | 308
 ```
 
@@ -311,7 +316,7 @@ export default new Middleware({
       throw error
     }
     // Set authenticated user on request
-    ;(request as any)._authenticatedUser = user
+    request._authenticatedUser = user
   },
 })
 ```
@@ -340,9 +345,96 @@ route.get('/admin', handler).middleware('abilities:admin,write')
 // Params accessible in middleware via: (request as any)._middlewareParams.abilities === 'admin,write'
 ```
 
+## Which client to reach for
+
+Stacks has three, and they answer different questions. Pick by who is calling.
+
+| Caller | Client | Why |
+|---|---|---|
+| TypeScript in this repo or a workspace package | **Typed client** (below) | Full input/output inference with **no generation step**. Change a route, the call site stops compiling. |
+| Anything that is not TypeScript here - native iOS/Android via the Craft bridge, third-party integrators, Swagger UI | **Generated REST client** (`buddy generate:openapi`) | Needs a real spec. That pipeline is unchanged and permanent. |
+| One-off calls to any URL | **`Fetcher`** (below) | No route awareness, and none intended. |
+
+The first two are both permanent. This is not a migration off REST.
+
+## Typed client (zero generation)
+
+Register routes with `createTypedRouter()` and the compiler can see both ends —
+no `buddy generate:openapi`, no committed file to go stale.
+
+```typescript
+// routes/api.ts
+import IndexAction from '../app/Actions/Project/IndexAction'
+import StoreAction from '../app/Actions/Project/StoreAction'
+import { createTypedRouter } from '@stacksjs/router'
+
+export const api = createTypedRouter()
+  .get('/v1/projects', IndexAction)
+  .get('/v1/projects/{id}', ShowAction)
+  .post('/v1/projects', StoreAction, { middleware: 'auth' })
+
+export type AppRoutes = typeof api
+```
+
+```typescript
+// any TypeScript consumer
+import type { AppRoutes } from '../routes/api'
+import { createTypedClient } from '@stacksjs/router'
+
+const client = createTypedClient<AppRoutes>({ baseUrl: 'https://api.example.com' })
+
+const projects = await client.get('/v1/projects')
+const one = await client.get('/v1/projects/{id}', { params: { id: '42' } })
+const created = await client.post('/v1/projects', { name: 'apollo', budget: 1200 })
+```
+
+An unknown path is a compile error. A body that does not match the action's
+`validations` is a compile error. The result is the action's own return type.
+
+**How it infers.** Input comes from the action's `validations` — the same object
+the validator runs, so the two cannot drift. Output comes from `handle`'s return
+type. An action returning a `Response` or a stream is typed `unknown`, honestly:
+it took over the wire format.
+
+**Per-route settings are an argument**, not a chained call — chaining
+`.middleware()` would return the route and lose the accumulated type:
+
+```typescript
+.post('/v1/projects', StoreAction, {
+  middleware: ['auth', 'can:create,project'],
+  name: 'projects.store',
+  skipCsrf: true,
+  rateLimit: { max: 10, window: 'minute' },
+})
+```
+
+**No `.group()`.** A prefix applied only at runtime makes every accumulated path
+type wrong; one applied only in the type is a second place for the URL to live.
+Write the full path.
+
+**The string form is untouched.** `route.get('/x', 'Actions/Foo')` stays exactly
+as it is — lazy import, hot-reload friendly — and simply produces no inferred
+types. A route wanting inference opts in by using the builder instead. Routes
+registered either way still land in the generated OpenAPI document.
+
+**Generated CRUD.** A `useApi` model's endpoints are describable too, without
+touching them:
+
+```typescript
+import type { ApiRoutesFor } from '@stacksjs/orm'
+import type Product from '../app/Models/Product'
+
+type AppRoutes = RoutesOf<typeof api> & ApiRoutesFor<typeof Product>
+await client.get('/api/products')  // typed listing envelope
+```
+
+The builder, the client and the route-map contract all live in
+`@stacksjs/bun-router` and are re-exported by `@stacksjs/router`. Import
+`createTypedClient` from `@stacksjs/bun-router` directly in a browser bundle.
+
 ## Fetcher (HTTP Client)
 
-A fluent HTTP client for making API requests:
+A fluent HTTP client for ad hoc requests, with no route awareness:
 
 ```typescript
 import { fetcher } from '@stacksjs/api'
@@ -710,6 +802,13 @@ Models with `traits.useApi` automatically get CRUD routes via ORM actions:
 | PUT/PATCH | `/api/{model}/{id}` | Generated update | 200 |
 | DELETE | `/api/{model}/{id}` | Generated destroy | 204 |
 
+Which `useApi` models get these routes is `security.api.models` in
+`config/security.ts` (`'own'` by default, `'all'`, `'none'`, or a list of model
+names that may include `'own'`), overridden by `STACKS_MODEL_APIS`. The ~80
+framework models publish nothing by default (#2954); an app that uses one
+names it, `['own', 'Product']`, or sets `'all'`. The OpenAPI schemas follow
+the same selection.
+
 Generated store and update handlers accept declared `fillable` attributes and
 the foreign-key attributes derived from `belongsTo`. For example,
 `belongsTo: ['Product', 'Customer']` accepts `productId` / `product_id` and
@@ -718,7 +817,9 @@ the foreign-key attributes derived from `belongsTo`. For example,
 ## CLI Commands
 
 - `buddy dev` -- starts the API server with hot-reload
-- `buddy generate:api-types` -- regenerates API TypeScript types from OpenAPI spec
+- `buddy generate:types` -- regenerates the API TypeScript types and server
+  declarations (there is no `generate:api-types`)
+- `buddy generate:openapi-spec` -- regenerates the OpenAPI spec those types come from
 
 ## Gotchas
 
@@ -741,3 +842,12 @@ the foreign-key attributes derived from `belongsTo`. For example,
 - CORS headers (`Access-Control-Allow-Origin: http://localhost:5173`) are only added in development mode for error responses
 - Body parsing happens once per request (tracked via `_bodyParsed` flag) -- JSON, URL-encoded, and multipart/form-data are all supported
 - `response.json()` catches circular reference errors and returns `{ error: 'Response data could not be serialized' }` instead of throwing
+
+## Sharing an authorized operation across transports
+
+`defineApiOperation({ authorize, handle })` from `@stacksjs/api/operation` returns
+an immutable operation with `execute(context)`. Every execution awaits authorize
+before invoking handle. Authenticate the context at each transport boundary;
+keep scope and resource-ownership checks in the operation and its domain helpers.
+This lets HTTP routes, native MCP tools and jobs share behavior without an HTTP
+loopback or a second implementation of the same business rules.

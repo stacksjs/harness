@@ -1,8 +1,11 @@
-import { Action } from '@stacksjs/actions'
-import { existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
-import process from 'node:process'
+import { Action } from '@stacksjs/actions/runtime'
+import { overridesReady } from '@stacksjs/config'
 import { countRows } from '../../../../resources/functions/dashboard/data'
+import { dashboardOperationalError, dashboardOperationalIssue } from '../dashboard-response'
+import { dashboardModelSources, resolveDashboardModel } from '../../../../resources/functions/dashboard/model-access'
+import { resolveDashboardIcon } from '../../../../resources/functions/dashboard/sidebar'
+import { isUnmigratedTable } from './model-migration'
+import { modelApiConfiguration } from './model-api'
 
 /**
  * `GET /api/dashboard/models` (stacksjs/stacks#1838).
@@ -22,6 +25,7 @@ import { countRows } from '../../../../resources/functions/dashboard/data'
  */
 interface ModelRow {
   name: string
+  icon: string
   table: string
   href: string
   count: number | null
@@ -30,6 +34,8 @@ interface ModelRow {
   source: 'userland' | 'framework'
   apiUri: string
   apiRoutes: string[]
+  /** False when the model's table does not exist yet. Its count is `null`, and it is not an error. */
+  migrated: boolean
   error: string | null
 }
 
@@ -38,6 +44,12 @@ interface ModelGroup {
   label: string
   models: ModelRow[]
   countLabel: string
+}
+
+interface DiscoveredModel {
+  name: string
+  file: string
+  source: 'userland' | 'framework'
 }
 
 function pascalToSnake(s: string): string {
@@ -54,29 +66,10 @@ function pluralize(word: string): string {
   return `${word}s`
 }
 
-function walkModels(dir: string, recursive: boolean): Array<{ name: string, file: string }> {
-  const out: Array<{ name: string, file: string }> = []
-  if (!existsSync(dir))
-    return out
-
-  const entries = readdirSync(dir, { withFileTypes: true })
-  for (const ent of entries) {
-    const full = join(dir, ent.name)
-    if (ent.isDirectory()) {
-      if (recursive) out.push(...walkModels(full, true))
-      continue
-    }
-    if (!ent.name.endsWith('.ts')) continue
-    if (ent.name.startsWith('_') || ent.name === 'index.ts' || ent.name === 'README.ts') continue
-    out.push({ name: ent.name.replace('.ts', ''), file: full })
-  }
-  return out
-}
-
 function categorize(model: { source: 'userland' | 'framework', file: string }): string {
   if (model.source === 'userland') return 'userland'
   const segs = model.file.split('/Models/')[1]?.split('/') ?? []
-  if (segs.length > 1) return segs[0].toLowerCase()
+  if (segs.length > 1 && segs[0]) return segs[0].toLowerCase()
   return 'framework'
 }
 
@@ -91,94 +84,126 @@ function categoryLabel(k: string): string {
   return k === 'userland' ? 'Your Models' : k.charAt(0).toUpperCase() + k.slice(1)
 }
 
+function unavailableModelRow(model: DiscoveredModel, error: string): ModelRow {
+  return {
+    name: model.name,
+    icon: resolveDashboardIcon('table'),
+    table: pluralize(pascalToSnake(model.name)),
+    href: `/models/${pascalToKebab(model.name)}`,
+    count: null,
+    attributeCount: 0,
+    category: categorize(model),
+    source: model.source,
+    apiUri: '',
+    apiRoutes: [],
+    migrated: true,
+    error,
+  }
+}
+
 export default new Action({
   name: 'Dashboard Models Index',
   description: 'List every model + live record count for the dashboard models overview.',
   method: 'GET',
   apiResponse: true,
   async handle() {
-    const cwd = process.cwd()
-    const userlandDir = join(cwd, 'app', 'Models')
-    const defaultsDir = join(cwd, 'storage/framework/defaults/app/Models')
-
-    const userland = walkModels(userlandDir, false)
-    const defaults = walkModels(defaultsDir, true)
-
-    const seen = new Set<string>()
-    const merged: Array<{ name: string, file: string, source: 'userland' | 'framework' }> = []
-    for (const list of [userland, defaults]) {
-      for (const m of list) {
-        if (seen.has(m.name)) continue
-        seen.add(m.name)
-        merged.push({ ...m, source: list === userland ? 'userland' : 'framework' })
-      }
+    await overridesReady
+    let merged: DiscoveredModel[]
+    // Listed once, and handed to every resolve below.
+    let sources: ReturnType<typeof dashboardModelSources>
+    try {
+      sources = dashboardModelSources()
+      merged = sources.map(model => ({
+        name: model.name,
+        file: model.file,
+        source: model.origin === 'framework' ? 'framework' : 'userland',
+      }))
+    }
+    catch (error) {
+      return dashboardOperationalError(error, 'Model catalog could not be loaded.', 'ModelsIndexAction.catalog')
     }
 
-    const enriched = await Promise.all(merged.map(async (m): Promise<ModelRow> => {
+    const candidates = await Promise.all(merged.map(async (m): Promise<ModelRow | null> => {
       let Model: any
       try {
         const module = await import(m.file)
-        Model = module.default ?? module
+        Model = await resolveDashboardModel(m.name, module.default ?? module, sources)
+        if (!Model) return null
       }
       catch (error) {
-        return {
-          name: m.name,
-          table: pluralize(pascalToSnake(m.name)),
-          href: `/models/${pascalToKebab(m.name)}`,
-          count: null,
-          attributeCount: 0,
-          category: categorize(m),
-          source: m.source,
-          apiUri: '',
-          apiRoutes: [],
-          error: error instanceof Error ? error.message : String(error),
-        }
+        return unavailableModelRow(
+          m,
+          dashboardOperationalIssue(error, 'Model definition could not be loaded.', `ModelsIndexAction.import.${m.name}`),
+        )
       }
 
-      const api = Model.traits?.useApi
+      let api: ReturnType<typeof modelApiConfiguration>
+      try {
+        api = modelApiConfiguration(Model)
+      }
+      catch (error) {
+        return unavailableModelRow(
+          m,
+          dashboardOperationalIssue(error, 'Model metadata could not be loaded.', `ModelsIndexAction.metadata.${m.name}`),
+        )
+      }
+      const table = String(Model.table || pluralize(pascalToSnake(m.name)))
       let count: number | null = null
       let error: string | null = null
+      let migrated = true
       try {
         count = await countRows(Model)
       }
       catch (cause) {
-        error = cause instanceof Error ? cause.message : String(cause)
+        // A table that was never migrated is reported as that, without logging
+        // a driver error for it on every visit to this page.
+        if (await isUnmigratedTable(table))
+          migrated = false
+        else
+          error = dashboardOperationalIssue(cause, 'Model count could not be loaded.', `ModelsIndexAction.count.${m.name}`)
       }
 
       return {
         name: m.name,
-        table: String(Model.table || pluralize(pascalToSnake(m.name))),
+        icon: resolveDashboardIcon(Model.dashboard?.icon ?? 'table'),
+        table,
         href: `/models/${pascalToKebab(m.name)}`,
         count,
         attributeCount: Object.keys(Model.attributes || {}).length,
         category: categorize(m),
         source: m.source,
-        apiUri: typeof api === 'object' && typeof api.uri === 'string' ? `/api/${api.uri}` : '',
-        apiRoutes: typeof api === 'object' && Array.isArray(api.routes) ? api.routes.map(String) : [],
+        apiUri: api.uri ? `/api/${api.uri}` : '',
+        apiRoutes: api.routes,
+        migrated,
         error,
       }
     }))
 
+    const enriched = candidates.filter((model): model is ModelRow => model !== null)
     enriched.sort((a, b) => a.name.localeCompare(b.name))
 
     const totalModels = enriched.length
     const totalRecords = enriched.reduce((sum, m) => sum + (m.count ?? 0), 0)
     const userlandCount = enriched.filter(m => m.source === 'userland').length
     const unavailableModels = enriched.filter(m => m.error !== null).length
+    const unmigratedModels = enriched.filter(m => !m.migrated).length
 
-    const groupMap: Record<string, ModelRow[]> = {}
+    const groupMap = new Map<string, ModelRow[]>()
     for (const m of enriched) {
-      if (!groupMap[m.category]) groupMap[m.category] = []
-      groupMap[m.category].push(m)
+      const bucket = groupMap.get(m.category) ?? []
+      bucket.push(m)
+      groupMap.set(m.category, bucket)
     }
 
-    const categoryGroups: ModelGroup[] = Object.keys(groupMap)
-      .sort((a, b) => categoryOrder(a) - categoryOrder(b))
-      .map(key => ({
+    // A Map rather than a plain object: every read here is by a key that was
+    // just written, and an index signature makes the compiler doubt all four.
+    const categoryGroups: ModelGroup[] = [...groupMap.entries()]
+      .sort(([a], [b]) => categoryOrder(a) - categoryOrder(b))
+      .map(([key, models]) => ({
         key,
         label: categoryLabel(key),
-        models: groupMap[key],
-        countLabel: `${groupMap[key].length} model${groupMap[key].length === 1 ? '' : 's'}`,
+        models,
+        countLabel: `${models.length} model${models.length === 1 ? '' : 's'}`,
       }))
 
     return {
@@ -186,6 +211,7 @@ export default new Action({
       totalRecords,
       userlandCount,
       unavailableModels,
+      unmigratedModels,
       categoryGroups,
     }
   },

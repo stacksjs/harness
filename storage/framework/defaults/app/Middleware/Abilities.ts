@@ -36,7 +36,10 @@ export default new Middleware({
       throw new HttpError(401, 'Unauthenticated.')
     }
 
-    const tokenAbilities: string[] = token.abilities || []
+    // `scopes`, which every token row carries: the Auth middleware stamps a
+    // `PersonalAccessToken`, whose `abilities` copy them, and
+    // `currentAccessToken()` the plain row, which has no `abilities` at all.
+    const tokenAbilities: readonly string[] = Array.isArray(token.scopes) ? token.scopes : []
 
     // Wildcard grants all permissions
     if (tokenAbilities.includes('*')) {

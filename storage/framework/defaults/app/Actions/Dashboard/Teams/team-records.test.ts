@@ -15,6 +15,7 @@ describe('team records', () => {
     expect(parsePositiveId('42')).toBe(42)
     expect(parsePositiveId('0')).toBeNull()
     expect(parsePositiveId('4.2')).toBeNull()
+    for (const value of [true, false, {}, [], Number.MAX_SAFE_INTEGER + 1]) expect(parsePositiveId(value)).toBeNull()
     expect(normalizeInvitationEmail('  Teammate@Example.COM ')).toBe('teammate@example.com')
     expect(normalizeInvitationEmail('not-an-email')).toBeNull()
     expect(normalizeInvitationRole(' ADMIN ')).toBe('admin')
@@ -25,6 +26,8 @@ describe('team records', () => {
     expect(changedRows({ changes: 1 })).toBe(1)
     expect(changedRows({ affectedRows: 2 })).toBe(2)
     expect(changedRows([{ numUpdatedRows: 3n }])).toBe(3)
+    expect(changedRows({ numDeletedRows: 4n })).toBe(4)
+    expect(changedRows({ numInsertedRows: 5n })).toBe(5)
     expect(changedRows(null)).toBe(0)
   })
 

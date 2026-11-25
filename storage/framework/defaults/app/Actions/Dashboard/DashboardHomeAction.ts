@@ -1,25 +1,39 @@
-import { Action } from '@stacksjs/actions'
-import { Order, Post, Product, Request, User } from '@stacksjs/orm'
+import { Action } from '@stacksjs/actions/runtime'
+import { feature } from '@stacksjs/config'
+import { Order, Product, User } from '@stacksjs/orm'
 import { checkApplicationHealth, type ApplicationHealthCheck } from '@stacksjs/router'
-import { formatRelative, safeGet } from '../../../resources/functions/dashboard/data'
+import { formatRelative, loadModel, safeGet } from '../../../resources/functions/dashboard/data'
+import { dashboardOperationalIssue } from './dashboard-response'
 
-interface HttpRequestSample {
-  duration: number
-  status: number
+/** Totals over every captured request, counted by the database. */
+export interface HttpRequestTotals {
+  total: number
+  /** 2xx and 3xx responses. */
+  successful: number
+  /** 4xx and 5xx responses. */
+  failed: number
+  /** Mean `duration_ms`, or 0 with no requests. */
+  averageDuration: number
 }
 
-export function summarizeHttpRequests(total: number, requests: HttpRequestSample[]) {
-  const successful = requests.filter(request => request.status >= 200 && request.status < 400).length
-  const failed = requests.filter(request => request.status >= 400).length
-  const averageDuration = requests.length > 0
-    ? Math.round(requests.reduce((sum, request) => sum + request.duration, 0) / requests.length)
-    : 0
+/**
+ * The Home page's request cards, over all captured requests.
+ *
+ * The rates and the average used to come from the newest 1,000 rows, fetched
+ * whole on every visit and averaged here, while the cards beside them said
+ * "All captured requests" and the Requests page counted every row. So the two
+ * pages disagreed, and the rates' labels did not say they were a sample. Every
+ * card now reads the same totals the Requests page does.
+ */
+export function summarizeHttpRequests(totals: HttpRequestTotals) {
+  const { total, successful, failed } = totals
+  const rate = (count: number) => total > 0 ? `${((count / total) * 100).toFixed(1)}%` : 'N/A'
 
   return [
     { title: 'HTTP Requests', value: total.toLocaleString(), detail: 'All captured requests', icon: 'i-hugeicons-global' },
-    { title: 'Average Response', value: `${averageDuration}ms`, detail: `Latest ${requests.length.toLocaleString()} requests`, icon: 'i-hugeicons-clock-01' },
-    { title: 'Success Rate', value: requests.length > 0 ? `${((successful / requests.length) * 100).toFixed(1)}%` : 'N/A', detail: '2xx and 3xx responses', icon: 'i-hugeicons-checkmark-circle-02' },
-    { title: 'Error Rate', value: requests.length > 0 ? `${((failed / requests.length) * 100).toFixed(1)}%` : 'N/A', detail: '4xx and 5xx responses', icon: 'i-hugeicons-alert-02' },
+    { title: 'Average Response', value: `${Math.round(totals.averageDuration)}ms`, detail: 'All captured requests', icon: 'i-hugeicons-clock-01' },
+    { title: 'Success Rate', value: rate(successful), detail: '2xx and 3xx responses', icon: 'i-hugeicons-checkmark-circle-02' },
+    { title: 'Error Rate', value: rate(failed), detail: '4xx and 5xx responses', icon: 'i-hugeicons-alert-02' },
   ]
 }
 
@@ -28,7 +42,7 @@ export function serializeHealthCheck(name: string, check: ApplicationHealthCheck
     name: name.charAt(0).toUpperCase() + name.slice(1),
     status: check.ok ? 'healthy' : 'critical',
     latency: `${check.ms}ms`,
-    detail: check.message || '',
+    detail: check.ok ? '' : 'Dependency probe failed.',
   }
 }
 
@@ -43,9 +57,48 @@ function issue(source: string, result: PromiseSettledResult<unknown>) {
   return result.status === 'rejected'
     ? {
         source,
-        message: result.reason instanceof Error ? result.reason.message : 'Query failed.',
+        message: dashboardOperationalIssue(
+          result.reason,
+          `${source} data could not be loaded.`,
+          `DashboardHomeAction.${source.toLowerCase().replaceAll(' ', '-')}`,
+        ),
       }
     : null
+}
+
+/**
+ * Run each query inside the promise, so one that throws before returning one -
+ * `Product.count()` when commerce is off, where the model is not loaded and
+ * `count` is undefined - is a rejected entry rather than a 500 for the page.
+ * `Promise.allSettled([Product.count(), ...])` evaluated every call first.
+ */
+export function settleEach<T extends readonly (() => unknown)[]>(queries: T): Promise<{ [K in keyof T]: PromiseSettledResult<Awaited<ReturnType<T[K]>>> }> {
+  return Promise.allSettled(queries.map(query => Promise.resolve().then(query))) as never
+}
+
+type Settled = PromiseSettledResult<unknown>
+
+/**
+ * The headline numbers. Products, revenue and orders are commerce's, so with
+ * commerce off they are left out rather than shown as "Unavailable" - there is
+ * nothing to be unavailable.
+ */
+export function homeStats(
+  results: { users: Settled, products?: Settled, revenue?: Settled, orders?: Settled },
+  commerce: boolean,
+): Array<{ label: string, value: string, color: string }> {
+  const value = (result: Settled | undefined, format: (raw: unknown) => string) =>
+    result?.status === 'fulfilled' ? format(result.value) : 'Unavailable'
+
+  const stats = [{ label: 'Total Users', value: value(results.users, String), color: 'blue' }]
+  if (commerce) {
+    stats.push(
+      { label: 'Products', value: value(results.products, String), color: 'green' },
+      { label: 'Revenue', value: value(results.revenue, raw => `$${Number(raw || 0).toLocaleString()}`), color: 'orange' },
+      { label: 'Orders', value: value(results.orders, String), color: 'red' },
+    )
+  }
+  return stats
 }
 
 export default new Action({
@@ -54,46 +107,55 @@ export default new Action({
   method: 'GET',
 
   async handle() {
-    const modelResults = await Promise.allSettled([
-      User.count(),
-      Product.count(),
-      Order.count(),
-      Post.count(),
-      Order.sum('totalAmount'),
-      Order.orderBy('created_at', 'desc').limit(5).get(),
-      User.orderBy('created_at', 'desc').limit(5).get(),
-      Request.count(),
-      Request.orderBy('created_at', 'desc').limit(1000).get(),
-    ])
-    const health = await checkApplicationHealth()
-
+    const commerce = feature('commerce')
+    const none = async () => null
+    const healthResult = settleEach([() => checkApplicationHealth()] as const)
     const [
       userCount,
       productCount,
       orderCount,
-      postCount,
       totalRevenue,
       recentOrders,
       recentUsers,
-      requestCount,
-      recentRequests,
-    ] = modelResults
+      requestMetrics,
+    ] = await settleEach([
+      () => User.count(),
+      commerce ? () => Product.count() : none,
+      commerce ? () => Order.count() : none,
+      commerce ? () => Order.sum('totalAmount') : none,
+      commerce ? () => Order.orderBy('created_at', 'desc').limit(5).get() : async () => [],
+      () => User.orderBy('created_at', 'desc').limit(5).get(),
+      async () => {
+        // A standalone developer dashboard may be open with the app's public
+        // dashboard bundle off. Resolve the persisted model from its source.
+        const Requests = await loadModel('Request')
+        const [total, successful, failed, averageDuration] = await Promise.all([
+          () => Requests.count(),
+          () => Requests.where('status_code', '>=', 200).where('status_code', '<', 400).count(),
+          () => Requests.where('status_code', '>=', 400).count(),
+          () => Requests.avg('duration_ms'),
+        ].map(query => Promise.resolve().then(query)))
+        return summarizeHttpRequests({ total: Number(total), successful: Number(successful), failed: Number(failed), averageDuration: Number(averageDuration ?? 0) })
+      },
+    ] as const)
 
-    const stats = [
-      { label: 'Total Users', value: userCount.status === 'fulfilled' ? String(userCount.value) : 'Unavailable', color: 'blue' },
-      { label: 'Products', value: productCount.status === 'fulfilled' ? String(productCount.value) : 'Unavailable', color: 'green' },
-      { label: 'Revenue', value: totalRevenue.status === 'fulfilled' ? `$${Number(totalRevenue.value || 0).toLocaleString()}` : 'Unavailable', color: 'orange' },
-      { label: 'Orders', value: orderCount.status === 'fulfilled' ? String(orderCount.value) : 'Unavailable', color: 'red' },
-    ]
+    const stats = homeStats({ users: userCount, products: productCount, revenue: totalRevenue, orders: orderCount }, commerce)
 
-    const httpMetrics = requestCount.status === 'fulfilled' && recentRequests.status === 'fulfilled'
-      ? summarizeHttpRequests(requestCount.value, recentRequests.value.map(request => ({
-        duration: Number(request.get('duration_ms')) || 0,
-        status: Number(request.get('status_code')) || 500,
-      })))
-      : summarizeHttpRequests(0, [])
+    const httpMetrics = requestMetrics.status === 'fulfilled' ? requestMetrics.value : []
 
-    const services = Object.entries(health.checks).map(([name, check]) => serializeHealthCheck(name, check))
+    const [health] = await healthResult
+    const services = health.status === 'fulfilled'
+      ? Object.entries(health.value.checks).map(([name, check]) => {
+          if (!check.ok) {
+            dashboardOperationalIssue(
+              check.message,
+              'Dependency probe failed.',
+              `DashboardHomeAction.health.${name}`,
+            )
+          }
+          return serializeHealthCheck(name, check)
+        })
+      : []
 
     const activities = [
       ...(recentOrders.status === 'fulfilled' ? recentOrders.value : []).map((order: any) => ({
@@ -123,11 +185,35 @@ export default new Action({
         status: activity.status,
       }))
 
-    const sources = ['Users', 'Products', 'Orders', 'Posts', 'Revenue', 'Recent orders', 'Recent users', 'Request count', 'Recent requests']
-    const issues = modelResults
-      .map((result, index) => issue(sources[index], result))
+    const sources: Array<[string, PromiseSettledResult<unknown>]> = [
+      ['Users', userCount],
+      ['Products', productCount],
+      ['Orders', orderCount],
+      ['Revenue', totalRevenue],
+      ['Recent orders', recentOrders],
+      ['Recent users', recentUsers],
+      ['HTTP metrics', requestMetrics],
+    ]
+    const issues = sources
+      .map(([source, result]) => issue(source, result))
       .filter((entry): entry is { source: string, message: string } => entry !== null)
+    if (health.status === 'rejected') {
+      issues.push({
+        source: 'System health',
+        message: dashboardOperationalIssue(
+          health.reason,
+          'System health could not be loaded.',
+          'DashboardHomeAction.health',
+        ),
+      })
+    }
 
-    return { stats, httpMetrics, services, activities, issues }
+    // Which feature-backed sections exist, so the home page does not offer a
+    // card for a section the sidebar has hidden and whose pages cannot load.
+    // `feature()` is server-side only, and this component runs on the client.
+    // See stacksjs/stacks#2928.
+    const sections = { commerce, content: feature('cms'), marketing: feature('marketing') }
+
+    return { stats, httpMetrics, services, activities, issues, sections }
   },
 })

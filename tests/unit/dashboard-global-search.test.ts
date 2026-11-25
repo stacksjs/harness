@@ -12,12 +12,15 @@ describe('dashboard global search', () => {
 
     expect(action).toContain('definition.traits?.useSearch')
     expect(action).toContain('Array.isArray(search.searchable)')
-    expect(action).toContain('new Database(env.DB_DATABASE_PATH')
-    expect(action).toContain('{ readonly: true }')
+    // The app's schema, listed once and without the generator's staging (dashboard-model-sources.test.ts).
+    expect(action).toContain('dashboardModelSources()')
+    expect(action).toContain('searchModelRows(model.model')
+    expect(action).not.toContain("import('bun:sqlite')")
+    expect(action).toContain('hiddenModelColumns(definition)')
     expect(action).toContain('HIDDEN_FIELDS')
     expect(action).toContain('isSafeIdentifier')
     expect(action).toContain('unavailable.push')
-    expect(action).toContain('has not been migrated')
+    expect(action).toContain('Check its migrated schema')
     expect(action).toContain('Could not search model')
     expect(action).not.toContain('A single optional model must not make dashboard search unavailable')
     expect(action).not.toContain('Chris Breuer')
@@ -35,7 +38,7 @@ describe('dashboard global search', () => {
     expect(client).toContain('`${baseUrl}/dashboard/search?q=${encodeURIComponent(query)}`')
   })
 
-  test('mounts a native command palette in the dashboard layout', () => {
+  test('mounts the command palette through the canonical native modal', () => {
     const component = source('storage/framework/defaults/resources/components/Dashboard/GlobalSearch.stx')
     const layout = source('storage/framework/defaults/views/dashboard/layouts/default.stx')
 
@@ -44,8 +47,14 @@ describe('dashboard global search', () => {
     expect(component).toContain("useEventListener('keydown', handleGlobalKeydown)")
     expect(component).toContain('navigate(item.href)')
     expect(component).toContain('unavailable().length')
-    expect(component).toContain('role="dialog"')
-    expect(component).toContain('aria-modal="true"')
+    expect(component).toContain('<Modal')
+    expect(component).toContain('ariaLabel="Search dashboard"')
+    expect(component).toContain('position="top"')
+    expect(component).toContain(':showCloseButton="false"')
+    expect(component).toContain('@close="close()"')
+    expect(component).toContain('autofocus')
+    expect(component).not.toContain('fixed inset-0')
+    expect(component).not.toContain('role="dialog"')
     expect(component).not.toContain('<svg')
     expect(component).not.toContain('window.')
     expect(component).not.toContain('document.')
@@ -55,8 +64,10 @@ describe('dashboard global search', () => {
     const modelView = source('storage/framework/defaults/resources/components/Dashboard/Models/ModelRecordsDashboard.stx')
 
     expect(modelView).toContain("const search = state(navigation.urlQuery('q') || '')")
-    expect(modelView).toContain('x-model="search"')
-    expect(modelView).toContain('x-model.number="perPage"')
+    expect(modelView).toContain('<SearchFilter v-model:searchValue="search"')
+    // The page size is text, as the shared dropdown reports it, and a number where it is used.
+    expect(modelView).toContain('<Select v-model:value="perPage"')
+    expect(modelView).toContain('Number(perPage())')
     expect(modelView).not.toContain(':value="search()"')
   })
 })

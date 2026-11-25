@@ -1,6 +1,6 @@
-import { Action } from '@stacksjs/actions'
+import { Action } from '@stacksjs/actions/runtime'
 import { ShippingMethod, ShippingZone } from '@stacksjs/orm'
-import { response } from '@stacksjs/router'
+import { dashboardOperationalError } from '../dashboard-response'
 import {
   indexShippingZoneMethods,
   normalizeShippingZoneRecord,
@@ -14,18 +14,18 @@ export default new Action({
 
   async handle() {
     try {
-      const zones = await ShippingZone.orderBy('name', 'asc').limit(500).get()
+      // Read whole: store configuration, which the page searches in full. The
+      // first 500 left the rest unlisted and unsearchable (stacksjs/stacks#3218).
+      const zones = await ShippingZone.orderBy('name', 'asc').get()
       const methodIds = [...new Set(zones.map(zone => zone.get('shipping_method_id')).filter(Boolean))]
       const methods = methodIds.length
-        ? await ShippingMethod.where('id', 'in', methodIds).get()
+        ? await ShippingMethod.whereIn('id', methodIds).get()
         : []
       const methodsById = indexShippingZoneMethods(methods)
       return zones.map(zone => normalizeShippingZoneRecord(zone, methodsById))
     }
     catch (error) {
-      return response.json({
-        message: error instanceof Error ? error.message : 'Shipping zone records could not be read.',
-      }, 503)
+      return dashboardOperationalError(error, 'Shipping zone records could not be read.', 'ShippingZoneIndexAction')
     }
   },
 })
