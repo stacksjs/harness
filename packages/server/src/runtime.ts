@@ -50,6 +50,7 @@ export interface RuntimeOptions {
 interface Running {
   instance: ProviderInstance
   savedLaunch?: SavedProviderLaunch
+  claudeAutoCompactAfter?: number
   /** Provider's own session id, so the next turn resumes rather than restarts. */
   providerSessionId?: string
   /** Approval request id → the id the engine assigned, for routing responses. */
@@ -130,6 +131,9 @@ export class ProviderRuntime {
       return null
     }
 
+    const claudeAutoCompactAfter = driverKind === 'claude'
+      ? this.options.engine.current.settings.claudeAutoCompactAfter ?? undefined
+      : undefined
     const existing = this.sessions.get(sessionId)
     if (existing) {
       if (existing.savedLaunch?.binaryPath !== savedLaunch?.binaryPath
@@ -142,7 +146,8 @@ export class ProviderRuntime {
         })
         return null
       }
-      return existing
+      if (existing.claudeAutoCompactAfter === claudeAutoCompactAfter) return existing
+      await this.stopSession(sessionId)
     }
 
     const resolve = this.options.resolve ?? resolveDriver
@@ -210,6 +215,7 @@ export class ProviderRuntime {
       workspacePath,
       autoApprove: this.options.autoApprove,
       model: session?.model || undefined,
+      ...(claudeAutoCompactAfter === undefined ? {} : { claudeAutoCompactAfter }),
       ...(session?.codexTurnOptions ? { codexTurnOptions: session.codexTurnOptions } : {}),
     }
     const probe = await driver.probe(launch)
@@ -246,6 +252,7 @@ export class ProviderRuntime {
     const running: Running = {
       instance,
       ...(savedLaunch ? { savedLaunch } : {}),
+      ...(claudeAutoCompactAfter === undefined ? {} : { claudeAutoCompactAfter }),
       approvals: new Map(),
       inputs: new Map(),
       abandoned: false,

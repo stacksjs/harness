@@ -25,6 +25,8 @@ export function claudeEnvironment(config: DriverConfig, host: NodeJS.ProcessEnv 
   delete env.ELECTRON_RUN_AS_NODE
   const home = config.home?.trim()
   if (home) env.CLAUDE_CONFIG_DIR = providerConfigPath(config.workspacePath, home)
+  if (config.claudeAutoCompactAfter !== undefined)
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(config.claudeAutoCompactAfter)
   return env
 }
 

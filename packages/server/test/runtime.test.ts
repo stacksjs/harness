@@ -401,6 +401,51 @@ describe('Claude idle compaction', () => {
   )
 })
 
+describe('Claude automatic compaction threshold', () => {
+  it('applies a changed window on the next turn without replacing the native conversation', async () => {
+    const launches: Array<number | undefined> = []
+    const bindings: Array<string | undefined> = []
+    const { driver } = fakeDriver([])
+    harness = await serve({
+      port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => ({
+        ...driver,
+        async create(config) {
+          launches.push(config.claudeAutoCompactAfter)
+          return {
+            ...await driver.create(config),
+            async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+              bindings.push(input.providerSessionId)
+              if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'threshold-conversation' }
+              yield { type: 'assistant-delta', text: 'The selected Claude runtime handled this turn.' }
+              yield { type: 'turn-complete', tokensIn: 5, tokensOut: 3, costMicros: 0 }
+            },
+          }
+        },
+      }),
+    })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    const { sessionId } = await bootstrap(client)
+    const send = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 10, command } })
+    try {
+      send('threshold-original', { type: 'session.turn.start', sessionId, text: 'Start with the default window.' })
+      expect(await client.waitFor('turn.completed')).toMatchObject({ turnId: 1 })
+      send('threshold-invalid', { type: 'settings.update', changes: { claudeAutoCompactAfter: 99_999 } })
+      expect(await client.waitForDispatch('threshold-invalid')).toMatchObject({ t: 'rejected' })
+      send('threshold-set', { type: 'settings.update', changes: { claudeAutoCompactAfter: 300_000 } })
+      expect(await client.waitForDispatch('threshold-set')).toMatchObject({ t: 'dispatched' })
+      send('threshold-custom', { type: 'session.turn.start', sessionId, text: 'Continue with the selected window.' })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 2)).toBeTruthy()
+      send('threshold-clear', { type: 'settings.update', changes: { claudeAutoCompactAfter: null } })
+      expect(await client.waitForDispatch('threshold-clear')).toMatchObject({ t: 'dispatched' })
+      send('threshold-default', { type: 'session.turn.start', sessionId, text: 'Continue with the default again.' })
+      expect(await client.waitFor('turn.completed', 3000, event => event.turnId === 3)).toBeTruthy()
+      expect(launches).toEqual([undefined, 300_000, undefined])
+      expect(bindings).toEqual([undefined, 'threshold-conversation', 'threshold-conversation'])
+    }
+    finally { client.close() }
+  })
+})
+
 describe('provider handoff', () => {
   it.each(['resumed', 'missing', 'ambiguous', 'over-capacity', 'changed-model', 'small-window'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
     const databasePath = join(dir, 'test.sqlite')
@@ -1493,7 +1538,7 @@ describe('host settings belong to the host', () => {
     const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' } } } })
     expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
 
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
@@ -1520,7 +1565,7 @@ describe('host settings belong to the host', () => {
     // The setting is in the log, so a fresh process over the same database
     // still has it.
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
     harness.stop()
 
     // A different host, which is a different log: independent by construction
@@ -1528,7 +1573,7 @@ describe('host settings belong to the host', () => {
     const otherDatabase = join(dir, 'other.sqlite')
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning' })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {

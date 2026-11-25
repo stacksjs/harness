@@ -123,6 +123,7 @@ export interface DriverConfig {
   home?: string
   binaryPath?: string
   model?: string
+  claudeAutoCompactAfter?: number
   codexTurnOptions?: CodexTurnOptions
   /** Host-only credentials for a managed Codex connection. */
   chatGptPlan?: {

@@ -20,7 +20,7 @@ export const settingsSections = $props.settingsSections || []
 // The keyboard registry, with both platform spellings of every default chord.
 export const keybindings = $props.keybindings || []
 // Settings this host owns, shared by every client connected to it.
-export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning' }
+export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -961,6 +961,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <option value="beforeCacheExpires">Before the cache expires (beta)</option>
           <option value="off">Never</option>
         </select>
+        <label for="settings-claude-auto-compact" class="block mt-3 font-medium text-[13px]">Auto-compact after</label>
+        <p id="settings-claude-window-help" class="mt-1 text-neutral-600 text-xs dark:text-neutral-300">Set 100,000 to 1,000,000 tokens, or leave blank to use Claude Code’s default.</p>
+        <input id="settings-claude-auto-compact" type="number" min="100000" max="1000000" step="1" inputmode="numeric" aria-describedby="settings-claude-window-help" :value="settings().claudeAutoCompactAfter ?? ''" @change="changeClaudeAutoCompactAfter" class="mt-2 px-2 max-w-full min-h-9 text-[13px] bg-white dark:bg-neutral-900 border border-black/10 rounded-md dark:border-white/20" />
         <p data-provider-settings-error role="alert" hidden :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mt-1 text-red-700 text-xs dark:text-red-300"></p>
       </details>
 
@@ -1336,6 +1339,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
    */
   function changeClaudeIdleCompaction(event) {
     void updateSettings({ claudeIdleCompaction: event.currentTarget.value })
+  }
+
+  function changeClaudeAutoCompactAfter(event) {
+    const input = event.currentTarget
+    if (!input.validity.valid) {
+      settingsSaveError.set('Enter a whole number from 100,000 to 1,000,000.')
+      return
+    }
+    settingsSaveError.set('')
+    void updateSettings({ claudeAutoCompactAfter: input.value === '' ? null : Number(input.value) })
   }
 
   async function updateSettings(changes) {

@@ -178,6 +178,13 @@ export class ClaudeInstance implements ProviderInstance {
     // starts a fresh Claude Code session and the agent forgets the last one.
     if (providerSessionId) options.resume = providerSessionId
     options.env = claudeEnvironment(this.config)
+    const threshold = this.config.claudeAutoCompactAfter
+    if (threshold !== undefined) {
+      options.settings = {
+        autoCompactWindow: threshold,
+        env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(threshold) },
+      }
+    }
     return options
   }
 

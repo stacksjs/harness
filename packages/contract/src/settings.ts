@@ -29,6 +29,8 @@ export interface HostSettings {
   terminalShell: TerminalShell
   /** When to compact an idle Claude conversation with a large context. */
   claudeIdleCompaction: ClaudeIdleCompaction
+  /** Claude Code's own automatic compaction window, or null for its default. */
+  claudeAutoCompactAfter: number | null
 }
 
 const DRIVER_KINDS: readonly DriverKind[] = ['claude', 'codex', 'cursor', 'opencode', 'grok']
@@ -39,6 +41,7 @@ export const defaultHostSettings: Readonly<HostSettings> = Object.freeze({
   followUpBehavior: 'queue',
   terminalShell: 'system',
   claudeIdleCompaction: 'whenReturning',
+  claudeAutoCompactAfter: null,
 })
 
 /** A fresh, mutable copy of the defaults. */
@@ -67,6 +70,9 @@ export function acceptedSettings(changes: unknown): Partial<HostSettings> {
     accepted.terminalShell = source.terminalShell
   if (source.claudeIdleCompaction === 'whenReturning' || source.claudeIdleCompaction === 'beforeCacheExpires' || source.claudeIdleCompaction === 'off')
     accepted.claudeIdleCompaction = source.claudeIdleCompaction
+  const threshold = source.claudeAutoCompactAfter
+  if (threshold === null || (typeof threshold === 'number' && Number.isInteger(threshold) && threshold >= 100_000 && threshold <= 1_000_000))
+    accepted.claudeAutoCompactAfter = threshold
   return accepted
 }
 

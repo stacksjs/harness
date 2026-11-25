@@ -113,6 +113,21 @@ it.each([[undefined, 0], ['ephemeral_5m_input_tokens', 5], ['ephemeral_1h_input_
   }
 })
 
+it('passes the configured automatic compaction window to the Claude SDK and launch environment', async () => {
+  const instance = new ClaudeInstance({ workspacePath: tmpdir(), claudeAutoCompactAfter: 300_000 }, ({ options }) => {
+    expect(options?.settings).toEqual({ autoCompactWindow: 300_000, env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '300000' } })
+    expect(options?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('300000')
+    expect(options?.resume).toBe('sess_abc')
+    return {
+      async *[Symbol.asyncIterator]() { yield successResult(0) },
+      close() {},
+    } as unknown as Query
+  })
+  const events = []
+  for await (const event of instance.startTurn({ text: 'Continue the fixture conversation.', providerSessionId: 'sess_abc' })) events.push(event)
+  expect(events.at(-1)).toMatchObject({ type: 'turn-complete' })
+})
+
 describe('Claude driver — translating the SDK stream', () => {
   it('turns a text delta into an assistant delta', () => {
     expect(translate(streamDelta('Hello'))).toEqual([{ type: 'assistant-delta', text: 'Hello' }])
