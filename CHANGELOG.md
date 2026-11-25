@@ -1,5 +1,16 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.8...v0.0.9)
+
+## ✨ Features
+
+- **chat**: highlight streamed transcript code ([feaa4cd](https://github.com/stacksjs/harness/commit/feaa4cd)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **chat**: add transcript code and table controls ([3031294](https://github.com/stacksjs/harness/commit/3031294)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.7...v0.0.8)
 
 ## ✨ Features
