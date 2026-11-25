@@ -14,12 +14,13 @@
  * stops at this boundary on purpose.
  */
 
-import type { AccountInfo, CanUseTool, Options, PermissionResult, Query, query as sdkQuery, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import type { InputAnswer } from '@harness/contract'
+import type { AccountInfo, CanUseTool, ElicitationRequest, ElicitationResult, Options, PermissionResult, Query, query as sdkQuery, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ApprovalChoice, InputAnswer } from '@harness/contract'
 import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
 import { claudeEnvironment } from './account-environment'
 import { EventQueue } from './event-queue'
 import { toolInputQuestions } from './input-questions'
+import { prepareMcpConsent } from './mcp-consent'
 
 // Adapted from apps/server/src/provider/ClaudeProvider.ts at T3 Code
 // 902d369808c5c30ae9b178c6c6f86587b8f4f336. See T3CODE-LICENSE.md.
@@ -70,6 +71,7 @@ export class ClaudeInstance implements ProviderInstance {
   private running: Query | null = null
   private activeQueue: EventQueue | null = null
   private pending = new Map<string, PendingPermission>()
+  private readonly mcpConsents = new Map<string, { queue: EventQueue, acceptance: ElicitationResult, resolve: (result: ElicitationResult) => void }>()
   private nextRequestId = 0
 
   constructor(private config: DriverConfig, private readonly queryFactory?: typeof sdkQuery) {}
@@ -118,10 +120,44 @@ export class ClaudeInstance implements ProviderInstance {
     })
   }
 
+  private async onElicitation(queue: EventQueue, request: ElicitationRequest, signal: AbortSignal): Promise<ElicitationResult> {
+    if (queue.closed || signal.aborted) return { action: 'cancel' }
+    const consent = prepareMcpConsent({ ...request }, 'claude')
+    const approved = consent?.accepted.get('once')
+    if (!consent || approved?.action !== 'accept') return { action: 'cancel' }
+    const values = Object.entries(approved.content).flatMap(([key, value]) => {
+      if (typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return [[key, value] as const]
+      return []
+    })
+    if (values.length !== Object.keys(approved.content).length) return { action: 'cancel' }
+    const acceptance: ElicitationResult = { action: 'accept', content: Object.fromEntries(values) }
+    if (this.config.autoApprove) return acceptance
+
+    const requestId = `mcp_${++this.nextRequestId}`
+    return new Promise<ElicitationResult>((resolve) => {
+      const onAbort = () => {
+        this.mcpConsents.get(requestId)?.resolve({ action: 'cancel' })
+        queue.push({ type: 'approval-cancelled', requestId })
+      }
+      this.mcpConsents.set(requestId, {
+        queue,
+        acceptance,
+        resolve: (result) => {
+          signal.removeEventListener('abort', onAbort)
+          this.mcpConsents.delete(requestId)
+          resolve(result)
+        },
+      })
+      signal.addEventListener('abort', onAbort, { once: true })
+      queue.push({ type: 'approval-request', requestId, toolName: consent.name, args: null, connector: consent.connector })
+    })
+  }
+
   private options(queue: EventQueue, providerSessionId?: string): Options {
     const options: Options = {
       cwd: this.config.workspacePath,
       canUseTool: (toolName, input, options) => this.canUseTool(queue, toolName, input, options),
+      onElicitation: (request, { signal }) => this.onElicitation(queue, request, signal),
       // Deltas are the whole point of a streaming transcript: without this the
       // SDK only reports complete assistant messages and the UI shows nothing
       // until the turn ends.
@@ -204,7 +240,12 @@ export class ClaudeInstance implements ProviderInstance {
     }
   }
 
-  async respondApproval(requestId: string, allow: boolean, reason?: string): Promise<void> {
+  async respondApproval(requestId: string, allow: boolean, reason?: string, choice?: Pick<ApprovalChoice, 'decision' | 'scope'>): Promise<void> {
+    const mcp = this.mcpConsents.get(requestId)
+    if (mcp) {
+      mcp.resolve(allow ? mcp.acceptance : { action: choice?.decision === 'cancelled' ? 'cancel' : 'decline' })
+      return
+    }
     const waiter = this.pending.get(requestId)
     // An unknown id is a late or duplicate answer — drop it rather than throw.
     if (waiter?.kind !== 'approval') return
@@ -233,6 +274,9 @@ export class ClaudeInstance implements ProviderInstance {
   private releasePending(queue: EventQueue): void {
     for (const waiter of this.pending.values()) {
       if (waiter.queue === queue) waiter.resolve({ behavior: 'deny', message: 'The turn ended.' })
+    }
+    for (const waiter of this.mcpConsents.values()) {
+      if (waiter.queue === queue) waiter.resolve({ action: 'cancel' })
     }
   }
 

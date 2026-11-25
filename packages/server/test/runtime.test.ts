@@ -115,8 +115,9 @@ class Client {
     return null
   }
 
-  async waitFor(type: string, timeoutMs = 3000): Promise<any> {
-    const frame = await this.waitForFrame(frame => frame?.t === 'event' && frame.event.payload.type === type, timeoutMs)
+  async waitFor(type: string, timeoutMs = 3000, matches?: (payload: any) => boolean): Promise<any> {
+    const frame = await this.waitForFrame(frame => frame?.t === 'event' && frame.event.payload.type === type
+      && (!matches || matches(frame.event.payload)), timeoutMs)
     return frame?.event.payload ?? null
   }
 
@@ -1020,6 +1021,76 @@ describe('interrupt reaches the provider', () => {
 
     expect(harness.engine.current.sessions.get(sessionId)!.turns[0]!.status).toBe('interrupted')
     client.close()
+  })
+})
+
+describe('connector consent over the socket', () => {
+  it('rejects forged scopes, commits one choice, and clears a provider withdrawal', async () => {
+    const decided = Promise.withResolvers<void>()
+    const withdraw = Promise.withResolvers<void>()
+    const replies: unknown[] = []
+    const connector = {
+      prompt: 'Allow the fixture connector to read the calendar?',
+      choices: [
+        { decision: 'cancelled', scope: 'once', label: 'Cancel' },
+        { decision: 'denied', scope: 'once', label: 'Decline' },
+        { decision: 'allowed', scope: 'session', label: 'Allow this session' },
+        { decision: 'allowed', scope: 'once', label: 'Approve' },
+      ],
+    } satisfies NonNullable<Extract<ProviderEvent, { type: 'approval-request' }>['connector']>
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn() {
+            yield { type: 'approval-request', requestId: 'consent', toolName: 'Fixture Calendar', args: { token: 'private fixture token' }, connector }
+            await decided.promise
+            yield { type: 'approval-request', requestId: 'withdrawn', toolName: 'Fixture Calendar', args: {}, connector }
+            await withdraw.promise
+            yield { type: 'approval-cancelled', requestId: 'withdrawn' }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+          async respondApproval(requestId, allow, _reason, choice) {
+            replies.push({ requestId, allow, choice })
+            decided.resolve()
+          },
+          async interrupt() { decided.resolve(); withdraw.resolve() },
+          async stop() { decided.resolve(); withdraw.resolve() },
+        }
+      },
+    }
+    const dbPath = join(dir, 'test.sqlite')
+    harness = await serve({ port, databasePath: dbPath, resolveDriver: () => driver })
+    const endpoint = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(endpoint)
+    const second = await Client.connect(endpoint)
+    try {
+      const { sessionId } = await bootstrap(first)
+      second.send({ t: 'subscribe', sessionId })
+      first.send({ t: 'dispatch', envelope: { id: 'consent_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'request consent' } } })
+      const request = await first.waitFor('approval.requested')
+      expect(request).toMatchObject({ toolName: 'Fixture Calendar', connector })
+      expect(JSON.stringify(request)).not.toContain('private fixture token')
+      const base = { type: 'session.approval.respond', sessionId, approvalId: request.approvalId }
+      first.send({ t: 'dispatch', envelope: { id: 'forged', at: 6, command: { ...base, decision: 'allowed', scope: 'always' } } })
+      expect(await first.waitForRejection('forged')).toMatchObject({ message: 'This connector did not offer that approval choice.' })
+      first.send({ t: 'dispatch', envelope: { id: 'selected', at: 7, command: { ...base, decision: 'allowed', scope: 'session' } } })
+      second.send({ t: 'dispatch', envelope: { id: 'competing', at: 7, command: { ...base, decision: 'cancelled', scope: 'once' } } })
+      const resolved = await first.waitFor('approval.resolved')
+      const waiting = await first.waitFor('approval.requested', 3000, event => event.requestId === 'withdrawn')
+      expect(replies).toEqual([{ requestId: 'consent', allow: resolved.decision === 'allowed', choice: { decision: resolved.decision, scope: resolved.scope } }])
+      withdraw.resolve()
+      const cancelled = await first.waitFor('approval.resolved', 3000, event => event.approvalId === waiting.approvalId)
+      expect(cancelled).toMatchObject({ decision: 'cancelled', scope: 'once' })
+      await first.waitFor('turn.completed')
+      expect(harness.engine.current.sessions.get(sessionId)?.pendingApprovals).toEqual([])
+      expect(replies).toHaveLength(1)
+    }
+    finally {
+      first.close()
+      second.close()
+    }
   })
 })
 

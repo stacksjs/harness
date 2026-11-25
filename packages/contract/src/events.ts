@@ -6,7 +6,7 @@
  * be wrong is corrected by a later fact. That is what makes replay meaningful.
  */
 
-import type { ApprovalDecision, ApprovalScope, DriverKind } from './commands'
+import type { ApprovalDecision, ApprovalScope, ConnectorApproval, DriverKind } from './commands'
 import type { InputQuestion, QuestionAttachment } from './input'
 
 export interface EventBase {
@@ -30,7 +30,7 @@ export type EventPayload =
   | { type: 'assistant.delta', turnId: number, text: string }
   | { type: 'tool.call.began', turnId: number, callId: string, toolName: string }
   | { type: 'tool.call.ended', turnId: number, callId: string, ok: boolean }
-  | { type: 'approval.requested', approvalId: number, requestId: string, toolName: string }
+  | { type: 'approval.requested', approvalId: number, requestId: string, toolName: string, connector?: ConnectorApproval }
   | { type: 'approval.resolved', approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
   | { type: 'input.requested', requestId: string, turnId: number, questions: InputQuestion[] }
   | { type: 'input.resolved', requestId: string, turnId: number, outcome: 'answered' | 'declined' | 'interrupted', attachments?: QuestionAttachment[] }

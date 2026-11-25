@@ -11,7 +11,7 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { CommandEnvelope, DriverKind, HarnessEvent, InputQuestion, InputResponse } from '@harness/contract'
+import type { ApprovalChoice, CommandEnvelope, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
@@ -332,10 +332,16 @@ export class ProviderRuntime {
 
           case 'approval-request': {
             if (running.interrupted) break
-            const result = await this.dispatchApproval(sessionId, event.requestId, event.toolName, event.args)
-            // Map the engine's approval id back to the provider's request id,
-            // so a client answering by approval id reaches the right callback.
-            if (result !== null) running.approvals.set(result, event.requestId)
+            await this.dispatchApproval(sessionId, event.requestId, event.toolName, event.args, event.connector,
+              approvalId => running.approvals.set(approvalId, event.requestId))
+            break
+          }
+
+          case 'approval-cancelled': {
+            const approval = [...running.approvals].find(([, requestId]) => requestId === event.requestId)
+            if (!approval) break
+            running.approvals.delete(approval[0])
+            await this.emit({ type: 'thread.approval.cancel', sessionId, approvalId: approval[0] })
             break
           }
 
@@ -403,23 +409,23 @@ export class ProviderRuntime {
     }
   }
 
-  /** Raise an approval and return the id the engine assigned, or null. */
+  /** Make the provider callback reachable before broadcasting the request. */
   private async dispatchApproval(
     sessionId: number,
     requestId: string,
     toolName: string,
     args: unknown,
-  ): Promise<number | null> {
-    const envelope = this.envelope({ type: 'thread.approval.request', sessionId, requestId, toolName, args })
+    connector: ConnectorApproval | undefined,
+    remember: (approvalId: number) => void,
+  ): Promise<void> {
+    const envelope = this.envelope({ type: 'thread.approval.request', sessionId, requestId, toolName, args, connector })
     try {
       const result = await this.options.engine.dispatchInternal(envelope)
-      if (result.events.length > 0) this.options.onEvents?.(result.events)
       const event = result.events.find(e => e.payload.type === 'approval.requested')
-      return event ? (event.payload as { approvalId: number }).approvalId : null
+      if (event?.payload.type === 'approval.requested') remember(event.payload.approvalId)
+      if (result.events.length > 0) this.options.onEvents?.(result.events)
     }
-    catch {
-      return null
-    }
+    catch {}
   }
 
   /**
@@ -558,13 +564,13 @@ export class ProviderRuntime {
   }
 
   /** Route a client's decision back to the provider callback that is blocked. */
-  async respondApproval(sessionId: number, approvalId: number, allow: boolean, reason?: string): Promise<void> {
+  async respondApproval(sessionId: number, approvalId: number, choice: Pick<ApprovalChoice, 'decision' | 'scope'>): Promise<void> {
     const running = this.sessions.get(sessionId)
     if (!running) return
     const requestId = running.approvals.get(approvalId)
     if (!requestId) return
     running.approvals.delete(approvalId)
-    await running.instance.respondApproval(requestId, allow, reason)
+    await running.instance.respondApproval(requestId, choice.decision === 'allowed', undefined, choice)
   }
 
   async respondInput(sessionId: number, requestId: string, response: InputResponse): Promise<void> {

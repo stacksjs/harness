@@ -70,6 +70,9 @@ const parallelDecisions = new Map<string, boolean>()
 const questionGate = Promise.withResolvers<void>()
 const questionAnswers = new Map<string, unknown>()
 const markdownControlsGate = Promise.withResolvers<void>()
+const connectorGate = Promise.withResolvers<void>()
+const connectorWithdrawal = Promise.withResolvers<void>()
+let connectorScope: string | undefined
 const script: ProviderEvent[] = [
   { type: 'session-bound', providerSessionId: 'ps-drive' },
   { type: 'assistant-delta', text: 'Thinking… ' },
@@ -81,6 +84,29 @@ const script: ProviderEvent[] = [
 ]
 const instance: ProviderInstance = {
   async *startTurn(input) {
+    if (input.text === 'exercise connector consent') {
+      const connector = {
+        prompt: 'Allow this fixture connector to read the calendar?',
+        choices: [
+          { decision: 'cancelled', scope: 'once', label: 'Cancel' },
+          { decision: 'denied', scope: 'once', label: 'Decline' },
+          { decision: 'allowed', scope: 'session', label: 'Allow this session' },
+          { decision: 'allowed', scope: 'once', label: 'Approve' },
+        ],
+      } as const
+      yield { type: 'approval-request', requestId: 'fixture_connector', toolName: 'Fixture Calendar', args: null, connector: {
+        ...connector, choices: [...connector.choices],
+      } }
+      await connectorGate.promise
+      yield { type: 'approval-request', requestId: 'fixture_withdrawal', toolName: 'Fixture Calendar', args: null, connector: {
+        prompt: 'This fixture request will be withdrawn.', choices: [...connector.choices],
+      } }
+      await connectorWithdrawal.promise
+      yield { type: 'approval-cancelled', requestId: 'fixture_withdrawal' }
+      yield { type: 'assistant-delta', text: 'Connector consent fixture complete.' }
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     if (input.text === 'exercise streaming markdown') {
       yield { type: 'assistant-delta', text: '## Build result\n\n**Completed checks**\n\n' }
       yield { type: 'assistant-delta', text: `${Array.from({ length: 60 }, (_, i) => `Checked component ${i + 1}`).join('\n\n')}\n\nEncoded comparison: \`&lt;\`` }
@@ -128,7 +154,12 @@ const instance: ProviderInstance = {
     }
   },
   async interrupt() {},
-  async respondApproval(id, allow) {
+  async respondApproval(id, allow, _reason, choice) {
+    if (id === 'fixture_connector') {
+      connectorScope = allow ? choice?.scope : undefined
+      connectorGate.resolve()
+      return
+    }
     if (id === 'parallel_read' || id === 'parallel_write') {
       parallelDecisions.set(id, allow)
       if (parallelDecisions.size === 2) parallelApprovalGate.resolve()
@@ -866,6 +897,47 @@ if (screenshotDir) {
   await tableCopy.click()
   await capture('transcript-syntax-desktop')
 }
+
+await page.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
+await promptBox.fill('exercise connector consent')
+await page.click('[data-send]')
+const connectorCard = page.getByRole('region', { name: 'Fixture Calendar requests access' })
+const moreApprovalOptions = connectorCard.locator('summary[aria-label="More approval options"]')
+const sessionChoice = connectorCard.getByRole('button', { name: 'Allow this session' })
+await moreApprovalOptions.waitFor()
+await page.reload()
+await moreApprovalOptions.waitFor()
+check('connector prompt and primary approval actions reload with the pending request',
+  await connectorCard.getByText('Allow this fixture connector to read the calendar?').isVisible()
+  && await connectorCard.getByRole('button', { name: 'Approve', exact: true }).isVisible()
+  && await connectorCard.getByRole('button', { name: 'Decline', exact: true }).isVisible()
+  && !await sessionChoice.isVisible()
+  && !await page.locator('[data-approve]').isVisible())
+await page.setViewportSize({ width: 1280, height: 800 })
+await moreApprovalOptions.focus()
+await page.keyboard.press('ArrowDown')
+check('the connector options disclosure supports keyboard navigation',
+  await connectorCard.getByRole('button', { name: 'Cancel', exact: true }).evaluate(element => element === element.ownerDocument.activeElement))
+await page.keyboard.press('Escape')
+check('Escape closes the scope choices and restores focus',
+  !await sessionChoice.isVisible()
+  && await moreApprovalOptions.evaluate(element => element === element.ownerDocument.activeElement))
+await moreApprovalOptions.click()
+await capture('connector-consent-desktop')
+await page.setViewportSize({ width: 390, height: 844 })
+await transcript.evaluate(element => { element.scrollTop = 0 })
+const connectorBounds = await sessionChoice.boundingBox()
+check('the session consent action fits on a phone',
+  Boolean(connectorBounds && connectorBounds.x >= 0 && connectorBounds.y >= 0 && connectorBounds.x + connectorBounds.width <= 390
+    && connectorBounds.y + connectorBounds.height <= 844))
+await capture('connector-consent-mobile')
+await sessionChoice.focus()
+await page.keyboard.press('Enter')
+await connectorCard.getByText('This fixture request will be withdrawn.').waitFor()
+check('the exact scope from the selected choice reached the provider', connectorScope === 'session')
+connectorWithdrawal.resolve()
+await transcript.getByText('Connector consent fixture complete.').waitFor()
+check('provider withdrawal closes the connector card', !await connectorCard.isVisible())
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

@@ -9,7 +9,9 @@
 export { CborError, decode, encode } from './cbor'
 export type {
   ApprovalDecision,
+  ApprovalChoice,
   ApprovalScope,
+  ConnectorApproval,
   ClientCommand,
   Command,
   CommandEnvelope,

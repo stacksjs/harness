@@ -535,7 +535,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       await runtime.respondApproval(
         command.sessionId,
         command.approvalId,
-        command.decision === 'allowed',
+        { decision: command.decision, scope: command.scope },
       )
       return
     }

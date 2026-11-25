@@ -71,6 +71,14 @@ const syntaxColors = { getCSS: () => `
 .dark .transcript-code code::highlight(harness-syntax-value) { color: #e9b78d; }
 ` }
 
+const approvalLayout = { getCSS: () => `
+[data-approval] {
+  width: min(788px, calc(100% - 24px));
+  margin-inline: auto;
+  margin-block: 4px 8px;
+}
+` }
+
 const RESPONSIVE_SHELL = `
 [data-sidebar-toggle], [data-sidebar-scrim], [data-workspace-actions-toggle],
 [data-workspace-actions-scrim], [data-workspace-action-label] { display: none; }
@@ -104,7 +112,7 @@ const RESPONSIVE_SHELL = `
   margin-inline: auto;
   margin-block-end: max(12px, env(safe-area-inset-bottom));
 }
-[data-transcript] > [data-turn], [data-transcript] > [data-approval] {
+[data-transcript] > [data-turn] {
   max-width: 788px; margin-inline: auto;
 }
 @media (max-width: 767px) {
@@ -240,6 +248,7 @@ export default {
     { getCSS: () => RESPONSIVE_SHELL },
     { getCSS: () => TRANSCRIPT_MARKDOWN },
     syntaxColors,
+    approvalLayout,
     { getCSS: () => TOOL_DOT },
     { getCSS: () => THINKING_DOTS },
     { getCSS: () => TERMINAL_PANEL },

@@ -453,20 +453,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </article>
       </template>
 
-      <div
-        data-approval
-        @if(!pendingApproval)hidden@endif
-        :hidden="!approvalId()"
-        class="mb-5 p-3 bg-amber-500/10 border border-amber-500/30 rounded-[10px]"
-      >
-        <div class="mb-2 font-medium text-[12px]">
-          <span data-approval-tool :text="approvalTool()">{{ pendingApproval ? pendingApproval.toolName : '' }}</span> wants to run.
-        </div>
-        <div class="flex gap-2">
-          <button type="button" data-approve @click="approveTool" :disabled="!!pendingApprovalId()" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px] disabled:opacity-50">Allow</button>
-          <button type="button" data-deny @click="denyTool" :disabled="!!pendingApprovalId()" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15 disabled:opacity-50">Deny</button>
-        </div>
-      </div>
     </div>
     @if(activeSession)
       <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="absolute bottom-3 inset-e-4 px-3 h-9 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full shadow-sm dark:border-white/20">Jump to latest</button>
@@ -474,6 +460,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
     </div>
 
+    @includeWhen(activeSession, '../partials/harness-approval-card')
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(canCompose)
@@ -836,6 +823,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const pendingApprovalId = state(0)
   const approvalId = derived(() => pendingApprovals()[0]?.approvalId || 0)
   const approvalTool = derived(() => pendingApprovals()[0]?.toolName || '')
+  const connectorApproval = derived(() => pendingApprovals()[0]?.connector)
+  const connectorOptions = useRef('connectorOptionsBox')
+  const primaryConnectorChoices = derived(() => connectorApproval()?.choices.filter(choice => choice.decision !== 'cancelled' && choice.scope === 'once') ?? [])
+  const moreConnectorChoices = derived(() => connectorApproval()?.choices.filter(choice => choice.decision === 'cancelled' || choice.scope !== 'once') ?? [])
 
   const questionForm = state(null)
   const questionCard = useRef('questionCardBox')
@@ -1871,7 +1862,45 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     dispatch({ type: 'session.turn.interrupt', sessionId })
   }
 
-  async function respondToApproval(allow) {
+  function closeConnectorOptions(restoreFocus = false) {
+    const details = connectorOptions.current
+    if (!details?.open) return
+    details.open = false
+    if (restoreFocus) details.querySelector('summary')?.focus()
+  }
+
+  function blurConnectorOptions(event) {
+    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) closeConnectorOptions()
+  }
+
+  function guardConnectorOptions(event) {
+    if (pendingApprovalId()) event.preventDefault()
+  }
+
+  function handleConnectorOptions(event) {
+    const details = connectorOptions.current
+    if (event.key === 'Escape' && details?.open) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeConnectorOptions(true)
+      return
+    }
+    if (!details || pendingApprovalId() || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const buttons = [...details.querySelectorAll('button:not(:disabled)')]
+    if (!buttons.length) return
+    event.preventDefault()
+    details.open = true
+    const index = buttons.indexOf(event.target)
+    if (event.key === 'Home' || (event.key === 'ArrowDown' && index === -1)) buttons[0].focus()
+    else if (event.key === 'End' || (event.key === 'ArrowUp' && index === -1)) buttons.at(-1)?.focus()
+    else buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length].focus()
+  }
+
+  useEventListener('pointerdown', (event) => {
+    if (connectorOptions.current?.open && !connectorOptions.current.contains(event.target)) closeConnectorOptions()
+  }, { target: document })
+
+  async function respondToApproval(decision, scope = 'once') {
     const id = approvalId()
     if (!id || !sessionId || pendingApprovalId()) return
     pendingApprovalId.set(id)
@@ -1880,8 +1909,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         type: 'session.approval.respond',
         sessionId,
         approvalId: id,
-        decision: allow ? 'allowed' : 'denied',
-        scope: 'once',
+        decision,
+        scope,
       })
     }
     catch (error) {
@@ -1891,8 +1920,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       }
     }
   }
-  function approveTool() { respondToApproval(true) }
-  function denyTool() { respondToApproval(false) }
+  function approveTool() { respondToApproval('allowed') }
+  function denyTool() { respondToApproval('denied') }
 
   function waitingSessionState() {
     return pendingApprovals().length ? 'awaiting-approval' : inputRequest() ? 'awaiting-input' : 'running'
@@ -2253,6 +2282,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
         batch(() => {
           setSessionState('idle')
+          closeConnectorOptions()
           pendingApprovals.set([])
           pendingApprovalId.set(0)
           questionForm()?.interrupt()
@@ -2265,6 +2295,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         // bindings put Send back while the chip says what happened.
         batch(() => {
           setSessionState('failed')
+          closeConnectorOptions()
           pendingApprovals.set([])
           pendingApprovalId.set(0)
           questionForm()?.interrupt()
@@ -2276,13 +2307,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           setSessionState('awaiting-approval')
           pendingApprovals.update(requests => requests.some(request => request.approvalId === payload.approvalId)
             ? requests
-            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName }])
+            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName, connector: payload.connector }])
           transcriptAnnouncement.set('An approval needs your attention.')
         })
         paintTranscript(updateTranscriptMarkdown)
       }
       else if (payload.type === 'approval.resolved') {
         if (!pendingApprovals().some(request => request.approvalId === payload.approvalId)) return
+        if (approvalId() === payload.approvalId) closeConnectorOptions()
         batch(() => {
           pendingApprovals.update(requests => requests.filter(request => request.approvalId !== payload.approvalId))
           if (pendingApprovalId() === payload.approvalId) pendingApprovalId.set(0)

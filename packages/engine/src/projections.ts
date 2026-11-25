@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { DriverKind, HarnessEvent, InputQuestion, QuestionAttachment } from '@harness/contract'
+import type { ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, QuestionAttachment } from '@harness/contract'
 
 export interface InputRequestState {
   attachments?: QuestionAttachment[]
@@ -37,7 +37,7 @@ export interface SessionState {
    * connected when it fired; anyone arriving afterwards saw a session marked
    * `awaiting-approval` with nothing to act on, and the turn waited forever.
    */
-  pendingApprovals: Array<{ approvalId: number, toolName: string }>
+  pendingApprovals: Array<{ approvalId: number, toolName: string, connector?: ConnectorApproval }>
   pendingInputs: InputRequestState[]
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
@@ -474,7 +474,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.state = 'awaiting-approval'
-      session.pendingApprovals.push({ approvalId: p.approvalId, toolName: p.toolName })
+      session.pendingApprovals.push({ approvalId: p.approvalId, toolName: p.toolName, ...(p.connector ? { connector: p.connector } : {}) })
       break
     }
 

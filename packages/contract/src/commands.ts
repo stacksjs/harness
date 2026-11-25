@@ -12,8 +12,19 @@ import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
 
 export type DriverKind = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok'
 
-export type ApprovalDecision = 'allowed' | 'denied'
+export type ApprovalDecision = 'allowed' | 'denied' | 'cancelled'
 export type ApprovalScope = 'once' | 'session' | 'workspace' | 'always'
+
+export interface ApprovalChoice {
+  decision: ApprovalDecision
+  scope: ApprovalScope
+  label: string
+}
+
+export interface ConnectorApproval {
+  prompt: string
+  choices: ApprovalChoice[]
+}
 
 /** Commands a client is allowed to dispatch. */
 export type ClientCommand =
@@ -90,7 +101,8 @@ export type InternalCommand =
   | { type: 'thread.message.assistant.complete', sessionId: number, turnId: number }
   | { type: 'thread.tool.call.begin', sessionId: number, turnId: number, callId: string, toolName: string, args: unknown }
   | { type: 'thread.tool.call.end', sessionId: number, turnId: number, callId: string, ok: boolean }
-  | { type: 'thread.approval.request', sessionId: number, requestId: string, toolName: string, args: unknown }
+  | { type: 'thread.approval.request', sessionId: number, requestId: string, toolName: string, args: unknown, connector?: ConnectorApproval }
+  | { type: 'thread.approval.cancel', sessionId: number, approvalId: number }
   | { type: 'thread.input.request', sessionId: number, turnId: number, questions: InputQuestion[] }
   | { type: 'thread.input.cancel', sessionId: number, requestId: string }
   | ({ type: 'thread.input.answer', sessionId: number, requestId: string, attachments: QuestionAttachment[] } & InputResponse)

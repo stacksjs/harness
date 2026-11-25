@@ -502,6 +502,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           approvalId: derivedId(commandId),
           requestId: command.requestId,
           toolName: command.toolName,
+          ...(command.connector ? { connector: command.connector } : {}),
         },
       }]
     }
@@ -573,14 +574,27 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'thread.approval.cancel':
     case 'session.approval.respond': {
       const session = state.sessions.get(command.sessionId)
-      if (!session)
-        throw new InvalidCommand(`no such session: ${command.sessionId}`)
-      if (session.state !== 'awaiting-approval' || !session.pendingApprovals.some(request => request.approvalId === command.approvalId))
+      const request = session?.pendingApprovals.find(request => request.approvalId === command.approvalId)
+      const cancelled = command.type === 'thread.approval.cancel'
+      if (!session || session.state !== 'awaiting-approval' || !request) {
+        if (cancelled) return []
+        if (!session) throw new InvalidCommand(`no such session: ${command.sessionId}`)
         throw new InvalidCommand('This approval is no longer pending.')
-      if (command.decision !== 'allowed' && command.decision !== 'denied')
-        throw new InvalidCommand('Invalid approval decision.')
+      }
+      const decision = cancelled ? 'cancelled' : command.decision
+      const scope = cancelled ? 'once' : command.scope
+      if (!cancelled) {
+        if (request.connector) {
+          if (!request.connector.choices.some(choice => choice.decision === decision && choice.scope === scope))
+            throw new InvalidCommand('This connector did not offer that approval choice.')
+        }
+        else if (decision !== 'allowed' && decision !== 'denied') {
+          throw new InvalidCommand('Invalid approval decision.')
+        }
+      }
       return [{
         sessionId: command.sessionId,
         commandId,
@@ -588,8 +602,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         payload: {
           type: 'approval.resolved',
           approvalId: command.approvalId,
-          decision: command.decision,
-          scope: command.scope,
+          decision,
+          scope,
         },
       }]
     }

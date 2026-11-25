@@ -10,7 +10,7 @@
  * `driverKind: 'harness'` beside `'claude'`, with nothing above it changing.
  */
 
-import type { DriverKind, InputAnswer, InputQuestion } from '@harness/contract'
+import type { ApprovalChoice, ConnectorApproval, DriverKind, InputAnswer, InputQuestion } from '@harness/contract'
 
 /**
  * What a driver emits while a turn runs.
@@ -24,7 +24,8 @@ export type ProviderEvent =
   | { type: 'assistant-delta', text: string }
   | { type: 'tool-call-begin', callId: string, toolName: string, args: unknown }
   | { type: 'tool-call-end', callId: string, ok: boolean }
-  | { type: 'approval-request', requestId: string, toolName: string, args: unknown }
+  | { type: 'approval-request', requestId: string, toolName: string, args: unknown, connector?: ConnectorApproval }
+  | { type: 'approval-cancelled', requestId: string }
   | { type: 'input-request', requestId: string, questions: InputQuestion[] }
   | { type: 'input-cancelled', requestId: string }
   | { type: 'turn-complete', tokensIn: number, tokensOut: number, costMicros: number }
@@ -54,7 +55,7 @@ export interface ProviderInstance {
   /** Stop the running turn. Safe to call when nothing is running. */
   interrupt: () => Promise<void>
   /** Answer a pending approval request. */
-  respondApproval: (requestId: string, allow: boolean, reason?: string) => Promise<void>
+  respondApproval: (requestId: string, allow: boolean, reason?: string, choice?: Pick<ApprovalChoice, 'decision' | 'scope'>) => Promise<void>
   /** Deliver an answer or decline to an agent waiting for input. */
   respondInput?: (requestId: string, answers: InputAnswer[] | null) => Promise<void>
   /** Tear down the process and release resources. */
