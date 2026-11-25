@@ -80,6 +80,8 @@ const config: PickierOptions = {
     // Build caches and vendored deps — never user-editable source
     '**/cache/**',
     '**/storage/framework/cache/**',
+    // Buddy syncs these from Stacks, which runs its own lint checks.
+    '**/storage/framework/defaults/**',
     '**/storage/framework/auto-imports/**',
     '**/storage/framework/frontend-dist/**',
     '**/storage/framework/server/storage/**',
