@@ -409,7 +409,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             >Revert this turn</button>
           @endif
         </article>
-        @includeWhen(initialFork?.sourceTurnId === turn.id, '../partials/harness-fork-lineage')
+        @if(initialFork && initialFork.sourceTurnId === turn.id)
+          @include('../partials/harness-fork-lineage')
+        @endif
       @endforeach
 
       @if(liveTurn)
@@ -487,7 +489,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             >Revert this turn</button>
           @endif
         </article>
-        @includeWhen(initialFork?.sourceTurnId === liveTurn.id, '../partials/harness-fork-lineage')
+        @if(initialFork && initialFork.sourceTurnId === liveTurn.id)
+          @include('../partials/harness-fork-lineage')
+        @endif
       @endif
 
       {{--

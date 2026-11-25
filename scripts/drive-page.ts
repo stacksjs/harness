@@ -1959,6 +1959,16 @@ check('the fork source stays attached to the copied response after continuation'
   && Boolean(marker.compareDocumentPosition(document.querySelector('[data-turn="2"]')!) & Node.DOCUMENT_POSITION_FOLLOWING)))
 await page.setViewportSize({ width: 1280, height: 800 })
 await capture('fork-continued-desktop')
+await page.reload()
+const sourceResponseLink = forkBanner.getByRole('link', { name: 'Source response' })
+await sourceResponseLink.waitFor()
+check('the lineage marker survives reload between the two responses', await forkBanner.evaluate(marker =>
+  marker.previousElementSibling?.getAttribute('data-turn') === '1'
+  && marker.nextElementSibling?.getAttribute('data-turn') === '2'))
+await sourceResponseLink.click()
+await page.waitForURL(url => url.pathname === `/s/${sourceId}` && url.hash === '#turn-1')
+check('the source link returns to the originating response', await page.locator('[data-turn="1"]').isVisible()
+  && !(await page.getByText('Continue only in the fork.', { exact: true }).count()))
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()
