@@ -1,5 +1,19 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.14...v0.0.15)
+
+## 🐛 Bug Fixes
+
+- track the team invitation upgrade migrations ([89d457e](https://github.com/stacksjs/harness/commit/89d457e)) _(by Chris)_
+
+## 🔧 Chores
+
+- upgrade Harness from current Stacks source ([b2d91e8](https://github.com/stacksjs/harness/commit/b2d91e8)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.13...v0.0.14)
 
 ## ✨ Features
