@@ -17,7 +17,7 @@ import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
-import { providerConversation } from '@harness/engine'
+import { effectiveClaudeCompaction, providerConversation } from '@harness/engine'
 import { capture, restore } from './checkpoint'
 import { estimateNativeContext, HandoffCapacityError, historicalContext } from './handoff'
 import { missingReferences, resolveForDriver } from './mcp'
@@ -131,8 +131,8 @@ export class ProviderRuntime {
       return null
     }
 
-    const claudeAutoCompactAfter = driverKind === 'claude'
-      ? this.options.engine.current.settings.claudeAutoCompactAfter ?? undefined
+    const claudeAutoCompactAfter = driverKind === 'claude' && session
+      ? effectiveClaudeCompaction(this.options.engine.current, session).autoCompactAfter
       : undefined
     const existing = this.sessions.get(sessionId)
     if (existing) {

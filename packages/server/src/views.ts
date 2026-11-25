@@ -7,7 +7,7 @@
  * has run.
  */
 
-import type { HostSettings, ThreadNavigation } from '@harness/contract'
+import type { ClaudeAccountCompaction, HostSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
 import { claudeIdleCompaction, isForkableResponse, providerConversation } from '@harness/engine'
@@ -35,6 +35,8 @@ export interface ViewProps {
     sessions: Array<{ id: number, workspaceId: number, title: string, state: string, navigation?: ThreadNavigation }>
   }>
   activeProfile: string
+  providerProfileId: number | null
+  claudeCompactionByAccount: Record<number, ClaudeAccountCompaction>
   draftWorkspace: ProjectSummary | null
   draftWithoutProject: boolean
   activeSession: {
@@ -160,8 +162,11 @@ export function viewProps(state: HarnessState, options: {
     ?? selectedProfile?.workspaces[0]
     ?? null
 
+  const providerProfileId = (active ? state.workspaces.get(active.workspaceId)?.profileId : undefined) ?? selectedProfile?.id ?? null
   return {
     profiles,
+    providerProfileId,
+    claudeCompactionByAccount: providerProfileId === null ? {} : state.profiles.get(providerProfileId)?.claudeCompactionByAccount ?? {},
     devices: [...state.devices.values()].map(device => ({
       id: device.id,
       name: device.name,

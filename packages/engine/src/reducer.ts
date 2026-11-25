@@ -7,9 +7,9 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
-import { GLOBAL_SESSION_ID, inputResponseValues, isCompactCommand, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isCompactCommand, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
 import { forkResponsePoint, isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
-import { claudeIdleCompaction } from './idle-compaction'
+import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
 
@@ -203,6 +203,22 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         at,
         payload: { type: 'profile.updated', profileId: command.profileId, ...changed },
       }]
+    }
+
+    case 'profile.claude-compaction.update': {
+      const profile = state.profiles.get(command.profileId)
+      const { providerInstanceId } = command
+      if (!profile || !Number.isSafeInteger(providerInstanceId) || providerInstanceId <= 0)
+        throw new InvalidCommand('Choose an available Claude account.')
+      const changes = acceptedClaudeAccountCompaction(command.changes)
+      if (!Object.keys(changes).length) throw new InvalidCommand('Enter valid Claude compaction settings.')
+      const previous = profile.claudeCompactionByAccount?.[providerInstanceId]
+      if (Object.entries(changes).every(([key, value]) => (previous?.[key as keyof typeof changes] ?? null) === value))
+        return []
+
+      return [{ sessionId: GLOBAL_SESSION_ID, commandId, at, payload: {
+        type: 'profile.claude-compaction.updated', profileId: profile.id, providerInstanceId, changes,
+      } }]
     }
 
     case 'profile.model-favorite.set': {
@@ -661,7 +677,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
 
       const turn = turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection))
       const base = { sessionId: session.id, commandId, at }
-      if (command.compactAfterTurnId !== undefined && state.settings.claudeIdleCompaction !== 'off'
+      if (command.compactAfterTurnId !== undefined && effectiveClaudeCompaction(state, session).idleCompaction !== 'off'
         && !isCompactCommand(command.text)) {
         const eligible = claudeIdleCompaction(session, at)
         if (eligible && eligible.afterTurnId === command.compactAfterTurnId && eligible.availableAt <= at) {
@@ -676,7 +692,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
 
     case 'thread.compact.idle': {
       const session = state.sessions.get(command.sessionId)
-      if (!session || state.settings.claudeIdleCompaction !== 'beforeCacheExpires'
+      if (!session || effectiveClaudeCompaction(state, session).idleCompaction !== 'beforeCacheExpires'
         || !state.workspaces.get(session.workspaceId)?.trusted) return []
       const eligible = claudeIdleCompaction(session, at)
       if (!eligible || eligible.afterTurnId !== command.afterTurnId || eligible.startsAt === undefined

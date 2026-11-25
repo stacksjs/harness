@@ -10,7 +10,7 @@
 
 import type { ProviderContextUsage } from './events'
 import type { SteeringOutcome } from './follow-ups'
-import type { HostSettings } from './settings'
+import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
 import type { ThreadOrganizationAction } from './thread-navigation'
 
@@ -97,6 +97,7 @@ export type ClientCommand =
   | { type: 'settings.update', changes: Partial<HostSettings> }
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
   | { type: 'profile.update', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
+  | { type: 'profile.claude-compaction.update', profileId: number, providerInstanceId: number, changes: ClaudeAccountCompaction }
   | { type: 'profile.model-favorite.set', profileId: number, favorite: ModelFavorite, selected: boolean }
   | { type: 'profile.delete', profileId: number }
   /**
@@ -205,6 +206,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'settings.update',
   'profile.create',
   'profile.update',
+  'profile.claude-compaction.update',
   'profile.model-favorite.set',
   'profile.delete',
   'workspace.add',

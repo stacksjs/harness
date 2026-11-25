@@ -37,6 +37,8 @@ export const initialInputs = activeSession?.pendingInputs || []
 export const initialFollowUps = activeSession?.followUps || { entries: [], held: false }
 export const initialContextUsage = activeSession?.contextUsage || null
 export const initialIdleCompaction = activeSession?.idleCompaction || null
+export const providerProfileId = $props.providerProfileId || 0
+export const initialAccountCompaction = $props.claudeCompactionByAccount || {}
 const pendingApproval = initialApprovals[0]
 
 // One space per profile. Its project rows contain threads that are ready for another message.
@@ -947,12 +949,47 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </li>
       </ul>
       <ul :if="providerAccounts().length" class="mb-3" aria-label="Project provider accounts">
-        <li :for="account in providerAccounts()" :key="account.id" class="flex gap-2 items-center py-1 text-[13px]">
-          <span class="flex-1 truncate" :text="account.name"></span>
-          <span class="text-[11px] opacity-60" :text="account.stateText"></span>
+        <li :for="account in providerAccounts()" :key="account.id" class="py-1 text-[13px]">
+          <details :if="account.kind === 'claude' && account.status !== 'deleted'" :data-claude-account="account.id" class="border-b border-black/10 dark:border-white/10">
+            <summary class="py-2 font-medium cursor-pointer">
+              <span class="inline-flex gap-2 justify-between w-[calc(100%-1.25rem)] align-middle">
+                <span class="min-w-0 truncate" :text="account.name"></span>
+                <span class="shrink-0 text-neutral-600 text-xs dark:text-neutral-300" :text="account.stateText"></span>
+              </span>
+            </summary>
+            <p :if="!canEditProviderAccounts()" class="mt-1 text-neutral-600 text-xs dark:text-neutral-300">Change these settings on the Harness host.</p>
+            <fieldset :disabled="!canEditProviderAccounts()" class="pb-3 min-w-0 border-0">
+              <label class="grid gap-1 mt-2">
+                <span class="font-medium">Compact idle threads</span>
+                <select data-claude-account-idle data-compaction-field="idle" :data-provider-instance="account.id" :value="accountCompaction()[account.id]?.idleCompaction ?? ''" @change="changeAccountCompaction" class="px-2 max-w-64 min-h-9 w-full text-[13px] bg-white dark:bg-neutral-900 border border-black/10 rounded-md dark:border-white/20">
+                  <option value="">Use host setting</option>
+                  <option value="whenReturning">When you return</option>
+                  <option value="beforeCacheExpires">Before the cache expires (beta)</option>
+                  <option value="off">Never</option>
+                </select>
+              </label>
+              <label class="grid gap-1 mt-3">
+                <span class="font-medium">Auto-compact after</span>
+                <input data-claude-account-window data-compaction-field="window" :data-provider-instance="account.id" type="number" min="100000" max="1000000" step="1" inputmode="numeric"
+                  placeholder="Use host setting" :disabled="accountCompaction()[account.id]?.autoCompactAfter === 'default'"
+                  :value="typeof accountCompaction()[account.id]?.autoCompactAfter === 'number' ? accountCompaction()[account.id].autoCompactAfter : ''"
+                  @change="changeAccountCompaction" class="px-2 max-w-64 min-h-9 w-full text-[13px] bg-white dark:bg-neutral-900 border border-black/10 rounded-md dark:border-white/20" />
+                <span class="text-neutral-600 text-xs dark:text-neutral-300">Enter 100,000 to 1,000,000 tokens. Leave blank to inherit.</span>
+              </label>
+              <label class="flex gap-2 items-center mt-2 min-h-9">
+                <input data-claude-account-default data-compaction-field="default" :data-provider-instance="account.id" type="checkbox" :checked="accountCompaction()[account.id]?.autoCompactAfter === 'default'" @change="changeAccountCompaction" />
+                Use Claude Code’s default threshold
+              </label>
+              <p role="alert" :if="accountCompactionError()?.id === account.id" :text="accountCompactionError()?.message" class="mt-1 text-red-700 text-xs dark:text-red-300"></p>
+            </fieldset>
+          </details>
+          <div :if="account.kind !== 'claude' || account.status === 'deleted'" class="flex gap-2 items-center">
+            <span class="flex-1 truncate" :text="account.name"></span>
+            <span class="text-[11px] opacity-60" :text="account.stateText"></span>
+          </div>
         </li>
       </ul>
-      <details class="mt-4 pt-3 border-black/10 border-t dark:border-white/10">
+      <details data-host-compaction-settings class="mt-4 pt-3 border-black/10 border-t dark:border-white/10">
         <summary class="font-semibold text-[13px] cursor-pointer">Advanced</summary>
         <label for="settings-claude-idle-compaction" class="block mt-3 font-medium text-[13px]">Compact idle threads</label>
         <p id="settings-claude-idle-help" class="mt-1 text-neutral-600 text-xs dark:text-neutral-300">Applies to Claude Code conversations with at least 200,000 tokens.</p>
@@ -1153,6 +1190,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // a new thread starts with, and the browser store cannot give them that.
   const settings = state({ ...hostSettings })
   const settingsSaveError = state('')
+  const accountCompaction = state(initialAccountCompaction)
+  const accountCompactionError = state(null)
+  const canEditProviderAccounts = state(false)
   const followUpPreference = derived(() => settings().followUpBehavior)
   const oppositeFollowUp = derived(() => followUpPreference() === 'steer' ? 'queue' : 'steer')
   const steeringPending = derived(() => followUps().entries.some(entry => entry.steering))
@@ -1337,6 +1377,39 @@ export const initialInputActivity = liveTurn?.inputRequests || []
    * put back if the host refuses. Leaving the control ahead of the host would
    * have the next reload silently undo the change.
    */
+  function applyAccountCompaction(id, changes) {
+    const previous = accountCompaction()
+    const account = previous[id]
+    if (Object.entries(changes).every(([key, value]) => (account?.[key] ?? null) === value)) return
+    accountCompaction.set({ ...previous, [id]: { ...account, ...changes } })
+  }
+
+  async function changeAccountCompaction(event) {
+    const input = event.currentTarget
+    const id = Number(input.dataset.providerInstance)
+    const field = input.dataset.compactionField
+    const key = field === 'idle' ? 'idleCompaction' : 'autoCompactAfter'
+    const previous = accountCompaction()[id]?.[key] ?? null
+    accountCompactionError.set(null)
+    if (field === 'window' && !input.validity.valid) {
+      accountCompactionError.set({ id, message: 'Enter a whole number from 100,000 to 1,000,000.' })
+      return
+    }
+    const value = field === 'idle' ? input.value || null
+      : field === 'default' ? (input.checked ? 'default' : null)
+        : (input.value === '' ? null : Number(input.value))
+    const changes = { [key]: value }
+    // Reflect the field before its acknowledgement can redraw adjacent inputs.
+    applyAccountCompaction(id, changes)
+    try {
+      await sendCommand({ type: 'profile.claude-compaction.update', profileId: providerProfileId, providerInstanceId: id, changes })
+    }
+    catch (error) {
+      accountCompactionError.set({ id, message: error.message || 'Could not save this account setting.' })
+      if ((accountCompaction()[id]?.[key] ?? null) === value) applyAccountCompaction(id, { [key]: previous })
+    }
+  }
+
   function changeClaudeIdleCompaction(event) {
     void updateSettings({ claudeIdleCompaction: event.currentTarget.value })
   }
@@ -1418,7 +1491,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const idleCompactionOffer = derived(() => {
     const candidate = idleCompactionCandidate()
     if (!candidate || candidate.availableAt > idleCompactionClock() || uiState() !== 'idle'
-      || settings().claudeIdleCompaction === 'off' || !sessionOnline() || pendingProviderSwitch() || editingFollowUp()
+      || (accountCompaction()[agentChoice(activeDriverValue()).providerInstanceId]?.idleCompaction
+        ?? settings().claudeIdleCompaction) === 'off' || !sessionOnline() || pendingProviderSwitch() || editingFollowUp()
       || followUps().entries.length || localFollowUps()?.length || threadNavigation().settledAt
       || threadNavigation().snoozedUntil || /^\s*\/compact(?:\s|$)/iu.test(composerText())) return null
     return candidate
@@ -2356,6 +2430,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
     const { drivers, accounts = [], favorites = [] } = catalog
+    canEditProviderAccounts.set(catalog.canEditProviderAccounts === true)
     if (modelsQuery && favoritesRevision === modelFavoritesRevision) modelFavorites.set(favorites)
     const selected = agentChoice(activeDriverValue())
     if (selected.providerInstanceId !== undefined && !accounts.some(account => account.id === selected.providerInstanceId)) {
@@ -3542,6 +3617,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         return
       }
       if (frame?.t !== 'event') return
+      if (frame.event.sessionId === 0 && frame.event.payload.type === 'profile.claude-compaction.updated') {
+        const { profileId, providerInstanceId, changes } = frame.event.payload
+        if (profileId === providerProfileId) applyAccountCompaction(providerInstanceId, changes)
+        return
+      }
       if (frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated') {
         settings.update(previous => ({ ...previous, ...frame.event.payload.changes }))
         return

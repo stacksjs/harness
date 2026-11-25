@@ -1,6 +1,18 @@
 import { claudeCompactionReturnAt } from '@harness/contract'
-import type { SessionState } from './projections'
+import type { HarnessState, SessionState } from './projections'
 import { providerConversation } from './projections'
+
+export function effectiveClaudeCompaction(state: HarnessState, session: SessionState) {
+  const profileId = state.workspaces.get(session.workspaceId)?.profileId
+  const account = profileId === undefined || session.providerInstanceId === undefined
+    ? undefined
+    : state.profiles.get(profileId)?.claudeCompactionByAccount?.[session.providerInstanceId]
+  return {
+    idleCompaction: account?.idleCompaction ?? state.settings.claudeIdleCompaction,
+    autoCompactAfter: account?.autoCompactAfter === 'default' ? undefined
+      : account?.autoCompactAfter ?? state.settings.claudeAutoCompactAfter ?? undefined,
+  }
+}
 
 const cacheLeadMs = 2 * 60_000
 

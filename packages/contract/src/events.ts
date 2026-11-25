@@ -9,7 +9,7 @@
 import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, ModelFavorite } from './commands'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
-import type { HostSettings } from './settings'
+import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { ThreadNavigation } from './thread-navigation'
 
 export interface EventBase {
@@ -92,6 +92,7 @@ export type EventPayload =
    * that has to restate everything.
    */
   | { type: 'profile.updated', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
+  | { type: 'profile.claude-compaction.updated', profileId: number, providerInstanceId: number, changes: ClaudeAccountCompaction }
   | { type: 'profile.model-favorite.changed', profileId: number, favorite: ModelFavorite, selected: boolean }
   /**
    * The workspaces and sessions removed along with it.
@@ -138,6 +139,7 @@ const GLOBAL_EVENT_TYPES: ReadonlySet<string> = new Set<EventType>([
   'settings.updated',
   'profile.created',
   'profile.updated',
+  'profile.claude-compaction.updated',
   'profile.model-favorite.changed',
   'profile.deleted',
   'workspace.added',

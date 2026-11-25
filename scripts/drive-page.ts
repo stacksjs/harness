@@ -2245,12 +2245,12 @@ const providerPreferences = new URL('/settings/providers', baseUrl)
 providerPreferences.searchParams.set('from', idleUrl.pathname)
 await page.goto(providerPreferences.href)
 await settingsDialog.getByText('Advanced', { exact: true }).click()
-const idleSetting = settingsDialog.getByLabel('Compact idle threads')
+const idleSetting = settingsDialog.locator('[data-host-compaction-settings]').getByLabel('Compact idle threads')
 check('the host defaults to compacting idle Claude threads on return', await idleSetting.inputValue() === 'whenReturning')
 await idleSetting.selectOption('off')
 await page.waitForFunction(() => document.querySelector('#settings-claude-idle-compaction')?.value === 'off')
 await capture('idle-compaction-settings-phone')
-const autoCompactWindow = settingsDialog.getByRole('spinbutton', { name: 'Auto-compact after' })
+const autoCompactWindow = settingsDialog.locator('[data-host-compaction-settings]').getByRole('spinbutton', { name: 'Auto-compact after' })
 check('Claude starts with its own automatic compaction window', await autoCompactWindow.inputValue() === '')
 await autoCompactWindow.fill('99999')
 await autoCompactWindow.press('Tab')
@@ -2277,6 +2277,52 @@ await idlePrompt.press('Enter')
 await page.locator('[data-turn]').filter({ hasText: 'Idle Claude fixture: expired cache with Never selected' })
   .getByText('Fixture context recorded.', { exact: true }).waitFor()
 check('Never suppresses the Compact choice for a fresh high-usage sample', await compactChoice.isHidden())
+
+
+await page.goto(providerPreferences.href)
+const workCompaction = page.locator('[data-claude-account="1"]')
+const personalCompaction = page.locator('[data-claude-account="2"]')
+await workCompaction.locator('summary').click()
+const workMode = workCompaction.locator('[data-claude-account-idle]')
+const workWindow = workCompaction.locator('[data-claude-account-window]')
+check('named Claude accounts inherit before edits', await workMode.inputValue() === '' && await workWindow.inputValue() === '')
+await workMode.selectOption('whenReturning')
+await workWindow.fill('300000')
+await workWindow.press('Tab')
+for (let attempts = 0; attempts < 100 && harness.engine.current.profiles.get(providerProfileId)?.claudeCompactionByAccount?.[1]?.autoCompactAfter !== 300_000; attempts++)
+  await Bun.sleep(20)
+await page.reload()
+await workCompaction.locator('summary').click()
+check('the named account’s independent mode and threshold survive reload',
+  await workMode.inputValue() === 'whenReturning' && await workWindow.inputValue() === '300000')
+if (screenshotDir) {
+  for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+    await page.setViewportSize({ width, height })
+    await workWindow.scrollIntoViewIfNeeded()
+    await capture(`claude-account-compaction-${width}`)
+  }
+}
+await personalCompaction.locator('summary').click()
+const personalMode = personalCompaction.locator('[data-claude-account-idle]')
+const personalWindow = personalCompaction.locator('[data-claude-account-window]')
+await personalCompaction.locator('[data-claude-account-default]').check()
+await personalWindow.waitFor({ state: 'visible' })
+check('choosing the Claude default leaves the other account intact',
+  await personalWindow.isDisabled() && await personalMode.inputValue() === '' && await workWindow.inputValue() === '300000')
+
+for (const [id, label] of [[1, 'Work'], [2, 'Personal']] as const) {
+  const key = `claude-account-browser-${id}`
+  await harness.engine.dispatch({
+    id: key, at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude', providerInstanceId: id },
+  })
+  await page.goto(new URL(`/s/${derivedId(key)}`, baseUrl).href)
+  await idlePrompt.fill(`Idle Claude fixture: expired cache on ${label}`)
+  await idlePrompt.press('Enter')
+  await page.getByText('Fixture context recorded.', { exact: true }).waitFor()
+  await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+  if (id === 1) await compactChoice.waitFor({ state: 'visible' })
+  check(`the ${label} account uses its effective idle setting`, await compactChoice.isVisible() === (id === 1))
+}
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

@@ -446,6 +446,123 @@ describe('Claude automatic compaction threshold', () => {
   })
 })
 
+describe('Claude account compaction preferences', () => {
+  it('isolates account overrides from the host defaults and from paired devices after restart', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    {
+      using db = new Database(databasePath)
+      db.exec('CREATE TABLE provider_instances (id INTEGER PRIMARY KEY, profile_id INTEGER, driver_kind TEXT, binary_path TEXT, resolved_home TEXT, config TEXT)')
+    }
+    const launches = new Map<string | undefined, Array<number | undefined>>()
+    const compactions: string[] = []
+    const { driver } = fakeDriver([])
+    const options = {
+      port, databasePath, remote: true, localTokenPath: join(dir, 'host-token'),
+      resolveDriver: (): Driver => ({
+        ...driver,
+        async create(config) {
+          const windows = launches.get(config.binaryPath) ?? []
+          windows.push(config.claudeAutoCompactAfter)
+          launches.set(config.binaryPath, windows)
+          return {
+            ...await driver.create(config),
+            async *startTurn(input: StartTurnInput): AsyncIterable<ProviderEvent> {
+              yield { type: 'session-bound', providerSessionId: input.providerSessionId ?? config.binaryPath ?? 'default' }
+              yield { type: 'assistant-delta', text: 'Fixture context recorded.' }
+              yield { type: 'turn-complete', tokensIn: 2, tokensOut: 1, costMicros: 0, contextUsage: {
+                usedTokens: 220_000, promptCacheExpiresAt: Date.now() + (input.text === 'Refresh the beta account cache' ? 120_700 : -1000),
+              } }
+            },
+            async *compact(providerSessionId: string): AsyncIterable<ProviderEvent> {
+              compactions.push(providerSessionId)
+              yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
+            },
+          }
+        },
+      }),
+    }
+    harness = await serve(options)
+    const access = harness.access!
+    const { code } = access.openPairing()
+    const paired = await access.redeem(code, 'Compaction fixture')
+    if (!paired.ok) throw new Error('Fixture pairing failed')
+    const socketUrl = `ws://127.0.0.1:${port}/ws`
+    let host = await Client.connect(socketUrl, access.localToken)
+    const device = await Client.connect(socketUrl, paired.token)
+    const profileId = derivedId('compaction-project')
+    const otherProfileId = derivedId('another-compaction-profile')
+    await harness.engine.dispatch({ id: 'compaction-project', at: 1, command: { type: 'workspace.register', path: dir, trusted: true } })
+    await harness.engine.dispatch({ id: 'another-compaction-profile', at: 1, command: { type: 'profile.create', name: 'Other' } })
+    {
+      using db = new Database(databasePath)
+      const insert = db.query('INSERT INTO provider_instances (id, profile_id, driver_kind, binary_path) VALUES (?, ?, ?, ?)')
+      insert.run(1, profileId, 'claude', 'claude-work-fixture')
+      insert.run(2, profileId, 'claude', 'claude-personal-fixture')
+      insert.run(3, profileId, 'codex', 'codex-fixture')
+    }
+    const send = (id: string, command: Command, client = host) => client.send({ t: 'dispatch', envelope: { id, at: 10, command } })
+    const localEdit = { type: 'profile.claude-compaction.update', profileId, providerInstanceId: 1,
+      changes: { idleCompaction: 'whenReturning', autoCompactAfter: 300_000 } } as const
+
+    try {
+      send('paired-account-compaction', localEdit, device)
+      expect(await device.waitForRejection('paired-account-compaction')).toMatchObject({ message: expect.stringContaining('Harness host') })
+      const fromPaired = await fetch(`http://127.0.0.1:${port}/drivers?workspace=${profileId}`, {
+        headers: { authorization: `Bearer ${paired.token}` },
+      }).then(response => response.json())
+      expect(fromPaired.canEditProviderAccounts).toBe(false)
+      send('foreign-account-compaction', { ...localEdit, profileId: otherProfileId })
+      expect(await host.waitForRejection('foreign-account-compaction')).toBeTruthy()
+      send('wrong-driver-compaction', { ...localEdit, providerInstanceId: 3 })
+      expect(await host.waitForRejection('wrong-driver-compaction')).toBeTruthy()
+      send('compaction-host-defaults', { type: 'settings.update', changes: { claudeIdleCompaction: 'off', claudeAutoCompactAfter: 400_000 } })
+      expect(await host.waitForDispatch('compaction-host-defaults')).toMatchObject({ t: 'dispatched' })
+      send('compaction-work', localEdit)
+      expect(await host.waitForDispatch('compaction-work')).toMatchObject({ t: 'dispatched' })
+      send('compaction-personal', { ...localEdit, providerInstanceId: 2, changes: { autoCompactAfter: 'default' } })
+      expect(await host.waitForDispatch('compaction-personal')).toMatchObject({ t: 'dispatched' })
+
+      host.close()
+      device.close()
+      harness.stop()
+      harness = await serve(options)
+      host = await Client.connect(socketUrl, harness.access!.localToken)
+      send('compaction-work', localEdit)
+      expect(await host.waitForDispatch('compaction-work')).toMatchObject({ replayed: true })
+
+      for (const providerInstanceId of [1, 2]) {
+        const label = `account-compaction-${providerInstanceId}`
+        send(label, { type: 'session.create', workspaceId: profileId, driverKind: 'claude', providerInstanceId })
+        const sessionId = await host.subscribeCreatedSession(label)
+        send(`${label}-seed`, { type: 'session.turn.start', sessionId, text: 'Seed the account context' })
+        expect(await host.waitFor('turn.completed', 3000, event => event.turnId === 1)).toBeTruthy()
+        host.events = []
+        send(`${label}-continue`, { type: 'session.turn.start', sessionId, text: 'Continue the account thread', compactAfterTurnId: 1 })
+        expect(await host.waitFor('turn.completed', 3000, event => event.turnId === (providerInstanceId === 1 ? 3 : 2))).toBeTruthy()
+        host.events = []
+        if (providerInstanceId === 2) {
+          send('compaction-personal-inherit', { ...localEdit, providerInstanceId, changes: { autoCompactAfter: null } })
+          expect(await host.waitForDispatch('compaction-personal-inherit')).toMatchObject({ t: 'dispatched' })
+          send(`${label}-inherit`, { type: 'session.turn.start', sessionId, text: 'Continue with the host window' })
+          expect(await host.waitFor('turn.completed', 3000, event => event.turnId === 3)).toBeTruthy()
+        }
+      }
+      expect(compactions).toEqual(['claude-work-fixture'])
+      const workSessionId = derivedId('account-compaction-1')
+      send('compaction-work-beta', { ...localEdit, changes: { idleCompaction: 'beforeCacheExpires' } })
+      expect(await host.waitForDispatch('compaction-work-beta')).toMatchObject({ t: 'dispatched' })
+      send('compaction-work-refresh', { type: 'session.turn.start', sessionId: workSessionId, text: 'Refresh the beta account cache' })
+      expect(await host.waitFor('turn.completed', 3000, event => event.turnId === 5 && event.contextCompacted)).toBeTruthy()
+      expect(compactions).toEqual(['claude-work-fixture', 'claude-work-fixture'])
+      expect(Object.fromEntries(launches)).toEqual({ 'claude-work-fixture': [300_000], 'claude-personal-fixture': [undefined, 400_000] })
+    }
+    finally {
+      host.close()
+      device.close()
+    }
+  })
+})
+
 describe('provider handoff', () => {
   it.each(['resumed', 'missing', 'ambiguous', 'over-capacity', 'changed-model', 'small-window'] as const)('continues a saved account after host restart when the return is %s', async (outcome) => {
     const databasePath = join(dir, 'test.sqlite')

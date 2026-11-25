@@ -18,7 +18,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell, Pty } from './pty'
 import type { HarnessState } from '@harness/engine'
-import { claudeIdleCompaction, Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
+import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff } from './diff'
@@ -178,6 +178,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     store,
     reducer: reduce,
     async prepareClientCommand(command, envelope) {
+      if (command.type === 'profile.claude-compaction.update'
+        && !savedProviders.find(command.providerInstanceId, command.profileId, 'claude', tmpdir()))
+        throw new Error('This Claude account is unavailable in the selected profile.')
       if (command.type === 'session.input.respond') {
         const pending = engine.current.sessions.get(command.sessionId)?.pendingInputs.find(input => input.requestId === command.requestId)
         const answers = pending && inputResponseValues(command, pending.questions)
@@ -568,9 +571,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
   function scheduleIdleCompaction(sessionId: number): void {
     cancelIdleCompaction(sessionId)
-    if (closing || engine.current.settings.claudeIdleCompaction !== 'beforeCacheExpires') return
+    if (closing) return
     const session = engine.current.sessions.get(sessionId)
-    if (!session || !engine.current.workspaces.get(session.workspaceId)?.trusted) return
+    if (!session || !engine.current.workspaces.get(session.workspaceId)?.trusted
+      || effectiveClaudeCompaction(engine.current, session).idleCompaction !== 'beforeCacheExpires') return
     const now = Date.now()
     const eligible = claudeIdleCompaction(session, now)
     if (!eligible || eligible.startsAt === undefined || eligible.expiresAt === undefined || eligible.expiresAt <= now) return
@@ -870,6 +874,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
         try {
           const command = envelope.command
+          if (command.type === 'profile.claude-compaction.update' && !socket.data.canUseHostPrivileges)
+            throw new Error('Change Claude account settings on the Harness host.')
           if (command.type === 'profile.model-favorite.set') {
             const favorite = command.favorite
             if (!favorite || !driverKinds().includes(favorite.driverKind)) throw new Error('Choose an available provider.')
@@ -1122,6 +1128,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return Promise.all([drivers, accounts]).then(([drivers, accounts]) => Response.json({
           drivers,
           accounts,
+          canEditProviderAccounts: hostPrivileges,
           ...(includeModels ? {
             favorites: profile?.modelFavorites?.filter(favorite => favorite.providerInstanceId === undefined
               || accounts.some(account => account.id === favorite.providerInstanceId && account.kind === favorite.driverKind)) ?? [],

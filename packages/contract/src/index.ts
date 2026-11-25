@@ -33,9 +33,9 @@ export type { QuestionAttachment } from './input'
 export { applyFollowUpEvent } from './follow-ups'
 export type { FollowUpQueue, QueuedFollowUp, SteeringOutcome } from './follow-ups'
 
-export { acceptedSettings, defaultHostSettings, hostSettings, settingsDelta } from './settings'
+export { acceptedClaudeAccountCompaction, acceptedSettings, defaultHostSettings, hostSettings, settingsDelta } from './settings'
 export { claudeCompactionReturnAt } from './idle-compaction'
-export type { ClaudeIdleCompaction, FollowUpBehavior, HostSettings, TerminalShell } from './settings'
+export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, HostSettings, TerminalShell } from './settings'
 
 export { maximumThreadSnooze, pinOrder, threadDisplayTitle } from './thread-navigation'
 export type { ThreadNavigation, ThreadOrganizationAction } from './thread-navigation'

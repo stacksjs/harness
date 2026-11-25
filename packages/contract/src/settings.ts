@@ -20,6 +20,30 @@ export type FollowUpBehavior = 'queue' | 'steer'
 export type TerminalShell = 'system' | 'den'
 export type ClaudeIdleCompaction = 'whenReturning' | 'beforeCacheExpires' | 'off'
 
+export interface ClaudeAccountCompaction {
+  /** Null inherits the host setting. */
+  idleCompaction?: ClaudeIdleCompaction | null
+  /** Null inherits the host setting. Default lets Claude Code choose. */
+  autoCompactAfter?: number | 'default' | null
+}
+
+function validClaudeIdleCompaction(value: unknown): value is ClaudeIdleCompaction {
+  return value === 'whenReturning' || value === 'beforeCacheExpires' || value === 'off'
+}
+
+function validClaudeAutoCompactAfter(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 100_000 && value <= 1_000_000
+}
+
+export function acceptedClaudeAccountCompaction(value: unknown): ClaudeAccountCompaction {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const { idleCompaction, autoCompactAfter } = value as Record<string, unknown>
+  return {
+    ...(idleCompaction === null || validClaudeIdleCompaction(idleCompaction) ? { idleCompaction } : {}),
+    ...(autoCompactAfter === null || autoCompactAfter === 'default' || validClaudeAutoCompactAfter(autoCompactAfter) ? { autoCompactAfter } : {}),
+  }
+}
+
 export interface HostSettings {
   /** The agent a new thread starts with, unless the composer overrides it. */
   defaultDriver: DriverKind
@@ -68,10 +92,10 @@ export function acceptedSettings(changes: unknown): Partial<HostSettings> {
     accepted.followUpBehavior = source.followUpBehavior as FollowUpBehavior
   if (source.terminalShell === 'system' || source.terminalShell === 'den')
     accepted.terminalShell = source.terminalShell
-  if (source.claudeIdleCompaction === 'whenReturning' || source.claudeIdleCompaction === 'beforeCacheExpires' || source.claudeIdleCompaction === 'off')
+  if (validClaudeIdleCompaction(source.claudeIdleCompaction))
     accepted.claudeIdleCompaction = source.claudeIdleCompaction
   const threshold = source.claudeAutoCompactAfter
-  if (threshold === null || (typeof threshold === 'number' && Number.isInteger(threshold) && threshold >= 100_000 && threshold <= 1_000_000))
+  if (threshold === null || validClaudeAutoCompactAfter(threshold))
     accepted.claudeAutoCompactAfter = threshold
   return accepted
 }

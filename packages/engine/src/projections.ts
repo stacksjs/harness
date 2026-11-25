@@ -6,9 +6,9 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
-import { acceptedSettings, applyFollowUpEvent, hostSettings, threadDisplayTitle } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, threadDisplayTitle } from '@harness/contract'
 
 export interface InputRequestState {
   attachments?: QuestionAttachment[]
@@ -170,6 +170,7 @@ export interface ProfileState {
   /** In the order they were attached. */
   mcpServers: McpServerState[]
   modelFavorites?: ModelFavorite[]
+  claudeCompactionByAccount?: Record<number, ClaudeAccountCompaction>
 }
 
 export function modelFavoriteIndex(favorites: readonly ModelFavorite[], favorite: ModelFavorite): number {
@@ -294,6 +295,16 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (p.icon !== undefined) profile.icon = p.icon
       if (p.tint !== undefined) profile.tint = p.tint
       if (p.position !== undefined) profile.position = p.position
+      break
+    }
+
+    case 'profile.claude-compaction.updated': {
+      const profile = state.profiles.get(p.profileId)
+      if (!profile) break
+      const accounts = profile.claudeCompactionByAccount ??= {}
+      accounts[p.providerInstanceId] = {
+        ...accounts[p.providerInstanceId], ...acceptedClaudeAccountCompaction(p.changes),
+      }
       break
     }
 
