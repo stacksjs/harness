@@ -1,5 +1,15 @@
 # Stacks Changelog
 
+[Compare changes](https://github.com/stacksjs/harness/compare/v0.0.30...v0.0.31)
+
+## ✨ Features
+
+- continue threads across provider accounts ([6331a74](https://github.com/stacksjs/harness/commit/6331a74)) _(by Chris)_
+
+## Contributors
+
+- _Chris_
+
 [Compare changes](https://github.com/stacksjs/harness/compare/v0.0.29...v0.0.30)
 
 ## 🐛 Bug Fixes
