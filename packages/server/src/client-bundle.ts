@@ -32,6 +32,8 @@ export { createFollowUpActions } from './packages/server/src/browser-follow-ups'
 export { createSessionSocket } from './packages/server/src/browser-session-socket'
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
 export { currentSettingsSection, showSettingsSection, leaveSettings } from './packages/server/src/browser-settings-location'
+export { ariaKeyshortcuts, chordFromEvent, chordText, formatChord, formatChordText, matchCommand, parseChord } from './packages/server/src/keybindings'
+export { createKeybindingStore, KEYBINDINGS_KEY } from './packages/server/src/keybindings-store'
 export { createTranscriptFinder } from './packages/server/src/browser-transcript-find'
 export { createTranscriptHighlighter } from './packages/server/src/browser-transcript-highlight'
 export { createQuestionForm, paintQuestionFiles } from './packages/server/src/browser-questions'`

@@ -11,6 +11,7 @@ import type { ThreadNavigation } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
 import { settingsSections } from './settings-location'
 import type { SettingsSection } from './settings-location'
 import { threadTitle } from './thread-search'
@@ -47,6 +48,23 @@ export interface ViewProps {
   remoteEnabled: boolean
   settingsSection: SettingsSection | null
   settingsSections: typeof settingsSections
+  /**
+   * The keyboard registry, rendered into the Keyboard section.
+   *
+   * Both platform spellings travel with each row because the server cannot
+   * know which keyboard is at the other end, and a row that waited for the
+   * island to format it would paint as raw `Mod+K`.
+   */
+  keybindings: Array<{
+    id: string
+    label: string
+    description: string
+    chord: string
+    apple: string
+    other: string
+    /** `aria-keyshortcuts` value, for the controls that advertise a chord. */
+    aria: string
+  }>
   serverUrl: string
   /** URL of the browser CBOR bundle, or '' when it could not be built. */
   codecUrl: string
@@ -143,6 +161,18 @@ export function viewProps(state: HarnessState, options: {
     remoteEnabled: options.remoteEnabled === true,
     settingsSection: options.settingsSection ?? null,
     settingsSections,
+    keybindings: keybindingCommands.map((command) => {
+      const chord = parseChord(command.chord)
+      return {
+        id: command.id,
+        label: command.label,
+        description: command.description,
+        chord: command.chord,
+        apple: chord ? formatChord(chord, true) : command.chord,
+        other: chord ? formatChord(chord, false) : command.chord,
+        aria: chord ? ariaKeyshortcuts(chord) : '',
+      }
+    }),
     activeProfile: String(selectedProfile?.id ?? ''),
     draftWorkspace,
     draftWithoutProject,

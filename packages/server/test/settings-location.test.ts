@@ -5,6 +5,7 @@ describe('workspace settings routes', () => {
   it('recognizes the index and the implemented sections', () => {
     expect(settingsSection('/settings')).toBe('general')
     expect(settingsSection('/settings/providers')).toBe('providers')
+    expect(settingsSection('/settings/keybindings')).toBe('keybindings')
     expect(settingsSection('/settings/archived')).toBe('archived')
     expect(settingsSection('/settings/not-a-section')).toBeNull()
   })
