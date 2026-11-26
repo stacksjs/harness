@@ -2588,7 +2588,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   async function refreshProjectSetup() {
     if (!sessionId || !workspaceEditorAllowed) return
-    clearTimeout(projectSetupPoll)
+    projectSetupPoll?.stop()
     const read = ++projectSetupRead
     try {
       const response = await fetch(`/s/${sessionId}/project-setup`)
@@ -2601,12 +2601,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         void previewProjectScript(setup.previewUrl, true)
       }
       if (setup?.status === 'pending' ? uiBusy() : setup?.status === 'running')
-        projectSetupPoll = setTimeout(refreshProjectSetup, 750)
+        projectSetupPoll = useTimeout(refreshProjectSetup, 750)
       else projectSetupPreview = false
     }
     catch {
       if (read === projectSetupRead && sessionOnline() && (uiBusy() || projectSetup()?.status === 'running'))
-        projectSetupPoll = setTimeout(refreshProjectSetup, 1500)
+        projectSetupPoll = useTimeout(refreshProjectSetup, 1500)
     }
   }
 
@@ -6129,7 +6129,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   onUnmounted(() => sidebarDrafts?.dispose())
-  onUnmounted(() => { ++projectSetupRead; clearTimeout(projectSetupPoll) })
+  onUnmounted(() => {
+    projectSetupRead++
+    projectSetupPoll?.stop()
+  })
   if (codecUrl) void connectComposerDrafts().catch(() => {})
   if ((sessionId || activeProfile) && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
 </script>
