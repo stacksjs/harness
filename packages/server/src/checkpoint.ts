@@ -113,9 +113,9 @@ export async function snapshotTree(workspacePath: string): Promise<string | null
  * directory and a repository with no commits are both ordinary situations, and
  * a turn must not fail because its workspace is not under version control.
  */
-export async function capture(workspacePath: string, message = 'harness checkpoint'): Promise<CaptureResult> {
-  const inside = await git(workspacePath, ['rev-parse', '--is-inside-work-tree'])
-  if (!inside.ok || inside.out.trim() !== 'true')
+export async function capture(workspacePath: string, message = 'harness checkpoint', excluded: string[] = []): Promise<CaptureResult> {
+  const inside = await git(workspacePath, ['rev-parse', '--is-inside-work-tree', '--show-prefix'])
+  if (!inside.ok || inside.out.trimEnd() !== 'true')
     return { ref: null, reason: 'not-a-repository' }
 
   const head = await git(workspacePath, ['rev-parse', 'HEAD'])
@@ -130,7 +130,8 @@ export async function capture(workspacePath: string, message = 'harness checkpoi
 
     // `-A` stages tracked modifications, deletions *and* untracked files, so an
     // agent's new file is inside the snapshot rather than surviving a revert.
-    const add = await git(workspacePath, ['add', '-A'], env)
+    const paths = excluded.length ? ['--', '.', ...excluded.map(path => `:(exclude,literal)${path}`)] : []
+    const add = await git(workspacePath, ['add', '-A', ...paths], env)
     if (!add.ok) return { ref: null, reason: 'git-failed' as const }
 
     const tree = await git(workspacePath, ['write-tree'], env)

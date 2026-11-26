@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -102,6 +102,7 @@ export interface CheckpointState {
   turnId: number
   kind: 'turn-start' | 'turn-end' | 'manual'
   vcsRef: string
+  repositories?: RepositoryCheckpoint[]
   /** Set once this checkpoint has been reverted to at least once. */
   reverted: boolean
 }
@@ -665,6 +666,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         turnId: p.turnId,
         kind: p.kind,
         vcsRef: p.vcsRef,
+        ...(p.repositories && { repositories: p.repositories }),
         reverted: false,
       })
       break

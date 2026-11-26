@@ -47,6 +47,12 @@ export interface CombinedWorktreeIntent {
 
 export type WorktreeIntent = CheckoutIntent | CombinedWorktreeIntent
 
+export interface RepositoryCheckpoint {
+  /** Empty for the project repository, otherwise a project-relative repository key. */
+  key: string
+  vcsRef: string
+}
+
 export interface ProviderContextUsage {
   usedTokens: number
   maxTokens?: number
@@ -91,7 +97,7 @@ export type EventPayload =
   | { type: 'input.requested', requestId: string, turnId: number, questions: InputQuestion[] }
   | { type: 'input.resolved', requestId: string, turnId: number, outcome: 'answered' | 'declined' | 'interrupted', attachments?: QuestionAttachment[] }
   /** `vcsRef` is the dangling commit holding the snapshot; see server/checkpoint.ts. */
-  | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }
+  | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string, repositories?: RepositoryCheckpoint[] }
   /**
    * A revert was accepted, in the same sense `turn.started` means a turn was
    * accepted: the checkpoint exists and the runtime has been told to put the

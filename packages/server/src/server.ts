@@ -408,7 +408,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       : repository ? await resolveProjectRepository(root, repository) : root
     if (!path) return Response.json({ error: 'This project repository is unavailable.' }, { status: 404, headers })
 
-    const turns = repository ? [] : reviewTurns(session)
+    const turns = reviewTurns(session, repository || '')
     try {
       if (operation === 'options') {
         const [options, repositories, rootIsGit] = await Promise.all([
@@ -420,14 +420,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return Response.json({ ...options, repositories, hasProjectRepository: rootIsGit ?? options.isRepository }, { headers })
       }
 
-      const baseline = repository ? undefined : session?.checkpoints[0]?.vcsRef
+      const baseline = checkpointRef(session?.checkpoints[0], repository || '')
       const context = operation === 'context'
       const readContext = (diff: NonNullable<Awaited<ReturnType<typeof reviewWorkspaceDiff>>>) =>
         workspaceDiffContext(path, diff, url.searchParams.get('file') ?? '', url.searchParams.get('object') ?? '')
       if (mode) {
         if (mode !== 'uncommitted' && mode !== 'branch' && mode !== 'commit' && mode !== 'turn')
           return Response.json({ error: 'Unknown Git comparison.' }, { status: 400, headers })
-        if (repository && mode === 'turn')
+        if (repository && mode === 'turn' && !turns.length)
           return Response.json({ error: 'There are no recorded turns for this repository.' }, { status: 404, headers })
         const diff = await reviewWorkspaceDiff(path, mode, target, turns, context ? undefined : url.searchParams.get('knownRevision') ?? undefined)
         if (!diff) return new Response(null, { status: 204, headers })
@@ -446,13 +446,20 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
   }
 
-  function reviewTurns(session: SessionState | undefined): WorkspaceReviewTurn[] {
+  function checkpointRef(point: SessionState['checkpoints'][number] | undefined, repository: string): string | undefined {
+    if (point?.repositories) return point.repositories.find(entry => entry.key === repository)?.vcsRef
+    return repository ? undefined : point?.vcsRef
+  }
+
+  function reviewTurns(session: SessionState | undefined, repository: string): WorkspaceReviewTurn[] {
     if (!session) return []
     const starts = new Map<number, string>()
     const ends = new Map<number, string>()
     for (const point of session.checkpoints) {
-      if (point.kind === 'turn-start' && !starts.has(point.turnId)) starts.set(point.turnId, point.vcsRef)
-      if (point.kind === 'turn-end') ends.set(point.turnId, point.vcsRef)
+      const ref = checkpointRef(point, repository)
+      if (!ref) continue
+      if (point.kind === 'turn-start' && !starts.has(point.turnId)) starts.set(point.turnId, ref)
+      if (point.kind === 'turn-end') ends.set(point.turnId, ref)
     }
     return session.turns.flatMap((turn, index) => {
       const before = starts.get(turn.id)

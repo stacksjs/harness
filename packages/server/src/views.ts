@@ -261,7 +261,7 @@ export function viewProps(state: HarnessState, options: {
             // The snapshot taken before this turn ran, which is what "undo
             // this turn" reverts to. 0 when there is none — a workspace that
             // is not a repository, or a turn from before checkpointing.
-            checkpointId: active.checkpoints.find(c => c.turnId === turn.id && c.kind === 'turn-start')?.id ?? 0,
+            checkpointId: active.checkpoints.find(c => c.turnId === turn.id && c.kind === 'turn-start' && !c.repositories)?.id ?? 0,
             toolCalls: turn.toolCalls.map(call => ({
               callId: call.callId,
               name: call.name,

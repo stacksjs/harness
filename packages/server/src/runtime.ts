@@ -11,7 +11,7 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { ApprovalChoice, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, RepositoryCheckpoint, SteeringOutcome } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
@@ -25,6 +25,7 @@ import { estimateNativeContext, HandoffCapacityError, historicalContext } from '
 import { missingReferences, resolveForDriver } from './mcp'
 import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
 import { providerLaunchConfig } from './provider-instances'
+import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { openScratchWorkspace } from './scratch-workspace'
 import * as worktree from './worktree'
 
@@ -740,17 +741,46 @@ export class ProviderRuntime {
     kind: 'turn-start' | 'turn-end' | 'manual',
   ): Promise<void> {
     const state = this.options.engine.current
-    // A checkpoint of the wrapper would omit the selected checkouts.
-    if (state.sessions.get(sessionId)?.combinedWorktree) return
-    const workspacePath = this.options.workspacePath
+    const session = state.sessions.get(sessionId)
+    if (!session || !state.workspaces.get(session.workspaceId)?.trusted) return
+    const combined = session.combinedWorktree
+    const workspacePath = session.worktreePath || (this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
-      : defaultWorkspacePath(state, sessionId)
+      : defaultWorkspacePath(state, sessionId))
     if (!workspacePath || !existsSync(workspacePath)) return
 
-    const result = await capture(workspacePath, `harness checkpoint · session ${sessionId} · turn ${turnId}`)
-    if (!result.ref) return
+    const message = `harness checkpoint: session ${sessionId}, turn ${turnId}`
+    const children = combined || session.worktreePath ? [] : await scanProjectRepositories(workspacePath)
+    if (!combined && children.length === 0) {
+      const result = await capture(workspacePath, message)
+      if (result.ref) await this.emit({ type: 'thread.checkpoint.capture', sessionId, turnId, kind, vcsRef: result.ref })
+      return
+    }
 
-    await this.emit({ type: 'thread.checkpoint.capture', sessionId, turnId, kind, vcsRef: result.ref })
+    const scopes = combined
+      ? combined.checkouts.map(checkout => ({
+          key: checkout.key,
+          open: () => openCombinedRepository(combined, checkout),
+          excluded: nestedWorktrees(combined, checkout),
+        }))
+      : [{ key: '' }, ...children].map(({ key }) => ({
+          key,
+          open: () => key ? resolveProjectRepository(workspacePath, key) : Promise.resolve(workspacePath),
+          excluded: children.filter(child => !key || child.key.startsWith(`${key}/`))
+            .map(child => child.key.slice(key ? key.length + 1 : 0)),
+        }))
+    const repositories: RepositoryCheckpoint[] = []
+    for (let offset = 0; offset < scopes.length; offset += 4) {
+      const batch = await Promise.all(scopes.slice(offset, offset + 4).map(async ({ key, open, excluded }) => {
+        const path = await open()
+        if (!path) return null
+        const result = await capture(path, message, excluded).catch(() => null)
+        return result?.ref ? { key, vcsRef: result.ref } : null
+      }))
+      for (const point of batch) if (point) repositories.push(point)
+    }
+    const primary = repositories[0]
+    if (primary) await this.emit({ type: 'thread.checkpoint.capture', sessionId, turnId, kind, vcsRef: primary.vcsRef, repositories })
   }
 
   /**

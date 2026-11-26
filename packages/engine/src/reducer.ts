@@ -749,6 +749,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           turnId: command.turnId,
           kind: command.kind,
           vcsRef: command.vcsRef,
+          ...(command.repositories && { repositories: command.repositories }),
         },
       }]
     }
@@ -761,6 +762,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const checkpoint = session.checkpoints.find(c => c.id === command.checkpointId)
       if (!checkpoint)
         throw new InvalidCommand(`no such checkpoint: ${command.checkpointId}`)
+      if (checkpoint.repositories)
+        throw new InvalidCommand('Reverting project repositories together is unavailable.')
 
       // Refused while a turn is running. Restoring files underneath a working
       // agent would have it editing a tree that changed for reasons it cannot

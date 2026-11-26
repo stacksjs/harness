@@ -2030,6 +2030,81 @@ describe('checkpoint and revert', () => {
     client.close()
   }, 15_000)
 
+  for (const isolated of [false, true]) {
+    it(`reviews a turn in each ${isolated ? 'isolated checkout' : 'project repository'} after restart`, async () => {
+      const project = join(dir, 'project')
+      const keys = ['api[dev]', 'web']
+      const git = (cwd: string, ...args: string[]) => {
+        const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout
+      }
+      for (const key of keys) {
+        const path = join(project, key)
+        mkdirSync(path, { recursive: true })
+        git(path, 'init', '-qb', 'main')
+        writeFileSync(join(path, 'shared.txt'), 'Original file\n')
+        writeFileSync(join(path, '.gitignore'), 'private*\n')
+        git(path, 'add', '.')
+        git(path, '-c', 'user.name=Fixture', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base')
+      }
+      const driver: Driver = {
+        kind: 'claude',
+        async probe() { return { status: 'ready' } },
+        async create({ workspacePath }) {
+          return {
+            async *startTurn() {
+              for (const key of keys) {
+                const path = join(workspacePath, key)
+                writeFileSync(join(path, 'shared.txt'), `Changed in ${key}\n`)
+                git(path, 'add', 'shared.txt')
+                writeFileSync(join(path, 'shared.txt'), `Changed in ${key}\nUnstaged line\n`)
+                writeFileSync(join(path, 'binary.dat'), Uint8Array.of(0, 1, 2))
+                writeFileSync(join(path, 'private[1].txt'), 'ignored fixture')
+              }
+              yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+            },
+            async interrupt() {}, async respondApproval() {}, async stop() {},
+          }
+        },
+      }
+      const databasePath = join(dir, 'test.sqlite')
+      harness = await serve({ port, databasePath, resolveDriver: () => driver })
+      const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      const { sessionId } = await bootstrap(client, project, isolated, isolated ? { repositories: keys } : undefined)
+      client.send({ t: 'dispatch', envelope: { id: 'repo_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'edit both' } } })
+      const completed = await client.waitFor('turn.completed', 10_000)
+      expect(completed).toBeTruthy()
+      if (!isolated) {
+        for (const key of keys) {
+          const path = join(project, key)
+          expect(git(path, 'show', ':shared.txt')).toBe(`Changed in ${key}\n`)
+          expect(readFileSync(join(path, 'shared.txt'), 'utf8')).toContain('Unstaged line')
+        }
+      }
+      client.close()
+      harness.stop()
+      harness = await serve({ port, databasePath, resolveDriver: () => driver })
+
+      const endpoint = `http://127.0.0.1:${port}/s/${sessionId}/diff`
+      for (const [key, other] of [[keys[0]!, keys[1]!], [keys[1]!, keys[0]!]]) {
+        const params = new URLSearchParams({ repository: key })
+        expect((await (await fetch(`${endpoint}/options?${params}`)).json()).turns).toEqual([{ id: completed.turnId, number: 1 }])
+        params.set('comparison', 'turn')
+        params.set('target', String(completed.turnId))
+        const recorded = await (await fetch(`${endpoint}?${params}`)).json()
+        expect(recorded).toMatchObject({ scope: 'turn', comparisonLabel: '1', comparisonTarget: String(completed.turnId) })
+        expect(recorded.patch).toContain(`+Changed in ${key}`)
+        expect(recorded.patch).toContain('+Unstaged line')
+        expect(recorded.patch).not.toContain(`+Changed in ${other}`)
+        expect(recorded.files.map(({ path }: { path: string }) => path).sort()).toEqual(['binary.dat', 'shared.txt'])
+      }
+      const root = await (await fetch(`${endpoint}/options`)).json()
+      expect(root.turns).toEqual([])
+      expect(root.hasProjectRepository).toBe(false)
+    }, 25_000)
+  }
+
   it('runs a turn in a workspace that is not a repository', async () => {
     // Checkpointing is best-effort. A plain directory must not stop a turn.
     const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
