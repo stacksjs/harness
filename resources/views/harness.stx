@@ -652,20 +652,27 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @if(activeWorkspaceId)
     <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
       <div data-terminal-toolbar>
-        <span :text="terminalLabel()">Terminal</span>
-        <div class="flex gap-1 items-center">
+        <div ref="terminalTabStrip" data-terminal-tabs role="tablist" aria-label="Terminal tabs" @keydown="terminalTabKeydown">
+          <button :for="tab in terminalTabs().tabs" :key="tab.key" type="button" role="tab" :id="'terminal-tab-' + tab.number"
+            :aria-selected="tab.key === terminalTabs().activeKey ? 'true' : 'false'" :tabindex="tab.key === terminalTabs().activeKey ? 0 : -1"
+            aria-controls="harness-terminal-output" @click="selectTerminalTab(tab.key)" :text="'Terminal ' + tab.number"></button>
+        </div>
+        <div class="flex items-center shrink-0">
           <span data-terminal-activity role="status" hidden :hidden="!terminalStatus()" :text="terminalStatus()" class="px-2 text-xs"></span>
-          <button type="button" data-terminal-restart hidden :hidden="!terminalExited() && !terminalError()" :disabled="!sessionOnline()" @click="restartTerminal" class="px-2 h-8 text-xs rounded-md">Restart terminal</button>
-          <button type="button" aria-label="End terminal session" title="End terminal session" hidden :hidden="!terminalAttached()" :disabled="!sessionOnline()" @click="endTerminal" class="harness-icon-button">
+          <button type="button" data-terminal-restart hidden :hidden="!terminalExited() && !terminalError()" :disabled="terminalBusy() || !sessionOnline()" @click="restartTerminal" class="px-2 h-8 text-xs rounded-md">Restart terminal</button>
+          <button type="button" aria-label="New terminal" title="New terminal" :disabled="terminalBusy() || !sessionOnline()" @click="addTerminalTab" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-add-01" aria-hidden="true"></span>
+          </button>
+          <button type="button" aria-label="End terminal session" title="End terminal session" hidden :hidden="!activeTerminalTab()" :disabled="terminalBusy() || !sessionOnline()" @click="endTerminal" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-stop" aria-hidden="true"></span>
           </button>
-          <button type="button" aria-label="Close terminal" title="Close terminal" @click="toggleTerminal" class="harness-icon-button">
+          <button type="button" aria-label="Hide terminal dock" title="Hide terminal dock" @click="toggleTerminal" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
           </button>
         </div>
       </div>
       <p data-terminal-error role="alert" hidden :hidden="!terminalError()" :text="terminalError()" class="px-3 py-2 text-red-300 text-sm"></p>
-      <div data-terminal-host ref="termHostBox" aria-label="Terminal input and output" @keydown="termKeydown" @paste="termPaste" @scroll="trackTerminalPosition" tabindex="0" class="terminal-host">
+      <div id="harness-terminal-output" data-terminal-host ref="termHostBox" role="tabpanel" :aria-labelledby="activeTerminalTab() ? 'terminal-tab-' + activeTerminalTab().number : null" :aria-label="terminalLabel() + ' input and output'" @keydown="termKeydown" @paste="termPaste" @scroll="trackTerminalPosition" tabindex="0" class="terminal-host">
         {{--
           Ten glyphs in the host's own font, laid out but invisible: the ruler
           the island measures to turn pixels into columns and rows.
@@ -1491,7 +1498,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   const diffOpen = state(false)
   const termOpen = useLocalStorage(`harness.terminal-open:${sessionId}`, false, { listenToStorageChanges: false })
-  const terminalSession = useLocalStorage(`harness.terminal-session:${sessionId}`, null, { listenToStorageChanges: false })
+  const legacyTerminalSession = useLocalStorage(`harness.terminal-session:${sessionId}`, null, { listenToStorageChanges: false })
+  const terminalDock = useLocalStorage(`harness.terminal-tabs:${sessionId}`, null, { listenToStorageChanges: false })
+  const terminalTabs = derived(() => {
+    const dock = terminalDock()
+    if (Array.isArray(dock?.tabs)) return dock
+    const legacy = legacyTerminalSession()
+    return legacy?.key ? { tabs: [{ ...legacy, number: 1 }], activeKey: legacy.key } : { tabs: [], activeKey: '' }
+  })
+  const activeTerminalTab = derived(() => terminalTabs().tabs.find(tab => tab.key === terminalTabs().activeKey))
   const startPending = state(false)
   const projectBusy = state(false)
   const projectError = state('')
@@ -1803,6 +1818,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const termHostRef = useRef('termHostBox')
   const termHeaderToggle = useRef('termHeaderToggle')
   const termMetricRef = useRef('termMetricBox')
+  const terminalTabStrip = useRef('terminalTabStrip')
 
   function toggleSidebar() {
     if (desktopSidebar()) {
@@ -2512,9 +2528,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       stxAlert(`Open a workspace first — the login runs in its terminal. Or run \`${command}\` in any terminal yourself.`)
       return
     }
+    if (!sessionOnline() || terminalBusy()) {
+      stxAlert('Wait for the workspace terminal to connect, then try logging in again.')
+      return
+    }
     closeSettings()
-    if (terminalExited() || terminalError()) restartTerminal()
-    else if (!termOpen()) toggleTerminal()
+    if (!termOpen()) toggleTerminal()
+    if (activeTerminalTab()) addTerminalTab()
     // The measured PTY opens on the next animation frame. Hold the command
     // until it binds, and discard it if the connection drops in the meantime.
     termSend(`${command}\r`)
@@ -3343,13 +3363,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   let termToHtml = null
   let termRenderQueued = false
   let termFollowing = true
-  let terminalOpening = false
+  let terminalCloseAction = ''
+  const terminalBusy = state(false)
   const terminalLabel = state('Terminal')
   const terminalError = state('')
   const terminalExited = state(false)
   const terminalActivity = state('')
   const terminalReconnecting = state(false)
-  const terminalAttached = state(false)
   const terminalStatus = derived(() => terminalReconnecting() ? 'Reconnecting…' : terminalActivity())
 
   function trackTerminalPosition(event) {
@@ -3455,45 +3475,126 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function showTerminalProcess() {
     if (!termOpen() || !sessionOnline()) return
-    if (termId === null && !terminalOpening && !terminalError()) {
+    if (termId === null && !terminalBusy() && !terminalError()) {
+      const dock = terminalTabs()
+      const stored = activeTerminalTab() ?? { key: crypto.randomUUID(), number: (dock.tabs.at(-1)?.number ?? 0) + 1, started: false }
+      if (!activeTerminalTab() || !terminalDock()) {
+        const tabs = activeTerminalTab() ? dock.tabs : [...dock.tabs, stored]
+        saveTerminalTabs(tabs, stored.key)
+      }
       const { cols, rows } = measureTerm()
-      const stored = terminalSession()
-      const resumeKey = stored?.key || crypto.randomUUID()
-      if (!stored?.key) terminalSession.set({ key: resumeKey, started: false })
-      terminalOpening = sendFrame({
-        t: 'term-open', workspaceId: Number(activeWorkspaceId), sessionId, resumeKey, cols, rows,
-        ...(stored?.started ? { resumeOnly: true } : {}),
+      const opening = sendFrame({
+        t: 'term-open', workspaceId: Number(activeWorkspaceId), sessionId, resumeKey: stored.key, cols, rows,
+        ...(stored.started ? { resumeOnly: true } : {}),
       })
-      if (!terminalOpening) terminalError.set('The terminal could not connect to this host.')
+      terminalBusy.set(opening)
+      if (!opening) terminalError.set('The terminal could not connect to this host.')
     }
     else resizeTerminal()
     watchTermSize()
   }
 
-  function restartTerminal() {
-    if (terminalOpening || !sessionOnline()) return
-    endTerminal()
-    termOpen.set(true)
-    void nextTick(() => termHostRef.current?.focus())
-    requestAnimationFrame(showTerminalProcess)
+  function saveTerminalTabs(tabs, activeKey) {
+    terminalDock.set({ tabs, activeKey })
+    if (legacyTerminalSession()?.key) legacyTerminalSession.set(null)
   }
 
-  function endTerminal() {
-    if (!sessionOnline()) return
-    if (termId !== null && !sendFrame({ t: 'term-close', termId })) return
+  function clearTerminalView() {
     termId = null
     term = null
     termFollowing = true
     termPendingInput = ''
-    terminalSession.set(null)
-    terminalAttached.set(false)
+    terminalLabel.set('Terminal')
     terminalReconnecting.set(false)
     if (termScreenRef.current) termScreenRef.current.textContent = ''
     terminalExited.set(false)
     terminalError.set('')
     terminalActivity.set('')
-    termOpen.set(false)
-    restoreTerminalFocus()
+  }
+
+  function focusActiveTerminalTab() {
+    const active = terminalTabStrip.current?.querySelector('[aria-selected="true"]')
+    active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    termHostRef.current?.focus({ preventScroll: true })
+  }
+
+  function showSelectedTerminal(tabs, key) {
+    clearTerminalView()
+    saveTerminalTabs(tabs, key)
+    void nextTick(focusActiveTerminalTab)
+    requestAnimationFrame(showTerminalProcess)
+  }
+
+  function detachTerminalView() {
+    return termId === null || sendFrame({ t: 'term-detach', termId })
+  }
+
+  function addTerminalTab() {
+    if (!sessionOnline() || terminalBusy() || !detachTerminalView()) return
+    const { tabs } = terminalTabs()
+    const tab = { key: crypto.randomUUID(), number: (tabs.at(-1)?.number ?? 0) + 1, started: false }
+    showSelectedTerminal([...tabs, tab], tab.key)
+  }
+
+  function selectTerminalTab(key) {
+    if (!sessionOnline() || terminalBusy() || key === terminalTabs().activeKey || !detachTerminalView()) return
+    showSelectedTerminal(terminalTabs().tabs, key)
+  }
+
+  function terminalTabKeydown(event) {
+    const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
+    const index = tabs.indexOf(event.target)
+    if (index < 0) return
+    const target = event.key === 'Home' ? tabs[0]
+      : event.key === 'End' ? tabs.at(-1)
+      : event.key === 'ArrowRight' ? tabs[(index + 1) % tabs.length]
+      : event.key === 'ArrowLeft' ? tabs[(index - 1 + tabs.length) % tabs.length]
+      : undefined
+    if (!target) return
+    event.preventDefault()
+    target.focus()
+  }
+
+  function finishTerminalClose(action) {
+    const tab = activeTerminalTab()
+    if (!tab) return
+    const { tabs } = terminalTabs()
+    const index = tabs.indexOf(tab)
+    if (action === 'restart') {
+      const replacement = { ...tab, key: crypto.randomUUID(), started: false }
+      showSelectedTerminal(tabs.map(item => item.key === tab.key ? replacement : item), replacement.key)
+      return
+    }
+    const remaining = tabs.filter(item => item.key !== tab.key)
+    const next = remaining[index] ?? remaining.at(-1)
+    if (next) showSelectedTerminal(remaining, next.key)
+    else {
+      clearTerminalView()
+      saveTerminalTabs([], '')
+      termOpen.set(false)
+      restoreTerminalFocus()
+    }
+  }
+
+  function requestTerminalClose(action) {
+    if (termId === null) finishTerminalClose(action)
+    else if (sendFrame({ t: 'term-close', termId })) {
+      terminalCloseAction = action
+      terminalBusy.set(true)
+    }
+  }
+
+  function restartTerminal() {
+    if (!sessionOnline() || terminalBusy()) return
+    if (!termOpen()) termOpen.set(true)
+    requestTerminalClose('restart')
+  }
+
+  async function endTerminal() {
+    const tab = activeTerminalTab()
+    if (!tab || !sessionOnline() || terminalBusy()) return
+    if (termId !== null && !terminalExited() && !await stxConfirm(`End Terminal ${tab.number}? Its shell will stop and its scrollback will be cleared.`, { confirmText: 'End terminal', cancelText: 'Keep terminal' })) return
+    if (tab.key === activeTerminalTab()?.key && sessionOnline() && !terminalBusy()) requestTerminalClose('end')
   }
 
   function toggleTerminal(event) {
@@ -3704,16 +3805,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
     function onMessage(frame) {
       if (frame?.t === 'term-opened') {
-        terminalOpening = false
-        terminalAttached.set(true)
+        terminalBusy.set(false)
         terminalReconnecting.set(false)
         terminalError.set('')
         terminalExited.set(false)
         terminalActivity.set('')
         terminalLabel.set(frame.shell === 'den' ? 'Den terminal' : 'Terminal')
         termId = frame.termId
-        const stored = terminalSession()
-        if (stored?.key) terminalSession.set({ key: stored.key, started: true })
+        const dock = terminalTabs()
+        saveTerminalTabs(dock.tabs.map(tab => tab.key === dock.activeKey ? { ...tab, started: true } : tab), dock.activeKey)
         term = frame.checkpoint ? Terminal.fromCheckpoint(frame.checkpoint, terminalHistory)
           : new Terminal({ cols: frame.cols, rows: frame.rows, ...terminalHistory })
         if (frame.exit) {
@@ -3751,16 +3851,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       }
       if (frame?.t === 'term-closed') {
         if (frame.termId === termId) {
-          termId = null
-          terminalAttached.set(false)
-          terminalSession.set(null)
-          terminalExited.set(true)
-          terminalActivity.set('')
+          const action = terminalCloseAction
+          terminalCloseAction = ''
+          terminalBusy.set(false)
+          finishTerminalClose(action)
         }
         return
       }
       if (frame?.t === 'term-error') {
-        terminalOpening = false
+        terminalBusy.set(false)
         termPendingInput = ''
         terminalReconnecting.set(false)
         terminalError.set(frame.message)
@@ -3989,11 +4088,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           void followUpActions()?.flush()
           if (termOpen()) requestAnimationFrame(showTerminalProcess)
         }
-        else if (terminalOpening || termId !== null || termPendingInput) {
-          terminalOpening = false
+        else if (terminalBusy() || termId !== null || termPendingInput) {
+          terminalBusy.set(false)
+          terminalCloseAction = ''
           termId = null
           termPendingInput = ''
-          terminalAttached.set(false)
           terminalReconnecting.set(termOpen())
         }
       },

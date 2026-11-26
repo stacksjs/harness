@@ -505,11 +505,25 @@ const TERMINAL_PANEL = `
   --t-color-15: #ffffff;
 }
 [data-terminal-toolbar] {
-  display: flex; align-items: center; justify-content: space-between; padding-inline: 10px 4px;
+  display: flex; align-items: center; justify-content: space-between; gap: 4px; padding-inline: 4px;
   color: #d7dae0; font-size: 12px; border-block-end: 1px solid rgb(255 255 255 / 16%);
 }
+[data-terminal-tabs] {
+  display: flex; flex: 1; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: thin;
+}
+[data-terminal-tabs] [role="tab"] {
+  flex: 0 0 auto; padding-inline: 9px; min-height: 32px; border-block-end: 2px solid transparent;
+  white-space: nowrap; font-size: 12px; color: #aeb4c1;
+}
+[data-terminal-tabs] [role="tab"]:hover,
+[data-terminal-tabs] [role="tab"][aria-selected="true"] {
+  background: rgb(255 255 255 / 7%); color: #f3f4f6;
+}
+[data-terminal-tabs] [role="tab"][aria-selected="true"] { border-block-end-color: #8db1ee; }
+[data-terminal-tabs] [role="tab"]:focus-visible,
+.terminal-host:focus-visible { outline: 1px solid #8db1ee; outline-offset: -2px; }
 .terminal-host {
-  flex: 1; overflow-y: auto; padding: 8px 10px; outline: none;
+  flex: 1; min-height: 0; overflow: auto; padding: 8px 10px;
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #d7dae0; white-space: pre;
 }
