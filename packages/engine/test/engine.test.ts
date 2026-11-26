@@ -256,6 +256,30 @@ describe('Thread navigation', () => {
     expect(restarted.current.sessions.get(third)?.navigation?.snoozedUntil).toBeNull()
   })
 
+  it('keeps same-kind host actions in separate groups across a local Undo boundary', async () => {
+    const { engine } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const first = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    const second = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    await engine.dispatch(first)
+    await engine.dispatch(second)
+    const ids = [derivedId(first.id), derivedId(second.id)]
+    const undoScope = 'tab-a'
+    const actions = ids.map((sessionId, index) => envelope({
+      type: 'session.organize', sessionId, action: 'settle', undoScope,
+      ...(index ? { undoBatch: 'after-discard' } : {}),
+    }))
+    for (const action of actions) await engine.dispatch(action)
+    for (const index of [1, 0]) {
+      const result = await engine.dispatch(envelope({
+        type: 'session.organize', sessionId: ids[index]!, action: 'undo', undoScope, sourceCommandId: actions[index]!.id,
+      }))
+      expect(result.events).toHaveLength(1)
+      expect(engine.current.sessions.get(ids[index]!)?.navigation?.settledAt).toBeNull()
+      if (index === 1) expect(engine.current.sessions.get(ids[0]!)?.navigation?.settledAt).toBe(actions[0]!.at)
+    }
+  })
+
   it('restores the safe members of an Undo group while preserving another tab’s newer rank and snooze', async () => {
     const { engine } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)

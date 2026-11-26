@@ -1,5 +1,5 @@
 import type { CommandEnvelope, EventPayload, ThreadPlacement, ThreadUndoOffer, ThreadUndoRecord } from '@harness/contract'
-import { threadPlacementKeys } from '@harness/contract'
+import { threadPlacementKeys, threadUndoDuration } from '@harness/contract'
 import type { HarnessState, ProfileState } from './projections'
 import type { AppendableEvent } from './store'
 
@@ -58,7 +58,7 @@ function latestGroup(stack: ThreadUndoStack | undefined, at: number): ScopedReco
   const group: ScopedRecord[] = []
   for (let index = stack.records.length - 1; index >= 0; index--) {
     const record = stack.records[index]!
-    if (record.action !== latest.action) break
+    if (record.action !== latest.action || record.batch !== latest.batch) break
     group.push(record)
   }
   return group
@@ -72,7 +72,7 @@ export function threadUndoOffer(profile: ProfileState | undefined, key: string, 
   const count = group.filter(record => !record.invalidated).length
   if (!count) return undefined
   const { sourceCommandId, sessionId, action } = head
-  return { sourceCommandId, sessionId, action, count, remainingMs: stack.expiresAt - at }
+  return { sourceCommandId, sessionId, action, count, remainingMs: stack.expiresAt - at, ageMs: Math.max(0, at - (head.expiresAt - threadUndoDuration)) }
 }
 
 export function restoreThreadUndoGroup(

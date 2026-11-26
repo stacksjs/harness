@@ -145,7 +145,11 @@ function organizeThread(state: HarnessState, command: OrganizeThreadCommand, env
       }
       return [{ sessionId, before, after }]
     })
-    last.undo = { sourceCommandId: envelope.id, sessionId: session.id, action, expiresAt: envelope.at + threadUndoDuration, entries }
+    const batch = typeof command.undoBatch === 'string' && /^[a-z0-9_-]{1,80}$/.test(command.undoBatch) ? command.undoBatch : undefined
+    last.undo = {
+      sourceCommandId: envelope.id, sessionId: session.id, action, expiresAt: envelope.at + threadUndoDuration, entries,
+      ...(batch ? { batch } : {}),
+    }
     if (command.undoScope) {
       for (const event of events) {
         if (event.payload.type === 'session.navigation-changed') event.payload.undoScope = { key: command.undoScope }

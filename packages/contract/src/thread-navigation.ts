@@ -29,6 +29,7 @@ export interface ThreadUndoRecord {
   sourceCommandId: string
   sessionId: number
   action: 'unpinned' | 'settled' | 'snoozed' | 'archived'
+  batch?: string
   expiresAt: number
   entries: Array<{ sessionId: number, before: ThreadPlacement, after: ThreadPlacement }>
 }
@@ -45,7 +46,7 @@ export interface ThreadUndoScopeUpdate {
   result?: ThreadUndoResult
 }
 
-export type ThreadUndoOffer = Pick<ThreadUndoRecord, 'sourceCommandId' | 'sessionId' | 'action'> & { remainingMs: number, count: number }
+export type ThreadUndoOffer = Pick<ThreadUndoRecord, 'sourceCommandId' | 'sessionId' | 'action'> & { remainingMs: number, count: number, ageMs?: number }
 
 export const threadUndoDuration = 5000
 export const maximumThreadSnooze = 366 * 24 * 60 * 60 * 1000

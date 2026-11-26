@@ -85,7 +85,7 @@ export type ClientCommand =
   | ({ type: 'session.input.respond', sessionId: number, requestId: string } & InputResponse)
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
   | { type: 'session.stop', sessionId: number }
-  | ({ type: 'session.organize', sessionId: number, undoScope?: string } & ThreadOrganizationAction)
+  | ({ type: 'session.organize', sessionId: number, undoScope?: string, undoBatch?: string } & ThreadOrganizationAction)
   /**
    * Change one or more host settings.
    *
