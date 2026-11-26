@@ -49,9 +49,40 @@ describe('the keyboard registry', () => {
       expect(chord, command.id).not.toBeNull()
       // Canonical, so a stored override of the default compares equal to it.
       expect(chordText(chord!)).toBe(command.chord)
-      expect(seen.has(command.chord), `${command.id} duplicates ${command.chord}`).toBe(false)
-      seen.add(command.chord)
+      const claim = command.scope === 'model-picker' ? `model:${command.chord}` : command.chord
+      expect(seen.has(claim), `${command.id} duplicates ${command.chord}`).toBe(false)
+      seen.add(claim)
     }
+  })
+
+  it('shares numbered desktop defaults between navigation and the model picker', () => {
+    const desktop = { apple: true, craft: true }
+    const chord = press({ key: '1', code: 'Digit1', meta: true })
+    const native = resolveKeybindings({}, desktop).bindings
+    const web = resolveKeybindings({}).bindings
+    expect(matchCommand(native, chord, desktop)).toBe('thread.jump.1')
+    expect(matchCommand(native, chord, { ...desktop, modelPickerOpen: true })).toBe('modelPicker.jump.1')
+    expect(matchCommand(native, chord, { ...desktop, terminalFocus: true })).toBeNull()
+    expect(matchCommand(web, chord)).toBeNull()
+    expect(matchCommand(web, chord, { modelPickerOpen: true })).toBeNull()
+    expect(matchCommand(web, press({ code: 'BracketRight', key: '}', meta: true, shift: true }))).toBe('thread.next')
+    expect(matchCommand(web, press({ code: 'BracketLeft', key: '{', meta: true, shift: true }))).toBe('thread.previous')
+  })
+
+  it('keeps a browser opt-in distinct from inherited desktop defaults', () => {
+    const storage = fakeStorage()
+    const web = createKeybindingStore(storage)
+    expect(web.save('thread.jump.1', 'Mod+1').ok).toBe(true)
+    expect(web.save('modelPicker.jump.1', 'Mod+1').ok).toBe(true)
+    expect(web.save('thread.jump.2', 'Mod+1').ok).toBe(false)
+    expect(createKeybindingStore(storage, undefined, { craft: true }).read().overrides).toEqual({
+      'thread.jump.1': 'Mod+1',
+      'modelPicker.jump.1': 'Mod+1',
+    })
+    expect(web.save('modelPicker.jump.1', 'Alt+7').ok).toBe(true)
+    expect(matchCommand(web.read().bindings, press({ key: '1', meta: true }))).toBe('thread.jump.1')
+    expect(matchCommand(web.read().bindings, press({ key: '7', alt: true }), { modelPickerOpen: true })).toBe('modelPicker.jump.1')
+    expect(web.reset('thread.jump.1').bindings['thread.jump.1']).toBe('')
   })
 
   it('parses modifier spellings and folds key case', () => {
@@ -174,7 +205,8 @@ describe('stored overrides', () => {
     expect(piled.bindings['transcript.find']).toBe('Mod+F')
     expect(piled.overrides).toEqual({})
     expect(piled.rejected.map(entry => entry.id).sort()).toEqual(['thread.search', 'transcript.find'])
-    expect(new Set(Object.values(piled.bindings)).size).toBe(Object.keys(piled.bindings).length)
+    const assigned = Object.values(piled.bindings).filter(Boolean)
+    expect(new Set(assigned).size).toBe(assigned.length)
   })
 
   it('names the command a chord already belongs to', () => {
