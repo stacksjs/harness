@@ -81,6 +81,12 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     chord: 'Mod+Alt+N',
   },
   {
+    id: 'composer.stash',
+    label: 'Stash or restore prompt',
+    description: 'Save the draft or open the stash when the composer is empty.',
+    chord: 'Mod+S',
+  },
+  {
     id: 'thread.undo',
     label: 'Undo thread action',
     description: 'Restore the previous thread position while Undo is available.',

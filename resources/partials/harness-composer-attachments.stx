@@ -8,6 +8,7 @@
         <span role="status" class="block break-words text-neutral-600 dark:text-neutral-300" :text="composerFileActions() ? composerFileStatus?.(file) : ''"></span>
       </div>
       <button type="button" :hidden="file.status !== 'failed' || !composerUploadSources.has(file.key)" :disabled="startPending()" @click="composerFileActions()?.retry(file.key)" class="px-1.5 min-h-8 font-medium hover:bg-black/5 dark:hover:bg-white/10 rounded">Retry</button>
+      <button type="button" :hidden="file.status !== 'failed' || composerUploadSources.has(file.key)" :disabled="startPending()" @click="chooseComposerFilesDialog(file.key)" class="px-1.5 min-h-8 font-medium hover:bg-black/5 dark:hover:bg-white/10 rounded">Attach again</button>
       <button type="button" :disabled="startPending()" :aria-label="'Remove ' + file.name" @click="composerFileActions()?.remove(file.key)" class="shrink-0 harness-icon-button">
         <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
       </button>
@@ -15,4 +16,4 @@
   </template>
 </ul>
 <p data-composer-files-error role="alert" :hidden="!composerFilesError()" :text="composerFilesError()" class="break-words text-[12px] text-red-700 dark:text-red-300"></p>
-<input type="file" data-composer-file-input ref="composerFileInput" multiple hidden :disabled="!composerFileActions()" @change="composerFileActions()?.choose($event)">
+<input type="file" data-composer-file-input ref="composerFileInput" multiple hidden :disabled="!composerFileActions()" @change="chooseComposerFiles">

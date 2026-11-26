@@ -1,0 +1,28 @@
+<dialog data-prompt-stash ref="promptStashDialog" @close="finishPromptStashClose" @click.self="closePromptStash" aria-labelledby="prompt-stash-title" class="overflow-hidden m-auto p-0 max-h-[80dvh] w-[min(92vw,460px)] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-xl dark:border-white/20 shadow-xl">
+  <div class="flex flex-col max-h-[80dvh]">
+    <header class="flex gap-2 items-center justify-between px-3 py-2 border-b border-black/10 dark:border-white/15">
+      <h2 id="prompt-stash-title" class="font-medium text-sm">Stashed prompts</h2>
+      <div class="flex gap-1 items-center">
+        <button type="button" data-stash-current @click="stashCurrentPrompt" :disabled="!hasComposerMessage() || startPending()" class="px-2 min-h-8 font-medium text-[13px] hover:bg-black/5 dark:hover:bg-white/10 rounded">Stash draft</button>
+        <button type="button" autofocus @click="closePromptStash" aria-label="Close stash" class="shrink-0 harness-icon-button">
+          <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+    <p role="alert" :hidden="!stashError()" :text="stashError()" class="pt-2 px-3 text-red-700 text-sm dark:text-red-300"></p>
+    <p :hidden="stashEntries().length > 0" class="p-3 text-neutral-600 text-sm dark:text-neutral-300">No stashed prompts</p>
+    <ul aria-label="Stashed prompts" class="overflow-auto divide-black/10 divide-y dark:divide-white/15">
+      <template :for="entry in stashEntries()" :key="entry.id">
+        <li data-stashed-prompt class="flex gap-2 items-center px-3 py-2">
+          <button type="button" data-restore-stashed-prompt @click="restoreStashedPrompt(entry)" :disabled="startPending()" :aria-label="'Restore ' + stashLabel(entry)" class="flex-1 px-2 py-1.5 min-w-0 text-sm text-start hover:bg-black/5 dark:hover:bg-white/10 rounded">
+            <span class="block truncate" :text="stashLabel(entry)"></span>
+            <span class="block text-[12px] text-neutral-600 dark:text-neutral-300" :hidden="!entry.files.length" :text="entry.files.length === 1 ? '1 attachment' : entry.files.length + ' attachments'"></span>
+          </button>
+          <button type="button" @click="removeStashedPrompt(entry)" :disabled="startPending()" :aria-label="'Remove ' + stashLabel(entry) + ' from stash'" class="shrink-0 harness-icon-button">
+            <span class="size-4 i-hugeicons-delete-02" aria-hidden="true"></span>
+          </button>
+        </li>
+      </template>
+    </ul>
+  </div>
+</dialog>

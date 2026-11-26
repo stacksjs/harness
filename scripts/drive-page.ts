@@ -1634,6 +1634,85 @@ await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]'
 await recallEditor.press('ArrowUp')
 check('prompt recall leaves an unsent attachment draft intact', await recallEditor.inputValue() === ''
   && await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').count() === 1)
+const stashChord = process.platform === 'darwin' ? 'Meta+s' : 'Control+s'
+const stashDialog = projectAttachmentDraft.getByRole('dialog', { name: 'Stashed prompts' })
+const stashLauncher = projectAttachmentDraft.locator('[data-open-stash]')
+await recallEditor.fill('Review the stashed file')
+await recallEditor.press(stashChord)
+await projectAttachmentDraft.getByRole('button', { name: 'Stashed prompts (1)' }).waitFor()
+await projectAttachmentDraft.locator('[data-composer-file]').first().waitFor({ state: 'detached' })
+check('the stash shortcut clears a durably saved prompt and attachment', await recallEditor.inputValue() === '')
+await recallEditor.fill('Standalone stashed text')
+await recallEditor.press(stashChord)
+await projectAttachmentDraft.getByRole('button', { name: 'Stashed prompts (2)' }).waitFor()
+await projectAttachmentDraft.reload()
+await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-open-stash]')?.disabled)
+await recallEditor.press(stashChord)
+await stashDialog.waitFor()
+check('multiple saved prompts open the stash after reload', await stashDialog.locator('[data-stashed-prompt]').count() === 2)
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await projectAttachmentDraft.setViewportSize({ width, height })
+    check(`the stash fits and is modal at ${width}×${height}`, await stashDialog.evaluate(dialog =>
+      dialog.matches(':modal') && dialog.getBoundingClientRect().right <= innerWidth && document.documentElement.scrollWidth === innerWidth))
+    await capture(`composer-prompt-stash-${width}`, projectAttachmentDraft)
+  }
+  await projectAttachmentDraft.setViewportSize({ width: 390, height: 844 })
+}
+await stashDialog.getByRole('button', { name: 'Restore Standalone stashed text', exact: true }).click()
+await stashDialog.waitFor({ state: 'hidden' })
+check('restoring text closes the stash and restores composer focus', await recallEditor.inputValue() === 'Standalone stashed text'
+  && await recallEditor.evaluate(box => box === document.activeElement))
+await recallEditor.fill('')
+
+await projectAttachmentDraft.goto(`${baseUrl}/?workspace=${workspaceId}`)
+await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-open-stash]')?.disabled)
+await recallEditor.fill('Keep this draft')
+await stashLauncher.click()
+await stashDialog.getByRole('button', { name: 'Restore Review the stashed file', exact: true }).click()
+await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').waitFor()
+check('restoring in another thread appends text and transfers the file', await recallEditor.inputValue() === 'Keep this draft\n\nReview the stashed file')
+await projectAttachmentDraft.locator('[data-send]').click()
+await projectAttachmentDraft.waitForURL('**/s/*')
+const stashedLink = projectAttachmentDraft.locator('[data-sent-attachment]').filter({ hasText: 'notes _draft_.txt' })
+await stashedLink.waitFor()
+const movedFile = await projectAttachmentDraft.request.get(new URL((await stashedLink.getAttribute('href'))!, baseUrl).href)
+check('the restored cross-thread attachment delivers the original bytes', movedFile.ok() && await movedFile.text() === 'Harness attachment fixture')
+
+await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-open-stash]')?.disabled)
+await recallEditor.fill('Restore an expired file')
+await projectAttachmentDraft.locator('[data-composer-file-input]').setInputFiles(fileFixture)
+await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').waitFor()
+await recallEditor.press(stashChord)
+await projectAttachmentDraft.getByRole('button', { name: 'Stashed prompts (1)' }).waitFor()
+await projectAttachmentDraft.route('**/composer-attachments/stash/**', async (route) => {
+  if (route.request().method() === 'PUT') await route.fulfill({ json: [] })
+  else await route.continue()
+})
+await recallEditor.press(stashChord)
+const expiredFile = projectAttachmentDraft.locator('[data-composer-file][data-status="failed"]')
+await expiredFile.waitFor()
+check('an expired file restores as a replaceable row and blocks sending', await expiredFile.getByText('Upload expired.').isVisible()
+  && await projectAttachmentDraft.locator('[data-send]').isDisabled())
+const replacement = projectAttachmentDraft.waitForEvent('filechooser')
+await expiredFile.getByRole('button', { name: 'Attach again' }).click()
+await (await replacement).setFiles(fileFixture)
+await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').waitFor()
+check('Attach again replaces the expired row', await projectAttachmentDraft.locator('[data-composer-file]').count() === 1)
+await projectAttachmentDraft.evaluate(() => {
+  const write = Storage.prototype.setItem
+  Storage.prototype.setItem = function (key, value) {
+    if (this === localStorage && key === 'harness.prompt-stash.v1') throw new DOMException('Fixture storage is full.', 'QuotaExceededError')
+    return write.call(this, key, value)
+  }
+})
+await recallEditor.press(stashChord)
+await projectAttachmentDraft.locator('[data-prompt-stash-error]').getByText('Fixture storage is full.').waitFor()
+check('a storage failure keeps both the draft and its uploaded file',
+  await recallEditor.inputValue() === 'Restore an expired file'
+  && await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').count() === 1)
+
+
 await projectAttachmentDraft.close()
 
 await page.addInitScript(() => {

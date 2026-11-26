@@ -407,7 +407,7 @@ const RESPONSIVE_SHELL = `
 [data-diff-body] { flex: 1; min-block-size: 0; overflow: auto; padding: 12px; }
 [data-diff-patch] { margin-block: 8px 0; }
 [data-project-dialog]::backdrop, [data-settings-modal]::backdrop,
-[data-thread-search]::backdrop, [data-sent-image-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
+[data-thread-search]::backdrop, [data-prompt-stash]::backdrop, [data-sent-image-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
 [data-sent-image-dialog] { width: max-content; min-width: min(90vw, 360px); max-width: min(90vw, 980px); }
 [data-sent-image-dialog] img { min-width: min(100%, 128px); }
 #harness-thread-actions {

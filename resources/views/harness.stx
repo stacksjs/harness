@@ -644,6 +644,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         ref="promptBox"
         @keydown="promptKeydown"
         @input="promptEdited"
+        :readonly="stashBusy()"
         @keyup="rememberPrompt"
         @select="rememberPrompt"
         @click="rememberPrompt"
@@ -655,9 +656,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       ></textarea>
       <p data-handoff-hint role="status" hidden :hidden="!pendingProviderSwitch()" :text="handoffHint()" class="text-neutral-600 text-xs dark:text-neutral-300"></p>
       <div data-composer-toolbar>
-        <button type="button" data-attach-composer @click="chooseComposerFilesDialog" :hidden="Boolean(editingFollowUp())" :disabled="!composerFileActions() || startPending()" aria-label="Attach files" title="Attach files" class="shrink-0 me-auto harness-icon-button">
-          <span class="size-4 i-hugeicons-attachment-01" aria-hidden="true"></span>
-        </button>
+        <div class="flex gap-1 items-center shrink-0 me-auto">
+          <button type="button" data-attach-composer @click="chooseComposerFilesDialog" :hidden="Boolean(editingFollowUp())" :disabled="!composerFileActions() || startPending()" aria-label="Attach files" title="Attach files" class="shrink-0 harness-icon-button">
+            <span class="size-4 i-hugeicons-attachment-01" aria-hidden="true"></span>
+          </button>
+          <button type="button" data-open-stash ref="promptStashButton" @click="openPromptStash" :hidden="Boolean(editingFollowUp())" :disabled="!stashReady()" aria-haspopup="dialog" :aria-label="stashEntries().length ? 'Stashed prompts (' + stashEntries().length + ')' : 'Stashed prompts'" :aria-keyshortcuts="shortcutKeys('composer.stash')" title="Stashed prompts" class="shrink-0 harness-icon-button">
+            <span class="size-4 i-hugeicons-bookmark-01" aria-hidden="true"></span>
+          </button>
+        </div>
         <div data-composer-provider-controls>
         @include('../partials/harness-model-picker')
         </div>
@@ -678,7 +684,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <button type="button" data-stop hidden :hidden="!uiBusy() || stopPressed()" :disabled="!sessionOnline()" @click="stopTurn" class="px-4 h-8 text-[13px] text-white bg-red-600 rounded-full hover:bg-red-700">Stop</button>
         </div>
       </div>
+      <p data-prompt-stash-error role="alert" :hidden="stashOpen() || !stashError()" :text="stashError()" class="text-red-700 text-sm dark:text-red-300"></p>
     </form>
+    @include('../partials/harness-prompt-stash')
     @endif
     @if(!activeSession && draftProjectChoices.length)
       <div data-draft-context>
@@ -1288,6 +1296,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const sentImage = state(null)
   const sentImageStatus = state('loading')
   let sentImageTrigger = null
+
+  const promptStashDialog = useRef('promptStashDialog')
+  const promptStashButton = useRef('promptStashButton')
+  const stashEntries = state([])
+  const stashReady = state(false)
+  const stashOpen = state(false)
+  const stashBusy = state(false)
+  const stashError = state('')
+  let promptStash
+  let stashCloseToEditor = false
+  let replaceUploadKey
 
   const composerFileInput = useRef('composerFileInput')
   const composerUploadSources = new Map()
@@ -3384,8 +3403,141 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     sentImageTrigger = null
   }
 
-  function chooseComposerFilesDialog() {
-    composerFileInput.current?.click()
+  function chooseComposerFilesDialog(replacing) {
+    const picker = composerFileInput.current
+    if (!picker) return
+    replaceUploadKey = typeof replacing === 'string' ? replacing : undefined
+    picker.multiple = !replaceUploadKey
+    picker.click()
+  }
+
+  function chooseComposerFiles(event) {
+    composerFileActions()?.choose(event, replaceUploadKey)
+    replaceUploadKey = undefined
+    if (composerFileInput.current) composerFileInput.current.multiple = true
+  }
+
+  function stashLabel(entry) {
+    return entry.text.trim().replace(/\s+/g, ' ').slice(0, 120) || entry.files[0]?.name || 'Saved prompt'
+  }
+
+  function refreshPromptStash() {
+    if (!promptStash) return
+    try { stashEntries.set(promptStash.entries()) }
+    catch { stashError.set('Could not read the saved prompts.') }
+  }
+
+  function openPromptStash() {
+    const dialog = promptStashDialog.current
+    if (!dialog || dialog.open || !promptRef.current?.form || promptRef.current.form.hidden || editingFollowUp()) return
+    stashError.set('')
+    refreshPromptStash()
+    dialog.showModal()
+    stashOpen.set(true)
+  }
+
+  function closePromptStash() {
+    promptStashDialog.current?.close()
+  }
+
+  function finishPromptStashClose() {
+    stashOpen.set(false)
+    if (stashCloseToEditor) promptRef.current?.focus({ preventScroll: true })
+    else promptStashButton.current?.focus({ preventScroll: true })
+    stashCloseToEditor = false
+  }
+
+  async function stashCurrentPrompt() {
+    const box = promptRef.current
+    if (!box || box.form?.hidden || !promptStash || startPending() || editingFollowUp() || !hasComposerMessage()) return
+    const text = box.value
+    const files = composerFiles()
+    const upload = composerDraft()?.upload
+    stashError.set('')
+    startPending.set(true)
+    stashBusy.set(true)
+    try {
+      stashEntries.set(await promptStash.save(text, files, upload))
+      if (box.value !== text || composerDraft()?.upload?.draft !== upload?.draft) return
+      localStorage.removeItem(promptDraftKey)
+      box.value = ''
+      composerText.set('')
+      composerDraft.set(null)
+      composerRecall?.reset()
+      sidebarDrafts?.update()
+      if (upload && files.length) composerDraftTools.releaseComposerUploads(upload, files)
+      if (stashOpen()) {
+        stashCloseToEditor = true
+        closePromptStash()
+      }
+      else box.focus({ preventScroll: true })
+    }
+    catch (error) { stashError.set(error.message || 'Could not stash this prompt.') }
+    finally {
+      startPending.set(false)
+      stashBusy.set(false)
+    }
+  }
+
+  async function restoreStashedPrompt(entry) {
+    const box = promptRef.current
+    if (!box || box.form?.hidden || !promptStash || startPending() || editingFollowUp()) return
+    const current = composerFiles()
+    const seen = new Set(current.flatMap(file => file.id ? [file.id, file.key] : [file.key]))
+    if (current.length + entry.files.filter(file => !seen.has(file.id) && !seen.has(file.key)).length > 100) {
+      stashError.set('The composer holds up to 100 attachments. Remove a file before restoring.')
+      return
+    }
+    const upload = composerDraft()?.upload ?? { scope: uploadScope, draft: composerDraftTools.newComposerDraftId() }
+    stashError.set('')
+    startPending.set(true)
+    stashBusy.set(true)
+    try {
+      const restored = await promptStash.restoreFiles(entry, upload)
+      if (box.form?.hidden || !promptStash.entries().some(item => item.id === entry.id)) return
+      const files = [...composerFiles(), ...restored.filter(file => !seen.has(file.id) && !seen.has(file.key))]
+      const existing = box.value.trimEnd()
+      const text = existing && entry.text ? existing + '\n\n' + entry.text : existing || entry.text
+      const draft = { ...composerDraft(), text, files, ...(files.length ? { upload } : {}),
+        start: text.length, end: text.length, discardedDraft: undefined, commandId: undefined }
+      localStorage.setItem(promptDraftKey, JSON.stringify(draft))
+      composerDraft.set(draft)
+      composerText.set(text)
+      box.value = text
+      box.setSelectionRange(text.length, text.length)
+      composerRecall?.reset()
+      sidebarDrafts?.update()
+      stashEntries.set(promptStash.remove(entry))
+      if (stashOpen()) {
+        stashCloseToEditor = true
+        closePromptStash()
+      }
+      else box.focus({ preventScroll: true })
+    }
+    catch (error) { stashError.set(error.message || 'Could not restore this prompt.') }
+    finally {
+      startPending.set(false)
+      stashBusy.set(false)
+    }
+  }
+
+  function removeStashedPrompt(entry) {
+    if (!promptStash || startPending()) return
+    try {
+      stashEntries.set(promptStash.remove(entry))
+      promptStashDialog.current?.querySelector('[data-restore-stashed-prompt], [data-stash-current]')?.focus()
+    }
+    catch { stashError.set('Could not remove the saved prompt.') }
+  }
+
+  function stashOrRestorePrompt() {
+    if (stashOpen()) closePromptStash()
+    else if (hasComposerMessage()) void stashCurrentPrompt()
+    else {
+      refreshPromptStash()
+      if (stashEntries().length === 1) void restoreStashedPrompt(stashEntries()[0])
+      else openPromptStash()
+    }
   }
 
   function composerDragOver(event) {
@@ -3447,6 +3599,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   async function connectComposerDrafts() {
     composerDraftTools = await import(codecUrl)
+    try {
+      promptStash = composerDraftTools.createPromptStash(localStorage)
+      refreshPromptStash()
+      stashReady.set(true)
+    }
+    catch { stashError.set('Browser storage is unavailable for the stash.') }
     composerRecall = composerDraftTools.createPromptRecall()
     composerFileStatus = composerDraftTools.composerFileStatus
     composerFileActions.set(composerDraftTools.createComposerFileActions({
@@ -4114,9 +4272,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
     if (event.defaultPrevented) return
-    if (threadUndoBlocked()) return
     const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
     const editable = event.target?.closest?.('textarea, input, [contenteditable="true"]')
+    if (command === 'composer.stash' && stashReady() && promptRef.current?.form && !promptRef.current.form.hidden
+      && !threadUndoBlocked() && !editingFollowUp() && (!editable || editable === promptRef.current)) {
+      event.preventDefault()
+      if (!event.repeat && !startPending()) stashOrRestorePrompt()
+      return
+    }
+    if (threadUndoBlocked() || stashOpen()) return
     if (command === 'thread.undo' && visibleUndo() && (!editable || threadUndoShortcutClaimed()) && !profileModalOpen()) {
       event.preventDefault()
       if (!event.repeat) void undoThreadAction()
@@ -4180,6 +4344,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   useEventListener('input', () => {
     if (visibleUndo()) threadUndoShortcutClaimed.set(false)
+  }, { target: window })
+
+  useEventListener('storage', (event) => {
+    if (event.key === composerDraftTools?.PROMPT_STASH_KEY || event.key === null) refreshPromptStash()
   }, { target: window })
 
   function threadUndoBlocked() {

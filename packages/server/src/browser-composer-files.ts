@@ -1,5 +1,6 @@
 import type { ComposerAttachment, ComposerUploads } from '@harness/contract'
 import { MAX_COMPOSER_ATTACHMENTS } from '@harness/contract'
+import { newComposerDraftId } from './browser-prompt-stash'
 
 type UploadSource = Pick<ComposerUploads, 'scope' | 'draft'>
 
@@ -39,6 +40,12 @@ export function composerFileStatus(file: ComposerDraftFile): string {
   return (file.size / (1024 * 1024)).toFixed(1) + ' MiB'
 }
 
+export function releaseComposerUploads(source: UploadSource, files: ComposerDraftFile[]): void {
+  for (const file of files) {
+    if (file.id) void fetch(attachmentUrl(source, file.id), { method: 'DELETE' }).catch(() => {})
+  }
+}
+
 export function createComposerFileActions(options: ComposerFileOptions) {
   const { files, upload, setFiles, setError, inputBlocked, newKey, focusEditor, sources, scope } = options
 
@@ -72,14 +79,15 @@ export function createComposerFileActions(options: ComposerFileOptions) {
     }
   }
 
-  function add(incoming: File[]): void {
+  function add(incoming: File[], replacing?: string): void {
     if (!incoming.length || inputBlocked()) return
-    if (files().length + incoming.length > MAX_COMPOSER_ATTACHMENTS) {
+    const current = files().filter(file => file.key !== replacing)
+    if (current.length + incoming.length > MAX_COMPOSER_ATTACHMENTS) {
       setError(`A message can contain up to ${MAX_COMPOSER_ATTACHMENTS} attachments.`)
       return
     }
     const target = upload() ?? {
-      draft: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join(''),
+      draft: newComposerDraftId(),
       scope,
     }
     const added = incoming.map((file): ComposerDraftFile => {
@@ -88,14 +96,16 @@ export function createComposerFileActions(options: ComposerFileOptions) {
       return { key, name: file.name, size: file.size, status: 'uploading' }
     })
     setError('')
-    setFiles([...files(), ...added], target)
+    if (replacing) sources.delete(replacing)
+    setFiles([...current, ...added], target)
     for (const file of added) void sendFile(file.key)
   }
 
   return {
-    choose(event: Event) {
+    choose(event: Event, replacing?: string) {
       const picker = event.currentTarget as HTMLInputElement
-      add(Array.from(picker.files ?? []))
+      const incoming = Array.from(picker.files ?? [])
+      add(replacing ? incoming.slice(0, 1) : incoming, replacing)
       picker.value = ''
     },
     drop(event: DragEvent) {
