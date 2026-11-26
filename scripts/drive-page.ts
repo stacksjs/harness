@@ -35,6 +35,14 @@ function check(name: string, ok: boolean): void {
 const fixtureBin = mkdtempSync(join(tmpdir(), 'harness-page-bin-'))
 const fixtureShell = join(fixtureBin, 'harness-test-shell')
 const fixtureEditorArgs = join(fixtureBin, 'editor-args')
+async function editorReceived(expected: string): Promise<boolean> {
+  const deadline = Date.now() + 4_000
+  do {
+    if (existsSync(fixtureEditorArgs) && readFileSync(fixtureEditorArgs, 'utf8') === expected) return true
+    await Bun.sleep(20)
+  } while (Date.now() < deadline)
+  return false
+}
 writeFileSync(join(fixtureBin, 'codex'), '#!/bin/sh\nprintf "Codex test sign-in\\n"\n', { mode: 0o755 })
 writeFileSync(join(fixtureBin, 'code'), '#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "${0%/*}/editor-args"\n', { mode: 0o755 })
 writeFileSync(fixtureShell, '#!/bin/sh\nprintf "Harness test terminal\\n"\nexec /bin/sh -i\n', { mode: 0o755 })
@@ -282,6 +290,14 @@ const instance: ProviderInstance = {
   },
   async stop() {},
 }
+function importProjectFixture(workspace: string, name: string) {
+  const source = join(driveRoot, 'api-import-source')
+  writeFileSync(join(source, name), 'Only the upstream repository wrote this.\n')
+  execFileSync('git', ['add', '--', name], { cwd: source })
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', name], { cwd: source })
+  execFileSync('git', ['pull', '-q', '--ff-only', 'fixture-upstream', 'review/fixture'], { cwd: join(workspace, 'api') })
+}
+
 const driver: Driver = {
   kind: 'claude',
   async probe() { return { status: 'ready' } },
@@ -290,6 +306,12 @@ const driver: Driver = {
     return {
       ...instance,
       async *startTurn(input) {
+        if (input.text === 'Import upstream changes without making edits.') {
+          importProjectFixture(config.workspacePath, 'imported-only.txt')
+          yield { type: 'assistant-delta', text: 'Upstream changes were imported without local edits.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          return
+        }
         if (input.text === 'Verify the repositories without editing.') {
           yield { type: 'assistant-delta', text: 'The fixture was checked without edits.' }
           yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
@@ -297,6 +319,7 @@ const driver: Driver = {
         }
         if (input.text.startsWith('Review both repositories in turn ')) {
           const sequence = input.text.slice(-1)
+          if (sequence === '2') importProjectFixture(config.workspacePath, 'upstream [notes].txt')
           for (const [key, label] of [['api', 'API'], ['packages/web', 'Web']] as const) {
             const file = join(config.workspacePath, key, 'shared.txt')
             writeFileSync(file, `${readFileSync(file, 'utf8')}${label} edit from turn ${sequence}\n`)
@@ -2079,7 +2102,7 @@ if (!editorResponse.ok()) throw new Error(`The editor launch returned ${editorRe
 await fileEditorDialog.waitFor({ state: 'hidden', timeout: 4000 })
 const projectFolder = realpathSync(dir)
 check('a linked file opens its exact working file and line, and the chooser returns focus',
-  existsSync(fixtureEditorArgs) && readFileSync(fixtureEditorArgs, 'utf8') === `${projectFolder}\n--goto\n${join(projectFolder, 'fixture context', previewFile)}:125\n`)
+  await editorReceived(`${projectFolder}\n--goto\n${join(projectFolder, 'fixture context', previewFile)}:125\n`))
 await fileEditorButton.click()
 await fixtureEditor.getByText('Preferred', { exact: true }).waitFor()
 const [shortcutLaunch] = await Promise.all([
@@ -2093,7 +2116,7 @@ const [shortcutLaunch] = await Promise.all([
 ])
 await fileEditorDialog.waitFor({ state: 'hidden' })
 check('opening the preferred editor immediately after closing the chooser keeps the new request',
-  shortcutLaunch.status() === 204 && readFileSync(fixtureEditorArgs, 'utf8') === `${projectFolder}\n--new-window\n${projectFolder}\n`)
+  shortcutLaunch.status() === 204 && await editorReceived(`${projectFolder}\n--new-window\n${projectFolder}\n`))
 await fileLinkPage.close()
 const fileTools = projectAttachmentDraft.getByRole('button', { name: 'Workspace actions' })
 await fileTools.click()
@@ -3747,7 +3770,7 @@ const [branchEditorResponse] = await Promise.all([
 await branchEditorDialog.waitFor({ state: 'hidden' })
 const ledgerFolder = realpathSync(ledgerRepo)
 check('a branch comparison opens the after line in the working checkout', branchEditorResponse.status() === 204
-  && readFileSync(fixtureEditorArgs, 'utf8') === `${ledgerFolder}\n--goto\n${join(ledgerFolder, 'branch-only.txt')}:1\n`)
+  && await editorReceived(`${ledgerFolder}\n--goto\n${join(ledgerFolder, 'branch-only.txt')}:1\n`))
 if (screenshotDir) {
   for (const [width, height] of workspaceViewports) {
     await page.setViewportSize({ width, height })
@@ -3956,6 +3979,8 @@ for (const [folder, label] of [['api', 'API'], ['packages/web', 'Web']] as const
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', `${label} review fixture`], { cwd: path, env: multiRepoGit })
   writeFileSync(join(path, 'shared.txt'), `Shared baseline\n${label} in commit\n${label} working copy\n`)
 }
+execFileSync('git', ['clone', '-q', join(multiRepoProject, 'api'), join(driveRoot, 'api-import-source')])
+execFileSync('git', ['remote', 'add', 'fixture-upstream', join(driveRoot, 'api-import-source')], { cwd: join(multiRepoProject, 'api') })
 writeFileSync(join(multiRepoProject, 'fixture.code-workspace'), '{"folders":[{"name":"API service","path":"api"},{"name":"Web frontend","path":"packages/web"}]}')
 const multiRepoId = 'project-repositories'
 const multiRepoWorkspace = derivedId(multiRepoId)
@@ -4027,6 +4052,9 @@ await ledgerPanel.getByText('API edit from turn 2', { exact: true }).waitFor()
 check('the streamed transcript action opens exactly the second turn',
   await recentTurnDiffs.nth(1).getAttribute('aria-expanded') === 'true'
   && await ledgerComparison.inputValue() === 'turn')
+check('the turn patch omits a fetched file that remains in the repository',
+  existsSync(join(multiRepoProject, 'api', 'upstream [notes].txt'))
+  && await ledgerPanel.getByText('upstream [notes].txt', { exact: true }).count() === 0)
 await ledgerComparison.selectOption('uncommitted')
 check('a transcript action reports collapsed in another comparison mode', await recentTurnDiffs.nth(1).getAttribute('aria-expanded') === 'false')
 await recentTurnDiffs.nth(1).press('Enter')
@@ -4086,6 +4114,22 @@ await repoTurnPrompt.press('Enter')
 await page.getByText('The fixture was checked without edits.', { exact: true }).waitFor()
 await page.getByRole('button', { name: 'Send', exact: true }).waitFor()
 check('an unchanged turn does not add a transcript diff action', await recentTurnDiffs.count() === 2)
+await repoTurnPrompt.fill('Import upstream changes without making edits.')
+const importedTurnSummary = page.waitForResponse(response => {
+  const url = new URL(response.url())
+  return url.pathname.endsWith('/diff/turn-files') && url.searchParams.get('target') === '4' && response.ok()
+})
+await repoTurnPrompt.press('Enter')
+const importedTurnResponse = page.getByText('Upstream changes were imported without local edits.', { exact: true })
+await importedTurnResponse.scrollIntoViewIfNeeded()
+await page.locator('[data-turn="4"] [data-turn-file-review="4"]').evaluate((button) => {
+  if (!(button as HTMLButtonElement).hidden) button.scrollIntoView({ block: 'nearest' })
+})
+const importOnlyResult = await (await importedTurnSummary).json()
+await page.locator('[data-turn="4"] [data-open-turn-diff]').waitFor({ state: 'hidden' })
+check('an import-only turn does not add a transcript diff action', existsSync(join(multiRepoProject, 'api', 'imported-only.txt'))
+  && importOnlyResult.repositories.some((repository: { key: string, summary: { total: number } | null }) => repository.key === 'api' && repository.summary?.total === 0)
+  && await recentTurnDiffs.count() === 2)
 await page.reload()
 await recentTurnDiffs.first().scrollIntoViewIfNeeded()
 await page.locator('[data-turn="1"] [data-turn-file-summary]').getByText(/2 changed files/u).waitFor()

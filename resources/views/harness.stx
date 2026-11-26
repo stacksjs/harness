@@ -449,7 +449,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             @includeWhen(activeSession, '../partials/harness-turn-file-summary')
           </template>
           <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[{{ turn.id }}]?.length ? String({{ turn.id }}) : ''"
-            :hidden="!turnDiffs()[{{ turn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ turn.id }}) ? 'true' : 'false'"
+            :hidden="!canOpenTurnDiff({{ turn.id }})" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ turn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ turn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -563,7 +563,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             @includeWhen(activeSession, '../partials/harness-turn-file-summary')
           </template>
           <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[{{ liveTurn.id }}]?.length ? String({{ liveTurn.id }}) : ''"
-            @if(!liveTurn.reviewRepositories.length)hidden@endif :hidden="!turnDiffs()[{{ liveTurn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ liveTurn.id }}) ? 'true' : 'false'"
+            @if(!liveTurn.reviewRepositories.length)hidden@endif :hidden="!canOpenTurnDiff({{ liveTurn.id }})" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ liveTurn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ liveTurn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -656,7 +656,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             @includeWhen(activeSession, '../partials/harness-turn-file-summary')
           </template>
           <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[turn.id]?.length ? String(turn.id) : ''"
-            hidden :hidden="!turnDiffs()[turn.id]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String(turn.id) ? 'true' : 'false'"
+            hidden :hidden="!canOpenTurnDiff(turn.id)" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String(turn.id) ? 'true' : 'false'"
             @click="openTurnDiff(turn.id, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -4064,6 +4064,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     })
   })
   onDestroy(() => turnFilesObserver?.dispose())
+
+  function canOpenTurnDiff(turnId) {
+    const repositories = turnFiles()[turnId]
+    return Boolean(turnDiffs()[turnId]?.length) && (!repositories || repositories.some(repo => !repo.summary || repo.summary.total))
+  }
 
   function turnFileLabel(turnId) {
     const repositories = turnFiles()[turnId]
