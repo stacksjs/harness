@@ -1587,6 +1587,53 @@ const attachmentOnlyThread = Number(new URL(projectAttachmentDraft.url()).pathna
 const attachmentOnlyTurn = harness.engine.current.sessions.get(attachmentOnlyThread)?.turns[0]
 check('starting a project thread carries an attachment-only draft into the first message',
   attachmentOnlyTurn?.prompt === '' && attachmentOnlyTurn.attachments?.[0]?.name === 'notes _draft_.txt')
+const recallEditor = projectAttachmentDraft.getByRole('textbox', { name: 'Message', exact: true })
+await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-attach-composer]')?.disabled)
+await recallEditor.press('ArrowUp')
+check('prompt recall skips an attachment-only message', await recallEditor.inputValue() === '')
+const earlierPrompt = 'First prompt for recall'
+const wrappedPrompt = 'Review the rendering and exact file names '.repeat(4) + 'before changing anything.'
+for (const text of [earlierPrompt, earlierPrompt, wrappedPrompt]) {
+  const turnsBefore = await projectAttachmentDraft.locator('[data-user-prompt]').count()
+  await recallEditor.fill(text)
+  await recallEditor.press('Enter')
+  await projectAttachmentDraft.waitForFunction(count => document.querySelectorAll('[data-user-prompt]').length > count, turnsBefore)
+  await projectAttachmentDraft.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+}
+await recallEditor.press('ArrowUp')
+check('prompt recall sees a turn sent on this page', await recallEditor.inputValue() === wrappedPrompt)
+await recallEditor.press('ArrowDown')
+await projectAttachmentDraft.setViewportSize({ width: 390, height: 844 })
+await projectAttachmentDraft.reload()
+await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-attach-composer]')?.disabled)
+await recallEditor.press('ArrowUp')
+check('Up on an empty composer recalls the latest exact prompt after reload', await recallEditor.inputValue() === wrappedPrompt)
+check('the caret and the last visual line are visible after recalling a long prompt',
+  await recallEditor.evaluate(editor => editor.scrollTop > 0 && editor.scrollHeight - editor.scrollTop - editor.clientHeight <= 1))
+await capture('composer-recalled-prompt-mobile', projectAttachmentDraft)
+await recallEditor.press('ArrowUp')
+check('Up moves the caret within a wrapped recalled prompt before stepping history',
+  await recallEditor.inputValue() === wrappedPrompt && await recallEditor.evaluate(editor => (editor as HTMLTextAreaElement).selectionStart < (editor as HTMLTextAreaElement).value.length))
+await recallEditor.evaluate(editor => (editor as HTMLTextAreaElement).setSelectionRange(4, 4))
+await recallEditor.press('ArrowUp')
+check('Up on the first visual line recalls the preceding prompt', await recallEditor.inputValue() === earlierPrompt)
+await recallEditor.press('ArrowUp')
+check('consecutive exact repeats occupy one recall step', await recallEditor.inputValue() === earlierPrompt)
+await recallEditor.press('ArrowDown')
+check('Down moves towards the latest prompt', await recallEditor.inputValue() === wrappedPrompt)
+await recallEditor.press('ArrowDown')
+check('Down past the latest prompt returns to an empty composer', await recallEditor.inputValue() === '')
+await recallEditor.press('ArrowUp')
+await recallEditor.press('x')
+await recallEditor.evaluate(editor => (editor as HTMLTextAreaElement).setSelectionRange(0, 0))
+await recallEditor.press('ArrowUp')
+check('editing a recalled prompt makes it an ordinary draft', await recallEditor.inputValue() === wrappedPrompt + 'x')
+await recallEditor.fill('')
+await projectAttachmentDraft.locator('[data-composer-file-input]').setInputFiles(fileFixture)
+await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').waitFor()
+await recallEditor.press('ArrowUp')
+check('prompt recall leaves an unsent attachment draft intact', await recallEditor.inputValue() === ''
+  && await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').count() === 1)
 await projectAttachmentDraft.close()
 
 await page.addInitScript(() => {

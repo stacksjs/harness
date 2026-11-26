@@ -643,7 +643,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         @paste="composerFileActions()?.paste($event)"
         ref="promptBox"
         @keydown="promptKeydown"
-        @input="rememberPrompt"
+        @input="promptEdited"
         @keyup="rememberPrompt"
         @select="rememberPrompt"
         @click="rememberPrompt"
@@ -1353,6 +1353,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const draftDiscardTemplate = useRef('draftDiscardTemplate')
   const draftDiscardReady = state(false)
   let composerDraftTools
+  let composerRecall
   let sidebarDrafts
   let sidebarHasDraft
   effect(() => {
@@ -3403,6 +3404,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     sidebarDrafts?.update()
   }
 
+  function promptEdited() {
+    composerRecall?.reset()
+    rememberPrompt()
+  }
+
   function rememberPrompt() {
     const box = promptRef.current
     if (!box) return
@@ -3441,6 +3447,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   async function connectComposerDrafts() {
     composerDraftTools = await import(codecUrl)
+    composerRecall = composerDraftTools.createPromptRecall()
     composerFileStatus = composerDraftTools.composerFileStatus
     composerFileActions.set(composerDraftTools.createComposerFileActions({
       files: composerFiles, upload: () => composerDraft()?.upload, setFiles: setComposerFiles,
@@ -3765,6 +3772,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         followUpActions()?.beginEdit(entry)
         return
       }
+    }
+    if (sessionId && !startPending() && !editingFollowUp() && !composerFiles().length
+      && promptRef.current && transcriptRef.current && composerRecall?.step(event, promptRef.current, transcriptRef.current)) {
+      rememberPrompt()
+      return
     }
     if (event.key === 'Escape' && editingFollowUp()) {
       event.preventDefault()

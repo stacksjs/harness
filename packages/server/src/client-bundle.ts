@@ -28,6 +28,7 @@ const ENTRY = `export { applyFollowUpEvent, claudeCompactionReturnAt, codexSelec
 export { createTerminalDock } from './packages/server/src/browser-terminal-dock'
 export { updateTranscriptMarkdown } from './packages/server/src/transcript-markdown'
 export { sendBrowserCommand } from './packages/server/src/browser-command'
+export { createPromptRecall } from './packages/server/src/browser-prompt-recall'
 export { createFollowUpActions } from './packages/server/src/browser-follow-ups'
 export { createSessionSocket } from './packages/server/src/browser-session-socket'
 export { createThreadSidebar } from './packages/server/src/browser-thread-sidebar'
