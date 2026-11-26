@@ -169,6 +169,7 @@ export type InternalCommand =
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
+  | { type: 'thread.worktree.restored', sessionId: number }
   | { type: 'thread.turn.rewind-provider-confirmed', sessionId: number, operation: string }
   | { type: 'thread.turn.rewind-result', sessionId: number, operation: string, outcome: 'rewound' | 'unchanged' | 'uncertain', message?: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number, skipped?: string[] }
