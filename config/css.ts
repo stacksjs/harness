@@ -287,6 +287,9 @@ const RESPONSIVE_SHELL = `
 [data-transcript] { padding-inline: var(--workspace-gutter); padding-block: var(--harness-transcript-top, 24px) 16px; }
 [data-transcript]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
 [data-transcript] > :is([data-turn], [data-follow-ups]) { max-width: var(--workspace-content); margin-inline: auto; }
+[data-jump-to-latest] { flex: none; align-self: center; min-height: 32px; margin-block: 4px; }
+[data-jump-to-latest]:hover { background: var(--workspace-hover); }
+@media (pointer: coarse) { [data-jump-to-latest] { min-height: 44px; } }
 [data-user-prompt] { background: var(--workspace-hover); }
 .harness-response-action:not([hidden]) {
   display: inline-flex; align-items: center; gap: 4px; min-height: 32px;
@@ -294,6 +297,16 @@ const RESPONSIVE_SHELL = `
 }
 .harness-response-action:hover { background: var(--workspace-hover); }
 .harness-response-action:disabled { opacity: .55; }
+[data-turn-file-summary] { margin-block: .5rem; max-width: 35rem; min-width: 0; font-size: .75rem; border: 1px solid var(--workspace-line); border-radius: .5rem; }
+[data-turn-file-summary] > summary { cursor: pointer; padding: .375rem .625rem; line-height: 1.25rem; font-weight: 500; }
+[data-turn-file-repository] { padding: 0 .25rem .25rem; }
+[data-turn-file-repository] > p { margin: .125rem .375rem; opacity: .75; overflow-wrap: anywhere; }
+[data-turn-file] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: .375rem; align-items: center; width: 100%; min-height: 1.75rem; padding: .125rem .375rem; text-align: start; border-radius: .25rem; }
+[data-turn-file]:hover, [data-turn-file-summary] > summary:hover { background: var(--workspace-hover); }
+[data-turn-file-insertions], [data-turn-file-deletions] { font-variant-numeric: tabular-nums; }
+[data-turn-file-insertions] { color: light-dark(#196840, #7ad6a3); }
+[data-turn-file-deletions] { color: light-dark(#a02a32, #ff9a9d); }
+@media (pointer: coarse) { [data-turn-file], [data-turn-file-summary] > summary { min-height: 44px; } }
 [data-fork-banner] { max-width: var(--workspace-content); justify-content: center; border-top: 1px solid var(--workspace-line); }
 @media (pointer: coarse) { .harness-response-action:not([hidden]) { min-height: 44px; } }
 [data-session-error] { width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter))); }

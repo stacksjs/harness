@@ -1,0 +1,21 @@
+<details data-turn-file-summary open hidden :hidden="!turnFileLabel(reviewTurn)">
+  <summary :text="turnFileLabel(reviewTurn)"></summary>
+  <button type="button" class="harness-response-action" :hidden="!canRetryTurnFiles(reviewTurn)" @click="retryTurnFiles(reviewTurn)">Retry</button>
+  <template :for="repo in turnFiles()[reviewTurn] || []" :key="repo.key">
+    <div data-turn-file-repository :data-repository="repo.key">
+      <p :hidden="turnFiles()[reviewTurn]?.length === 1" :text="repo.label"></p>
+      <p role="status" :hidden="Boolean(repo.summary)">Recorded files unavailable</p>
+      <template :for="file in repo.summary?.files || []" :key="file.path">
+        <button type="button" data-turn-file :title="file.path" :aria-label="turnFileActionLabel(repo, file)"
+          aria-controls="harness-changes" @click="openTurnDiff(reviewTurn, $event, repo.key, file.path)">
+          <span class="shrink-0 size-3.5 i-hugeicons-file-01" aria-hidden="true"></span>
+          <span class="min-w-0 truncate" :text="file.path"></span>
+          <span :hidden="!file.insertions" data-turn-file-insertions :text="'+' + file.insertions"></span>
+          <span :hidden="!file.deletions" data-turn-file-deletions :text="'−' + file.deletions"></span>
+        </button>
+      </template>
+      <button type="button" class="harness-response-action" :hidden="!repo.summary || repo.summary.total <= repo.summary.files.length"
+        @click="openTurnDiff(reviewTurn, $event, repo.key)" :text="'Open all ' + (repo.summary?.total || 0) + ' files'"></button>
+    </div>
+  </template>
+</details>

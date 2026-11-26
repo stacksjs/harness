@@ -445,7 +445,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
           @if(turn.status === 'interrupted')<p data-turn-interrupted class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>@endif
           @if(turn.reviewRepositories.length)
-          <button type="button" data-open-turn-diff aria-controls="harness-changes"
+          <template :for="reviewTurn in [{{ turn.id }}]" :key="reviewTurn">
+            @includeWhen(activeSession, '../partials/harness-turn-file-summary')
+          </template>
+          <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[{{ turn.id }}]?.length ? String({{ turn.id }}) : ''"
             :hidden="!turnDiffs()[{{ turn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ turn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ turn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
@@ -556,7 +559,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @endif
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
           <p data-turn-interrupted @if(!initialInterrupted)hidden@endif :hidden="!ssrInterrupted()" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
-          <button type="button" data-open-turn-diff aria-controls="harness-changes"
+          <template :for="reviewTurn in [{{ liveTurn.id }}]" :key="reviewTurn">
+            @includeWhen(activeSession, '../partials/harness-turn-file-summary')
+          </template>
+          <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[{{ liveTurn.id }}]?.length ? String({{ liveTurn.id }}) : ''"
             @if(!liveTurn.reviewRepositories.length)hidden@endif :hidden="!turnDiffs()[{{ liveTurn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ liveTurn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ liveTurn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
@@ -646,7 +652,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             :hidden="!rewindCheckpoints()[turn.id] || uiBusy()" :disabled="Boolean(revertingId()) || !sessionOnline()"
             class="harness-response-action" @click="revertTurn(turn.id)"
             :text="revertingId() && revertingId() === rewindCheckpoints()[turn.id]?.id ? 'Reverting…' : 'Revert this turn'">Revert this turn</button>
-          <button type="button" data-open-turn-diff aria-controls="harness-changes"
+          <template :for="reviewTurn in [turn.id]" :key="reviewTurn">
+            @includeWhen(activeSession, '../partials/harness-turn-file-summary')
+          </template>
+          <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[turn.id]?.length ? String(turn.id) : ''"
             hidden :hidden="!turnDiffs()[turn.id]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String(turn.id) ? 'true' : 'false'"
             @click="openTurnDiff(turn.id, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
@@ -671,12 +680,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     </div>
     @if(activeSession)
       @include('../partials/harness-transcript-find')
-      <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="absolute bottom-3 inset-e-4 px-3 h-9 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full shadow-sm dark:border-white/20">Jump to latest</button>
       <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
     @endif
     </div>
 
     @if(activeSession)
+      <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="px-3 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full dark:border-white/20">Jump to latest</button>
       <div data-thread-archived @if(!initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().archivedAt" class="mx-auto mb-3 px-3 py-2 flex gap-2 items-center text-sm border border-black/10 rounded-md dark:border-white/15">
         <span>Archived thread</span>
         <button type="button" @click="organizeThread('restore')" :disabled="threadActionBusy()" class="font-medium underline">Restore thread</button>
@@ -1365,6 +1374,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let diffTools = null
   let diffComparisonTarget
   let pendingDiffLineLink = null
+  let pendingTurnFile = null
   const diffDisplayFiles = derived(() => {
     const hunks = diffHunks()
     const limits = diffFileLimits()
@@ -1390,6 +1400,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const forkingResponseId = state(0)
   const forkableTurns = state(initialForkableTurns)
   const turnDiffs = state(initialTurnDiffs)
+  const turnFiles = state({})
+  let turnFilesObserver = null
   const forkStatus = state(initialFork?.state || 'ready')
   const forkError = state(initialFork?.error || '')
   const forkStatusText = derived(() => forkStatus() === 'pending' ? 'Creating fork…'
@@ -3562,6 +3574,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function clearDiffComparison() {
     stopDiffContextRequests()
     pendingDiffLineLink = null
+    pendingTurnFile = null
     diffComparisonTarget = undefined
     batch(() => {
       diffStatus.set('Loading comparison…')
@@ -3734,6 +3747,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       : diff.scope === 'working-tree' ? 'No uncommitted changes.' : `No changes ${scope}.`
     diffComparisonTarget = diff.comparisonTarget
     const linked = pendingDiffLineLink
+    const selectedFile = pendingTurnFile
+    pendingTurnFile = null
     batch(() => {
       diffStatus.set(status)
       const patch = diff.error ? '' : diff.patch
@@ -3743,7 +3758,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const paths = new Set(files.map(file => file.path))
       for (const path of limits.keys()) if (!paths.has(path)) limits.delete(path)
       if (!previousFiles.length) {
-        const first = files.find(file => hunks.has(file.path))
+        const first = selectedFile ? files.find(file => file.path === selectedFile) : files.find(file => hunks.has(file.path))
         if (first) limits.set(first.path, diffPageSize)
       }
       const selection = diffLineSelection()
@@ -3761,6 +3776,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     })
     for (const [path] of diffFileLimits()) void loadDiffContext(path)
     if (linked) void selectLinkedDiffLine(linked)
+    if (selectedFile && diffOpen()) void nextTick(() => diffTools.focusWorkspaceDiffFile(changesPane.current, selectedFile))
   }
 
   effect(() => {
@@ -4039,17 +4055,56 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   })
   onDestroy(() => workspaceFilesController?.dispose())
 
-  function openTurnDiff(turnId, event) {
+  onMount(async () => {
+    if (!sessionId || !codecUrl) return
+    const codec = await import(codecUrl).catch(() => null)
+    const transcript = transcriptRef.current
+    if (codec && transcript?.isConnected) turnFilesObserver = codec.observeTurnFiles(transcript, sessionId, (id, repositories) => {
+      turnFiles.update(files => ({ ...files, [id]: repositories }))
+    })
+  })
+  onDestroy(() => turnFilesObserver?.dispose())
+
+  function turnFileLabel(turnId) {
+    const repositories = turnFiles()[turnId]
+    if (repositories === undefined) return ''
+    if (repositories === null) return 'Recorded files unavailable'
+    const total = repositories.reduce((sum, repo) => sum + (repo.summary?.total || 0), 0)
+    if (!total) return repositories.some(repo => !repo.summary) ? 'Recorded files unavailable' : ''
+    const insertions = repositories.reduce((sum, repo) => sum + (repo.summary?.insertions || 0), 0)
+    const deletions = repositories.reduce((sum, repo) => sum + (repo.summary?.deletions || 0), 0)
+    const count = total + (total === 1 ? ' changed file' : ' changed files')
+    return insertions || deletions ? count + ' · +' + insertions + ' −' + deletions : count
+  }
+
+  function retryTurnFiles(turnId) {
+    void turnFilesObserver?.load(String(turnId))
+  }
+
+  function canRetryTurnFiles(turnId) {
+    const repositories = turnFiles()[turnId]
+    return repositories === null || Boolean(repositories?.some(repo => !repo.summary))
+  }
+
+  function turnFileActionLabel(repo, file) {
+    const label = 'Review ' + file.path + ' in ' + repo.label
+    return file.insertions || file.deletions ? label + ', ' + file.insertions + ' additions, ' + file.deletions + ' deletions' : label
+  }
+
+  function openTurnDiff(turnId, event, selectedRepository, path) {
     const repositories = turnDiffs()[turnId]
     if (!repositories?.length) return
-    const repository = repositories.includes(diffRepository()) ? diffRepository() : repositories[0]
+    const preferred = selectedRepository ?? diffRepository()
+    const repository = repositories.includes(preferred) ? preferred : repositories[0]
     clearDiffComparison()
+    pendingTurnFile = path ?? null
     batch(() => {
       if (repository !== diffRepository()) diffReviewOptions.set(null)
       diffRepository.set(repository)
       diffReviewMode.set('turn')
       diffTurn.set(String(turnId))
       openDiffPane(event.currentTarget)
+      refreshWorkspaceDiff()
     })
   }
 
@@ -4064,6 +4119,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function toggleDiff(event) {
     if (diffOpen()) {
       diffOpen.set(false)
+      pendingTurnFile = null
       const trigger = diffTrigger
       diffTrigger = null
       void nextTick(() => (trigger?.getClientRects().length ? trigger : workspaceActionsToggle.current)?.focus())
@@ -4103,8 +4159,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const transcript = transcriptRef.current
     if (!transcript) return
     followingTranscript.set(true)
-    transcript.scrollTop = transcript.scrollHeight
-    transcript.focus({ preventScroll: true })
+    void nextTick(() => {
+      transcript.scrollTop = transcript.scrollHeight
+      transcript.focus({ preventScroll: true })
+    })
   }
 
   async function handleTranscriptControl(event) {
