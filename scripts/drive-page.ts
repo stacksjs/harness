@@ -1492,6 +1492,7 @@ await page.route('**/composer-attachments?**', async (route) => {
   }
   else await route.continue()
 })
+await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-attach-composer]')?.disabled)
 await attachmentPicker.setInputFiles(fileFixture)
 const failedFile = draftFiles.filter({ hasText: 'Fixture upload interrupted.' })
 await failedFile.waitFor()
@@ -1499,9 +1500,22 @@ check('failed upload keeps the file visible and prevents sending', await page.lo
 await failedFile.getByRole('button', { name: 'Retry' }).click()
 await page.locator('[data-composer-file][data-status="ready"]').waitFor()
 await page.unroute('**/composer-attachments?**')
-await attachmentPicker.setInputFiles(imageFixture)
+await promptBox.evaluate((editor, { name, mimeType, bytes }) => {
+  const clipboard = new DataTransfer()
+  clipboard.items.add(new File([new Uint8Array(bytes)], name, { type: mimeType }))
+  editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clipboard, bubbles: true, cancelable: true }))
+}, { name: imageFixture.name, mimeType: imageFixture.mimeType, bytes: Array.from(imageFixture.buffer) })
 await page.waitForFunction(() => document.querySelectorAll('[data-composer-file][data-status="ready"]').length === 2)
 await page.waitForFunction(() => ((document.querySelector('[data-composer-file] img:not([hidden])') as HTMLImageElement | null)?.naturalWidth ?? 0) > 0)
+await page.locator('[data-composer]').evaluate((composer) => {
+  const transfer = new DataTransfer()
+  transfer.items.add(new File(['Dropped file fixture'], 'dropped.txt', { type: 'text/plain' }))
+  composer.dispatchEvent(new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true }))
+})
+const dropped = draftFiles.filter({ hasText: 'dropped.txt' })
+await dropped.and(page.locator('[data-status="ready"]')).waitFor()
+await dropped.getByRole('button', { name: 'Remove dropped.txt' }).click()
+check('a pasted image decodes and a dropped file can be removed', await draftFiles.count() === 2)
 await promptBox.fill('Review these fixture files')
 if (screenshotDir) {
   for (const [width, height] of workspaceViewports) {
@@ -1525,12 +1539,45 @@ await sentFile.waitFor()
 const sentFileUrl = new URL((await sentFile.getAttribute('href'))!, baseUrl).href
 const sentFileResponse = await page.request.get(sentFileUrl)
 check('sent file links return the exact committed bytes', sentFileResponse.ok() && await sentFileResponse.text() === 'Harness attachment fixture')
+const sentImage = page.getByRole('button', { name: 'Preview reference-pattern.png' })
+const attachmentDialog = page.getByRole('dialog', { name: 'reference-pattern.png' })
+await sentImage.click()
+await attachmentDialog.waitFor()
+await attachmentDialog.getByRole('img', { name: 'reference-pattern.png' }).evaluate(async (img: HTMLImageElement) => img.decode())
+const imageDownload = new URL((await attachmentDialog.getByRole('link', { name: 'Download' }).getAttribute('href'))!, baseUrl)
+check('the sent-image dialog decodes the image and preserves the original download',
+  Buffer.compare(await (await page.request.get(imageDownload.href)).body(), imageFixture.buffer) === 0)
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`composer-sent-image-${width}`)
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+}
+await page.keyboard.press('Escape')
+await attachmentDialog.waitFor({ state: 'hidden' })
+check('Escape closes the image preview and restores focus to its trigger',
+  await sentImage.evaluate(button => button === document.activeElement))
 await page.reload()
 await sentFile.waitFor()
-check('committed attachment links render from history after reload', await sentFile.isVisible() && await draftFiles.count() === 0)
+await sentImage.click()
+await attachmentDialog.waitFor()
+await attachmentDialog.getByRole('button', { name: 'Close image preview' }).click()
+check('sent attachments remain usable from history after reload', await sentFile.isVisible() && await draftFiles.count() === 0)
+
+await promptBox.evaluate((editor) => {
+  const clipboard = new DataTransfer()
+  clipboard.setData('text/plain', 'Text fixture. '.repeat(4096))
+  editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clipboard, bubbles: true, cancelable: true }))
+})
+const longPaste = draftFiles.filter({ hasText: 'pasted-text.txt' })
+await longPaste.and(page.locator('[data-status="ready"]')).waitFor()
+check('a large plain-text paste becomes a file and leaves the editor usable', await promptBox.inputValue() === '')
+await longPaste.getByRole('button', { name: 'Remove pasted-text.txt' }).click()
 
 const projectAttachmentDraft = await browserContext.newPage()
 await projectAttachmentDraft.goto(`${baseUrl}/?workspace=${workspaceId}`)
+await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-attach-composer]')?.disabled)
 await projectAttachmentDraft.locator('[data-composer-file-input]').setInputFiles(fileFixture)
 await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').waitFor()
 await projectAttachmentDraft.locator('[data-send]').click()

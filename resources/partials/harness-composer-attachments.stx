@@ -2,17 +2,17 @@
   <template :for="file in composerFiles()" :key="file.key">
     <li data-composer-file :data-status="file.status" class="flex gap-2 items-center px-2 py-1 max-w-full min-w-0 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
       <span :hidden="Boolean(file.image && file.id)" class="shrink-0 size-4 i-hugeicons-attachment-01" aria-hidden="true"></span>
-      <img :hidden="!(file.image && file.id)" :src="file.image && file.id ? composerFilePreview(file.id) : null" width="32" height="32" alt="" class="object-cover shrink-0 size-8 rounded">
+      <img :hidden="!(file.image && file.id)" :src="file.image && file.id ? composerFileActions()?.preview(file.id) ?? null : null" width="32" height="32" alt="" class="object-cover shrink-0 size-8 rounded">
       <div class="min-w-0">
         <span class="block font-medium truncate" :title="file.name" :text="file.name"></span>
-        <span role="status" class="block break-words text-neutral-600 dark:text-neutral-300" :text="composerFileStatus(file)"></span>
+        <span role="status" class="block break-words text-neutral-600 dark:text-neutral-300" :text="composerFileActions() ? composerFileStatus?.(file) : ''"></span>
       </div>
-      <button type="button" :hidden="file.status !== 'failed' || !composerUploadSources.has(file.key)" :disabled="startPending()" @click="uploadComposerFile(file.key)" class="px-1.5 min-h-8 font-medium hover:bg-black/5 dark:hover:bg-white/10 rounded">Retry</button>
-      <button type="button" :disabled="startPending()" :aria-label="'Remove ' + file.name" @click="removeComposerFile(file.key)" class="shrink-0 harness-icon-button">
+      <button type="button" :hidden="file.status !== 'failed' || !composerUploadSources.has(file.key)" :disabled="startPending()" @click="composerFileActions()?.retry(file.key)" class="px-1.5 min-h-8 font-medium hover:bg-black/5 dark:hover:bg-white/10 rounded">Retry</button>
+      <button type="button" :disabled="startPending()" :aria-label="'Remove ' + file.name" @click="composerFileActions()?.remove(file.key)" class="shrink-0 harness-icon-button">
         <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
       </button>
     </li>
   </template>
 </ul>
 <p data-composer-files-error role="alert" :hidden="!composerFilesError()" :text="composerFilesError()" class="break-words text-[12px] text-red-700 dark:text-red-300"></p>
-<input type="file" data-composer-file-input ref="composerFileInput" multiple hidden @change="chooseComposerFiles">
+<input type="file" data-composer-file-input ref="composerFileInput" multiple hidden :disabled="!composerFileActions()" @change="composerFileActions()?.choose($event)">

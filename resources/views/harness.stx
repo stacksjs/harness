@@ -364,9 +364,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
               @foreach(turn.attachments as file)
                 <li class="max-w-full min-w-0">
+                  @if(file.image)
+                    <button type="button" data-preview-sent-image="{{ file.id }}" @click="openSentImage" class="flex gap-2 items-center p-1.5 max-w-full text-[12px] border border-black/15 rounded-lg dark:border-white/20">
+                      <img src="/composer-attachments/{{ file.id }}?session={{ activeSession.id }}&amp;preview=1" loading="lazy" width="32" height="32" alt="" class="object-cover shrink-0 size-8 rounded">
+                      <span class="sr-only">Preview </span><span data-attachment-name class="truncate">{{ file.nameHtml }}</span>
+                    </button>
+                  @else
                   <a data-sent-attachment href="/composer-attachments/{{ file.id }}?session={{ activeSession.id }}" download class="flex items-center gap-2 px-2 min-h-8 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
                     <span class="shrink-0 size-4 i-hugeicons-attachment-01" aria-hidden="true"></span><span class="truncate">{{ file.nameHtml }}</span>
                   </a>
+                  @endif
                 </li>
               @endforeach
             </ul>
@@ -441,9 +448,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
               @foreach(liveTurn.attachments as file)
                 <li class="max-w-full min-w-0">
+                  @if(file.image)
+                    <button type="button" data-preview-sent-image="{{ file.id }}" @click="openSentImage" class="flex gap-2 items-center p-1.5 max-w-full text-[12px] border border-black/15 rounded-lg dark:border-white/20">
+                      <img src="/composer-attachments/{{ file.id }}?session={{ activeSession.id }}&amp;preview=1" loading="lazy" width="32" height="32" alt="" class="object-cover shrink-0 size-8 rounded">
+                      <span class="sr-only">Preview </span><span data-attachment-name class="truncate">{{ file.nameHtml }}</span>
+                    </button>
+                  @else
                   <a data-sent-attachment href="/composer-attachments/{{ file.id }}?session={{ activeSession.id }}" download class="flex items-center gap-2 px-2 min-h-8 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
                     <span class="shrink-0 size-4 i-hugeicons-attachment-01" aria-hidden="true"></span><span class="truncate">{{ file.nameHtml }}</span>
                   </a>
+                  @endif
                 </li>
               @endforeach
             </ul>
@@ -538,7 +552,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <ul :hidden="!turn.attachments?.length" aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
             <template :for="file in turn.attachments ?? []" :key="file.id">
               <li class="max-w-full min-w-0">
-                <a data-sent-attachment :href="'/composer-attachments/' + file.id + '?session=' + sessionId" download class="flex items-center gap-2 px-2 min-h-8 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
+                <button type="button" :data-preview-sent-image="file.id" :hidden="!file.image" @click="openSentImage" class="flex gap-2 items-center p-1.5 max-w-full text-[12px] border border-black/15 rounded-lg dark:border-white/20">
+                  <img :src="file.image ? sentAttachmentUrl(file.id) + '&preview=1' : null" loading="lazy" width="32" height="32" alt="" class="object-cover shrink-0 size-8 rounded">
+                  <span class="sr-only">Preview </span><span data-attachment-name class="truncate" :text="file.name"></span>
+                </button>
+                <a data-sent-attachment :hidden="file.image" :href="sentAttachmentUrl(file.id)" download class="flex items-center gap-2 px-2 min-h-8 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
                   <span class="shrink-0 size-4 i-hugeicons-attachment-01" aria-hidden="true"></span><span class="truncate" :text="file.name"></span>
                 </a>
               </li>
@@ -604,7 +622,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
 
     @if(canCompose)
-    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerDrop" class="grid gap-2 items-end shrink-0">
+    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerFileActions()?.drop($event)" class="grid gap-2 items-end shrink-0">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -622,7 +640,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @include('../partials/harness-composer-attachments')
       <textarea
         data-prompt
-        @paste="composerPaste"
+        @paste="composerFileActions()?.paste($event)"
         ref="promptBox"
         @keydown="promptKeydown"
         @input="rememberPrompt"
@@ -637,7 +655,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       ></textarea>
       <p data-handoff-hint role="status" hidden :hidden="!pendingProviderSwitch()" :text="handoffHint()" class="text-neutral-600 text-xs dark:text-neutral-300"></p>
       <div data-composer-toolbar>
-        <button type="button" data-attach-composer @click="chooseComposerFilesDialog" :hidden="Boolean(editingFollowUp())" :disabled="startPending()" aria-label="Attach files" title="Attach files" class="shrink-0 me-auto harness-icon-button">
+        <button type="button" data-attach-composer @click="chooseComposerFilesDialog" :hidden="Boolean(editingFollowUp())" :disabled="!composerFileActions() || startPending()" aria-label="Attach files" title="Attach files" class="shrink-0 me-auto harness-icon-button">
           <span class="size-4 i-hugeicons-attachment-01" aria-hidden="true"></span>
         </button>
         <div data-composer-provider-controls>
@@ -806,6 +824,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   @if(activeSession)
     @include('../partials/harness-thread-actions')
     @include('../partials/harness-thread-arrangement')
+  @endif
+
+  @if(activeSessionId)
+    @include('../partials/harness-sent-image')
   @endif
 
   <dialog data-thread-search ref="threadSearchDialogBox" aria-labelledby="thread-search-heading" @cancel="cancelThreadSearch" @click.self="closeThreadSearch" class="mb-auto mt-8 mx-auto p-0 md:mt-auto text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[12px] dark:border-white/15 shadow-xl">
@@ -1262,8 +1284,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const composerDraft = useLocalStorage(promptDraftKey, null, {
     listenToStorageChanges: false,
   })
+  const sentImageDialog = useRef('sentImageDialog')
+  const sentImage = state(null)
+  const sentImageStatus = state('loading')
+  let sentImageTrigger = null
+
   const composerFileInput = useRef('composerFileInput')
   const composerUploadSources = new Map()
+  const composerFileActions = state(null)
+  let composerFileStatus
   const composerFiles = derived(() => Array.isArray(composerDraft()?.files) ? composerDraft().files : [])
   const composerFilesError = state('')
   const composerFilesPending = derived(() => !editingFollowUp() && composerFiles().some(file => file.status !== 'ready'))
@@ -3329,37 +3358,37 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return (hash >>> 0) % 2147483647 + 1
   }
 
+  function sentAttachmentUrl(id) {
+    return `/composer-attachments/${id}?session=${sessionId}`
+  }
+
+  function openSentImage(event) {
+    const trigger = event.currentTarget
+    const dialog = sentImageDialog.current
+    const id = trigger?.dataset.previewSentImage
+    if (!dialog || dialog.open || !id) return
+    sentImageTrigger = trigger
+    sentImageStatus.set('loading')
+    sentImage.set({ url: sentAttachmentUrl(id), name: trigger.querySelector('[data-attachment-name]')?.textContent || 'Image' })
+    dialog.showModal()
+  }
+
+  function closeSentImage() {
+    sentImageDialog.current?.close()
+  }
+
+  function finishSentImageClose() {
+    sentImage.set(null)
+    sentImageTrigger?.focus({ preventScroll: true })
+    sentImageTrigger = null
+  }
+
   function chooseComposerFilesDialog() {
     composerFileInput.current?.click()
   }
 
-  function chooseComposerFiles(event) {
-    addComposerFiles(Array.from(event.target.files ?? []))
-    event.target.value = ''
-  }
-
   function composerDragOver(event) {
     if (Array.from(event.dataTransfer?.types ?? []).includes('Files')) event.preventDefault()
-  }
-
-  function composerDrop(event) {
-    const files = Array.from(event.dataTransfer?.files ?? [])
-    if (!files.length) return
-    event.preventDefault()
-    addComposerFiles(files)
-  }
-
-  function composerPaste(event) {
-    const clipboard = event.clipboardData
-    const files = Array.from(clipboard?.files ?? [])
-    if (!files.length) {
-      const text = clipboard?.getData('text/plain') ?? ''
-      if (new Blob([text]).size < 32 * 1024) return
-      files.push(new File([text], 'pasted-text.txt', { type: 'text/plain' }))
-    }
-    if (editingFollowUp() || startPending()) return
-    event.preventDefault()
-    addComposerFiles(files)
   }
 
   function setComposerFiles(files, upload) {
@@ -3372,84 +3401,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const text = promptRef.current?.value ?? remainder.text ?? ''
     composerDraft.set(files.length ? { ...remainder, text, files, upload } : text ? { ...remainder, text } : null)
     sidebarDrafts?.update()
-  }
-
-  function addComposerFiles(files) {
-    if (!files.length || startPending() || editingFollowUp()) return
-    if (composerFiles().length + files.length > 100) {
-      composerFilesError.set('A message can contain up to 100 attachments.')
-      return
-    }
-    const upload = composerDraft()?.upload ?? {
-      draft: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join(''),
-      scope: uploadScope,
-    }
-    const added = files.map((source) => {
-      const key = newCommandId()
-      composerUploadSources.set(key, source)
-      return { key, name: source.name, size: source.size, status: 'uploading' }
-    })
-    composerFilesError.set('')
-    setComposerFiles([...composerFiles(), ...added], upload)
-    for (const file of added) void uploadComposerFile(file.key)
-  }
-
-  function composerFileUrl(upload, id = '', name = '') {
-    const params = new URLSearchParams({ scope: upload.scope, draft: upload.draft })
-    if (name) params.set('name', name)
-    return `/composer-attachments${id ? '/' + id : ''}?${params}`
-  }
-
-  function composerFilePreview(id) {
-    const upload = composerDraft()?.upload
-    return upload ? composerFileUrl(upload, id) + '&preview=1' : null
-  }
-
-  async function uploadComposerFile(key) {
-    const upload = composerDraft()?.upload
-    const source = composerUploadSources.get(key)
-    if (!upload || !source || startPending()) return
-    const update = (changes) => {
-      if (composerDraft()?.upload?.draft !== upload.draft || !composerFiles().some(file => file.key === key)) return false
-      setComposerFiles(composerFiles().map(file => file.key === key ? { ...file, ...changes } : file), upload)
-      return true
-    }
-    update({ status: 'uploading', error: '' })
-    try {
-      const response = await fetch(composerFileUrl(upload, '', source.name), {
-        method: 'POST',
-        body: source,
-        headers: { 'Content-Type': source.type || 'application/octet-stream' },
-      })
-      const file = await response.json().catch(() => null)
-      if (!response.ok || !file?.id) throw new Error(file?.error || 'Upload failed. Try again.')
-      if (!update({ ...file, status: 'ready' }))
-        void fetch(composerFileUrl(upload, file.id), { method: 'DELETE' }).catch(() => {})
-      composerUploadSources.delete(key)
-    }
-    catch (cause) {
-      update({ status: 'failed', error: cause.message || 'Upload failed. Try again.' })
-    }
-  }
-
-  function removeComposerFile(key) {
-    if (startPending()) return
-    const upload = composerDraft()?.upload
-    const file = composerFiles().find(item => item.key === key)
-    if (!upload || !file) return
-    composerUploadSources.delete(key)
-    composerFilesError.set('')
-    setComposerFiles(composerFiles().filter(item => item.key !== key), upload)
-    if (file.id) void fetch(composerFileUrl(upload, file.id), { method: 'DELETE' }).catch(() => {})
-    promptRef.current?.focus()
-  }
-
-  function composerFileStatus(file) {
-    if (file.status === 'uploading') return 'Uploading…'
-    if (file.status === 'failed') return file.error
-    if (file.size < 1024) return file.size + ' B'
-    if (file.size < 1024 * 1024) return Math.round(file.size / 1024) + ' KiB'
-    return (file.size / (1024 * 1024)).toFixed(1) + ' MiB'
   }
 
   function rememberPrompt() {
@@ -3490,6 +3441,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   async function connectComposerDrafts() {
     composerDraftTools = await import(codecUrl)
+    composerFileStatus = composerDraftTools.composerFileStatus
+    composerFileActions.set(composerDraftTools.createComposerFileActions({
+      files: composerFiles, upload: () => composerDraft()?.upload, setFiles: setComposerFiles,
+      setError: message => composerFilesError.set(message), inputBlocked: () => startPending() || Boolean(editingFollowUp()),
+      newKey: newCommandId, focusEditor: () => promptRef.current?.focus(),
+      sources: composerUploadSources, scope: uploadScope,
+    }))
     const sidebar = sidebarRef.current
     const discardTemplate = draftDiscardTemplate.current
     if (sidebar && discardTemplate) sidebarDrafts = composerDraftTools.watchSidebarDrafts(sidebar, discardTemplate, discardDraft)

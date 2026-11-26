@@ -236,7 +236,7 @@ export function viewProps(state: HarnessState, options: {
           turns: active.turns.map(turn => ({
             id: turn.id,
             prompt: turn.prompt,
-            attachments: (turn.attachments ?? []).map(({ id, name }) => ({ id, nameHtml: escapeTranscriptText(name) })),
+            attachments: (turn.attachments ?? []).map(({ id, name, image }) => ({ id, image, nameHtml: escapeTranscriptText(name) })),
             response: turn.response,
             status: turn.status,
             ...(turn.contextCompacted ? { contextCompacted: true } : {}),

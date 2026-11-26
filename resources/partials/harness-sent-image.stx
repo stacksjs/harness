@@ -1,0 +1,15 @@
+<dialog data-sent-image-dialog ref="sentImageDialog" @click.self="closeSentImage" @close="finishSentImageClose" aria-labelledby="sent-image-name" class="overflow-hidden m-auto p-0 max-h-[90dvh] text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/15 rounded-xl dark:border-white/20 shadow-xl">
+  <div class="grid min-w-0">
+    <header class="flex gap-2 items-center p-2.5 border-b border-black/10 dark:border-white/15">
+      <h2 id="sent-image-name" :text="sentImage()?.name || 'Image'" class="flex-1 min-w-0 font-medium text-sm truncate">Image</h2>
+      <a download :href="sentImage()?.url || null" class="inline-flex items-center px-2 min-h-8 font-medium text-[13px] underline">Download</a>
+      <button type="button" autofocus @click="closeSentImage" aria-label="Close image preview" class="shrink-0 harness-icon-button">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </header>
+    <div class="flex items-center justify-center p-3 min-h-40 bg-neutral-100 dark:bg-neutral-950">
+      <img :hidden="!sentImage() || sentImageStatus() !== 'ready'" :src="sentImage() ? sentImage().url + '&preview=1' : null" :alt="sentImage()?.name || ''" @load="sentImageStatus.set('ready')" @error="sentImageStatus.set('failed')" class="block object-contain max-h-[70dvh] max-w-full rounded">
+      <p role="status" :hidden="sentImageStatus() === 'ready'" class="text-neutral-600 text-sm dark:text-neutral-300" :text="sentImageStatus() === 'failed' ? 'Preview unavailable. You can download the original file.' : 'Loading image…'"></p>
+    </div>
+  </div>
+</dialog>
