@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { expandWorkspaceDiffGap, parseWorkspacePatch, revealWorkspaceDiffContext, workspaceDiffContextKey, workspaceDiffLink, workspaceDiffLinkedRows, workspaceDiffLocation, workspaceDiffRows } from '../src/browser-diff'
-import { MAX_PATCH_BYTES, parseNumstat, parseStatus, workspaceDiff } from '../src/diff'
+import { MAX_PATCH_BYTES, parseNumstat, parseStatus, summarizeTurnFiles, workspaceDiff } from '../src/diff'
 
 it('expands unchanged lines with distinct before and after numbers across an insertion', () => {
   const path = 'sample.txt'
@@ -105,6 +105,23 @@ describe('parsing numstat', () => {
 })
 
 describe('reading a real workspace', () => {
+  it('keeps totals for the entire checkpoint comparison while bounding the transcript preview', async () => {
+    const dir = repo()
+    try {
+      const head = () => spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).stdout.trim()
+      const before = head()
+      for (let i = 0; i < 10; i++) writeFileSync(join(dir, `file [${i}].txt`), 'a\nb\n')
+      expect(spawnSync('git', ['add', '.'], { cwd: dir }).status).toBe(0)
+      expect(spawnSync('git', ['commit', '-qm', 'Add ten files'], { cwd: dir }).status).toBe(0)
+      const after = head()
+      writeFileSync(join(dir, 'outside the turn.txt'), 'Later\n')
+      const result = await summarizeTurnFiles(dir, { before, after })
+      expect(result).toMatchObject({ total: 10, insertions: 20, deletions: 0 })
+      expect(result?.files).toHaveLength(8)
+      expect(result?.files[0]).toEqual({ path: 'file [0].txt', status: 'added', insertions: 2, deletions: 0 })
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
   function repo(initialPath = 'tracked.txt'): string {
     const dir = mkdtempSync(join(tmpdir(), 'harness-diff-'))
     const run = (...args: string[]) => spawnSync('git', args, { cwd: dir })

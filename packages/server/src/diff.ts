@@ -37,6 +37,13 @@ export interface FileChange {
   deletions: number
 }
 
+export interface TurnFileSummary {
+  total: number
+  insertions: number
+  deletions: number
+  files: FileChange[]
+}
+
 export interface WorkspaceDiff {
   /** False when the workspace is not a git repository at all. */
   isRepository: boolean
@@ -231,21 +238,40 @@ export async function workspaceDiff(workspacePath: string, baseline?: string): P
   return readWorkspaceDiff(workspacePath, scope, range, scoped)
 }
 
-async function readWorkspaceDiff(workspacePath: string, scope: WorkspaceDiff['scope'], range: string[], againstTree: boolean, comparisonLabel?: string): Promise<WorkspaceDiff> {
-  const [status, numstat, patch] = await Promise.all([
+async function readFileChanges(workspacePath: string, range: string[], againstTree: boolean): Promise<FileChange[] | null> {
+  const [status, numstat] = await Promise.all([
     git(workspacePath, againstTree ? ['diff', '--name-status', '-z', ...range] : ['status', '--porcelain=v1', '-z']),
     git(workspacePath, ['diff', '--no-ext-diff', '--no-textconv', '--numstat', '-z', ...range]),
+  ])
+  if (!status.ok || (againstTree && !numstat.ok)) return null
+  const counts = parseNumstat(numstat.out)
+  const listed = againstTree ? parseNameStatus(status.out) : parseStatus(status.out)
+  return listed.map(file => ({ ...file, ...(counts.get(file.path) ?? {}) }))
+}
+
+/** Read an immutable comparison without generating or sending the patch. */
+export async function summarizeTurnFiles(path: string, turn: Pick<WorkspaceReviewTurn, 'before' | 'after'>): Promise<TurnFileSummary | null> {
+  if (!commitId.test(turn.before) || !commitId.test(turn.after)) return null
+  const files = await readFileChanges(path, [turn.before, turn.after], true)
+  if (!files) return null
+  return {
+    total: files.length,
+    insertions: files.reduce((total, file) => total + file.insertions, 0),
+    deletions: files.reduce((total, file) => total + file.deletions, 0),
+    files: files.slice(0, 8),
+  }
+}
+
+async function readWorkspaceDiff(workspacePath: string, scope: WorkspaceDiff['scope'], range: string[], againstTree: boolean, comparisonLabel?: string): Promise<WorkspaceDiff> {
+  const [files, patch] = await Promise.all([
+    readFileChanges(workspacePath, range, againstTree),
     git(workspacePath, ['-c', 'diff.suppressBlankEmpty=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index',
       '--src-prefix=a/', '--dst-prefix=b/', '--output-indicator-old=-',
       '--output-indicator-new=+', '--output-indicator-context= ', ...range]),
   ])
 
-  if (!status.ok || (againstTree && (!numstat.ok || !patch.ok)))
+  if (!files || (againstTree && !patch.ok))
     return { isRepository: true, scope, files: [], patch: '', error: 'Could not read this Git comparison.' }
-
-  const counts = parseNumstat(numstat.out)
-  const listed = againstTree ? parseNameStatus(status.out) : parseStatus(status.out)
-  const files = listed.map(file => ({ ...file, ...(counts.get(file.path) ?? {}) }))
 
   return {
     isRepository: true,

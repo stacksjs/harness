@@ -2110,6 +2110,16 @@ describe('checkpoint and revert', () => {
       harness = await serve({ port, databasePath, resolveDriver: () => driver })
 
       const endpoint = `http://127.0.0.1:${port}/s/${sessionId}/diff`
+      const files = await (await fetch(`${endpoint}/turn-files?target=${completed.turnId}`)).json()
+      expect(files.repositories.map(({ key }: { key: string }) => key).sort()).toEqual([...keys].sort())
+      for (const { summary } of files.repositories) {
+        expect(summary).toMatchObject({ total: 2, insertions: 2, deletions: 1 })
+        expect(summary.files).toEqual(expect.arrayContaining([
+          { path: 'binary.dat', status: 'added', insertions: 0, deletions: 0 },
+          { path: 'shared.txt', status: 'modified', insertions: 2, deletions: 1 },
+        ]))
+      }
+      expect((await fetch(`${endpoint}/turn-files?target=missing`)).status).toBe(404)
       for (const [key, other] of [[keys[0]!, keys[1]!], [keys[1]!, keys[0]!]]) {
         const params = new URLSearchParams({ repository: key })
         expect((await (await fetch(`${endpoint}/options?${params}`)).json()).turns).toEqual([{ id: completed.turnId, number: 1 }])
