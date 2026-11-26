@@ -1376,6 +1376,73 @@ check('confirming either form of input composition leaves Enter to the editor', 
   })))
 await capture('composer-draft-recovery-mobile')
 
+const draftSidebar = page.locator('[data-harness-sidebar]')
+const discardSidebarDraft = (id: number) => draftSidebar.locator(`[data-item-id="${id}"] > [data-draft-discard-row]`)
+await page.locator('[data-sidebar-toggle]').click()
+await discardSidebarDraft(sessionId).click()
+check('discarding another thread’s draft from the sidebar keeps the current editor intact', await promptBox.inputValue() === scratchDraft)
+await discardSidebarDraft(scratchSessionId).click()
+const sidebarDraftUndo = draftSidebar.locator('[data-thread-undo]')
+await sidebarDraftUndo.getByText('2 drafts discarded', { exact: true }).waitFor()
+await capture('composer-discard-sidebar-mobile')
+await sidebarDraftUndo.getByRole('button', { name: 'Undo', exact: true }).click()
+await page.locator('[data-sidebar-close]').click()
+check('one sidebar Undo restores both scoped drafts and the current text selection',
+  await promptBox.evaluate((box: HTMLTextAreaElement) => box.selectionStart === 14 && box.selectionEnd === 21 && box.selectionDirection === 'backward')
+  && await promptBox.inputValue() === scratchDraft)
+await page.goto(`${baseUrl}/s/${sessionId}`)
+await page.waitForFunction(() => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === 'A separate draft in another project')
+await page.goto(`${baseUrl}/s/${scratchSessionId}`)
+const discardComposer = page.locator('[data-discard-composer]')
+await discardComposer.click()
+const compactDraftUndo = page.locator('[data-compact-thread-undo] [data-thread-undo]')
+await compactDraftUndo.getByText('Draft discarded', { exact: true }).waitFor()
+await page.reload()
+await compactDraftUndo.getByText('Draft discarded', { exact: true }).waitFor()
+await capture('composer-discard-undo-mobile')
+await pressChord('Meta+z')
+check('discard Undo survives reload and restores the exact draft from the composer shortcut', await promptBox.inputValue() === scratchDraft)
+
+const draftWriter = await browserContext.newPage()
+try {
+  await draftWriter.goto(`${baseUrl}/s/${scratchSessionId}`)
+  await discardComposer.click()
+  await compactDraftUndo.getByText('Draft discarded', { exact: true }).waitFor()
+  await draftWriter.locator('[data-prompt]').fill('Newer draft from a second tab')
+  await compactDraftUndo.getByRole('button', { name: 'Undo', exact: true }).click()
+  await page.reload()
+  await page.waitForFunction(() => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === 'Newer draft from a second tab')
+  check('discard Undo preserves text saved by a second tab', true)
+}
+finally {
+  await draftWriter.close()
+}
+
+const mixedDraft = 'Draft saved before a thread action'
+await promptBox.fill(mixedDraft)
+await discardComposer.click()
+await compactDraftUndo.getByText('Draft discarded', { exact: true }).waitFor()
+const draftThreadActions = page.locator('[data-thread-actions-trigger]')
+await draftThreadActions.click()
+await page.getByRole('dialog', { name: 'Thread actions' }).getByRole('button', { name: 'Settle thread', exact: true }).click()
+await compactDraftUndo.getByText('Thread settled', { exact: true }).waitFor()
+await compactDraftUndo.getByRole('button', { name: 'Undo', exact: true }).click()
+await compactDraftUndo.getByText('Draft discarded', { exact: true }).waitFor()
+await compactDraftUndo.getByRole('button', { name: 'Undo', exact: true }).click()
+check('thread Undo reveals the preceding draft Undo in order', await promptBox.inputValue() === mixedDraft)
+
+await page.evaluate(() => {
+  const write = Storage.prototype.setItem
+  Storage.prototype.setItem = function (key, value) {
+    if (this === sessionStorage && key === 'harness.draft-undo.v2') throw new DOMException('Storage full', 'QuotaExceededError')
+    return write.call(this, key, value)
+  }
+})
+await discardComposer.click()
+check('discard leaves the draft intact when its recovery copy cannot be persisted', await promptBox.inputValue() === mixedDraft)
+await page.reload()
+await page.waitForFunction(text => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === text, mixedDraft)
+
 const attemptedIds: string[] = []
 const retryText = 'Retry a turn whose receipt was interrupted'
 let droppedReceipt = false
@@ -1405,6 +1472,7 @@ check('a dropped send receipt leaves the draft and stores one turn', droppedRece
 await page.keyboard.press('Escape')
 await page.click('[data-send]')
 await page.waitForFunction(() => (document.querySelector('[data-prompt]') as HTMLTextAreaElement)?.value === '')
+await discardSidebarDraft(scratchSessionId).waitFor({ state: 'detached' })
 check('retry uses the same id and clears the draft after receipt', attemptedIds.length === 2 && attemptedIds[0] === attemptedIds[1]
   && harness.engine.current.sessions.get(scratchSessionId)?.turns.filter(turn => turn.prompt === retryText).length === 1)
 

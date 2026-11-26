@@ -185,6 +185,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       @endif
     </div>
     <div data-navigation-content>
+    <template ref="draftDiscardTemplate">
+      <button type="button" data-draft-discard-row aria-label="Discard draft" title="Discard draft" class="harness-icon-button">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </template>
     @if(hasProfiles)
       <Sidebar
         :spaces="spaces"
@@ -603,6 +608,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         @include('../partials/harness-model-picker')
         </div>
         <div data-composer-actions class="flex flex-wrap gap-2 justify-end">
+          <button type="button" data-discard-composer hidden :hidden="!canDiscardComposer()" @click="discardCurrentDraft" aria-label="Discard draft" title="Discard draft" class="harness-icon-button">
+            <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+          </button>
           <button type="button" data-idle-compaction hidden :hidden="!idleCompactionOffer()" @click="toggleIdleCompaction" :aria-pressed="compactNextPrompt()" :aria-label="idleCompactionLabel()" :title="idleCompactionLabel()" class="px-2 min-h-8 text-[12px] border border-black/10 rounded-full dark:border-white/20" :text="idleCompactionChip()"></button>
           <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!composerText().trim() || startPending() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
@@ -1214,7 +1222,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return Boolean(sessionId && runningTurnId() > 0 && !editingFollowUp()
       && text.startsWith('/') && '/clear'.startsWith(text))
   })
-  const composerDraft = useLocalStorage(`harness.composer.v1:${activeProfile || 0}:${promptScope}`, null, {
+  const promptDraftKey = `harness.composer.v1:${activeProfile || 0}:${promptScope}`
+  const composerDraft = useLocalStorage(promptDraftKey, null, {
     listenToStorageChanges: false,
   })
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
@@ -1266,22 +1275,50 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const threadActionBusy = state(false)
   const threadActionError = state('')
   const threadUndo = useSessionStorage('harness.thread-undo.v2', null, { listenToStorageChanges: false })
+  const draftUndoKey = 'harness.draft-undo.v2'
+  const draftUndo = useSessionStorage(draftUndoKey, [], { listenToStorageChanges: false })
+  const threadUndoBatch = useSessionStorage('harness.thread-undo-batch.v1', '', { listenToStorageChanges: false })
+  const draftDiscardTemplate = useRef('draftDiscardTemplate')
+  const draftDiscardReady = state(false)
+  let composerDraftTools
+  let sidebarDrafts
+  let sidebarHasDraft
+  effect(() => {
+    const hasDraft = Boolean(composerDraft()?.text)
+    if (sidebarHasDraft === hasDraft) return
+    sidebarHasDraft = hasDraft
+    void nextTick(() => sidebarDrafts?.update())
+  })
   const threadUndoTab = useSessionStorage('harness.thread-undo-tab.v1', '', { listenToStorageChanges: false })
   const threadUndoBusy = state(false)
   const threadUndoShortcutClaimed = state(true)
+  const visibleUndo = derived(() => {
+    const draft = draftUndo().at(-1)
+    const thread = threadUndo()
+    const threadStarted = thread?.offeredAt ?? (thread?.expiresAt || 0) - 5000
+    return draft?.offeredAt >= threadStarted ? draft : thread
+  })
   const threadUndoMessage = derived(() => {
-    const offer = threadUndo()
+    const offer = visibleUndo()
     if (!offer) return ''
+    if (offer.action === 'discarded') return offer.entries.length === 1 ? 'Draft discarded' : `${offer.entries.length} drafts discarded`
     return offer.count > 1 ? `${offer.count} threads ${offer.action}` : `Thread ${offer.action}`
   })
-  const threadUndoTimer = useInterval(() => {
-    if (threadUndo()?.expiresAt <= Date.now()) threadUndo.set(null)
-  }, 100)
+  function expireUndoNotices() {
+    const thread = threadUndo()
+    if (thread && (!Number.isFinite(thread.expiresAt) || thread.expiresAt <= Date.now())) threadUndo.set(null)
+    const drafts = draftUndo()
+    const live = drafts.filter(draft => {
+      if (Number.isFinite(draft.expiresAt) && draft.expiresAt > Date.now()) return true
+      for (const entry of draft.entries) composerDraftTools?.expireComposerDraft(localStorage, entry)
+      return false
+    })
+    if (live.length !== drafts.length) draftUndo.set(live)
+  }
+  const threadUndoTimer = useInterval(expireUndoNotices, 100)
   effect(() => {
-    const offer = threadUndo()
-    if (!offer) threadUndoTimer.pause()
-    else if (!Number.isFinite(offer.expiresAt) || offer.expiresAt <= Date.now()) threadUndo.set(null)
-    else threadUndoTimer.resume()
+    if (threadUndo() || draftUndo().length) threadUndoTimer.resume()
+    else threadUndoTimer.pause()
   })
   const threadTitleDraft = state('')
   const threadActionsDialog = useRef('threadActionsDialogBox')
@@ -1469,18 +1506,37 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function storeThreadUndo(offer) {
-    threadUndo.set(offer ? { ...offer, expiresAt: Date.now() + offer.remainingMs } : null)
+    const previous = threadUndo()
+    threadUndo.set(offer ? {
+      ...offer, expiresAt: Date.now() + offer.remainingMs,
+      offeredAt: typeof offer.ageMs === 'number' ? Date.now() - offer.ageMs
+        : offer.sourceCommandId === previous?.sourceCommandId ? previous.offeredAt : Date.now(),
+    } : null)
   }
 
   async function sendThreadOrganization(command) {
-    const { threadUndo: offer } = await sendCommand({ ...command, type: 'session.organize', undoScope: threadUndoScope() })
+    const commandId = newCommandId()
+    const undoBatch = threadUndoBatch()
+    const { threadUndo: offer } = await sendCommand({
+      ...command, type: 'session.organize', undoScope: threadUndoScope(), ...(undoBatch && { undoBatch }),
+    }, commandId)
     if (offer && offer.sourceCommandId !== threadUndo()?.sourceCommandId) threadUndoShortcutClaimed.set(true)
     storeThreadUndo(offer)
+    if (offer?.sourceCommandId === commandId && draftUndo().length) {
+      expireUndoNotices()
+      const expiresAt = Date.now() + offer.remainingMs
+      draftUndo.update(groups => groups.map(group => ({ ...group, expiresAt })))
+    }
   }
 
   async function undoThreadAction() {
-    const offer = threadUndo()
+    expireUndoNotices()
+    const offer = visibleUndo()
     if (!offer || threadUndoBusy()) return
+    if (offer.action === 'discarded') {
+      restoreDiscardedDrafts(offer)
+      return
+    }
     threadUndoBusy.set(true)
     const arranged = threadArrangement.current?.open
     try {
@@ -2971,7 +3027,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const bindings = keybindingTable()?.bindings
     const canOperate = focused && sessionOnline() && !terminalBusy()
     const canSplit = focused && canSplitTerminal()
-    const undoShortcut = threadUndo() && threadUndoShortcutClaimed() && !focused ? keyboard?.craftShortcut(bindings?.['thread.undo']) : undefined
+    const undoShortcut = visibleUndo() && threadUndoShortcutClaimed() && !focused ? keyboard?.craftShortcut(bindings?.['thread.undo']) : undefined
     const threadUndoItem = { id: 'thread.undo', label: 'Undo Thread Action', shortcut: undoShortcut }
     const terminalItem = (id, enabled) => ({
       id,
@@ -3030,7 +3086,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (id === 'settings') openSettings()
     else if (id === 'new-session') openDraft(visibleProfile())
     else if (id === 'toggle-terminal') toggleTerminal()
-    else if (id === 'thread.undo' && threadUndo() && !threadUndoBlocked() && !profileModalOpen()) void undoThreadAction()
+    else if (id === 'thread.undo' && visibleUndo() && !threadUndoBlocked() && !profileModalOpen()) void undoThreadAction()
     else if (termOpen() && terminalInputFocused()) runTerminalShortcut(id)
   }, { target: window })
 
@@ -3237,10 +3293,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (editingFollowUp()) return
     const previous = composerDraft()
     if (!box.value) {
-      if (previous) composerDraft.set(null)
+      if (previous?.text) composerDraft.set(null)
       return
     }
     const { value: text, selectionStart: start, selectionEnd: end, selectionDirection: direction } = box
+    if (previous?.text === text && composerDraftTools?.wasComposerDraftDiscarded(localStorage, promptDraftKey)) return
     const codexSelection = draftCodexSelection()
     const provider = pendingProviderSwitch() ? draftProvider() : undefined
     const model = provider ? draftModel() : undefined
@@ -3253,6 +3310,91 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       ...(provider ? { provider, model } : {}),
       ...(sameSelection && previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
     })
+  }
+
+  function canDiscardComposer() {
+    return draftDiscardReady() && Boolean(composerDraft()?.text) && !editingFollowUp() && !startPending()
+  }
+
+  function discardCurrentDraft() {
+    discardDraft(promptDraftKey)
+  }
+
+  async function connectComposerDrafts() {
+    composerDraftTools = await import(codecUrl)
+    const sidebar = sidebarRef.current
+    const discardTemplate = draftDiscardTemplate.current
+    if (sidebar && discardTemplate) sidebarDrafts = composerDraftTools.watchSidebarDrafts(sidebar, discardTemplate, discardDraft)
+    draftDiscardReady.set(true)
+    expireUndoNotices()
+  }
+
+  function discardDraft(key) {
+    if (!composerDraftTools) return
+    const here = key === promptDraftKey
+    if (here && !canDiscardComposer()) return
+    expireUndoNotices()
+    try {
+      const box = here ? promptRef.current : null
+      if (box) rememberPrompt()
+      const claim = newCommandId()
+      const entry = composerDraftTools.discardComposerDraft(localStorage, key, claim, box?.value)
+      if (!entry) return
+      const groups = draftUndo()
+      const mergeLatest = visibleUndo()?.action === 'discarded'
+      const entries = mergeLatest ? groups.at(-1).entries.filter(item => item.key !== key) : []
+      const now = Date.now()
+      const expiresAt = now + 5000
+      const earlier = (mergeLatest ? groups.slice(0, -1) : groups)
+        .map(group => ({ ...group, expiresAt, entries: group.entries.filter(item => item.key !== key) }))
+        .filter(group => group.entries.length)
+      const offers = [...earlier, { action: 'discarded', offeredAt: now, expiresAt, entries: [...entries, entry] }]
+      try { composerDraftTools.persistDraftUndo(draftUndoKey, offers) }
+      catch {
+        composerDraftTools.restoreComposerDraft(localStorage, entry)
+        throw new Error('Could not save draft recovery.')
+      }
+      if (box) {
+        box.value = ''
+        composerText.set('')
+        composerDraft.set({ discardedDraft: claim })
+        if (!sidebarOpen()) box.focus()
+      }
+      draftUndo.set(offers)
+      threadUndoBatch.set(claim)
+      threadUndoShortcutClaimed.set(true)
+      sidebarDrafts?.update()
+    }
+    catch {
+      stxAlert('Could not discard the draft. Try again.')
+    }
+  }
+
+  function restoreDiscardedDrafts(offer) {
+    if (!composerDraftTools) return
+    draftUndo.update(groups => groups.slice(0, -1))
+    let skipped = 0
+    for (const entry of offer.entries) {
+      try {
+        const here = entry.key === promptDraftKey
+        const editor = here ? promptRef.current : null
+        if ((editor && (editor.value || startPending() || editingFollowUp()))
+          || !composerDraftTools.restoreComposerDraft(localStorage, entry)) {
+          skipped++
+          composerDraftTools.expireComposerDraft(localStorage, entry)
+          continue
+        }
+        if (editor) {
+          composerDraft.set(entry.draft)
+          restorePrompt()
+          if (!sidebarOpen()) editor.focus()
+        }
+      }
+      catch { skipped++ }
+    }
+    sidebarDrafts?.update()
+    if (sidebarOpen()) sidebarRef.current?.querySelector('a[data-sidebar-item][data-active="true"]')?.focus()
+    if (skipped) stxAlert(skipped === 1 ? 'A draft changed and could not be restored.' : `${skipped} drafts changed and could not be restored.`)
   }
 
   function restorePrompt() {
@@ -3814,12 +3956,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (threadUndoBlocked()) return
     const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
     const editable = event.target?.closest?.('textarea, input, [contenteditable="true"]')
-    if (command === 'thread.undo' && threadUndo() && (!editable || threadUndoShortcutClaimed()) && !profileModalOpen()) {
+    if (command === 'thread.undo' && visibleUndo() && (!editable || threadUndoShortcutClaimed()) && !profileModalOpen()) {
       event.preventDefault()
       if (!event.repeat) void undoThreadAction()
       return
     }
-    if (threadUndo() && !['Alt', 'Control', 'Meta', 'Shift'].includes(event.key)) threadUndoShortcutClaimed.set(false)
+    if (visibleUndo() && !['Alt', 'Control', 'Meta', 'Shift'].includes(event.key)) threadUndoShortcutClaimed.set(false)
     if (arrangementOpen()) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
@@ -3876,7 +4018,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }, { target: window })
 
   useEventListener('input', () => {
-    if (threadUndo()) threadUndoShortcutClaimed.set(false)
+    if (visibleUndo()) threadUndoShortcutClaimed.set(false)
   }, { target: window })
 
   function threadUndoBlocked() {
@@ -4272,5 +4414,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     connection.open()
   }
 
+  onUnmounted(() => sidebarDrafts?.dispose())
+  if (codecUrl) void connectComposerDrafts().catch(() => {})
   if ((sessionId || activeProfile) && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
 </script>
