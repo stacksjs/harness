@@ -35,9 +35,9 @@ export { MAX_COMPOSER_ATTACHMENTS } from './composer-attachments'
 export { applyFollowUpEvent } from './follow-ups'
 export type { FollowUpQueue, QueuedFollowUp, SteeringOutcome } from './follow-ups'
 
-export { acceptedClaudeAccountCompaction, acceptedSettings, defaultHostSettings, hostSettings, settingsDelta } from './settings'
+export { acceptedClaudeAccountCompaction, acceptedSettings, defaultHostSettings, defaultSnoozePresets, hostSettings, maxSnoozeMinutes, maxSnoozePresets, sameSnoozePresets, settingsDelta, snoozeDays, snoozePresetKey } from './settings'
 export { claudeCompactionReturnAt } from './idle-compaction'
-export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, HostSettings, TerminalShell } from './settings'
+export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, HostSettings, SnoozeDay, SnoozePreset, TerminalShell } from './settings'
 
 export { maximumThreadSnooze, pinOrder, threadDisplayTitle, threadPlacementKeys, threadUndoDuration } from './thread-navigation'
 export type { ThreadDrop, ThreadNavigation, ThreadOrganizationAction, ThreadPlacement, ThreadUndoOffer, ThreadUndoRecord, ThreadUndoResult, ThreadUndoScopeUpdate } from './thread-navigation'
