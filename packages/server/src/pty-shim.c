@@ -81,7 +81,7 @@ int harness_set_nonblocking(int fd, int nonblock_flag) {
  * The unused `setsid_flag` parameter is kept so the TS caller has one
  * signature across this shim and the Linux dlopen one.
  */
-int harness_spawn_on_pty(int master, const char *shell, const char *cwd, char *const envp[], int setsid_flag) {
+int harness_spawn_on_pty(int master, const char *shell, const char *cwd, char *const envp[], int setsid_flag, const char *command) {
   (void)setsid_flag;
   char *slave_path = ptsname(master);
   if (!slave_path) return -1;
@@ -97,10 +97,8 @@ int harness_spawn_on_pty(int master, const char *shell, const char *cwd, char *c
       if (slave > 2) close(slave);
     }
     close(master);
-    if (cwd && cwd[0]) chdir(cwd);
-    char *argv[2];
-    argv[0] = (char *)shell;
-    argv[1] = 0;
+    if (cwd && cwd[0] && chdir(cwd) != 0) _exit(126);
+    char *argv[] = { (char *)shell, command ? "-c" : 0, (char *)command, 0 };
     execve(shell, argv, envp && envp[0] ? envp : environ);
     _exit(127);
   }

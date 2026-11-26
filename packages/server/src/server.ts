@@ -29,6 +29,7 @@ import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
+import { ProjectScripts, respondProjectScripts, scriptIdPattern } from './project-scripts'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -116,7 +117,7 @@ type ClientFrame =
   | { t: 'watch-pins', profileId: number }
   | { t: 'watch-sidebar', profileId: number }
   | { t: 'ping' }
-  | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number }
+  | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number, projectScriptId?: string }
   | { t: 'term-input', termId: number, data: string }
   | { t: 'term-resize', termId: number, cols: number, rows: number }
   | { t: 'term-detach', termId: number }
@@ -188,6 +189,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const previewDatabase = await realpath(databasePath).catch(() => resolve(databasePath))
   const previewOwner = (sessionId: number) => createHash('sha256').update(previewDatabase).update('\0').update(String(sessionId)).digest('hex')
   const savedProviders = new SavedProviderInstances(databasePath)
+  const projectScripts = new ProjectScripts(databasePath)
   const chatGptCredentials = new ChatGptCredentialStore(options.chatGptCredentialDirectory ?? chatGptCredentialDirectory())
   const engine = new Engine({
     store,
@@ -664,6 +666,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (event.payload.type === 'session.navigation-changed') {
         const changes = event.payload.changes
         if ('snoozedUntil' in changes) scheduleThreadWake()
+        if (typeof changes.settledAt === 'number') terminals.stopScriptJobs(event.sessionId)
       }
       if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'session.created' || event.payload.type === 'turn.started'
         || event.payload.type === 'turn.completed' || event.payload.type === 'turn.interrupted' || event.payload.type === 'turn.rewind-settled'
@@ -980,6 +983,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           send(socket, { t: 'term-error', message: 'This terminal does not belong to the thread.' })
           return
         }
+        if (frame.projectScriptId !== undefined && (!session || !frame.resumeKey || frame.resumeOnly || !workspace.trusted || workspace.scratch
+          || typeof frame.projectScriptId !== 'string' || !scriptIdPattern.test(frame.projectScriptId))) {
+          send(socket, { t: 'term-error', message: 'Open a trusted project thread to run a saved script.' })
+          return
+        }
         const scope = { workspaceId: workspace.id, sessionId: session?.id, resumeKey: frame.resumeKey }
         if (terminals.resume(socket, scope)) return
         const shellKind = engine.current.settings.terminalShell
@@ -1013,10 +1021,26 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           send(socket, { t: 'term-error', message: 'This terminal session is no longer available.' })
           return
         }
-        const cwd = session ? defaultWorkspacePath(engine.current, session.id) ?? workspace.path : workspace.path
+        const launchScript = frame.projectScriptId !== undefined && saved === undefined
+        const script = launchScript ? projectScripts.get(workspace.id, frame.projectScriptId!) : undefined
+        if (launchScript && !script) {
+          send(socket, { t: 'term-error', message: 'This project script is no longer available.' })
+          return
+        }
+        const cwd = session ? defaultWorkspacePath(engine.current, session.id) : workspace.path
+        if (script && !cwd) {
+          send(socket, { t: 'term-error', message: 'The thread checkout is unavailable.' })
+          return
+        }
         const cols = Number.isFinite(frame.cols) ? Math.min(500, Math.max(20, Math.floor(frame.cols!))) : 80
         const rows = Number.isFinite(frame.rows) ? Math.min(200, Math.max(5, Math.floor(frame.rows!))) : 24
-        terminals.open(socket, scope, shellKind, { cwd, cols, rows, shell, denIntegration: shellKind === 'den' }, saved)
+        try {
+          terminals.open(socket, scope, shellKind, { cwd: cwd ?? workspace.path, cols, rows, shell,
+            denIntegration: shellKind === 'den', command: script?.command }, saved, script)
+        }
+        catch {
+          send(socket, { t: 'term-error', message: 'Could not record the terminal for this script. Try again.' })
+        }
         return
       }
 
@@ -1315,6 +1339,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch))
       }
 
+      const projectScriptsRoute = /^\/s\/([1-9]\d*)\/project-scripts$/u.exec(url.pathname)
+      if (projectScriptsRoute) {
+        const headers = { 'cache-control': 'private, no-store' }
+        const fetchSite = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || fetchSite === 'cross-site' || fetchSite === 'same-site') return new Response(null, { status: 403, headers })
+        const session = engine.current.sessions.get(Number(projectScriptsRoute[1]))
+        if (!session) return new Response(null, { status: 404, headers })
+        const params = new URLSearchParams({ session: String(session.id) })
+        return respondProjectScripts(request, projectScripts, session.workspaceId, () => workspaceFileRoot(params))
+      }
+
       const previewServersRoute = /^\/s\/([1-9]\d*)\/preview-servers$/u.exec(url.pathname)
       if (previewServersRoute) {
         const headers = { 'cache-control': 'private, no-store' }
@@ -1564,6 +1600,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // own port in use, by itself.
       server.stop(true)
       savedProviders.close()
+      projectScripts.close()
       store.close()
       throw error
     }
@@ -1593,6 +1630,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       terminals.shutdown()
       server.stop(true)
       savedProviders.close()
+      projectScripts.close()
       store.close()
     },
   }
