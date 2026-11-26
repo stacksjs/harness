@@ -1,6 +1,6 @@
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -341,6 +341,17 @@ describe('harness serve — HTTP', () => {
     process.env.PATH = [dir, originalPath].filter(Boolean).join(delimiter)
     try {
       const request = (path: string, line = '2', editor = 'vscode', headers?: HeadersInit) => fetch(`${editorRoute}?${new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path, line, editor })}`, { method: 'POST', headers })
+      const editorArguments = join(worktree, '.editor-args')
+      async function receiveEditorArguments(expected: string): Promise<string> {
+        const deadline = Date.now() + 2_000
+        let received = ''
+        do {
+          if (existsSync(editorArguments)) received = readFileSync(editorArguments, 'utf8')
+          if (received === expected) break
+          await Bun.sleep(20)
+        } while (Date.now() < deadline)
+        return received
+      }
       const catalog = await fetch(`${editorRoute}?session=${sessionId}`)
       expect(catalog.headers.get('cache-control')).toBe('private, no-store')
       expect((await catalog.json()).choices).toContainEqual({ id: 'vscode', label: 'VS Code' })
@@ -349,15 +360,17 @@ describe('harness serve — HTTP', () => {
       expect((await request('parity notes [draft].md')).status).toBe(404)
       expect((await request('worktree-parity.md', '0.5')).status).toBe(400)
       expect((await request('worktree-parity.md', '2', launcher)).status).toBe(404)
-      expect(await Bun.file(join(worktree, '.editor-args')).exists()).toBe(false)
+      expect(existsSync(editorArguments)).toBe(false)
       const filename = 'diff lines [new] $(fixture).md'
       await Bun.write(join(worktree, filename), 'one\ntwo\n')
       symlinkSync(join(dir, 'outside-parity.txt'), join(worktree, 'linked.txt'))
       expect((await request('linked.txt')).status).toBe(404)
       expect((await request(filename)).status).toBe(204)
-      expect(await Bun.file(join(worktree, '.editor-args')).text()).toBe(`--goto\n${join(realpathSync(worktree), filename)}:2\n`)
+      const openFile = `--goto\n${join(realpathSync(worktree), filename)}:2\n`
+      expect(await receiveEditorArguments(openFile)).toBe(openFile)
       expect((await request('', '0')).status).toBe(204)
-      expect(await Bun.file(join(worktree, '.editor-args')).text()).toBe(`--new-window\n${realpathSync(worktree)}\n`)
+      const openFolder = `--new-window\n${realpathSync(worktree)}\n`
+      expect(await receiveEditorArguments(openFolder)).toBe(openFolder)
     }
     finally {
       if (originalPath === undefined) delete process.env.PATH
