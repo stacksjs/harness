@@ -11,6 +11,7 @@
 import type { ProviderContextUsage } from './events'
 import type { SteeringOutcome } from './follow-ups'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
+import type { ComposerAttachment, ComposerUploads } from './composer-attachments'
 import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
 import type { ThreadOrganizationAction } from './thread-navigation'
 
@@ -72,10 +73,10 @@ export type ClientCommand =
     }
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'session.fork', sessionId: number, turnId: number }
-  | { type: 'session.handoff', sessionId: number, afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, text: string, freshContext?: true }
-  | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection, compactAfterTurnId?: number, freshContext?: true }
+  | { type: 'session.handoff', sessionId: number, afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, text: string, freshContext?: true, uploads?: ComposerUploads }
+  | { type: 'session.turn.start', sessionId: number, text: string, codexSelection?: CodexTurnSelection, compactAfterTurnId?: number, freshContext?: true, uploads?: ComposerUploads }
   | { type: 'session.turn.interrupt', sessionId: number }
-  | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection, freshContext?: true }
+  | { type: 'session.queue.add', sessionId: number, text: string, codexSelection?: CodexTurnSelection, freshContext?: true, uploads?: ComposerUploads }
   | { type: 'session.queue.edit', sessionId: number, id: string, text: string, previousText: string }
   | { type: 'session.queue.remove', sessionId: number, id: string }
   | { type: 'session.queue.move', sessionId: number, id: string, direction: 'up' | 'down' }
@@ -158,6 +159,7 @@ export type InternalCommand =
   | { type: 'thread.approval.cancel', sessionId: number, approvalId: number }
   | { type: 'thread.input.request', sessionId: number, turnId: number, questions: InputQuestion[] }
   | { type: 'thread.input.cancel', sessionId: number, requestId: string }
+  | { type: 'thread.composer.submit', intent: Extract<ClientCommand, { type: 'session.turn.start' | 'session.queue.add' | 'session.handoff' }>, attachments: ComposerAttachment[] }
   | ({ type: 'thread.input.answer', sessionId: number, requestId: string, attachments: QuestionAttachment[] } & InputResponse)
   | { type: 'thread.turn.complete', sessionId: number, turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, contextCompacted?: true, contextUsage?: ProviderContextUsage }
   | { type: 'thread.fork.finished', sessionId: number, providerSessionId: string, copiedProviderTurnIds?: Record<string, string> }

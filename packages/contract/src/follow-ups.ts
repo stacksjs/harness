@@ -1,4 +1,5 @@
 import type { CodexTurnSelection } from './commands'
+import type { ComposerAttachment } from './composer-attachments'
 import type { EventPayload } from './events'
 
 export type SteeringOutcome = 'delivered' | 'rejected' | 'uncertain'
@@ -6,6 +7,7 @@ export type SteeringOutcome = 'delivered' | 'rejected' | 'uncertain'
 export interface QueuedFollowUp {
   id: string
   text: string
+  attachments?: ComposerAttachment[]
   codexSelection?: CodexTurnSelection
   freshContext?: true
   steering?: { requestId: string, turnId: number }

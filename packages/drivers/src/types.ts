@@ -68,6 +68,8 @@ export interface HistoricalContext {
 
 export interface StartTurnInput {
   text: string
+  /** Host-resolved raster images for the Codex app-server. */
+  localImages?: string[]
   codexSelection?: CodexTurnSelection
   /** Attributed history for a native conversation. */
   historicalContext?: HistoricalContext

@@ -700,7 +700,10 @@ class CodexInstance implements ProviderInstance {
     const { effort, serviceTier } = this.config.codexTurnOptions ?? {}
     const turn = await this.request('turn/start', {
       threadId: this.threadId,
-      input: [{ type: 'text', text }],
+      input: [
+        ...(text || !input.localImages?.length ? [{ type: 'text', text }] : []),
+        ...(input.localImages ?? []).map(path => ({ type: 'localImage', path })),
+      ],
       ...(selection
         ? { model: selection.model, effort: selection.effort ?? null, serviceTier: selection.serviceTier ?? null }
         : { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) }),

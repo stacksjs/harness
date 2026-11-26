@@ -105,6 +105,42 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
 })
 
+it('delivers an attachment-only prompt as a native local image', async () => {
+  const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-image-'))
+  const binaryPath = join(workspacePath, 'codex-fixture')
+  const imagePath = join(workspacePath, 'image.png')
+  try {
+    writeFileSync(binaryPath, `#!${process.execPath}
+import { createInterface } from 'node:readline'
+import { writeFileSync } from 'node:fs'
+const threadId = 'image-thread'
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined) continue
+  let result = {}
+  if (method === 'thread/start') result = { thread: { id: threadId } }
+  if (method === 'turn/start') {
+    writeFileSync(${JSON.stringify(join(workspacePath, 'input.json'))}, JSON.stringify(params.input))
+    result = { turn: { id: 'image-turn' } }
+  }
+  console.log(JSON.stringify({ id, result }))
+  if (method === 'turn/start') console.log(JSON.stringify({
+    method: 'turn/completed', params: { threadId, turn: { id: 'image-turn', status: 'completed' } },
+  }))
+}
+`, { mode: 0o755 })
+    const instance = await CodexDriver.create({ binaryPath, workspacePath })
+    try {
+      const events = []
+      for await (const event of instance.startTurn({ text: '', localImages: [imagePath] })) events.push(event)
+      expect(events.at(-1)?.type).toBe('turn-complete')
+      expect(await Bun.file(join(workspacePath, 'input.json')).json()).toEqual([{ type: 'localImage', path: imagePath }])
+    }
+    finally { await instance.stop() }
+  }
+  finally { rmSync(workspacePath, { recursive: true, force: true }) }
+})
+
 describe('codex native compaction', () => {
   it.each(['confirmed', 'unconfirmed', 'unsupported', 'interrupted'] as const)('reports the %s provider operation without sending a prompt', async mode => {
     const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-compact-'))

@@ -29,6 +29,8 @@ export type { InputAnswer, InputOption, InputQuestion, InputResponse } from './i
 export { inputResponseValues, MAX_INPUT_ANSWER_LENGTH, validInputAnswers } from './input'
 export { MAX_QUESTION_ATTACHMENTS, MAX_QUESTION_FILE_BYTES, MAX_QUESTION_IMAGE_BYTES, MAX_QUESTION_TOTAL_IMAGE_BYTES, questionAllowsAttachments } from './input'
 export type { QuestionAttachment } from './input'
+export type { ComposerAttachment, ComposerUploads } from './composer-attachments'
+export { MAX_COMPOSER_ATTACHMENTS } from './composer-attachments'
 
 export { applyFollowUpEvent } from './follow-ups'
 export type { FollowUpQueue, QueuedFollowUp, SteeringOutcome } from './follow-ups'

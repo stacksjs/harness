@@ -44,6 +44,7 @@ database/stacks.sqlite
 database/*.sqlite-wal
 database/*.sqlite-shm
 *.harness-attachments/
+*.harness-composer-files/
 
 # OS files
 .DS_Store

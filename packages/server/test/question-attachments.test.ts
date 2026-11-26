@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MAX_QUESTION_IMAGE_BYTES } from '@harness/contract'
+import { MAX_QUESTION_ATTACHMENTS, MAX_QUESTION_IMAGE_BYTES } from '@harness/contract'
 import { QuestionAttachments } from '../src/question-attachments'
 
 let root: string
@@ -58,4 +58,14 @@ it('keeps submitted files across reopening and removes drafts and deleted sessio
   expect(await Bun.file(restartedStore.path(1, 'request-a', draft)).exists()).toBe(false)
   await restartedStore.prune(1, () => new Map())
   expect(await Bun.file(restartedStore.path(1, 'request-a', kept)).exists()).toBe(false)
+})
+
+it('reserves one slot per concurrent upload and limits the completed draft', async () => {
+  const files = await Promise.all(Array.from({ length: MAX_QUESTION_ATTACHMENTS }, (_, index) =>
+    store.upload(file(), 1, 'parallel', 'question-a', 'local', `note-${index}.txt`)))
+  expect(files).toHaveLength(MAX_QUESTION_ATTACHMENTS)
+  expect(new Set(files.map(attachment => attachment.id)).size).toBe(MAX_QUESTION_ATTACHMENTS)
+  await expect(store.upload(file(), 1, 'parallel', 'question-a', 'local', 'over-limit.txt')).rejects.toThrow('up to 100 files')
+  await store.removeDraft(1, 'parallel', files[0]!.id, 'local')
+  expect(await store.upload(file(), 1, 'parallel', 'question-a', 'local', 'replacement.txt')).toMatchObject({ name: 'replacement.txt' })
 })

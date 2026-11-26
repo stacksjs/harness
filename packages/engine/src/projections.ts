@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -124,6 +124,7 @@ export interface TurnState {
   switchedProvider?: DriverKind
   /** What the user asked. Set once, at `turn.started`. */
   prompt: string
+  attachments?: ComposerAttachment[]
   steerable?: boolean
   steered?: Array<{ id: string, text: string }>
   /**
@@ -595,6 +596,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         role: p.role,
         status: 'running',
         prompt: p.text ?? '',
+        ...(p.attachments?.length ? { attachments: p.attachments } : {}),
         ...(p.compaction ? { compaction: true } : {}),
         ...(p.automaticCompaction ? { automaticCompaction: true } : {}),
         ...(p.freshContext ? { freshContext: true } : {}),

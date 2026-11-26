@@ -6,7 +6,7 @@
  * identical state rather than a similar one.
  */
 
-import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
+import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
 import { activeThreadOrder, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
@@ -39,9 +39,9 @@ function derivedId(commandId: string): number {
   return (hash >>> 0) % 2147483647 + 1
 }
 
-function followUpText(value: unknown): string {
+function followUpText(value: unknown, hasAttachments = false): string {
   const text = typeof value === 'string' ? value.trim() : ''
-  if (!text) throw new InvalidCommand('Enter a message to queue.')
+  if (!text && !hasAttachments) throw new InvalidCommand('Enter a message to queue.')
   return text
 }
 
@@ -75,9 +75,9 @@ function requestedCodexSelection(session: SessionState, selection: CodexTurnSele
   return { model, ...codexTurnOptions }
 }
 
-function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string, freshContext = false): Extract<EventPayload, { type: 'turn.started' }> {
+function turnStarted(session: SessionState, text: string, codexSelection?: CodexTurnSelection, queuedId?: string, freshContext = false, attachments?: ComposerAttachment[]): Extract<EventPayload, { type: 'turn.started' }> {
   const compaction = isCompactCommand(text)
-  if (freshContext && (typeof text !== 'string' || !text.trim() || isClearCommand(text) || compaction))
+  if (freshContext && (typeof text !== 'string' || (!text.trim() && !attachments?.length) || isClearCommand(text) || compaction))
     throw new InvalidCommand('Write a message to start the fresh provider session.')
   const selection = compaction ? undefined : codexSelection ?? (session.driverKind === 'codex' && session.model
     ? { model: session.model, ...session.codexTurnOptions } : undefined)
@@ -85,6 +85,7 @@ function turnStarted(session: SessionState, text: string, codexSelection?: Codex
     || selection.effort !== session.codexTurnOptions?.effort || selection.serviceTier !== session.codexTurnOptions?.serviceTier)
   return {
     type: 'turn.started', turnId: session.turns.length + 1, role: 'user', text,
+    ...(attachments?.length ? { attachments } : {}),
     ...(queuedId ? { queuedId } : {}),
     ...(freshContext ? { freshContext: true } : {}),
     ...(compaction ? { compaction: true } : {}),
@@ -275,7 +276,12 @@ function organizeThreadEvents(state: HarnessState, session: SessionState, comman
   }
 }
 
-export function reduce(state: HarnessState, command: Command, envelope: CommandEnvelope): AppendableEvent[] {
+export function reduce(state: HarnessState, command: Command, envelope: CommandEnvelope, attachments?: ComposerAttachment[]): AppendableEvent[] {
+  if (command.type === 'thread.composer.submit') {
+    if (isClearCommand(command.intent.text) || isCompactCommand(command.intent.text))
+      throw new InvalidCommand('Remove the attachments before running this command.')
+    return reduce(state, command.intent, envelope, command.attachments)
+  }
   const at = envelope.at
   const commandId = envelope.id
 
@@ -770,7 +776,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (command.driverKind === session.driverKind && command.providerInstanceId === session.providerInstanceId
         && (command.driverKind === 'codex' || (command.model ?? '') === session.model))
         throw new InvalidCommand('Choose another provider, account, or model.')
-      if (typeof command.text !== 'string' || !command.text.trim() || isClearCommand(command.text))
+      if (typeof command.text !== 'string' || (!command.text.trim() && !attachments?.length) || isClearCommand(command.text))
         throw new InvalidCommand('Enter a message to switch providers.')
       if (isCompactCommand(command.text))
         throw new InvalidCommand('Send a message to switch providers before compacting the new conversation.')
@@ -787,7 +793,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           ...model,
         } },
         { ...event, payload: {
-          ...turnStarted({ ...session, driverKind: command.driverKind, model: model.model ?? '', codexTurnOptions: model.codexTurnOptions }, command.text, undefined, undefined, command.freshContext === true),
+          ...turnStarted({ ...session, driverKind: command.driverKind, model: model.model ?? '', codexTurnOptions: model.codexTurnOptions }, command.text, undefined, undefined, command.freshContext === true, attachments),
           switchedProvider: command.driverKind,
         } },
       ]
@@ -812,7 +818,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const freshContext = command.freshContext === true
       if (freshContext && session.followUps.entries.length)
         throw new InvalidCommand('Queue this message after the existing follow-ups.')
-      const turn = turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection), undefined, freshContext)
+      const turn = turnStarted(session, command.text, requestedCodexSelection(session, command.codexSelection), undefined, freshContext, attachments)
       const base = { sessionId: session.id, commandId, at }
       if (!freshContext && command.compactAfterTurnId !== undefined && effectiveClaudeCompaction(state, session).idleCompaction !== 'off'
         && !isCompactCommand(command.text)) {
@@ -820,7 +826,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         if (eligible && eligible.afterTurnId === command.compactAfterTurnId && eligible.availableAt <= at) {
           return [
             { ...base, payload: { ...turnStarted(session, '/compact'), automaticCompaction: true } },
-            { ...base, payload: { type: 'queue.added', entry: { id: commandId, text: followUpText(command.text) } } },
+            { ...base, payload: { type: 'queue.added', entry: { id: commandId, text: followUpText(command.text, Boolean(attachments?.length)), ...(attachments?.length ? { attachments } : {}) } } },
           ]
         }
       }
@@ -855,12 +861,12 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         if (!state.workspaces.get(session.workspaceId)?.trusted)
           throw new InvalidCommand('Trust this workspace before queuing a message.')
         const codexSelection = requestedCodexSelection(session, command.codexSelection)
-        const text = followUpText(command.text)
+        const text = followUpText(command.text, Boolean(attachments?.length))
         const freshContext = command.freshContext === true
         if (isClearCommand(text) || (freshContext && isCompactCommand(text)))
           throw new InvalidCommand('Write a message to start the fresh provider session.')
         return emit({ type: 'queue.added', entry: {
-          id: commandId, text, ...(codexSelection ? { codexSelection } : {}), ...(freshContext ? { freshContext: true } : {}),
+          id: commandId, text, ...(attachments?.length ? { attachments } : {}), ...(codexSelection ? { codexSelection } : {}), ...(freshContext ? { freshContext: true } : {}),
         } })
       }
 
@@ -874,8 +880,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (command.type === 'session.queue.edit') {
         if (entry.text !== command.previousText)
           throw new InvalidCommand('This message was edited on another device. Reopen it to make changes.')
-        const text = followUpText(command.text)
-        if (isClearCommand(text) || (entry.freshContext && isCompactCommand(text)))
+        const text = followUpText(command.text, Boolean(entry.attachments?.length))
+        if ((entry.attachments?.length && isCompactCommand(text)) || isClearCommand(text) || (entry.freshContext && isCompactCommand(text)))
           throw new InvalidCommand('Write a message to start the fresh provider session.')
         return emit({ type: 'queue.edited', id: entry.id, text })
       }
@@ -919,6 +925,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (selection && (selection.model !== session.model || selection.effort !== session.codexTurnOptions?.effort
         || selection.serviceTier !== session.codexTurnOptions?.serviceTier))
         throw new InvalidCommand('This message is queued for a different model or settings.')
+      if ('attachments' in entry && entry.attachments?.length)
+        throw new InvalidCommand('Messages with attachments wait for the current turn to finish.')
       if (entry.steeringIssue === 'uncertain')
         throw new InvalidCommand('Review this message before sending it again.')
       return [
@@ -979,7 +987,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         if (!id || command.confirmResend !== true)
           throw new InvalidCommand('Use Send again on the message whose delivery could not be confirmed.')
       }
-      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.codexSelection, entry.id, entry.freshContext === true) }]
+      return [{ sessionId: session.id, commandId, at, payload: turnStarted(session, entry.text, entry.codexSelection, entry.id, entry.freshContext === true, entry.attachments) }]
     }
 
     case 'session.turn.interrupt': {

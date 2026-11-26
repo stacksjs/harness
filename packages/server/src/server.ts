@@ -23,6 +23,7 @@ import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from '.
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff, workspaceDiffRevision } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
+import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -171,6 +172,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // After the bind check, so a refused start leaves no database behind.
   const databasePath = options.databasePath ?? 'database/stacks.sqlite'
   const attachments = new QuestionAttachments(resolve(databasePath + '.harness-attachments'))
+  const composerAttachments = new ComposerAttachments(resolve(databasePath + '.harness-composer-files'), () => engine.current)
   const attachmentOwners = new WeakMap<CommandEnvelope, string>()
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
@@ -222,6 +224,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const workspace = engine.current.workspaces.get(command.workspaceId)
         if (workspace?.scratch) await openScratchWorkspace(workspace.path)
       }
+      if ((command.type === 'session.turn.start' || command.type === 'session.queue.add' || command.type === 'session.handoff') && command.uploads !== undefined) {
+        const files = await composerAttachments.resolve(command.uploads, command.sessionId, attachmentOwners.get(envelope) ?? 'local')
+        return { type: 'thread.composer.submit', intent: command, attachments: files }
+      }
       if (command.type !== 'workspace.register') return command
       if (typeof command.trusted !== 'boolean')
         throw new Error('Choose whether to trust the folder.')
@@ -234,6 +240,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     resolve: options.resolveDriver,
     savedProviders,
     chatGptCredentials,
+    composerAttachmentPath: attachment => composerAttachments.path(attachment),
     workspacePath: options.workspacePath,
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
@@ -979,7 +986,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           attachmentOwners.set(envelope, socket.data.deviceId ?? 'local')
           const result = command.type === 'session.input.respond' && Number.isSafeInteger(command.sessionId) && typeof command.requestId === 'string'
             ? await attachments.serialize(command.sessionId, command.requestId, () => engine.dispatch(envelope))
-            : await engine.dispatch(envelope)
+            : (command.type === 'session.turn.start' || command.type === 'session.queue.add' || command.type === 'session.handoff') && command.uploads !== undefined
+              ? await composerAttachments.serialize(command.uploads, () => engine.dispatch(envelope))
+              : await engine.dispatch(envelope)
           const last = result.events.at(-1)?.payload
           const undo = last?.type === 'session.navigation-changed' ? last.undo : undefined
           const session = command.type === 'session.organize' && engine.current.sessions.get(command.sessionId)
@@ -1092,6 +1101,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           },
         })
         return upgraded ? undefined : new Response('expected a websocket upgrade', { status: 426 })
+      }
+
+      if (url.pathname === '/composer-attachments' || url.pathname.startsWith('/composer-attachments/')) {
+        if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
+        return composerAttachments.respond(request, url, access?.authenticate(request).deviceId ?? 'local')
+          .then(response => response ?? new Response(null, { status: 404 }))
       }
 
       const attachmentRoute = /^\/s\/([1-9]\d*)\/question-attachments(?:\/([a-f\d-]{36}))?$/u.exec(url.pathname)

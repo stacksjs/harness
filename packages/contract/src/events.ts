@@ -7,6 +7,7 @@
  */
 
 import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, ModelFavorite } from './commands'
+import type { ComposerAttachment } from './composer-attachments'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
@@ -45,7 +46,7 @@ export type EventPayload =
   | { type: 'session.fork-portable' }
   | { type: 'session.fork-failed', message: string }
   | { type: 'session.provider-switched', afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions }
-  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind, compaction?: true, automaticCompaction?: true, freshContext?: true }
+  | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, attachments?: ComposerAttachment[], queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind, compaction?: true, automaticCompaction?: true, freshContext?: true }
   | { type: 'queue.added', entry: QueuedFollowUp }
   | { type: 'queue.edited', id: string, text: string }
   | { type: 'queue.removed', id: string }

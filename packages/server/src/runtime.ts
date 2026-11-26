@@ -11,7 +11,7 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { ApprovalChoice, CommandEnvelope, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, SteeringOutcome } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
@@ -32,6 +32,7 @@ export interface RuntimeOptions {
   resolve?: (kind: DriverKind) => Driver | null
   savedProviders?: Pick<SavedProviderInstances, 'find'>
   chatGptCredentials?: ChatGptCredentialStore
+  composerAttachmentPath?: (attachment: ComposerAttachment) => string
   /** Resolve a session's workspace path. Defaults to the projection. */
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
   now?: () => number
@@ -353,8 +354,20 @@ export class ProviderRuntime {
       const providerSessionId = running.providerSessionId ?? (session.providerSessionId || undefined)
       const claudeFork = session.driverKind === 'claude' && Boolean(session.fork?.providerSessionId && providerSessionId)
       const forkResume = claudeFork && session.worktreePath ? { forkAcrossWorktrees: true as const } : undefined
+      const attachments = session.turns.at(-1)?.attachments
+      const nativeImages: string[] = []
+      const fileReferences: string[] = []
+      for (const file of attachments ?? []) {
+        const path = this.options.composerAttachmentPath?.(file)
+        if (!path || !existsSync(path)) throw new Error(`Attachment "${file.name}" is unavailable. Attach it again and resend.`)
+        if (file.image && session.driverKind === 'codex') nativeImages.push(path)
+        else fileReferences.push(JSON.stringify(path))
+      }
+      const prompt = nativeHistory ? text : history?.inlinePrompt ?? text
+      const attachmentNote = fileReferences.length ? `Attached files (host paths):\n${fileReferences.map(path => '- ' + path).join('\n')}` : ''
       const events = compaction ? running.instance.compact?.(session.providerSessionId, forkResume) : running.instance.startTurn({
-        text: nativeHistory ? text : history?.inlinePrompt ?? text,
+        text: [prompt, attachmentNote].filter(Boolean).join('\n\n'),
+        ...(nativeImages.length ? { localImages: nativeImages } : {}),
         ...(nativeHistory ? { historicalContext: nativeHistory } : {}),
         codexSelection: session.turns.at(-1)?.codexSelection,
         // The projection stores '' for "not bound yet"; the driver wants

@@ -40,10 +40,9 @@ async function names(folder: string): Promise<string[]> {
 }
 
 export class QuestionAttachments {
-  private readonly uploads = new Map<string, number>()
   private readonly mutations = new Map<string, Promise<unknown>>()
 
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string, private readonly subject = 'A question response') {}
 
   async serialize<T>(sessionId: number, requestId: string, action: () => Promise<T>): Promise<T> {
     const folder = requestFolder(this.root, sessionId, requestId)
@@ -65,17 +64,18 @@ export class QuestionAttachments {
     if (advertised !== null && Number(advertised) > limit) throw new AttachmentError('This file exceeds the attachment size limit.', 413)
     if (!request.body) throw new AttachmentError('Select a file to attach.')
 
-    const pending = this.uploads.get(directory) ?? 0
-    if (pending >= MAX_QUESTION_ATTACHMENTS) throw new AttachmentError('A question response can contain up to 100 files.', 409)
-    this.uploads.set(directory, pending + 1)
     const id = crypto.randomUUID()
     const slot = join(directory, id)
     const filename = readableName(name)
+    await this.serialize(sessionId, requestId, async () => {
+      if ((await names(directory)).length >= MAX_QUESTION_ATTACHMENTS)
+        throw new AttachmentError(`${this.subject} can contain up to 100 files.`, 409)
+      // Reserve the slot before accepting another upload. In-flight uploads
+      // count once, just like completed files.
+      await mkdir(slot, { recursive: true, mode: 0o700 })
+    })
     let saved = false
     try {
-      if ((await names(directory)).length + pending >= MAX_QUESTION_ATTACHMENTS)
-        throw new AttachmentError('A question response can contain up to 100 files.', 409)
-      await mkdir(slot, { recursive: true, mode: 0o700 })
       const file = await open(join(slot, filename), 'wx', 0o600)
       const reader = request.body.getReader()
       let size = 0
@@ -99,9 +99,6 @@ export class QuestionAttachments {
       return attachment
     }
     finally {
-      const remaining = (this.uploads.get(directory) ?? 1) - 1
-      if (remaining) this.uploads.set(directory, remaining)
-      else this.uploads.delete(directory)
       if (!saved) await rm(slot, { recursive: true, force: true }).catch(() => {})
     }
   }
@@ -133,6 +130,14 @@ export class QuestionAttachments {
       }
     }
     return attachments
+  }
+
+  async draftFile(sessionId: number, requestId: string, id: string, owner: string): Promise<QuestionAttachment | undefined> {
+    const stored = await this.find(sessionId, requestId, id)
+    if (stored?.owner === owner) {
+      const { questionId, name, size, image } = stored
+      return { id, questionId, name, size, image }
+    }
   }
 
   async removeDraft(sessionId: number, requestId: string, id: string, owner: string): Promise<void> {

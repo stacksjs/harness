@@ -178,6 +178,93 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
+describe('composer attachments', () => {
+  it('delivers a project-scoped first attachment and a queued attachment exactly once', async () => {
+    const databasePath = join(dir, 'test.sqlite')
+    const delivered: StartTurnInput[] = []
+    const firstTurn = Promise.withResolvers<void>()
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn(input) {
+            delivered.push(input)
+            if (delivered.length === 1) await firstTurn.promise
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          },
+          async interrupt() { firstTurn.resolve() },
+          async respondApproval() {},
+          async stop() { firstTurn.resolve() },
+        }
+      },
+    }
+    const start = () => serve({ port, databasePath, resolveDriver: () => driver })
+    harness = await start()
+    const wsUrl = `ws://127.0.0.1:${port}/ws`
+    const client = await Client.connect(wsUrl)
+    const { sessionId } = await bootstrap(client)
+    const root = `http://127.0.0.1:${port}/composer-attachments`
+    const draft = 'a'.repeat(32)
+    const projectScope = `project:${derivedId('c_w')}`
+    const sessionScope = `session:${sessionId}`
+    const params = (scope: string) => new URLSearchParams({ scope, draft, name: 'fixture.txt' })
+    const upload = async (scope: string, body: string) => {
+      const response = await fetch(`${root}?${params(scope)}`, { method: 'POST', body })
+      expect(response.status).toBe(201)
+      return await response.json() as { id: string, name: string }
+    }
+    const send = (id: string, command: Command) => {
+      client.events = client.events.filter(frame => frame.id !== id)
+
+      client.send({ t: 'dispatch', envelope: { id, at: Date.now(), command } })
+      return client.waitForDispatch(id)
+    }
+
+    try {
+      const first = await upload(projectScope, 'first attachment contents')
+      const firstInput = { scope: projectScope, draft, ids: [first.id] }
+      const direct = { type: 'session.turn.start', sessionId, text: '', uploads: firstInput } as const
+      expect((await fetch(`${root}/${first.id}?session=${sessionId}`)).status).toBe(404)
+      expect(await send('duplicated-refs', { ...direct, uploads: { ...firstInput, ids: [first.id, first.id] } })).toMatchObject({ t: 'rejected' })
+      expect(await send('wrong-bucket', { ...direct, uploads: { ...firstInput, scope: sessionScope } })).toMatchObject({ t: 'rejected' })
+      expect(await send('first-message', direct)).toMatchObject({ t: 'dispatched', replayed: false })
+      expect(await send('first-message-retry', direct)).toMatchObject({ t: 'rejected' })
+
+      const second = await upload(sessionScope, 'second attachment contents')
+      const queue = {
+        type: 'session.queue.add', sessionId, text: '',
+        uploads: { scope: sessionScope, draft, ids: [second.id] },
+      } as const
+      expect(await send('queue-files', queue)).toMatchObject({ t: 'dispatched', replayed: false })
+      expect(await send('queue-files', queue)).toMatchObject({ t: 'dispatched', replayed: true })
+      expect((await fetch(`${root}/${second.id}?${params(sessionScope)}`, { method: 'DELETE' })).status).toBe(409)
+      firstTurn.resolve()
+      expect(await client.waitFor('turn.completed', 3000, turn => turn.turnId === 2)).not.toBeNull()
+      expect(delivered).toHaveLength(2)
+      for (const [index, contents] of ['first attachment contents', 'second attachment contents'].entries()) {
+        const path = JSON.parse(delivered[index]!.text.split('- ')[1]!) as string
+        expect(await Bun.file(path).text()).toBe(contents)
+      }
+      expect(harness.engine.current.sessions.get(sessionId)?.turns.map(turn => turn.prompt)).toEqual(['', ''])
+      expect(await send('first-message', direct)).toMatchObject({ t: 'dispatched', replayed: true })
+      client.close()
+      harness.stop()
+      harness = await start()
+      expect(harness.engine.current.sessions.get(sessionId)?.turns.map(turn => turn.attachments?.[0]?.id)).toEqual([first.id, second.id])
+      const download = await fetch(`${root}/${first.id}?session=${sessionId}`)
+      expect(download.status).toBe(200)
+      expect(download.headers.get('content-type')).toBe('application/octet-stream')
+      expect(await download.text()).toBe('first attachment contents')
+      expect((await fetch(`${root}/${first.id}?session=${sessionId + 1}`)).status).toBe(404)
+    }
+    finally {
+      firstTurn.resolve()
+      client.close()
+    }
+  })
+})
+
 describe('fork recovery', () => {
   it.each([true, false])('continues a historical Claude fork with native history available = %s', async (available) => {
     const databasePath = join(dir, 'test.sqlite')
