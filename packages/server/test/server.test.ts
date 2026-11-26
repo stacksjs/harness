@@ -114,15 +114,20 @@ afterEach(() => {
 
 describe('shared workspace addresses', () => {
   it('serves prompt routes without caching or embedding the prompt in HTML', async () => {
-    const marker = 'UNIQUE_PRIVATE_PROMPT_FOR_SHARE'
-    const response = await fetch(`http://127.0.0.1:${port}/new?prompt=${marker}`)
-    expect(response.status).toBe(200)
-    expect(response.headers.get('cache-control')).toBe('no-store')
-    expect(response.headers.get('referrer-policy')).toBe('no-referrer')
-    expect(await response.text()).not.toContain(marker)
-    const missing = await fetch(`http://127.0.0.1:${port}/s/999992`)
-    expect(missing.status).toBe(404)
-    expect(await missing.text()).toContain('Thread unavailable')
+    const previousCwd = process.cwd()
+    process.chdir(join(import.meta.dir, '../../..'))
+    try {
+      const marker = 'UNIQUE_PRIVATE_PROMPT_FOR_SHARE'
+      const response = await fetch(`http://127.0.0.1:${port}/new?prompt=${marker}`)
+      expect(response.status).toBe(200)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(response.headers.get('referrer-policy')).toBe('no-referrer')
+      expect(await response.text()).not.toContain(marker)
+      const missing = await fetch(`http://127.0.0.1:${port}/s/999992`)
+      expect(missing.status).toBe(404)
+      expect(await missing.text()).toContain('Thread unavailable')
+    }
+    finally { process.chdir(previousCwd) }
   }, 15_000)
 
   it('preserves only a safe destination while pairing a new device', async () => {
