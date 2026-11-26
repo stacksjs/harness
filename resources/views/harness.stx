@@ -686,12 +686,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         </template>
       @endif
       @if(activeSession && workspaceEditorAllowed)
-        <section data-project-setup-status hidden :hidden="!projectSetupStatus()" aria-label="Worktree setup" class="grid mb-4 p-3 text-neutral-700 text-sm border border-black/10 rounded-md dark:text-neutral-200 dark:border-white/15">
+        <section data-project-setup-status hidden :hidden="!projectSetupStatus()" aria-label="Worktree setup" class="grid mb-4 p-3 text-neutral-700 text-sm dark:text-neutral-200 border border-black/10 rounded-md dark:border-white/15">
           <div class="flex flex-wrap gap-x-3 items-baseline justify-between min-w-0">
             <p class="break-words font-medium" :text="projectSetup()?.name"></p>
             <p role="status" class="text-neutral-600 text-xs dark:text-neutral-300" :text="projectSetupStatus()"></p>
           </div>
-          <pre :hidden="!projectSetup()?.output" :text="projectSetup()?.output" class="mt-2 p-2 overflow-hidden break-words font-mono text-xs whitespace-pre-wrap bg-black/5 rounded dark:bg-white/5"></pre>
+          <pre :hidden="!projectSetup()?.output" :text="projectSetup()?.output" class="overflow-hidden mt-2 p-2 break-words font-mono text-xs whitespace-pre-wrap bg-black/5 dark:bg-white/5 rounded"></pre>
           <div class="flex flex-wrap gap-x-3 items-center text-xs">
             <button type="button" :hidden="projectSetup()?.status === 'pending'" :disabled="!sessionOnline()" @click="viewProjectSetupTerminal" class="min-h-8 font-medium underline underline-offset-2">Open setup terminal</button>
             <button type="button" :disabled="!sessionOnline()" @click="openProjectScripts" class="min-h-8 font-medium underline underline-offset-2">Setup details</button>
