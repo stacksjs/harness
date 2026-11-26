@@ -74,6 +74,12 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     chord: 'Mod+K',
   },
   {
+    id: 'thread.copyReference',
+    label: 'Copy thread link',
+    description: 'Copy a link to the current thread.',
+    chord: 'Mod+Shift+C',
+  },
+  {
     id: 'transcript.find',
     label: 'Find in thread',
     description: 'Find text within the open transcript.',

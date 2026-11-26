@@ -35,6 +35,8 @@ import type { ProjectSetupScope, SettlementReceipt } from './project-setup'
 import { ProjectSetup } from './project-setup'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
+import { promptLinkProjects } from './prompt-link-projects'
+import { promptLinkKeys } from './prompt-links'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -44,6 +46,7 @@ import { respondWorkspaceEditor } from './workspace-editors'
 import { createWorkspaceFileSearch } from './workspace-file-search'
 import { respondWorkspaceFile } from './workspace-files'
 import { threadSidebarLayout } from './thread-sidebar'
+import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
 import { TerminalHistoryStore } from './terminal-history'
@@ -629,7 +632,22 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    * before the client bundle, the asset cache or the projection are reachable,
    * and it is the only surface an unauthenticated caller can reach at all.
    */
-  function pairingPage(error: string | null): string {
+  function pairingReturn(value: unknown): string {
+    if (typeof value !== 'string' || value.length > 96_000 || !value.startsWith('/') || value.startsWith('//')) return '/'
+    const link = new URL(value, 'http://harness.local')
+    if (link.origin !== 'http://harness.local' || (!['/new', '/new/'].includes(link.pathname) && !/^\/s\/[1-9]\d*\/?$/u.test(link.pathname))) return '/'
+    const params = new URLSearchParams()
+    for (const key of promptLinkKeys) {
+      const item = link.searchParams.get(key)
+      if (item !== null) params.set(key, item)
+    }
+    const hash = /^#turn-[1-9]\d*$/u.test(link.hash) ? link.hash : ''
+    return link.pathname + (params.size ? '?' + params : '') + hash
+  }
+
+  const pairingHeaders = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }
+
+  function pairingPage(error: string | null, destination = '/'): string {
     const message = error
       ? `<p class="err">${error.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] ?? c))}</p>`
       : '<p class="hint">Enter the code shown in the terminal running harness.</p>'
@@ -655,6 +673,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   <input name="code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off"
         spellcheck="false" placeholder="XXXX-XXXX" autofocus required>
   <input type="hidden" name="name" value="">
+  <input type="hidden" name="next" value="${escapeTranscriptText(destination)}">
   <button type="submit">Pair this device</button>
 </form>
 <script>
@@ -662,6 +681,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // already knows what it is, and one fewer field is one fewer reason to give up.
   document.querySelector('input[name=name]').value =
     (navigator.userAgentData?.platform || navigator.platform || 'a device') + ' browser'
+  const next = document.querySelector('input[name=next]')
+  if (next.value.startsWith('/s/') && /^#turn-[1-9][0-9]*$/.test(location.hash))
+    next.value = next.value.split('#')[0] + location.hash
 </script>`
   }
 
@@ -669,21 +691,16 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (!access) return new Response('not found', { status: 404 })
 
     if (request.method !== 'POST') {
-      return new Response(pairingPage(null), {
-        status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      })
+      return new Response(pairingPage(null), { headers: pairingHeaders })
     }
 
     const form = await request.formData().catch(() => null)
-    if (!form) return new Response(pairingPage('that form did not arrive intact'), { status: 400, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    if (!form) return new Response(pairingPage('that form did not arrive intact'), { status: 400, headers: pairingHeaders })
 
+    const destination = pairingReturn(form.get('next'))
     const result = await access.redeem(String(form.get('code') ?? ''), String(form.get('name') ?? ''))
     if (!result.ok) {
-      return new Response(pairingPage(result.reason), {
-        status: 401,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      })
+      return new Response(pairingPage(result.reason, destination), { status: 401, headers: pairingHeaders })
     }
 
     console.warn(`[access] paired a new device from ${url.host}`)
@@ -692,7 +709,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return new Response(null, {
       status: 303,
       headers: {
-        'location': '/',
+        'location': destination,
         'set-cookie': sessionCookie(result.token, url.protocol === 'https:'),
       },
     })
@@ -1420,7 +1437,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // A browser gets the pairing page rather than a bare 401, because the
           // person holding the phone needs somewhere to type the code.
           if (request.headers.get('accept')?.includes('text/html'))
-            return new Response(pairingPage(null), { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } })
+            return new Response(pairingPage(null, pairingReturn(url.pathname + url.search)), { status: 401, headers: pairingHeaders })
           return Response.json({ error: 'this harness requires pairing' }, { status: 401 })
         }
       }
@@ -1676,33 +1693,47 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // The web surface. Rendered from the in-memory projection — no query
       // runs, so the shell paints immediately — and cached against the state
       // revision, so only the first request after a state change renders.
+      if (url.pathname === '/prompt-link/project') {
+        if (request.method !== 'GET') return new Response(null, { status: 405 })
+        if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
+        return promptLinkProjects(engine.current, url.searchParams)
+      }
+
       const settings = settingsSection(url.pathname)
       if (settings === 'general' && url.pathname !== '/settings/general')
         return new Response(null, { status: 307, headers: { location: '/settings/general' + url.search } })
-      if (url.pathname === '/' || url.pathname.startsWith('/s/') || settings) {
+      const sharedDraft = url.pathname === '/new' || url.pathname === '/new/'
+      if (url.pathname === '/' || url.pathname.startsWith('/s/') || sharedDraft || settings) {
         const workspaceUrl = settings ? new URL(workspaceReturn(url.searchParams.get('from')), url.origin) : url
-        const pageHeaders = { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
+        const pageHeaders: Record<string, string> = { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
+        const sessionId = /^\/s\/([1-9]\d*)\/?$/u.exec(workspaceUrl.pathname)
+        const id = sessionId ? Number(sessionId[1]) : undefined
+        const missingThread = workspaceUrl.pathname.startsWith('/s/') && !engine.current.sessions.has(id ?? 0)
+        const shared = sharedDraft || workspaceUrl.searchParams.has('prompt')
+        if (shared) {
+          pageHeaders['cache-control'] = 'no-store'
+          pageHeaders['referrer-policy'] = 'no-referrer'
+        }
         const canLaunchWorkspaceEditor = canUseHostPrivileges(request, url)
           && (!remote || isLoopbackHost(srv?.requestIP(request)?.address ?? ''))
         // The socket URL embedded in the page depends on both host and scheme.
         const cacheKey = `${url.pathname}${url.search}|${url.origin}|${stateRev}|${canLaunchWorkspaceEditor}`
-        const cached = renderCache.get(cacheKey)
+        const cached = shared ? undefined : renderCache.get(cacheKey)
         if (cached !== undefined) {
           return new Response(cached, {
+            status: missingThread ? 404 : 200,
             headers: { ...pageHeaders, 'x-render-cache': 'hit' },
           })
         }
-        const sessionId = workspaceUrl.pathname.startsWith('/s/')
-          ? Number(workspaceUrl.pathname.slice(3)) || undefined
-          : undefined
         return renderHarnessView(viewProps(engine.current, {
-          sessionId,
+          sessionId: id,
+          missingThread,
           // `?profile=` opens the sidebar on a given space. Swiping past the
           // active space's neighbours lands here, so the server renders that
           // space's rows rather than the client rebuilding them.
           profileId: Number(workspaceUrl.searchParams.get('profile')) || undefined,
           workspaceId: Number(workspaceUrl.searchParams.get('workspace')) || undefined,
-          withoutProject: workspaceUrl.searchParams.get('project') === 'none',
+          withoutProject: sharedDraft || workspaceUrl.searchParams.get('project') === 'none',
           freshDraftId: workspaceUrl.searchParams.get('draft'),
           settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
@@ -1715,13 +1746,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // Stored under the key captured at request time: if an event landed
           // mid-render, the new revision's requests miss this entry and
           // render fresh, which is the consistency renders had all along.
-          renderCache.set(cacheKey, html)
+          if (!shared) renderCache.set(cacheKey, html)
           if (renderCache.size > RENDER_CACHE_CAP) {
             const oldest = renderCache.keys().next().value
             if (oldest !== undefined) renderCache.delete(oldest)
           }
 
           return new Response(html, {
+            status: missingThread ? 404 : 200,
             headers: { ...pageHeaders, 'x-render-cache': 'miss' },
           })
         }).catch((error: unknown) => {

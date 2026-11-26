@@ -42,6 +42,7 @@ export interface ViewProps {
   claudeCompactionByAccount: Record<number, ClaudeAccountCompaction>
   draftWorkspace: ProjectSummary | null
   draftWithoutProject: boolean
+  missingThread: boolean
   freshDraftId: string | null
   activeSession: {
     turns: ReadonlyArray<{ id: number, response: string, status: string }>
@@ -104,6 +105,7 @@ export interface ViewProps {
  */
 export function viewProps(state: HarnessState, options: {
   sessionId?: number
+  missingThread?: boolean
   /**
    * Profile to open the sidebar on.
    *
@@ -208,6 +210,7 @@ export function viewProps(state: HarnessState, options: {
       }
     }),
     activeProfile: String(selectedProfile?.id ?? ''),
+    missingThread: options.missingThread === true,
     draftWorkspace,
     draftWithoutProject,
     freshDraftId: !active && (draftWorkspace || draftWithoutProject) && /^web_[a-z0-9]{1,16}_[a-z0-9]{1,6}$/.test(options.freshDraftId ?? '')

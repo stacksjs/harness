@@ -23,6 +23,7 @@ export const keybindings = $props.keybindings || []
 export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
+export const missingThread = $props.missingThread === true
 export const freshDraftId = $props.freshDraftId || ''
 export const serverUrl = $props.serverUrl || ''
 // The browser CBOR bundle. Empty when the server could not build one, which
@@ -117,7 +118,7 @@ export const workspaceName = activeWorkspace?.name
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
 export const previewDiscoveryAllowed = Boolean(activeSession && $props.canLaunchWorkspaceEditor)
-export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
+export const canCompose = !missingThread && Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
 export const profileProjects = Object.fromEntries(profiles.map(profile => {
   const projects = profile.workspaces || []
   return [String(profile.id), projects.find(workspace => workspace.trusted) || projects[0] || null]
@@ -370,7 +371,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       --}}
       @if(turns.length === 0)
         <div data-empty-state :hidden="liveTurns().length > 0" class="flex flex-col gap-2 items-center justify-center text-center @if(activeSession)h-full@endif">
-          @if(activeSession)
+          @if(missingThread)
+            <h1 class="font-semibold text-lg">Thread unavailable</h1>
+            <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">This thread could not be found on the connected host.</p>
+            <a href="/" class="px-3 py-2 text-[13px] underline underline-offset-4">Back to workspace</a>
+          @elseif(activeSession)
             <p class="text-[15px] font-medium">Start the conversation</p>
           @elseif(draftWithoutProject)
             <h1 data-draft-title>What would you like to work on?</h1>
@@ -398,6 +403,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @if(!turn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(turn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
+          @if(turn.prompt && !turn.automaticCompaction)
+            @include('../partials/harness-prompt-link-buttons')
+          @endif
           @if(turn.attachments.length)
             <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
               @foreach(turn.attachments as file)
@@ -500,6 +508,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @if(!liveTurn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(liveTurn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
+          @if(liveTurn.prompt && !liveTurn.automaticCompaction)
+            @include('../partials/harness-prompt-link-buttons')
+          @endif
           @if(liveTurn.attachments.length)
             <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
               @foreach(liveTurn.attachments as file)
@@ -619,6 +630,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <div class="sr-only" :hidden="turn.automaticCompaction">You</div>
           <p data-automatic-compaction hidden :hidden="!turn.automaticCompaction" class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
+          <div :hidden="!turn.prompt || turn.automaticCompaction">
+            @include('../partials/harness-prompt-link-buttons')
+          </div>
           <ul :hidden="!turn.attachments?.length" aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
             <template :for="file in turn.attachments ?? []" :key="file.id">
               <li class="max-w-full min-w-0">
@@ -719,12 +733,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     </div>
     @if(activeSession)
       @include('../partials/harness-transcript-find')
-      <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
     @endif
+    <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
     </div>
 
     @if(activeSession)
       <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="px-3 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full dark:border-white/20">Jump to latest</button>
+      <p role="status" data-unavailable-message hidden :hidden="!missingTurnLink()">This message is unavailable in the current thread.</p>
       <div data-thread-archived @if(!initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().archivedAt" class="mx-auto mb-3 px-3 py-2 flex gap-2 items-center text-sm border border-black/10 rounded-md dark:border-white/15">
         <span>Archived thread</span>
         <button type="button" @click="organizeThread('restore')" :disabled="threadActionBusy()" class="font-medium underline">Restore thread</button>
@@ -748,6 +763,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
     @if(canCompose)
     <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerFileActions()?.drop($event)" class="grid gap-2 items-end shrink-0">
+      <div data-linked-prompt-notice hidden :hidden="!sharedPromptNotice()">
+        <span role="status" :text="sharedPromptNotice()"></span>
+        <button type="button" @click="dismissLinkedPromptNotice" aria-label="Dismiss linked prompt notice" class="harness-icon-button">
+          <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </div>
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -1003,6 +1024,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
       <input data-thread-search-input ref="threadSearchInputBox" type="search" maxlength="120" role="combobox" aria-label="Search thread titles and messages" aria-controls="thread-search-list" aria-autocomplete="list" aria-expanded="false" :aria-expanded="threadSearchResults().length ? 'true' : 'false'" :aria-activedescendant="selectedThreadSearchId()" @input="queueThreadSearch" @compositionend="queueThreadSearch" @keydown="threadSearchKeydown" autocomplete="off" placeholder="Search titles, projects, and messages" class="px-3 py-2 w-full text-[14px] bg-neutral-50 dark:bg-neutral-950 border border-black/15 rounded-[8px] dark:border-white/20" />
       <p role="status" :hidden="!threadSearchStatus()" :text="threadSearchStatus()" class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300"></p>
+      <div data-share-commands :hidden="!showShareCommand('copy prompt link') && !showShareCommand('copy prompt link with repo and model', true) && !showShareCommand('copy thread link', false, true)">
+        <button type="button" @click="copyDraftPromptLink($event)" :hidden="!showShareCommand('copy prompt link')">Copy prompt link</button>
+        <button type="button" @click="copyDraftPromptLink($event, true)" :hidden="!showShareCommand('copy prompt link with repo and model', true)">Copy prompt link with repo and model</button>
+        <button type="button" @click="copyThreadLink($event)" :hidden="!showShareCommand('copy thread link', false, true)">Copy thread link</button>
+      </div>
       <ul id="thread-search-list" data-thread-search-list ref="threadSearchListBox" role="listbox" aria-label="Matching threads" :hidden="!threadSearchResults().length" class="overflow-y-auto mt-2">
         <li :for="(result, index) in threadSearchResults()" :key="result.id" :id="'thread-search-result-' + result.id" data-thread-search-option role="option" :aria-selected="threadSearchIndex() === index ? 'true' : 'false'" @click="chooseThreadSearchResult(result)" class="px-3 py-2 rounded-[6px] cursor-pointer">
           <div class="flex gap-2 items-center justify-between">
@@ -1014,6 +1040,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </ul>
     </div>
   </dialog>
+
+  @include('../partials/harness-prompt-link-dialogs')
 
   <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
     <form class="flex flex-col gap-4 p-5" @submit.prevent="registerProject">
@@ -2541,6 +2569,20 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const threadSearchResults = state([])
   const threadSearchStatus = state('')
   const threadSearchIndex = state(0)
+  const shareSearch = state('')
+  const shareRepository = state('')
+  const shareClipboardDialog = useRef('shareClipboardDialogBox')
+  const shareClipboardBox = useRef('shareClipboardTextBox')
+  const shareClipboardText = state('')
+  let shareClipboardTrigger = null
+  let shareRepositoryRequest
+  let linkedPromptRequest
+  const promptLinkDialog = useRef('promptLinkDialogBox')
+  const linkReview = state(null)
+  const linkReviewError = state('')
+  const linkOpening = state(false)
+  const sharedPromptNotice = state('')
+  const missingTurnLink = state(false)
   const selectedThreadSearchId = derived(() => {
     const id = threadSearchResults()[threadSearchIndex()]?.id
     return id === undefined ? undefined : `thread-search-result-${id}`
@@ -2770,6 +2812,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     workspaceStatusPaused = true
     providerCatalogRequest?.abort()
     draftWorktreeRequest?.abort()
+    shareRepositoryRequest?.abort()
+    linkedPromptRequest?.abort()
     projectSetupRequest?.abort()
     projectSetupPoll?.stop()
     projectSettlementRequest?.abort()
@@ -3931,11 +3975,75 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let threadSearchRequest = null
   let threadSearchTrigger = null
 
+  function showShareCommand(label, withRepository = false, thread = false) {
+    if (thread ? !sessionId : !composerText().trim()) return false
+    if (withRepository && !shareRepository()) return false
+    return shareSearch().toLowerCase().split(/\s+/).every(word => label.includes(word))
+  }
+
+  function loadShareRepository() {
+    const workspace = Number(activeScratchSession ? 0 : activeWorkspaceId || draftProject?.id)
+    if (!workspace || shareRepositoryRequest) return
+    const request = new AbortController()
+    shareRepositoryRequest = request
+    void fetch('/prompt-link/project?workspace=' + workspace, { signal: request.signal }).then(async (response) => {
+      if (!response.ok) return
+      const result = await response.json()
+      if (!request.signal.aborted) shareRepository.set(result.repository || '')
+    }).catch(() => {}).finally(() => { shareRepositoryRequest = undefined })
+  }
+
+  async function shareLink(target, address, notice) {
+    try {
+      await composerDraftTools.writeClipboardText(target, address, desktop()?.clipboard)
+      transcriptAnnouncement.set(notice)
+    }
+    catch {
+      shareClipboardTrigger = target
+      shareClipboardText.set(address)
+      shareClipboardDialog.current?.showModal()
+      void nextTick(() => shareClipboardBox.current?.select())
+    }
+  }
+
+  function closeShareClipboard() {
+    shareClipboardDialog.current?.close()
+    const trigger = shareClipboardTrigger
+    shareClipboardTrigger = null
+    shareClipboardText.set('')
+    const fallback = sessionId ? threadActionsTrigger.current : promptRef.current
+    const focus = trigger?.getClientRects().length ? trigger : fallback
+    focus?.focus()
+  }
+
+  function copyThreadLink(event) {
+    const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : threadActionsTrigger.current
+    if (!sessionId || !target || !composerDraftTools) return
+    if (threadActionsDialog.current?.open) closeThreadActions()
+    if (threadSearchDialog.current?.open) closeThreadSearch()
+    void shareLink(target, composerDraftTools.threadLink(target.ownerDocument.location.origin, sessionId), 'Thread link copied.')
+  }
+
+  function copyDraftPromptLink(event, withRepository = false) {
+    const target = event.currentTarget
+    if (!target || !composerDraftTools) return
+    try {
+      const context = withRepository && shareRepository() ? {
+        repository: shareRepository(), provider: agentChoice(draftProvider()).driverKind, model: draftModel(),
+      } : undefined
+      const address = composerDraftTools.newThreadLink(target.ownerDocument.location.origin, composerText(), context)
+      closeThreadSearch()
+      void shareLink(target, address, 'Prompt link copied.')
+    }
+    catch (error) { stxAlert(error.message) }
+  }
+
   function openThreadSearch(event) {
     const dialog = threadSearchDialog.current
-    if (!dialog || dialog.open || !Number(activeProfile)) return
+    if (!dialog || dialog.open || (!Number(activeProfile) && !composerText().trim())) return
     threadSearchTrigger = event?.currentTarget?.matches?.('[data-thread-search-toggle], [data-nav-search]') ? event.currentTarget : null
     workspaceActionsOpen.set(false)
+    if (composerText().trim()) loadShareRepository()
     dialog.showModal()
     threadSearchInput.current?.focus()
   }
@@ -3945,6 +4053,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     threadSearchRequest?.abort()
     threadSearchResults.set([])
     threadSearchStatus.set('')
+    shareSearch.set('')
     if (threadSearchInput.current) threadSearchInput.current.value = ''
     threadSearchDialog.current?.close()
     threadSearchTrigger?.focus()
@@ -3959,12 +4068,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function queueThreadSearch(event) {
     if (event.isComposing) return
     const query = event.currentTarget.value.trim()
+    shareSearch.set(query)
     threadSearchTimer?.stop()
     threadSearchRequest?.abort()
     threadSearchResults.set([])
     threadSearchIndex.set(0)
     threadSearchStatus.set('')
-    if (!query) return
+    if (!query || !Number(activeProfile)) return
     threadSearchTimer = useTimeout(() => searchThreadResults(query), 160)
   }
 
@@ -4001,7 +4111,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     const results = threadSearchResults()
-    if (results.length === 0) return
+    if (results.length === 0) {
+      const command = threadSearchDialog.current?.querySelector('[data-share-commands]:not([hidden]) button:not([hidden])')
+      if (event.key === 'Enter' && command) {
+        event.preventDefault()
+        command.click()
+      }
+      return
+    }
     if (event.key === 'Enter') {
       event.preventDefault()
       chooseThreadSearchResult(results[threadSearchIndex()])
@@ -4859,12 +4976,30 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const transcript = transcriptRef.current
     if (!transcript) return
     followingTranscript.set(true)
+    missingTurnLink.set(false)
+    transcript.querySelector('[data-linked-turn]')?.removeAttribute('data-linked-turn')
     transcript.scrollTop = transcript.scrollHeight
     transcript.focus({ preventScroll: true })
     void nextTick(() => { transcript.scrollTop = transcript.scrollHeight })
   }
 
   async function handleTranscriptControl(event) {
+    const copy = event.target?.closest?.('[data-copy-prompt-link], [data-copy-message-link]')
+    if (copy && sessionId && composerDraftTools) {
+      const turn = copy.closest('[data-turn]')
+      const origin = copy.ownerDocument.location.origin
+      try {
+        if (copy.hasAttribute('data-copy-message-link')) {
+          void shareLink(copy, composerDraftTools.threadLink(origin, sessionId, Number(turn?.dataset.turn)), 'Message link copied.')
+        }
+        else {
+          const text = turn?.querySelector('[data-user-prompt]')?.textContent || ''
+          void shareLink(copy, composerDraftTools.newThreadLink(origin, text), 'Prompt link copied.')
+        }
+      }
+      catch (error) { stxAlert(error.message) }
+      return
+    }
     try {
       const message = await transcriptControl?.(event.target, desktop()?.clipboard)
       if (message) transcriptAnnouncement.set(message)
@@ -4875,6 +5010,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function handleTranscriptKeyboard(event) { transcriptMenuKeyboard?.(event) }
+
+  function revealLinkedTurn() {
+    const transcript = transcriptRef.current
+    const outcome = transcript && composerDraftTools?.linkedTurn(transcript)
+    missingTurnLink.set(outcome === 'missing')
+    if (outcome) followingTranscript.set(false)
+  }
+
+  useEventListener('hashchange', revealLinkedTurn, { target: window })
 
   function paintTranscript(updateMarkdown) {
     if (transcriptFrame) return
@@ -5177,6 +5321,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (!box) return
     composerText.set(box.value)
     if (editingFollowUp()) return
+    if (!box.value) sharedPromptNotice.set('')
     const previous = composerDraft()
     if (!box.value && !previous?.files?.length) {
       if (previous?.text) composerDraft.set(null)
@@ -5192,14 +5337,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       : previous?.worktree
     const sameSelection = previous?.provider === provider && previous?.model === model && sameCodexSelection(previous?.codexSelection, codexSelection)
       && JSON.stringify(previous?.worktree) === JSON.stringify(worktree)
+    const linkNotice = sharedPromptNotice() || undefined
     if (previous?.text === text && previous.start === start && previous.end === end && previous.direction === direction
-      && sameSelection) return
+      && sameSelection && previous.linkNotice === linkNotice) return
     composerDraft.set({
       text, start, end, direction, createdAt: previous?.createdAt ?? Date.now(),
       ...(previous?.files?.length ? { files: previous.files, upload: previous.upload } : {}),
       ...(codexSelection ? { codexSelection } : {}),
       ...(provider ? { provider, model } : {}),
       ...(worktree ? { worktree } : {}),
+      ...(linkNotice ? { linkNotice } : {}),
       ...(sameSelection && previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
     })
   }
@@ -5211,6 +5358,126 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function discardCurrentDraft() {
     discardDraft(promptDraftKey)
+  }
+
+  function linkedPromptWarning(prompt) {
+    return prompt.hiddenCharacters ? 'Hidden characters were removed from this prompt. Read it carefully before sending.' : ''
+  }
+
+  function showLinkedPrompt(review) {
+    linkReview.set(review)
+    linkReviewError.set('')
+    if (!promptLinkDialog.current?.open) promptLinkDialog.current?.showModal()
+  }
+
+  function cancelPromptLink() {
+    if (linkOpening()) return
+    const review = linkReview()
+    promptLinkDialog.current?.close()
+    linkReview.set(null)
+    if (review?.newThread) openDraftAddress('/')
+    else promptRef.current?.focus()
+  }
+
+  function dismissLinkedPromptNotice() {
+    sharedPromptNotice.set('')
+    if (composerDraft()?.linkNotice) {
+      const draft = { ...composerDraft() }
+      delete draft.linkNotice
+      composerDraft.set(draft)
+    }
+  }
+
+  function replaceFromPromptLink(prompt) {
+    const box = promptRef.current
+    if (!box?.form || box.form.hidden || startPending() || editingFollowUp())
+      throw new Error('This composer is unavailable. Open the prompt as a new draft.')
+    box.value = prompt.text
+    box.setSelectionRange(prompt.text.length, prompt.text.length)
+    sharedPromptNotice.set(linkedPromptWarning(prompt))
+    rememberPrompt()
+    promptLinkDialog.current?.close()
+    linkReview.set(null)
+    box.focus({ preventScroll: true })
+  }
+
+  async function openLinkedDraft(prompt, project, target) {
+    const profile = String(project?.profile || activeProfile || '0')
+    let notice = linkedPromptWarning(prompt)
+    let choice
+    if (prompt.provider || prompt.model) {
+      const params = new URLSearchParams({ profile, workspace: String(project?.id || 0), models: '1' })
+      const request = new AbortController()
+      linkedPromptRequest = request
+      const catalog = await fetch('/drivers?' + params, { signal: request.signal }).then(response => response.ok ? response.json() : null).catch(() => null)
+      if (request.signal.aborted) return
+      linkedPromptRequest = undefined
+      const accounts = [...(catalog?.drivers || []), ...(catalog?.accounts || [])]
+      choice = composerDraftTools.matchingLinkedModel(prompt.provider, prompt.model, accounts)
+      if (!choice) notice = [notice, 'The linked model is unavailable. Your default model was selected.'].filter(Boolean).join(' ')
+    }
+    const address = composerDraftTools.storeLinkedDraft(target, { profile, workspace: project?.id, id: newCommandId() }, {
+      text: prompt.text, notice, ...choice,
+    })
+    openDraftAddress(address)
+  }
+
+  async function acceptLinkedPrompt(destination) {
+    const review = linkReview()
+    const target = promptRef.current ?? transcriptRef.current
+    if (!review?.prompt?.text || !target || linkOpening()) return
+    linkOpening.set(true)
+    try {
+      if (destination === 'selected' && review.replace) replaceFromPromptLink(review.prompt)
+      else await openLinkedDraft(review.prompt, destination === 'selected' ? review.project : null, target)
+    }
+    catch (error) { linkReviewError.set(error.message || 'Could not open this prompt.') }
+    finally { linkOpening.set(false) }
+  }
+
+  async function openIncomingPromptLink() {
+    const target = promptRef.current ?? transcriptRef.current
+    const link = target && composerDraftTools.readPromptLink(target, Boolean(sessionId))
+    if (!link) return
+    composerDraftTools.clearPromptLink(target)
+    const { newThread, prompt, error } = link
+    if (error) {
+      showLinkedPrompt({ title: 'Could not open prompt link', detail: error, newThread })
+      return
+    }
+    if (!newThread) {
+      restorePrompt()
+      const editable = promptRef.current?.form && !promptRef.current.form.hidden && !inputRequest() && !initialNavigation.archivedAt
+      if (editable && !promptRef.current.value && !composerFiles().length) {
+        replaceFromPromptLink(prompt)
+        return
+      }
+      showLinkedPrompt({
+        title: editable ? 'Replace draft text?' : 'Open linked prompt',
+        detail: editable ? 'This thread already has a draft. Its attachments will stay with it.' : 'This thread cannot receive a draft right now.',
+        prompt, replace: Boolean(editable),
+      })
+      return
+    }
+    if (!prompt.repository) {
+      showLinkedPrompt({ title: 'Opening linked prompt', prompt, newThread })
+      await acceptLinkedPrompt('scratch')
+      return
+    }
+    showLinkedPrompt({ title: 'Open linked prompt', detail: 'Looking for ' + prompt.repository + ' on this host.', prompt, newThread })
+    const request = new AbortController()
+    linkedPromptRequest = request
+    const result = prompt.pullRequest ? null : await fetch('/prompt-link/project?repo=' + encodeURIComponent(prompt.repository), { signal: request.signal })
+      .then(response => response.ok ? response.json() : null).catch(() => null)
+    if (request.signal.aborted || !linkReview()) return
+    linkedPromptRequest = undefined
+    // A shared PR URL can be opened for review. Drafting in its checkout is
+    // a separate project operation that needs a branch setup confirmation.
+    const project = prompt.pullRequest ? null : result?.project
+    const detail = prompt.pullRequest
+      ? 'Open the pull request to review it, or start a draft without a project.'
+      : project ? 'Open a draft in ' + project.name + '.' : prompt.repository + ' is unavailable on this host.'
+    showLinkedPrompt({ title: 'Open linked prompt', detail, prompt, newThread, project })
   }
 
   async function connectComposerDrafts() {
@@ -5251,6 +5518,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     draftDiscardReady.set(true)
     expireUndoNotices()
     if (initialRewoundPrompt && requestedRewind() === initialRewoundPrompt.operation) await restoreEarlierPrompt()
+    await openIncomingPromptLink()
   }
 
   function discardDraft(key) {
@@ -5281,6 +5549,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (box) {
         box.value = ''
         composerText.set('')
+        sharedPromptNotice.set('')
         composerDraft.set({ discardedDraft: claim })
         if (!sidebarOpen()) box.focus()
       }
@@ -5332,6 +5601,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (first) pendingFirstPrompt.set(null)
     const current = typeof saved?.text === 'string' ? saved : first
     if (!current?.text && !current?.files?.length) return
+    sharedPromptNotice.set(current.linkNotice || '')
     if (current === first && first.files?.length) composerDraft.set(first)
     if (current.files?.some(file => file.status === 'uploading' && !composerUploadSources.has(file.key))) {
       const files = current.files.map(file => file.status === 'uploading' && !composerUploadSources.has(file.key)
@@ -5549,6 +5819,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (box.value === raw) {
         box.value = ''
         composerText.set('')
+        sharedPromptNotice.set('')
         composerDraft.set(null)
         if (background && sessionId) openFreshDraft()
       }
@@ -5599,6 +5870,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
       box.value = ''
       composerText.set('')
+      sharedPromptNotice.set('')
       composerDraft.set(null)
       followingTranscript.set(true)
       void nextTick(() => {
@@ -6167,7 +6439,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       openSettings()
       return
     }
-    if (command === 'thread.search' && Number(activeProfile)) {
+    if (command === 'thread.copyReference' && sessionId && !editable && !event.target?.ownerDocument?.getSelection()?.toString()) {
+      event.preventDefault()
+      if (!event.repeat) copyThreadLink(event)
+      return
+    }
+    if (command === 'thread.search' && (Number(activeProfile) || composerText().trim())) {
       event.preventDefault()
       openThreadSearch()
       return
@@ -6198,6 +6475,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function threadUndoBlocked() {
     return projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open
       || threadActionsDialog.current?.open || workspaceEditorDialog.current?.open
+      || promptLinkDialog.current?.open || shareClipboardDialog.current?.open
   }
 
   function termKeydown(tab, event) {
@@ -6346,8 +6624,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       liveResponse.removeAttribute('data-response-source')
     }
     const hash = transcript?.ownerDocument.location?.hash
-    if (hash?.startsWith('#turn-')) followingTranscript.set(false)
-    else paintTranscript(updateTranscriptMarkdown)
+    if (hash?.startsWith('#turn-')) {
+      followingTranscript.set(false)
+      void nextTick(revealLinkedTurn)
+    }
+    paintTranscript(updateTranscriptMarkdown)
 
     let cursor = Number(sinceSeq) || 0
     followUpActions.set(createFollowUpActions({

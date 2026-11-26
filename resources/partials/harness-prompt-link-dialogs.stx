@@ -1,0 +1,28 @@
+<dialog id="harness-prompt-link" ref="promptLinkDialogBox" data-prompt-link-dialog aria-labelledby="harness-prompt-link-title" @cancel.prevent="cancelPromptLink" @click.self="cancelPromptLink">
+  <div data-share-dialog-body>
+    <h2 id="harness-prompt-link-title" :text="linkReview()?.title"></h2>
+    <p :hidden="!linkReview()?.detail" :text="linkReview()?.detail"></p>
+    <p data-shared-prompt-warning role="alert" :hidden="!linkReview()?.prompt?.hiddenCharacters">Hidden characters were removed from this prompt. Read it carefully before sending.</p>
+    <pre :hidden="!linkReview()?.prompt?.text" :text="linkReview()?.prompt?.text"></pre>
+    <a data-linked-pr :hidden="!linkReview()?.prompt?.pullRequest" :href="linkReview()?.prompt?.pullRequest" target="_blank" rel="noopener noreferrer">Open pull request on GitHub</a>
+    <p role="alert" :hidden="!linkReviewError()" :text="linkReviewError()"></p>
+    <div data-share-dialog-actions>
+      <button type="button" @click="cancelPromptLink" :disabled="linkOpening()">Cancel</button>
+      <button type="button" @click="acceptLinkedPrompt('scratch')" :hidden="!linkReview()?.prompt?.text || linkReview()?.replace" :disabled="linkOpening()">
+        Use without a project
+      </button>
+      <button type="button" data-share-primary @click="acceptLinkedPrompt('selected')" :hidden="!linkReview()?.replace && !linkReview()?.project" :disabled="linkOpening()" :text="linkReview()?.replace ? 'Replace draft text' : 'Open project draft'"></button>
+    </div>
+  </div>
+</dialog>
+
+<dialog ref="shareClipboardDialogBox" data-share-clipboard-dialog aria-labelledby="harness-share-clipboard-title" @cancel.prevent="closeShareClipboard" @click.self="closeShareClipboard">
+  <div data-share-dialog-body>
+    <h2 id="harness-share-clipboard-title">Copy link</h2>
+    <p>Select and copy the link.</p>
+    <textarea rows="3" ref="shareClipboardTextBox" readonly aria-label="Shareable link" :value="shareClipboardText()"></textarea>
+    <div data-share-dialog-actions>
+      <button type="button" data-share-primary @click="closeShareClipboard">Done</button>
+    </div>
+  </div>
+</dialog>
