@@ -1,8 +1,8 @@
 import type { PtyOptions } from './pty'
+import type { SavedTerminalScope, TerminalHistoryStore } from './terminal-history'
 import { Terminal } from '@harness/ansi'
 import { Pty } from './pty'
-
-export const terminalHistory = { scrollback: 5000, scrollbackBytes: 8 * 1024 * 1024 } as const
+import { terminalHistory } from './terminal-history'
 
 export interface TerminalScope {
   workspaceId: number
@@ -19,7 +19,14 @@ interface WorkspaceTerminal<Peer> {
   peers: Set<Peer>
   pty: Pty
   model?: Terminal
+  savedScope?: SavedTerminalScope
+  pendingHistory?: ReturnType<typeof setTimeout>
   exit?: { code: number | null }
+}
+
+function savedTerminalScope(scope: TerminalScope): SavedTerminalScope | undefined {
+  if (scope.sessionId === undefined || !scope.resumeKey) return
+  return { workspaceId: scope.workspaceId, sessionId: scope.sessionId, resumeKey: scope.resumeKey }
 }
 
 /** Keep a thread's terminal independent of the sockets that render it. */
@@ -27,7 +34,10 @@ export class WorkspaceTerminals<Peer> {
   private readonly terminals = new Map<number, WorkspaceTerminal<Peer>>()
   private nextId = 0
 
-  constructor(private readonly send: (peer: Peer, frame: unknown) => void) {}
+  constructor(
+    private readonly send: (peer: Peer, frame: unknown) => void,
+    private readonly history: TerminalHistoryStore,
+  ) {}
 
   resume(peer: Peer, scope: TerminalScope): boolean {
     if (!scope.resumeKey) return false
@@ -41,25 +51,43 @@ export class WorkspaceTerminals<Peer> {
     return false
   }
 
-  open(peer: Peer, scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions): void {
+  savedHistory(scope: TerminalScope): string | undefined {
+    const saved = savedTerminalScope(scope)
+    if (saved) return this.history.read(saved)
+  }
+
+  open(peer: Peer, scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, saved?: string): void {
     // Scratch directory creation can yield between the first resume check and opening.
     if (this.resume(peer, scope)) return
     const { cols, rows } = options
+    const savedScope = savedTerminalScope(scope)
+    const model = savedScope ? new Terminal({ cols, rows, ...terminalHistory }) : undefined
+    const restoring = saved !== undefined && model?.restoreHistory(saved) === true
+    if (restoring) model?.write('[Host restarted. Previous output restored.]\r\n')
+    if (savedScope) {
+      try { this.history.register(savedScope) }
+      catch { this.warnHistory() }
+    }
     const terminal: WorkspaceTerminal<Peer> = {
       id: ++this.nextId, scope, shell, cols, rows, peers: new Set(), pty: new Pty(options),
-      ...(scope.resumeKey ? { model: new Terminal({ cols, rows, ...terminalHistory }) } : {}),
+      model, savedScope,
     }
     this.terminals.set(terminal.id, terminal)
     terminal.pty.onData((data) => {
+      if (!this.terminals.has(terminal.id)) return
       terminal.model?.write(data)
+      if (terminal.model && !terminal.pendingHistory)
+        terminal.pendingHistory = setTimeout(() => this.flushHistory(terminal), 500)
       this.broadcast(terminal, { t: 'term-data', termId: terminal.id, data })
     })
     terminal.pty.onExit((code) => {
+      if (!this.terminals.has(terminal.id)) return
       terminal.exit = { code }
+      this.flushHistory(terminal)
       this.broadcast(terminal, { t: 'term-exit', termId: terminal.id, code })
       if (!scope.resumeKey) this.terminals.delete(terminal.id)
     })
-    this.attach(peer, terminal, false)
+    this.attach(peer, terminal, restoring)
   }
 
   private attach(peer: Peer, terminal: WorkspaceTerminal<Peer>, replay = true): void {
@@ -93,7 +121,15 @@ export class WorkspaceTerminals<Peer> {
 
   close(peer: Peer, id: number): void {
     const terminal = this.terminals.get(id)
-    if (terminal?.peers.has(peer)) this.remove(terminal)
+    if (!terminal?.peers.has(peer)) return
+    try {
+      if (terminal.savedScope) this.history.remove(terminal.savedScope)
+    }
+    catch {
+      this.send(peer, { t: 'term-error', termId: terminal.id, message: 'Could not clear this terminal’s saved output. Try ending it again.' })
+      return
+    }
+    this.remove(terminal)
   }
 
   detach(peer: Peer, id: number): void {
@@ -111,11 +147,35 @@ export class WorkspaceTerminals<Peer> {
     for (const terminal of this.terminals.values()) {
       if (!exists(terminal.scope)) this.remove(terminal)
     }
+    try { this.history.prune(exists) }
+    catch { this.warnHistory() }
   }
 
-  private remove(terminal: WorkspaceTerminal<Peer>): void {
+  shutdown(): void {
+    for (const terminal of this.terminals.values()) {
+      this.flushHistory(terminal)
+      // A server stop is a disconnect. Sending term-closed would erase the tab on clients.
+      this.remove(terminal, false)
+    }
+    this.history.close()
+  }
+
+  private flushHistory(terminal: WorkspaceTerminal<Peer>): void {
+    if (!terminal.pendingHistory || !terminal.model || !terminal.savedScope) return
+    clearTimeout(terminal.pendingHistory)
+    terminal.pendingHistory = undefined
+    try { this.history.write(terminal.savedScope, terminal.model.saveHistory()) }
+    catch { this.warnHistory() }
+  }
+
+  private warnHistory(): void {
+    console.warn('Harness could not update saved terminal history.')
+  }
+
+  private remove(terminal: WorkspaceTerminal<Peer>, notify = true): void {
+    clearTimeout(terminal.pendingHistory)
     this.terminals.delete(terminal.id)
-    this.broadcast(terminal, { t: 'term-closed', termId: terminal.id })
+    if (notify) this.broadcast(terminal, { t: 'term-closed', termId: terminal.id })
     terminal.peers.clear()
     if (!terminal.exit) terminal.pty.kill()
   }

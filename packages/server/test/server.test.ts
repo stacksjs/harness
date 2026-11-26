@@ -588,6 +588,73 @@ describe('terminals over the socket', () => {
     finally { second.close() }
   })
 
+  it('recovers each pane’s scrollback with a fresh shell after the host restarts', async () => {
+    let client = await TestClient.connect(url())
+    const sendOutput = async (termId: number, command: string, expected: string) => {
+      client.send({ t: 'term-input', termId, data: `${command}\n` })
+      let output = ''
+      for (let i = 0; i < 30 && !output.includes(expected); i++) output += (await client.until('term-data')).data ?? ''
+      expect(output).toContain(expected)
+    }
+    const restart = async () => {
+      harness.stop()
+      client.close()
+      port = ++portCounter
+      harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+      client = await TestClient.connect(url())
+      await client.until('ready')
+    }
+
+    try {
+      await client.until('ready')
+      const workspaceId = await openWorkspace(client)
+      await harness.engine.dispatch({ id: 'persist-trust', at: 3, command: { type: 'workspace.trust', workspaceId, trusted: true } })
+      for (const id of ['persist-session', 'other-session'])
+        await harness.engine.dispatch({ id, at: 3, command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
+      const sessionId = derivedId('persist-session')
+      const left = { t: 'term-open', workspaceId, sessionId, resumeKey: crypto.randomUUID() }
+      const right = { ...left, resumeKey: crypto.randomUUID() }
+      client.send(left)
+      const first = await client.until('term-opened')
+      await sendOutput(first.termId, 'export HARNESS_PANE_VALUE=41; printf "left-%d\\n" "$HARNESS_PANE_VALUE"', 'left-41')
+      client.send(right)
+      const second = await client.until('term-opened')
+      await sendOutput(second.termId, 'printf "right-%d\\n" $((70+3))', 'right-73')
+
+      await restart()
+      client.send({ ...left, sessionId: derivedId('other-session'), resumeOnly: true })
+      expect((await client.until('term-error', 'term-opened')).t).toBe('term-error')
+      client.send({ ...left, resumeOnly: true })
+      const recovered = await client.until('term-error', 'term-opened')
+      expect(recovered.t).toBe('term-opened')
+      const history = Terminal.fromCheckpoint(recovered.checkpoint).toText()
+      expect(history).toContain('left-41')
+      expect(history).toContain('[Host restarted. Previous output restored.]')
+      expect(history).not.toContain('right-73')
+      await sendOutput(recovered.termId, 'printf "fresh-%s\\n" "${HARNESS_PANE_VALUE:-empty}"', 'fresh-empty')
+      client.send({ ...right, resumeOnly: true })
+      const recoveredRight = await client.until('term-opened')
+      expect(Terminal.fromCheckpoint(recoveredRight.checkpoint).toText()).toContain('right-73')
+
+      using writer = new Database(join(dir, 'test.sqlite'))
+      writer.exec('BEGIN IMMEDIATE')
+      try {
+        client.send({ t: 'term-close', termId: recovered.termId })
+        expect(await client.until('term-error', 'term-closed')).toMatchObject({ t: 'term-error', termId: recovered.termId })
+      }
+      finally { writer.exec('ROLLBACK') }
+      client.send({ t: 'term-close', termId: recovered.termId })
+      await client.until('term-closed')
+      await restart()
+      client.send({ ...left, resumeOnly: true })
+      expect((await client.until('term-error', 'term-opened')).t).toBe('term-error')
+      client.send({ ...right, resumeOnly: true })
+      const surviving = await client.until('term-opened')
+      expect(Terminal.fromCheckpoint(surviving.checkpoint).toText()).toContain('right-73')
+    }
+    finally { client.close() }
+  })
+
   it('resizes a live terminal, and the shell sees the new size', async () => {
     // The native backend (pty-shim.c via TinyCC) is what makes this possible;
     // asked via `stty size` so the answer comes from the kernel's winsize,

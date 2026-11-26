@@ -28,6 +28,40 @@ it('restores output, the alternate buffer, and an unfinished escape sequence', (
   expect(restored.shellActivity.lastExitStatus).toBe(7)
 })
 
+it('loads old main-screen rows without reviving the previous shell’s modes', () => {
+  const options = { cols: 24, rows: 3, scrollback: 10, scrollbackBytes: 2048 }
+  const old = new Terminal(options)
+  old.write('old prompt\r\n\x1b[31mstyled\x1b[0m\r\n\x1b[?2004h\x1b]133;C\x07\x1b[?1049hhidden full screen\x1b[')
+  const next = new Terminal(options)
+  expect(next.restoreHistory(old.saveHistory())).toBe(true)
+  expect(next.onAltScreen).toBe(false)
+  expect(next.formatPaste('pasted')).toBe('pasted')
+  expect(next.shellActivity).toEqual({ phase: 'unavailable', lastExitStatus: null })
+  expect(next.toText()).toBe('old prompt\nstyled')
+  expect(next.scrollback[1]?.[0]?.style.fg).toBe(1)
+  next.write('fresh prompt')
+  expect(next.toText()).toBe('old prompt\nstyled\nfresh prompt')
+})
+
+it('bounds saved scrollback including visible rows and refuses corrupt styles', () => {
+  const options = { cols: 12, rows: 3, scrollback: 3, scrollbackBytes: 64 }
+  const old = new Terminal(options)
+  old.write('first\r\nsecond\r\nthird\r\nfourth\r\nvisible')
+  const saved = old.saveHistory()
+  expect(Buffer.byteLength(saved)).toBeLessThanOrEqual(options.scrollbackBytes)
+  const next = new Terminal(options)
+  expect(next.restoreHistory(saved)).toBe(true)
+  expect(next.toText()).toBe('fourth\nvisible')
+  expect(next.restoreHistory('[[["bad",{"fg":"\""}]]]')).toBe(false)
+  expect(next.toText()).toBe('fourth\nvisible')
+  const moreBytes = { ...options, scrollbackBytes: 512 }
+  const first = new Terminal(moreBytes)
+  first.write('first\r\nsecond\r\nthird\r\nfourth\r\nvisible')
+  const last = new Terminal(moreBytes)
+  expect(last.restoreHistory(first.saveHistory())).toBe(true)
+  expect(last.toText()).toBe('third\nfourth\nvisible')
+})
+
 it('keeps only the newest scrollback permitted by the byte budget', () => {
   const terminal = new Terminal({ cols: 20, rows: 1, scrollback: 5, scrollbackBytes: 70 })
   terminal.write('line one\nline two\nline three\nline four')

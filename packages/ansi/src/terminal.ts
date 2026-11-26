@@ -68,6 +68,32 @@ function unpackRow(row: PackedRow): Cell[] {
   return row.flatMap(([text, style]) => [...text].map(ch => ch === ' ' && !style ? BLANK : { ch, style: style ?? DEFAULT_STYLE }))
 }
 
+function validHistoryColor(value: unknown): boolean {
+  return value === null
+    || (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255)
+    || (typeof value === 'string' && /^#[\da-f]{6}$/iu.test(value))
+}
+
+function validHistoryStyle(value: unknown): boolean {
+  if (value === null) return true
+  if (!value || typeof value !== 'object') return false
+  const style = value as Record<string, unknown>
+  return validHistoryColor(style.fg) && validHistoryColor(style.bg)
+    && ['bold', 'dim', 'italic', 'underline', 'inverse', 'strike'].every(key => typeof style[key] === 'boolean')
+}
+
+function validHistoryRow(value: unknown): value is PackedRow {
+  if (!Array.isArray(value) || value.length > 500) return false
+  let columns = 0
+  for (const run of value) {
+    if (!Array.isArray(run) || run.length !== 2 || typeof run[0] !== 'string' || !validHistoryStyle(run[1])) return false
+    if (run[0].length > 1000 || /[\u0000-\u001F\u007F]/u.test(run[0])) return false
+    columns += [...run[0]].length
+    if (columns > 500) return false
+  }
+  return true
+}
+
 const ParseState = {
   Ground: 0,
   Escape: 1,
@@ -203,6 +229,38 @@ export class Terminal {
     terminal.shellPhase = checkpoint.shellPhase
     terminal.lastExitStatus = checkpoint.lastExitStatus
     return terminal
+  }
+
+  /** Save the main screen and scrollback as styled rows, without live PTY state. */
+  saveHistory(): string {
+    const screen = this.savedMain?.grid ?? this.grid
+    const cursorLine = this.savedMain?.y ?? this.y
+    const lastLine = Math.max(cursorLine - 1, screen.findLastIndex(row => row.some(cell => cell.ch !== ' ' || cell.style !== DEFAULT_STYLE)))
+    const rows: string[] = []
+    const encoder = new TextEncoder()
+    let bytes = 2 // JSON array brackets
+    for (let index = this.scrollback.length + lastLine; index >= 0 && rows.length < this.scrollbackLimit; index--) {
+      const row = index >= this.scrollback.length ? screen[index - this.scrollback.length] : this.scrollback[index]
+      if (!row) continue
+      const packed = JSON.stringify(packRow(row))
+      // The scrollback budget already measured these immutable rows, including a delimiter.
+      const rowBytes = this.scrollbackRowBytes[index] || encoder.encode(packed).length + 1
+      bytes += rowBytes - (rows.length ? 0 : 1)
+      if (bytes > this.scrollbackByteLimit) break
+      rows.push(packed)
+    }
+    return `[${rows.reverse().join(',')}]`
+  }
+
+  /** Load display rows into a fresh terminal, with its default modes and empty grid. */
+  restoreHistory(saved: string): boolean {
+    if (saved.length > this.scrollbackByteLimit || new TextEncoder().encode(saved).length > this.scrollbackByteLimit) return false
+    let rows: unknown
+    try { rows = JSON.parse(saved) }
+    catch { return false }
+    if (!Array.isArray(rows) || rows.length > this.scrollbackLimit || !rows.every(validHistoryRow)) return false
+    for (const row of rows) this.rememberRow(unpackRow(row))
+    return rows.length > 0
   }
 
   /**

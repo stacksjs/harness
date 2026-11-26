@@ -330,10 +330,11 @@ const codexDriver: Driver = {
 }
 
 const port = Number(process.env.HARNESS_DRIVE_PORT ?? 3973)
-const harness = await serve({
+const startHarness = () => serve({
   port, databasePath, scratchDirectory, chatGptCredentialDirectory: join(driveRoot, 'credentials'),
   resolveDriver: kind => kind === 'codex' ? codexDriver : driver,
 })
+let harness = await startHarness()
 const baseUrl = `http://localhost:${port}`
 // Compile the fixture's template before starting the browser's network drive.
 // The performance drive measures cold rendering separately.
@@ -2772,6 +2773,29 @@ await page.getByRole('button', { name: 'Close changes' }).click()
 const readsAfterClose = ledgerReads
 await page.waitForTimeout(2300)
 check('closing Changes stops Git revision checks', ledgerReads === readsAfterClose)
+
+// Leave the browser running while the host flushes history and opens the same database again.
+await page.setViewportSize({ width: 1280, height: 800 })
+await terminalHost.focus()
+await page.keyboard.type('export HARNESS_RESTART_VALUE=42; printf "saved-%d\\n" "$HARNESS_RESTART_VALUE"')
+await page.keyboard.press('Enter')
+await waitForTerminalLine('saved-42')
+harness.stop()
+harness = await startHarness()
+await waitForTerminalLine('[Host restarted. Previous output restored.]')
+await waitForTerminalLine('saved-42')
+await terminalHost.focus()
+await page.keyboard.type('printf "fresh-%s\\n" "${HARNESS_RESTART_VALUE:-empty}"')
+await page.keyboard.press('Enter')
+await waitForTerminalLine('fresh-empty')
+check('browser reattaches a terminal after a host restart with saved output and a fresh shell',
+  await page.locator('[data-terminal]').isVisible() && (await terminalScreen.textContent())?.includes('saved-42') === true)
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`terminal-host-restarted-${width}`)
+  }
+}
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

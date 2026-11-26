@@ -32,7 +32,9 @@ import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
+import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
+import type { TerminalScope } from './workspace-terminals'
 
 export interface ServeOptions {
   port?: number
@@ -359,7 +361,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   const sockets = new Set<HarnessSocket>()
-  const terminals = new WorkspaceTerminals<HarnessSocket>(send)
+  const terminals = new WorkspaceTerminals<HarnessSocket>(send, new TerminalHistoryStore(databasePath))
+  const terminalScopeExists = (scope: TerminalScope) => engine.current.workspaces.has(scope.workspaceId)
+    && (scope.sessionId === undefined || engine.current.sessions.get(scope.sessionId)?.workspaceId === scope.workspaceId)
+  terminals.prune(terminalScopeExists)
   const assetCache = new AssetCache()
   // Built once, before listening: the page references it by URL, so it must be
   // servable by the time the first render can hand that URL out.
@@ -482,7 +487,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (events.length > 0) stateRev++
     for (const event of events) {
       if (event.payload.type === 'profile.deleted')
-        terminals.prune(scope => engine.current.workspaces.has(scope.workspaceId))
+        terminals.prune(terminalScopeExists)
       // A revoke has to reach the connection, not just the next handshake.
       // Closed before the event is delivered, so the socket being cut off does
       // not first get told why in a frame it could act on.
@@ -785,10 +790,6 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }
         const scope = { workspaceId: workspace.id, sessionId: session?.id, resumeKey: frame.resumeKey }
         if (terminals.resume(socket, scope)) return
-        if (frame.resumeOnly === true) {
-          send(socket, { t: 'term-error', message: 'This terminal session is no longer available.' })
-          return
-        }
         const shellKind = engine.current.settings.terminalShell
         const shell = shellKind === 'den' ? findDenShell() : undefined
         if (shell === null) {
@@ -804,11 +805,26 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             return
           }
         }
-        if (!sockets.has(socket) || !engine.current.workspaces.has(workspace.id)) return
+        if (!sockets.has(socket)) return
+        if (!terminalScopeExists(scope)) {
+          send(socket, { t: 'term-error', message: 'This terminal does not belong to the thread.' })
+          return
+        }
+        if (terminals.resume(socket, scope)) return
+        let saved: string | undefined
+        try { saved = terminals.savedHistory(scope) }
+        catch {
+          send(socket, { t: 'term-error', message: 'Could not load this terminal’s saved output. Try again.' })
+          return
+        }
+        if (frame.resumeOnly === true && saved === undefined) {
+          send(socket, { t: 'term-error', message: 'This terminal session is no longer available.' })
+          return
+        }
         const cwd = session ? defaultWorkspacePath(engine.current, session.id) ?? workspace.path : workspace.path
         const cols = Number.isFinite(frame.cols) ? Math.min(500, Math.max(20, Math.floor(frame.cols!))) : 80
         const rows = Number.isFinite(frame.rows) ? Math.min(200, Math.max(5, Math.floor(frame.rows!))) : 24
-        terminals.open(socket, scope, shellKind, { cwd, cols, rows, shell, denIntegration: shellKind === 'den' })
+        terminals.open(socket, scope, shellKind, { cwd, cols, rows, shell, denIntegration: shellKind === 'den' }, saved)
         return
       }
 
@@ -1292,13 +1308,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     tunnelUrl: tunnel?.url ?? null,
     markWindowSpawned: () => { windowSpawnedAt = Date.now() },
     stop: () => {
+      if (closing) return
       closing = true
       clearTimeout(wakeTimer)
       for (const timer of compactTimers.values()) clearTimeout(timer)
       compactTimers.clear()
       void tunnel?.close()
       void runtime.stopAll()
-      terminals.prune(() => false)
+      terminals.shutdown()
       server.stop(true)
       savedProviders.close()
       store.close()

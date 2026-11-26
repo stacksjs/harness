@@ -33,7 +33,7 @@ type TerminalFrame =
   | { t: 'term-sized', termId: number, cols: number, rows: number }
   | { t: 'term-exit', termId: number, code: number | null }
   | { t: 'term-closed', termId: number }
-  | { t: 'term-error', message: string }
+  | { t: 'term-error', message: string, termId?: number }
 
 interface TerminalDockOptions {
   workspaceId: number
@@ -177,6 +177,18 @@ export function createTerminalDock(options: TerminalDockOptions) {
   }
 
   function receive(frame: TerminalFrame): boolean {
+    if (frame.t === 'term-error' && frame.termId !== undefined) {
+      const pane = [...panes.values()].find(pane => pane.id === frame.termId)
+      if (pane) {
+        pane.closing = undefined
+        status(pane, { busy: false, error: frame.message })
+      }
+      else if (detachedClosingPanes.delete(frame.termId)) {
+        options.send({ t: 'term-detach', termId: frame.termId })
+        openNext()
+      }
+      return true
+    }
     if (frame.t === 'term-opened' || frame.t === 'term-error') {
       const pane = opening
       opening = undefined
