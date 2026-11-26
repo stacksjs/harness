@@ -28,9 +28,11 @@ import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { snapshotTree } from './checkpoint'
 import { parseWorkspacePatch } from './diff-patch'
+import { listTurnAuthoredPaths } from './turn-attribution'
 
 export interface FileChange {
   path: string
+  previousPath?: string
   /** Untracked files have no diff to show, only a name. */
   status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked'
   insertions: number
@@ -63,11 +65,11 @@ export interface WorkspaceDiff {
 }
 
 /** Run a git command in the workspace, capturing stdout. */
-function git(cwd: string, args: string[], limit = Infinity): Promise<{ ok: boolean, out: string }> {
+function git(cwd: string, args: string[], limit = Infinity, stdin?: string): Promise<{ ok: boolean, out: string }> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] })
+      child = spawn('git', args, { cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'] })
     }
     catch {
       return resolve({ ok: false, out: '' })
@@ -86,6 +88,8 @@ function git(cwd: string, args: string[], limit = Infinity): Promise<{ ok: boole
     })
     child.on('error', () => { clearTimeout(timer); resolve({ ok: false, out: '' }) })
     child.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(stdin)
   })
 }
 
@@ -190,9 +194,10 @@ function parseNameStatus(raw: string): FileChange[] {
     // `R100\0old\0new` — a rename spends two paths, and the new one is what
     // the reader cares about.
     if (/^[RC]/u.test(code)) {
+      const from = fields[i + 1]
       const to = fields[i + 2]
       i += 2
-      if (to) files.push({ path: to, status: code.startsWith('R') ? 'renamed' : 'added', insertions: 0, deletions: 0 })
+      if (to) files.push({ path: to, previousPath: from, status: code.startsWith('R') ? 'renamed' : 'added', insertions: 0, deletions: 0 })
       continue
     }
     const path = fields[++i]
@@ -249,11 +254,22 @@ async function readFileChanges(workspacePath: string, range: string[], againstTr
   return listed.map(file => ({ ...file, ...(counts.get(file.path) ?? {}) }))
 }
 
+async function readTurnFileChanges(path: string, before: string, after: string) {
+  if (!commitId.test(before) || !commitId.test(after)) return null
+  const [all, authored] = await Promise.all([
+    readFileChanges(path, [before, after], true),
+    listTurnAuthoredPaths(git, path, before, after),
+  ])
+  if (!all) return null
+  const files = authored ? all.filter(file => authored.has(file.path) || Boolean(file.previousPath && authored.has(file.previousPath))) : all
+  return { files, filtered: files.length < all.length }
+}
+
 /** Read an immutable comparison without generating or sending the patch. */
 export async function summarizeTurnFiles(path: string, turn: Pick<WorkspaceReviewTurn, 'before' | 'after'>): Promise<TurnFileSummary | null> {
-  if (!commitId.test(turn.before) || !commitId.test(turn.after)) return null
-  const files = await readFileChanges(path, [turn.before, turn.after], true)
-  if (!files) return null
+  const review = await readTurnFileChanges(path, turn.before, turn.after)
+  if (!review) return null
+  const { files } = review
   return {
     total: files.length,
     insertions: files.reduce((total, file) => total + file.insertions, 0),
@@ -262,12 +278,43 @@ export async function summarizeTurnFiles(path: string, turn: Pick<WorkspaceRevie
   }
 }
 
-async function readWorkspaceDiff(workspacePath: string, scope: WorkspaceDiff['scope'], range: string[], againstTree: boolean, comparisonLabel?: string): Promise<WorkspaceDiff> {
+async function readPatch(path: string, range: string[], selected?: FileChange[]) {
+  const args = ['-c', 'diff.suppressBlankEmpty=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index',
+    '--src-prefix=a/', '--dst-prefix=b/', '--output-indicator-old=-', '--output-indicator-new=+', '--output-indicator-context= ', ...range]
+  if (!selected) return git(path, args)
+  let out = ''
+  let paths = new Set<string>()
+  let size = 0
+  const flush = async () => {
+    if (!paths.size) return true
+    const patch = await git(path, [...args, '--', ...paths])
+    out += patch.out
+    paths = new Set()
+    size = 0
+    return patch.ok
+  }
+  for (const file of selected) {
+    // Force a glob match by escaping the first character, then quote the
+    // remaining metacharacters. Git's literal pathspec also matches descendants.
+    const names = [file.path, ...(file.previousPath ? [file.previousPath] : [])]
+      .map(name => ':(top,glob)' + name.replace(/^.|[\\[*?]/gsu, character => `\\${character}`))
+    const bytes = names.reduce((total, name) => total + Buffer.byteLength(name) + 1, 0)
+    if (paths.size && size + bytes > 12 * 1024) {
+      if (!await flush()) return { ok: false, out: '' }
+      if (out.length > MAX_PATCH_BYTES) return { ok: true, out }
+    }
+    for (const name of names) paths.add(name)
+    size += bytes
+  }
+  const ok = await flush()
+  return { ok, out }
+}
+
+async function readWorkspaceDiff(workspacePath: string, scope: WorkspaceDiff['scope'], range: string[], againstTree: boolean, comparisonLabel?: string,
+  recorded?: { files: FileChange[], filtered: boolean }): Promise<WorkspaceDiff> {
   const [files, patch] = await Promise.all([
-    readFileChanges(workspacePath, range, againstTree),
-    git(workspacePath, ['-c', 'diff.suppressBlankEmpty=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index',
-      '--src-prefix=a/', '--dst-prefix=b/', '--output-indicator-old=-',
-      '--output-indicator-new=+', '--output-indicator-context= ', ...range]),
+    recorded?.files ?? readFileChanges(workspacePath, range, againstTree),
+    readPatch(workspacePath, range, recorded?.filtered ? recorded.files : undefined),
   ])
 
   if (!files || (againstTree && !patch.ok))
@@ -415,6 +462,7 @@ export async function reviewWorkspaceDiff(
   let tip: string | undefined
   let label: string | undefined
   let comparisonTarget: string | undefined
+  let recorded: NonNullable<Awaited<ReturnType<typeof readTurnFileChanges>>> | undefined
   if (mode === 'branch') {
     const branch = await reviewBase(path, head, target)
     if (!branch) return unavailable('This branch base is unavailable or has no common history.')
@@ -441,6 +489,9 @@ export async function reviewWorkspaceDiff(
     if (!turn) return unavailable('This turn has no recorded Git comparison.')
     const [before, after] = await Promise.all([resolveCommit(path, turn.before), resolveCommit(path, turn.after)])
     if (!before || !after) return unavailable('The checkpoints for this turn are unavailable.')
+    const review = await readTurnFileChanges(path, before, after)
+    if (!review) return unavailable('Could not read this Git comparison.')
+    recorded = review
     base = before
     tip = after
     label = String(turn.number)
@@ -449,12 +500,13 @@ export async function reviewWorkspaceDiff(
 
   const workingState = tip ? '' : await reviewWorkingState(path)
   if (workingState === null) return unavailable('Could not check the working tree for changes.')
-  const revision = Bun.hash(JSON.stringify([path, mode, label, comparisonTarget, base, tip ?? head, workingState])).toString(36)
+  const revision = Bun.hash(JSON.stringify([path, mode, label, comparisonTarget, base, tip ?? head, workingState,
+    recorded?.filtered ? recorded.files : null])).toString(36)
   if (revision === knownRevision) return null
   // Branch and uncommitted review both include untracked files. The existing
   // checkpoint mechanism uses a temporary index and leaves the real one alone.
   const current = tip ?? await snapshotTree(path)
   if (!current) return unavailable('Could not read the current working tree.')
-  const diff = await readWorkspaceDiff(path, scope, [base, current], true, label)
+  const diff = await readWorkspaceDiff(path, scope, [base, current], true, label, recorded)
   return diff.error ? diff : { ...diff, revision, ...(comparisonTarget && { comparisonTarget }) }
 }
