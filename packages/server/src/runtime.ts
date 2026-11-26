@@ -40,6 +40,7 @@ export interface RuntimeOptions {
   composerAttachmentPath?: (attachment: ComposerAttachment) => string
   /** Resolve a session's workspace path. Defaults to the projection. */
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
+  previewOwner?: (sessionId: number) => string
   combinedWorktreesDirectory: string
   now?: () => number
   /** Auto-approve tool calls. Off by default; see PLAN.md §12. */
@@ -258,7 +259,7 @@ export class ProviderRuntime {
     }
 
     if (!this.options.engine.current.sessions.has(sessionId)) return null
-    const instance = await driver.create({ ...launch, mcpServers })
+    const instance = await driver.create({ ...launch, mcpServers, previewOwner: this.options.previewOwner?.(sessionId) })
     if (!this.options.engine.current.sessions.has(sessionId)) {
       await instance.stop().catch(() => {})
       return null

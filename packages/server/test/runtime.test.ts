@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { decode, encode } from '@harness/contract'
-import { ChatGptCredentialStore } from '@harness/drivers'
+import { ChatGptCredentialStore, CodexDriver, PREVIEW_THREAD_ENV } from '@harness/drivers'
 import { derivedId } from '@harness/engine'
 import { addSavedProvider, removeSavedProvider } from '../src/provider-instances'
 import { serve } from '../src/server'
@@ -176,6 +176,102 @@ afterEach(() => {
   try { harness.stop() }
   catch { /* already stopped */ }
   rmSync(dir, { recursive: true, force: true })
+})
+
+describe('provider preview discovery', () => {
+  it.skipIf(process.platform !== 'darwin' && (process.platform !== 'linux' || (!Bun.which('ss') && !Bun.which('lsof'))))(
+    'lists only the thread’s development listener after its Codex turn settles',
+    async () => {
+      const binaryPath = join(dir, 'codex-preview-fixture')
+      writeFileSync(join(dir, 'listener.js'), "const site = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('Fixture site') }); console.log(site.url.href)\n")
+      writeFileSync(binaryPath, `#!${process.execPath}
+import { appendFileSync } from 'node:fs'
+import { createInterface } from 'node:readline'
+const threadId = 'native-preview'
+const marker = '${PREVIEW_THREAD_ENV}'
+let owner
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined) continue
+  const respond = result => console.log(JSON.stringify({ id, result }))
+  if (method === 'thread/start') {
+    owner = params.config?.['shell_environment_policy.set.' + marker]
+    if (!owner || process.env[marker]) process.exit(1)
+    respond({ thread: { id: threadId } })
+  }
+  else if (method === 'turn/start') {
+    const urls = {}
+    for (const [mode, args, env] of [
+      ['owned', [], { ...process.env, [marker]: owner }],
+      ['debugger', ['--remote-debugging-port=0'], { ...process.env, [marker]: owner }],
+      ['argvOnly', [marker + '=' + owner], process.env],
+    ]) {
+      const child = Bun.spawn([process.execPath, 'listener.js', ...args], { stdout: 'pipe', env })
+      appendFileSync('fixture-pids', child.pid + '\\n')
+      for await (const chunk of child.stdout) {
+        urls[mode] = new TextDecoder().decode(chunk).trim()
+        break
+      }
+    }
+    await Bun.write('fixture-sites.json', JSON.stringify(urls))
+    const turnId = 'native-preview-turn'
+    respond({ turn: { id: turnId } })
+    console.log(JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } }))
+  }
+  else respond({})
+}
+`, { mode: 0o755 })
+      let owner: string | undefined
+      harness = await serve({
+        port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => ({
+          ...CodexDriver,
+          async probe() { return { status: 'ready' } },
+          create(config) {
+            owner = config.previewOwner
+            return CodexDriver.create({ ...config, binaryPath })
+          },
+        }),
+      })
+      const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      const send = (id: string, command: Command) =>
+        client.send({ t: 'dispatch', envelope: { id, at: 5, command } })
+      const discover = (id: number) => fetch(`http://127.0.0.1:${port}/s/${id}/preview-servers`).then(response => response.json())
+      const fixturePids = () => existsSync(join(dir, 'fixture-pids'))
+        ? readFileSync(join(dir, 'fixture-pids'), 'utf8').trim().split('\n').filter(Boolean).map(Number)
+        : []
+      try {
+        const { sessionId } = await bootstrap(client, dir, false, undefined, 'codex')
+        send('other-thread', { type: 'session.create', driverKind: 'codex', workspaceId: derivedId('c_w') })
+        expect(await client.waitForDispatch('other-thread')).toMatchObject({ t: 'dispatched' })
+        send('start-development-server', { type: 'session.turn.start', sessionId, text: 'Start a local fixture site.' })
+        expect(await client.waitFor('turn.completed')).toBeTruthy()
+        expect(owner).toMatch(/^[a-f0-9]{64}$/u)
+        expect(JSON.stringify(client.events)).not.toContain(owner!)
+        const sites = await Bun.file(join(dir, 'fixture-sites.json')).json() as Record<string, string>
+        expect(sites).toHaveProperty('argvOnly', expect.stringContaining('http://127.0.0.1:'))
+        expect(await (await fetch(sites.owned!)).text()).toBe('Fixture site')
+        const [sibling, source] = await Promise.all([discover(derivedId('other-thread')), discover(sessionId)])
+        expect(sibling).toEqual({ status: 'ready', servers: [] })
+        expect(source).toEqual({ status: 'ready', servers: [{ url: sites.owned, label: expect.any(String) }] })
+        process.kill(fixturePids()[0]!)
+        const deadline = Date.now() + 2500
+        let stopped = await discover(sessionId)
+        while (stopped.servers.length && Date.now() < deadline) {
+          await Bun.sleep(50)
+          stopped = await discover(sessionId)
+        }
+        expect(stopped).toEqual({ status: 'ready', servers: [] })
+      }
+      finally {
+        client.close()
+        for (const pid of fixturePids()) {
+          try { process.kill(pid) }
+          catch { /* This listener has already exited. */ }
+        }
+      }
+    },
+    12_000,
+  )
 })
 
 describe('composer attachments', () => {

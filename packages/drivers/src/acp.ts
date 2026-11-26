@@ -28,6 +28,7 @@ import { probeBinary, runQuiet } from './cli-driver'
 import { createLineReader } from './codex'
 import { EventQueue } from './event-queue'
 import { acpInputForm } from './input-questions'
+import { PREVIEW_THREAD_ENV } from './preview-owner'
 
 /** JSON-RPC frames, only as much of them as this driver reads. */
 interface Frame {
@@ -240,7 +241,11 @@ class AcpInstance implements ProviderInstance {
     const child = spawn(this.binary, this.args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.config.workspacePath,
-      env: this.config.home ? { ...process.env, HOME: this.config.home } : process.env,
+      env: {
+        ...process.env,
+        ...(this.config.home ? { HOME: this.config.home } : {}),
+        ...(this.config.previewOwner ? { [PREVIEW_THREAD_ENV]: this.config.previewOwner } : {}),
+      },
     }) as ChildProcessWithoutNullStreams
     this.child = child
 

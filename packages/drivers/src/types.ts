@@ -148,6 +148,8 @@ export type ResolvedMcpServer =
 export interface DriverConfig {
   /** Absolute path the agent runs against. */
   workspacePath: string
+  /** Host-assigned tag for local listeners started by this thread. */
+  previewOwner?: string
   /** Provider account directory. Claude uses CLAUDE_CONFIG_DIR and keeps the host HOME. */
   home?: string
   binaryPath?: string

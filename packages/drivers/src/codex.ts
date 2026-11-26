@@ -28,6 +28,7 @@ import { EventQueue } from './event-queue'
 import { toolInputQuestions } from './input-questions'
 import { prepareMcpConsent } from './mcp-consent'
 import type { McpConsentResponse } from './mcp-consent'
+import { PREVIEW_THREAD_ENV } from './preview-owner'
 
 /** JSON-RPC frames, only as much of them as this driver reads. */
 interface Frame {
@@ -182,6 +183,11 @@ export function readableError(message: unknown): string {
   }
 }
 
+function previewThreadConfig(config: DriverConfig): Record<string, unknown> {
+  // Scope ownership to commands run by the thread, through Codex's shell policy.
+  return config.previewOwner ? { config: { [`shell_environment_policy.set.${PREVIEW_THREAD_ENV}`]: config.previewOwner } } : {}
+}
+
 /**
  * Parameters for `thread/start`.
  *
@@ -200,6 +206,7 @@ export function threadStartParams(config: DriverConfig): Record<string, unknown>
     approvalPolicy: config.autoApprove ? 'never' : 'untrusted',
     sandbox: config.autoApprove ? 'workspace-write' : 'read-only',
     ...(config.model ? { model: config.model } : {}),
+    ...previewThreadConfig(config),
   }
 }
 
@@ -631,7 +638,7 @@ class CodexInstance implements ProviderInstance {
     // continues the conversation instead of starting a stranger.
     if (input.providerSessionId && !this.threadId) {
       const threadId = input.providerSessionId
-      const resume = () => this.request('thread/resume', { threadId, excludeTurns: true }, 15_000)
+      const resume = () => this.request('thread/resume', { threadId, excludeTurns: true, ...previewThreadConfig(this.config) }, 15_000)
       let resumed = await resume()
       if (queue.closed || this.queue !== queue) return
       if (/\bsession \S+ is archived\b|\bcodex unarchive\b/i.test(resumed.error?.message ?? '')) {
@@ -773,7 +780,7 @@ class CodexInstance implements ProviderInstance {
       if (head !== input.newestTurnId || index < 0 || before[index + 1]?.id !== retained)
         return { outcome: 'unchanged', message: 'Codex history changed. Reopen this thread and choose its current edit point.' }
       if (!this.threadId || thread.status?.type === 'notLoaded') {
-        const resumed = await this.request('thread/resume', { threadId, excludeTurns: true }, 15_000)
+        const resumed = await this.request('thread/resume', { threadId, excludeTurns: true, ...previewThreadConfig(this.config) }, 15_000)
         if (resumed.error || resumed.result?.thread?.id !== threadId)
           return { outcome: 'unchanged', message: 'Codex could not open the selected conversation.' }
       }
