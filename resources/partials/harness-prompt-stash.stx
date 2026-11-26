@@ -3,7 +3,7 @@
     <header class="flex gap-2 items-center justify-between px-3 py-2 border-b border-black/10 dark:border-white/15">
       <h2 id="prompt-stash-title" class="font-medium text-sm">Stashed prompts</h2>
       <div class="flex gap-1 items-center">
-        <button type="button" data-stash-current @click="stashCurrentPrompt" :disabled="!hasComposerMessage() || startPending()" class="px-2 min-h-8 font-medium text-[13px] hover:bg-black/5 dark:hover:bg-white/10 rounded">Stash draft</button>
+        <button type="button" data-stash-current @click="stashCurrentPrompt" :disabled="!hasComposerMessage() || startPending()" class="px-2 min-h-8 font-medium text-[13px] hover:bg-black/5 dark:hover:bg-white/10 rounded disabled:opacity-50">Stash draft</button>
         <button type="button" autofocus @click="closePromptStash" aria-label="Close stash" class="shrink-0 harness-icon-button">
           <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
         </button>

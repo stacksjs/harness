@@ -1650,6 +1650,9 @@ await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLB
 await recallEditor.press(stashChord)
 await stashDialog.waitFor()
 check('multiple saved prompts open the stash after reload', await stashDialog.locator('[data-stashed-prompt]').count() === 2)
+const stashDraftButton = stashDialog.getByRole('button', { name: 'Stash draft', exact: true })
+check('the empty composer clearly disables Stash draft', await stashDraftButton.isDisabled()
+  && await stashDraftButton.evaluate(button => Number(getComputedStyle(button).opacity) < 1))
 if (screenshotDir) {
   for (const [width, height] of workspaceViewports) {
     await projectAttachmentDraft.setViewportSize({ width, height })
@@ -1712,6 +1715,61 @@ check('a storage failure keeps both the draft and its uploaded file',
   await recallEditor.inputValue() === 'Restore an expired file'
   && await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').count() === 1)
 
+
+const stashRoute = '**/composer-attachments/stash/**'
+await projectAttachmentDraft.unroute(stashRoute)
+const stashWriter = await browserContext.newPage()
+try {
+  for (const operation of ['POST', 'PUT'] as const) {
+    const newerDraft = operation === 'POST' ? 'Keep the newer draft during stash save' : 'Keep the newer draft during stash restore'
+    const outcome = operation === 'POST' ? 'Your saved prompt is in the stash.' : 'Your saved prompt is still in the stash.'
+    await projectAttachmentDraft.reload()
+    await stashWriter.goto(projectAttachmentDraft.url())
+    const writerEditor = stashWriter.locator('[data-prompt]')
+    await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-open-stash]')?.disabled)
+    const resumeTransfer = Promise.withResolvers<void>()
+    await projectAttachmentDraft.route(stashRoute, async (route) => {
+      if (route.request().method() !== operation) return route.continue()
+      const response = await route.fetch()
+      await resumeTransfer.promise
+      await route.fulfill({ response })
+    })
+    try {
+      const requested = projectAttachmentDraft.waitForRequest(request => request.method() === operation
+        && request.url().includes('/composer-attachments/stash/'))
+      if (operation === 'POST') await recallEditor.press(stashChord)
+      else {
+        await stashLauncher.click()
+        await stashDialog.getByRole('button', { name: 'Restore Restore an expired file', exact: true }).click()
+      }
+      await requested
+      await writerEditor.fill(newerDraft)
+      resumeTransfer.resolve()
+      await (operation === 'POST' ? projectAttachmentDraft.locator('[data-prompt-stash-error]') : stashDialog)
+        .getByText(outcome, { exact: false }).waitFor()
+      if (operation === 'PUT') await capture('composer-prompt-stash-conflict', projectAttachmentDraft)
+      await stashWriter.reload()
+      await stashWriter.waitForFunction((expected) => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === expected, newerDraft)
+      check(`${operation === 'POST' ? 'saving' : 'restoring'} a stash keeps the newer draft, its ready file, and the stash entry`,
+        await stashWriter.locator('[data-composer-file][data-status="ready"]').count() === 1
+        && await projectAttachmentDraft.getByRole('button', { name: 'Stashed prompts (1)', exact: true, includeHidden: true }).count() === 1)
+    }
+    finally {
+      resumeTransfer.resolve()
+      await projectAttachmentDraft.unroute(stashRoute)
+    }
+  }
+}
+finally {
+  await stashWriter.close()
+}
+await projectAttachmentDraft.reload()
+await stashLauncher.click()
+await stashDialog.getByRole('button', { name: 'Restore Restore an expired file', exact: true }).click()
+await stashDialog.waitFor({ state: 'hidden' })
+check('reloading lets a conflicting stash restore append to the newer draft without duplicating its file',
+  await recallEditor.inputValue() === 'Keep the newer draft during stash restore\n\nRestore an expired file'
+  && await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').count() === 1)
 
 await projectAttachmentDraft.close()
 

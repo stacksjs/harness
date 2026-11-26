@@ -3447,6 +3447,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     stashCloseToEditor = false
   }
 
+  function readStashDraftSnapshot() {
+    const persisted = localStorage.getItem(promptDraftKey)
+    if (persisted !== null && persisted !== JSON.stringify(composerDraft()))
+      throw new Error('The draft changed in another tab. Reopen the thread to load it.')
+    return persisted
+  }
+
   async function stashCurrentPrompt() {
     const box = promptRef.current
     if (!box || box.form?.hidden || !promptStash || startPending() || editingFollowUp() || !hasComposerMessage()) return
@@ -3457,7 +3464,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     startPending.set(true)
     stashBusy.set(true)
     try {
+      const snapshot = readStashDraftSnapshot()
       stashEntries.set(await promptStash.save(text, files, upload))
+      if (localStorage.getItem(promptDraftKey) !== snapshot)
+        throw new Error('The draft changed in another tab. Your saved prompt is in the stash.')
       if (box.value !== text || composerDraft()?.upload?.draft !== upload?.draft) return
       localStorage.removeItem(promptDraftKey)
       box.value = ''
@@ -3488,12 +3498,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       stashError.set('The composer holds up to 100 attachments. Remove a file before restoring.')
       return
     }
-    const upload = composerDraft()?.upload ?? { scope: uploadScope, draft: composerDraftTools.newComposerDraftId() }
+    const existingUpload = composerDraft()?.upload
+    const upload = existingUpload ?? { scope: uploadScope, draft: composerDraftTools.newComposerDraftId() }
+    let unclaimedFiles
     stashError.set('')
     startPending.set(true)
     stashBusy.set(true)
     try {
+      const snapshot = readStashDraftSnapshot()
       const restored = await promptStash.restoreFiles(entry, upload)
+      if (!existingUpload) unclaimedFiles = restored
+      if (localStorage.getItem(promptDraftKey) !== snapshot)
+        throw new Error('The draft changed in another tab. Your saved prompt is still in the stash.')
       if (box.form?.hidden || !promptStash.entries().some(item => item.id === entry.id)) return
       const files = [...composerFiles(), ...restored.filter(file => !seen.has(file.id) && !seen.has(file.key))]
       const existing = box.value.trimEnd()
@@ -3501,6 +3517,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       const draft = { ...composerDraft(), text, files, ...(files.length ? { upload } : {}),
         start: text.length, end: text.length, discardedDraft: undefined, commandId: undefined }
       localStorage.setItem(promptDraftKey, JSON.stringify(draft))
+      unclaimedFiles = undefined
       composerDraft.set(draft)
       composerText.set(text)
       box.value = text
@@ -3516,6 +3533,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     catch (error) { stashError.set(error.message || 'Could not restore this prompt.') }
     finally {
+      if (unclaimedFiles) composerDraftTools.releaseComposerUploads(upload, unclaimedFiles)
       startPending.set(false)
       stashBusy.set(false)
     }
