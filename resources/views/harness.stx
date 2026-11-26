@@ -201,10 +201,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
     </div>
     <div data-navigation-footer>
-      <button type="button" data-account-button data-nav-settings @click="openSettings" :title="settingsShortcutTitle()" class="harness-nav-search">
+      <button type="button" data-account-button data-nav-settings @click="openSettings" :title="settingsShortcutTitle()" aria-label="Settings" class="harness-nav-search">
         <span class="inline-block size-4 i-hugeicons-settings-02" aria-hidden="true"></span>
         <span>Settings</span>
       </button>
+      <div data-navigation-undo>
+        @include('../partials/harness-thread-undo')
+      </div>
     </div>
     <p role="status" :text="threadOrderStatus()" class="sr-only"></p>
   </aside>
@@ -305,6 +308,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       </div>
     </header>
 
+    <div data-compact-thread-undo :hidden="sidebarOpen()">
+      @include('../partials/harness-thread-undo')
+    </div>
     <div data-workspace-content>
     <div data-workspace-lane @if(!activeSession)data-workspace-draft@endif :inert="workspaceActionsOpen()">
     {{--
@@ -1259,6 +1265,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const threadSnoozeMode = state('date')
   const threadActionBusy = state(false)
   const threadActionError = state('')
+  const threadUndo = useSessionStorage('harness.thread-undo.v1', null, { listenToStorageChanges: false })
+  const threadUndoBusy = state(false)
+  const threadUndoShortcutClaimed = state(true)
+  const threadUndoMessage = derived(() => {
+    const action = threadUndo()?.action
+    return ({ unpinned: 'Thread unpinned', settled: 'Thread settled', snoozed: 'Thread snoozed', archived: 'Thread archived' })[action] || ''
+  })
+  const threadUndoTimer = useInterval(() => {
+    if (threadUndo()?.expiresAt <= Date.now()) threadUndo.set(null)
+  }, 100)
+  effect(() => {
+    const offer = threadUndo()
+    if (!offer) threadUndoTimer.pause()
+    else if (!Number.isFinite(offer.expiresAt) || offer.expiresAt <= Date.now()) threadUndo.set(null)
+    else threadUndoTimer.resume()
+  })
   const threadTitleDraft = state('')
   const threadActionsDialog = useRef('threadActionsDialogBox')
   const threadActionsTrigger = useRef('threadActionsTriggerBox')
@@ -1356,7 +1378,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     arrangementError.set('')
     arrangementStatus.set('')
     try {
-      await sendCommand({ type: 'session.organize', sessionId: id, action: 'drop', ...intent })
+      await sendThreadOrganization({ sessionId: id, action: 'drop', ...intent })
       arrangementChoice.set(null)
       arrangementStatus.set('Thread position saved.')
     }
@@ -1439,13 +1461,52 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   useEventListener('resize', positionThreadActions)
 
+  async function sendThreadOrganization(command) {
+    const offer = await sendCommand({ ...command, type: 'session.organize' })
+    if (offer) {
+      const reopen = command.action === 'archive' && command.sessionId === sessionId
+      threadUndo.set({ ...offer, reopen, expiresAt: Date.now() + offer.remainingMs })
+      threadUndoShortcutClaimed.set(true)
+    }
+    else if (command.action !== 'rename') threadUndo.set(null)
+  }
+
+  async function undoThreadAction() {
+    const offer = threadUndo()
+    if (!offer || threadUndoBusy()) return
+    threadUndoBusy.set(true)
+    const arranged = threadArrangement.current?.open
+    try {
+      await sendCommand({ type: 'session.organize', sessionId: offer.sessionId, action: 'undo', sourceCommandId: offer.sourceCommandId })
+      if (threadUndo()?.sourceCommandId === offer.sourceCommandId) threadUndo.set(null)
+      if (offer.reopen) navigate(`/s/${offer.sessionId}`)
+      else if (arranged) {
+        arrangementStatus.set('Thread position restored.')
+        threadArrangement.current?.querySelector('[data-arrangement-done]')?.focus()
+      }
+      else refresh()
+    }
+    catch (error) {
+      if (threadUndo()?.sourceCommandId === offer.sourceCommandId) threadUndo.set(null)
+      if (arranged) arrangementError.set(error.message)
+      else stxAlert(error.message)
+    }
+    finally {
+      threadUndoBusy.set(false)
+    }
+  }
+
   async function organizeThread(action, fields = {}, target = sessionId) {
     if (!target || threadActionBusy()) return
     threadActionBusy.set(true)
     threadActionError.set('')
     try {
-      await sendCommand({ type: 'session.organize', sessionId: target, action, ...fields })
-      refresh()
+      await sendThreadOrganization({ sessionId: target, action, ...fields })
+      if (action === 'archive' && target === sessionId) {
+        if (activeScratchSession) startWithoutProject()
+        else navigate(`/?workspace=${activeWorkspaceId}`)
+      }
+      else refresh()
     }
     catch (error) {
       if (threadActionsDialog.current?.open) threadActionError.set(error.message)
@@ -2891,6 +2952,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const bindings = keybindingTable()?.bindings
     const canOperate = focused && sessionOnline() && !terminalBusy()
     const canSplit = focused && canSplitTerminal()
+    const undoShortcut = threadUndo() && threadUndoShortcutClaimed() && !focused ? keyboard?.craftShortcut(bindings?.['thread.undo']) : undefined
+    const threadUndoItem = { id: 'thread.undo', label: 'Undo Thread Action', shortcut: undoShortcut }
     const terminalItem = (id, enabled) => ({
       id,
       label: keybindingRow(id)?.label,
@@ -2917,7 +2980,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         ...(focused ? [terminalItem('terminal.close', canOperate)] : []),
       ] },
       { label: 'Edit', items: [
-        { id: 'undo', label: 'Undo', role: 'undo', shortcut: 'cmd+z' },
+        ...(undoShortcut === 'cmd+z' ? [threadUndoItem] : [
+          { id: 'undo', label: 'Undo', role: 'undo', shortcut: 'cmd+z' },
+          ...(undoShortcut ? [threadUndoItem] : []),
+        ]),
         { id: 'redo', label: 'Redo', role: 'redo', shortcut: 'cmd+shift+z' },
         { separator: true },
         { id: 'cut', label: 'Cut', role: 'cut', shortcut: 'cmd+x' },
@@ -2945,6 +3011,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (id === 'settings') openSettings()
     else if (id === 'new-session') openDraft(visibleProfile())
     else if (id === 'toggle-terminal') toggleTerminal()
+    else if (id === 'thread.undo' && threadUndo() && !threadUndoBlocked() && !profileModalOpen()) void undoThreadAction()
     else if (termOpen() && terminalInputFocused()) runTerminalShortcut(id)
   }, { target: window })
 
@@ -3725,7 +3792,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
     if (event.defaultPrevented) return
-    if (projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open || threadActionsDialog.current?.open) return
+    if (threadUndoBlocked()) return
+    const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
+    const editable = event.target?.closest?.('textarea, input, [contenteditable="true"]')
+    if (command === 'thread.undo' && threadUndo() && (!editable || threadUndoShortcutClaimed()) && !profileModalOpen()) {
+      event.preventDefault()
+      if (!event.repeat) void undoThreadAction()
+      return
+    }
+    if (threadUndo() && !['Alt', 'Control', 'Meta', 'Shift'].includes(event.key)) threadUndoShortcutClaimed.set(false)
+    if (arrangementOpen()) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.
@@ -3755,7 +3831,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     // A command whose precondition fails is left unhandled rather than
     // swallowed, so Cmd+F still reaches the browser's own find on a page with
     // no transcript.
-    const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
     if (command === 'transcript.find' && sessionId) {
       event.preventDefault()
       openTranscriptFind(event.target)
@@ -3780,6 +3855,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     event.preventDefault()
     toggleTerminal()
   }, { target: window })
+
+  useEventListener('input', () => {
+    if (threadUndo()) threadUndoShortcutClaimed.set(false)
+  }, { target: window })
+
+  function threadUndoBlocked() {
+    return projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open
+      || threadActionsDialog.current?.open
+  }
 
   function termKeydown(tab, event) {
     const command = matchedCommand(event, true)
@@ -3823,7 +3907,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         }
         threadOrderStatus.set('')
         try {
-          await sendCommand({ type: 'session.organize', sessionId, action: 'drop', ...intent })
+          await sendThreadOrganization({ sessionId, action: 'drop', ...intent })
           threadOrderStatus.set('Thread position saved.')
         }
         catch (error) { stxAlert(error.message) }

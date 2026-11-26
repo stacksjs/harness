@@ -42,6 +42,9 @@
       </template>
     </template>
   </div>
+  <div data-arrangement-undo>
+    @include('./harness-thread-undo')
+  </div>
   <div data-arrangement-preview hidden aria-hidden="true">
     <span data-arrangement-preview-title class="truncate"></span>
     <span data-arrangement-preview-action class="shrink-0 font-semibold text-xs"></span>

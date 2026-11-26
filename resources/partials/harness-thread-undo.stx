@@ -1,0 +1,4 @@
+<div data-thread-undo hidden :hidden="!threadUndoMessage()" class="flex gap-2 items-center justify-between text-[13px]">
+  <span role="status" :text="threadUndoMessage()"></span>
+  <button type="button" @click="undoThreadAction" :disabled="threadUndoBusy()" :aria-keyshortcuts="shortcutKeys('thread.undo')" class="px-2 min-h-8 font-semibold underline underline-offset-4 rounded-md">Undo</button>
+</div>

@@ -81,6 +81,12 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     chord: 'Mod+Alt+N',
   },
   {
+    id: 'thread.undo',
+    label: 'Undo thread action',
+    description: 'Restore the previous thread position while Undo is available.',
+    chord: 'Mod+Z',
+  },
+  {
     id: 'terminal.toggle',
     label: 'Toggle the terminal',
     description: 'Show or hide the docked workspace terminal.',
