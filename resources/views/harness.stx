@@ -205,7 +205,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <span class="inline-block size-4 i-hugeicons-settings-02" aria-hidden="true"></span>
         <span>Settings</span>
       </button>
-      <div data-navigation-undo>
+      <div data-navigation-undo :hidden="arrangementOpen()">
         @include('../partials/harness-thread-undo')
       </div>
     </div>
@@ -308,7 +308,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       </div>
     </header>
 
-    <div data-compact-thread-undo :hidden="sidebarOpen()">
+    <div data-compact-thread-undo :hidden="sidebarOpen() || arrangementOpen()">
       @include('../partials/harness-thread-undo')
     </div>
     <div data-workspace-content>
@@ -1265,12 +1265,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const threadSnoozeMode = state('date')
   const threadActionBusy = state(false)
   const threadActionError = state('')
-  const threadUndo = useSessionStorage('harness.thread-undo.v1', null, { listenToStorageChanges: false })
+  const threadUndo = useSessionStorage('harness.thread-undo.v2', null, { listenToStorageChanges: false })
+  const threadUndoTab = useSessionStorage('harness.thread-undo-tab.v1', '', { listenToStorageChanges: false })
   const threadUndoBusy = state(false)
   const threadUndoShortcutClaimed = state(true)
   const threadUndoMessage = derived(() => {
-    const action = threadUndo()?.action
-    return ({ unpinned: 'Thread unpinned', settled: 'Thread settled', snoozed: 'Thread snoozed', archived: 'Thread archived' })[action] || ''
+    const offer = threadUndo()
+    if (!offer) return ''
+    return offer.count > 1 ? `${offer.count} threads ${offer.action}` : `Thread ${offer.action}`
   })
   const threadUndoTimer = useInterval(() => {
     if (threadUndo()?.expiresAt <= Date.now()) threadUndo.set(null)
@@ -1461,14 +1463,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   useEventListener('resize', positionThreadActions)
 
+  function threadUndoScope() {
+    if (!threadUndoTab()) threadUndoTab.set(crypto.randomUUID?.() ?? newCommandId().replaceAll('_', '-'))
+    return threadUndoTab()
+  }
+
+  function storeThreadUndo(offer) {
+    threadUndo.set(offer ? { ...offer, expiresAt: Date.now() + offer.remainingMs } : null)
+  }
+
   async function sendThreadOrganization(command) {
-    const offer = await sendCommand({ ...command, type: 'session.organize' })
-    if (offer) {
-      const reopen = command.action === 'archive' && command.sessionId === sessionId
-      threadUndo.set({ ...offer, reopen, expiresAt: Date.now() + offer.remainingMs })
-      threadUndoShortcutClaimed.set(true)
-    }
-    else if (command.action !== 'rename') threadUndo.set(null)
+    const { threadUndo: offer } = await sendCommand({ ...command, type: 'session.organize', undoScope: threadUndoScope() })
+    if (offer && offer.sourceCommandId !== threadUndo()?.sourceCommandId) threadUndoShortcutClaimed.set(true)
+    storeThreadUndo(offer)
   }
 
   async function undoThreadAction() {
@@ -1477,11 +1484,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     threadUndoBusy.set(true)
     const arranged = threadArrangement.current?.open
     try {
-      await sendCommand({ type: 'session.organize', sessionId: offer.sessionId, action: 'undo', sourceCommandId: offer.sourceCommandId })
-      if (threadUndo()?.sourceCommandId === offer.sourceCommandId) threadUndo.set(null)
-      if (offer.reopen) navigate(`/s/${offer.sessionId}`)
+      const { threadUndo: nextOffer, undoResult } = await sendCommand({
+        type: 'session.organize', sessionId: offer.sessionId, action: 'undo',
+        sourceCommandId: offer.sourceCommandId, undoScope: threadUndoScope(),
+      })
+      if (!threadUndo() || threadUndo()?.sourceCommandId === offer.sourceCommandId) storeThreadUndo(nextOffer)
+      if (undoResult?.skipped) {
+        const message = undoResult.restored
+          ? `Restored ${undoResult.restored}. ${undoResult.skipped} could no longer be undone.`
+          : 'This action can no longer be undone.'
+        if (arranged) arrangementError.set(message)
+        else stxAlert(message)
+        if (!undoResult.restored) return
+      }
+      if (offer.action === 'archived' && undoResult?.sessionId) navigate(`/s/${undoResult.sessionId}`)
       else if (arranged) {
-        arrangementStatus.set('Thread position restored.')
+        arrangementStatus.set(undoResult?.restored > 1 ? `${undoResult.restored} thread positions restored.` : 'Thread position restored.')
         threadArrangement.current?.querySelector('[data-arrangement-done]')?.focus()
       }
       else refresh()

@@ -2035,6 +2035,21 @@ await arrangementUndo.getByRole('button', { name: 'Undo', exact: true }).click()
 await arrangementGrip.waitFor()
 check('phone Undo restores a settled pin without closing Arrange threads', harness.engine.current.sessions.get(steerSessionId)?.navigation?.pinnedOrder != null
   && await arrangement.isVisible())
+const arrangementOtherPin = arrangement.locator(`[data-section-id^="pinned-"] [data-arrangement-row][data-item-id="${sessionId}"]`)
+const groupedRanks = [steerSessionId, sessionId].map(id => harness.engine.current.sessions.get(id)?.navigation?.pinnedOrder)
+for (const row of [arrangementPin, arrangementOtherPin]) {
+  await row.locator('[data-arrangement-grip]').click()
+  await row.getByRole('button', { name: 'Settle', exact: true }).click()
+  await row.waitFor({ state: 'detached' })
+}
+await arrangementUndo.getByText('2 threads settled', { exact: true }).waitFor()
+await capture('thread-undo-grouped-phone')
+if (browserName === 'webkit') await pressChord('Meta+z')
+else await arrangementUndo.getByRole('button', { name: 'Undo', exact: true }).click()
+await arrangementPin.waitFor()
+await arrangementOtherPin.waitFor()
+check('one phone Undo restores both settled threads to their original ranks', [steerSessionId, sessionId]
+  .every((id, index) => harness.engine.current.sessions.get(id)?.navigation?.pinnedOrder === groupedRanks[index]))
 await beginArrangeDrop()
 await endArrangeDrop(false)
 await arrangementTouch?.detach()

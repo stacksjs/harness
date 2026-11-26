@@ -125,8 +125,8 @@ const RESPONSIVE_SHELL = `
 [data-navigation-footer] { display: flex; padding: 6px 8px max(6px, env(safe-area-inset-bottom)); border-block-start: 1px solid var(--workspace-line); }
 [data-navigation-undo] { flex: 1; min-width: 0; }
 [data-navigation-undo]:has([data-thread-undo][hidden]) { display: none; }
-[data-navigation-footer]:has([data-thread-undo]:not([hidden])) [data-nav-settings] { flex: 0 0 auto; }
-[data-navigation-footer]:has([data-thread-undo]:not([hidden])) [data-nav-settings] span:last-child { display: none; }
+[data-navigation-footer]:has([data-navigation-undo]:not([hidden]) [data-thread-undo]:not([hidden])) [data-nav-settings] { flex: 0 0 auto; }
+[data-navigation-footer]:has([data-navigation-undo]:not([hidden]) [data-thread-undo]:not([hidden])) [data-nav-settings] span:last-child { display: none; }
 [data-navigation-undo] [data-thread-undo]:not([hidden]) { min-height: 30px; padding: 0 0 0 4px; background: transparent; border: 0; }
 [data-navigation-undo] [data-thread-undo] button { min-height: 30px; }
 [data-compact-thread-undo] { display: none; }
