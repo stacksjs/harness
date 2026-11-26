@@ -55,6 +55,8 @@ export interface HostSettings {
   claudeIdleCompaction: ClaudeIdleCompaction
   /** Claude Code's own automatic compaction window, or null for its default. */
   claudeAutoCompactAfter: number | null
+  /** Null disables inactivity settlement on this host. */
+  autoSettleAfterDays: number | null
 }
 
 const DRIVER_KINDS: readonly DriverKind[] = ['claude', 'codex', 'cursor', 'opencode', 'grok']
@@ -66,6 +68,7 @@ export const defaultHostSettings: Readonly<HostSettings> = Object.freeze({
   terminalShell: 'system',
   claudeIdleCompaction: 'whenReturning',
   claudeAutoCompactAfter: null,
+  autoSettleAfterDays: 7,
 })
 
 /** A fresh, mutable copy of the defaults. */
@@ -97,6 +100,9 @@ export function acceptedSettings(changes: unknown): Partial<HostSettings> {
   const threshold = source.claudeAutoCompactAfter
   if (threshold === null || validClaudeAutoCompactAfter(threshold))
     accepted.claudeAutoCompactAfter = threshold
+  const days = source.autoSettleAfterDays
+  if (days === null || (typeof days === 'number' && days >= 1 && days <= 90))
+    accepted.autoSettleAfterDays = days
   return accepted
 }
 

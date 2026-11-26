@@ -12,6 +12,7 @@ import type { EventPayload, HarnessEvent } from '@harness/contract'
 import { Database } from 'bun:sqlite'
 import { GLOBAL_SESSION_ID } from '@harness/contract'
 import type { AppendableEvent, CommandIdentity, EngineStore } from './store'
+import { recordsThreadActivity } from './projections'
 
 interface EventRow {
   session_id: number | null
@@ -19,7 +20,10 @@ interface EventRow {
   payload: string
   command_id: string
   at: number | null
+  recorded_at: number | null
 }
+
+const eventColumns = "session_id, seq, payload, command_id, at, CAST(unixepoch(created_at) * 1000 AS INTEGER) AS recorded_at"
 
 /**
  * The engine uses the sentinel 0 for facts that belong to no session, because
@@ -37,12 +41,14 @@ function fromColumn(sessionId: number | null): number {
 }
 
 function fromRow(row: EventRow): HarnessEvent {
+  const payload = JSON.parse(row.payload) as EventPayload
   return {
     seq: row.seq,
     sessionId: fromColumn(row.session_id),
     commandId: row.command_id,
     at: row.at ?? 0,
-    payload: JSON.parse(row.payload) as EventPayload,
+    payload,
+    ...(recordsThreadActivity(payload) && { recordedAt: row.recorded_at }),
   }
 }
 
@@ -70,10 +76,11 @@ export class SqliteStore implements EngineStore {
     )
     const insert = this.db.query(
       `INSERT INTO events (session_id, turn_id, seq, type, payload, command_id, at, created_at, updated_at, uuid)
-      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime(?, 'unixepoch'), datetime('now'), lower(hex(randomblob(16))))`,
     )
 
     const out: HarnessEvent[] = []
+    const recordedSeconds = Math.floor(Date.now() / 1000)
 
     for (const event of events) {
       const column = toColumn(event.sessionId)
@@ -89,6 +96,7 @@ export class SqliteStore implements EngineStore {
         JSON.stringify(event.payload),
         event.commandId,
         event.at,
+        recordedSeconds,
       )
       out.push({
         seq,
@@ -96,6 +104,7 @@ export class SqliteStore implements EngineStore {
         commandId: event.commandId,
         at: event.at,
         payload: event.payload,
+        ...(recordsThreadActivity(event.payload) && { recordedAt: recordedSeconds * 1000 }),
       })
     }
 
@@ -105,7 +114,7 @@ export class SqliteStore implements EngineStore {
   async read(sessionId: number, sinceSeq = 0): Promise<HarnessEvent[]> {
     const rows = this.db
       .query<EventRow, [number | null, number]>(
-        'SELECT session_id, seq, payload, command_id, at FROM events WHERE session_id IS ? AND seq > ? ORDER BY seq ASC',
+        `SELECT ${eventColumns} FROM events WHERE session_id IS ? AND seq > ? ORDER BY seq ASC`,
       )
       .all(toColumn(sessionId), sinceSeq)
 
@@ -122,7 +131,7 @@ export class SqliteStore implements EngineStore {
   async readAll(): Promise<HarnessEvent[]> {
     const rows = this.db
       .query<EventRow, []>(
-        'SELECT session_id, seq, payload, command_id, at FROM events ORDER BY id ASC',
+        `SELECT ${eventColumns} FROM events ORDER BY id ASC`,
       )
       .all()
 
@@ -157,7 +166,7 @@ export class SqliteStore implements EngineStore {
     if (!receipt) return null
 
     return this.db.query<EventRow, [string]>(
-      'SELECT session_id, seq, payload, command_id, at FROM events WHERE command_id = ? ORDER BY id ASC',
+      `SELECT ${eventColumns} FROM events WHERE command_id = ? ORDER BY id ASC`,
     ).all(commandId).map(fromRow)
   }
 
