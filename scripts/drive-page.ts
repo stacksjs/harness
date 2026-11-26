@@ -1875,6 +1875,42 @@ await threadActions.getByRole('button', { name: 'Move up', exact: true }).click(
 await pinnedThreads.first().and(otherPin).waitFor()
 check('pinning and moving a thread changes durable sidebar order', true)
 
+const pinObserver = await browserContext.newPage()
+try {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await pinObserver.goto(`${baseUrl}/?workspace=${workspaceId}`)
+  const observerPins = pinObserver.locator('[data-pin-order-ready] [data-sidebar-item]')
+  await observerPins.nth(1).waitFor()
+  const reviewPin = pinnedThreads.getByText('Parity release review', { exact: true })
+  const source = await reviewPin.boundingBox()
+  const destination = await otherPin.boundingBox()
+  if (!source || !destination) throw new Error('Pinned drag rows are not visible')
+  const startPinDrag = async () => {
+    await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(destination.x + destination.width / 2, destination.y + 4, { steps: 8 })
+    await page.locator('[data-pin-insertion="before"]').waitFor()
+  }
+  await startPinDrag()
+  await capture('thread-pin-drag-desktop')
+  await page.keyboard.press('Escape')
+  await page.mouse.up()
+  check('Escape cancels pin dragging without opening the dragged thread', await pinnedThreads.first().getAttribute('href') === `/s/${sessionId}`
+    && new URL(page.url()).pathname === `/s/${sessionId}` && await page.locator('[data-pin-insertion]').count() === 0)
+  await observerPins.nth(1).focus()
+  await startPinDrag()
+  await page.mouse.up()
+  await pinnedThreads.first().getByText('Parity release review', { exact: true }).waitFor()
+  await observerPins.first().getByText('Parity release review', { exact: true }).waitFor()
+  check('a pinned drag saves the order for a second open client and preserves its focus', await observerPins.first().evaluate(el => el === document.activeElement)
+    && new URL(pinObserver.url()).pathname === '/' && new URL(page.url()).pathname === `/s/${sessionId}`)
+  await capture('thread-pins-reordered-desktop')
+  await pinObserver.reload()
+  await observerPins.first().getByText('Parity release review', { exact: true }).waitFor()
+  check('the dragged pin order survives a reload', true)
+}
+finally { await pinObserver.close() }
+
 await page.goto(`${baseUrl}/s/${steerSessionId}`)
 await page.setViewportSize({ width: 390, height: 844 })
 await threadActionsTrigger.click()

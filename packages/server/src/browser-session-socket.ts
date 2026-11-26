@@ -2,7 +2,7 @@ import { decode, encode } from '@harness/contract'
 
 interface SessionSocketOptions {
   url: string
-  sessionId: number
+  sessionId: number | null
   cursor: () => number
   onSocket: (socket: WebSocket | null) => void
   onOnline: (online: boolean) => void
@@ -25,7 +25,13 @@ export function createSessionSocket(options: SessionSocketOptions) {
     options.onSocket(current)
 
     current.addEventListener('open', () => {
-      if (!disposed) current.send(encode({ t: 'subscribe', sessionId: options.sessionId, sinceSeq: options.cursor() }))
+      if (disposed) return
+      if (options.sessionId !== null)
+        current.send(encode({ t: 'subscribe', sessionId: options.sessionId, sinceSeq: options.cursor() }))
+      else {
+        delay = 300
+        options.onOnline(true)
+      }
     })
     current.addEventListener('message', event => {
       if (disposed || socket !== current || !(event.data instanceof ArrayBuffer)) return

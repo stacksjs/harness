@@ -1,7 +1,7 @@
 export { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 export { CommandRejected, Engine } from './engine'
 export type { DispatchResult, EngineOptions, Reducer } from './engine'
-export { apply, emptyState, forkResponsePoint, isForkableResponse, isTurnActive, providerConversation, replay } from './projections'
+export { apply, emptyState, forkResponsePoint, isForkableResponse, isTurnActive, isVisiblePin, profilePinnedThreads, providerConversation, replay } from './projections'
 export type { HarnessState, ProfileState, SessionState, TurnState, WorkspaceState } from './projections'
 export { derivedId, InvalidCommand, reduce } from './reducer'
 export { MemoryStore } from './store'

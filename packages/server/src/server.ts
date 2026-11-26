@@ -18,7 +18,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState } from '@harness/engine'
-import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
+import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff, workspaceDiffRevision } from './diff'
@@ -93,6 +93,7 @@ interface SocketData {
    * rather than re-sending a session's whole log.
    */
   cursors: Map<number, number>
+  pinProfileId?: number
 }
 
 type HarnessSocket = ServerWebSocket<SocketData>
@@ -102,6 +103,7 @@ type ClientFrame =
   | { t: 'dispatch', envelope: CommandEnvelope }
   | { t: 'subscribe', sessionId: number, sinceSeq?: number }
   | { t: 'unsubscribe', sessionId: number }
+  | { t: 'watch-pins', profileId: number }
   | { t: 'ping' }
   | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number }
   | { t: 'term-input', termId: number, data: string }
@@ -477,6 +479,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const renderCache = new Map<string, string>()
   const RENDER_CACHE_CAP = 16
 
+  function pinSnapshot(profileId: number) {
+    return { t: 'pin-order', profileId, sessionIds: profilePinnedThreads(engine.current, profileId).filter(isVisiblePin).map(session => session.id) }
+  }
+
   /**
    * Push events to everyone subscribed to their session.
    *
@@ -485,6 +491,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    */
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
     if (events.length > 0) stateRev++
+    const pinProfiles = new Set<number>()
     for (const event of events) {
       if (event.payload.type === 'profile.deleted')
         terminals.prune(terminalScopeExists)
@@ -506,8 +513,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }
       }
 
-      if (event.payload.type === 'session.navigation-changed' && 'snoozedUntil' in event.payload.changes)
-        scheduleThreadWake()
+      if (event.payload.type === 'session.navigation-changed') {
+        const changes = event.payload.changes
+        if ('snoozedUntil' in changes) scheduleThreadWake()
+        if ('pinnedOrder' in changes || 'archivedAt' in changes || 'snoozedUntil' in changes) {
+          const session = engine.current.sessions.get(event.sessionId)
+          const profile = session && engine.current.workspaces.get(session.workspaceId)?.profileId
+          if (profile !== undefined) pinProfiles.add(profile)
+        }
+      }
 
       for (const socket of sockets) {
         if (event.sessionId !== 0 && !socket.data.subscriptions.has(event.sessionId)) continue
@@ -521,6 +535,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         send(socket, { t: 'event', event })
         socket.data.cursors.set(event.sessionId, event.seq)
       }
+    }
+    for (const profileId of pinProfiles) {
+      const watchers = [...sockets].filter(socket => socket.data.pinProfileId === profileId)
+      if (!watchers.length) continue
+      const snapshot = pinSnapshot(profileId)
+      for (const socket of watchers) send(socket, snapshot)
     }
   }
 
@@ -765,6 +785,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     switch (frame?.t) {
       case 'ping':
         send(socket, { t: 'pong' })
+        return
+
+      case 'watch-pins':
+        socket.data.pinProfileId = engine.current.profiles.has(frame.profileId) ? frame.profileId : undefined
+        if (socket.data.pinProfileId !== undefined) send(socket, pinSnapshot(socket.data.pinProfileId))
         return
 
       case 'term-open': {

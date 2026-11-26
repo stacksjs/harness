@@ -230,6 +230,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <span>Settings</span>
       </button>
     </div>
+    <p role="status" :text="pinOrderStatus()" class="sr-only"></p>
   </aside>
   <button type="button" data-sidebar-scrim hidden :hidden="!sidebarOpen()" @click="closeSidebar" aria-label="Close navigation"></button>
   <div
@@ -2052,6 +2053,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // Set by the transcript's socket once it opens, so a sidebar command reuses
   // it rather than opening a second connection to the same server.
   let liveSocket = null
+  let watchSidebarPins = () => {}
+  const pinOrderStatus = state('')
   let disconnectLiveSession = () => {}
   let reconnectLiveSession = () => {}
   onUnmounted(() => disconnectLiveSession())
@@ -2916,6 +2919,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const id = event.detail?.id
     if (!id) return
     visibleProfile.set(id)
+    watchSidebarPins()
     // Repaint first: a swipe should feel like the window changed colour with
     // it, not after a round trip.
     paintWindow(id)
@@ -3721,7 +3725,41 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createPinnedSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
+    const sidebar = sidebarRef.current
+    const pins = sidebar && createPinnedSidebar({
+      root: sidebar,
+      async reorder(sessionId, targetSessionId, placement) {
+        pinOrderStatus.set('')
+        try {
+          await sendCommand({ type: 'session.organize', sessionId, action: 'reorder-pin', targetSessionId, placement })
+          pinOrderStatus.set('Pinned thread order saved.')
+        }
+        catch (error) { stxAlert(error.message) }
+      },
+    })
+    const watchPins = (connection) => {
+      watchSidebarPins = () => {
+        const profileId = Number(visibleProfile())
+        if (profileId) connection.send({ t: 'watch-pins', profileId })
+      }
+    }
+    if (!sessionId) {
+      const connection = createSessionSocket({
+        url: serverUrl, sessionId: null, cursor: () => 0,
+        onSocket: socket => { liveSocket = socket },
+        onFrame: frame => pins?.receive(frame),
+        onOnline: online => { if (online) watchSidebarPins() },
+      })
+      watchPins(connection)
+      reconnectLiveSession = connection.open
+      disconnectLiveSession = () => {
+        pins?.dispose()
+        connection.dispose()
+      }
+      connection.open()
+      return
+    }
     changesWatcher.set(watchWorkspaceChanges)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
@@ -3794,6 +3832,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     terminalController.set(terminal)
 
     function onMessage(frame) {
+      if (pins?.receive(frame)) return
       if (frame && terminal.receive(frame)) return
       if (frame?.t !== 'event') return
       if (frame.event.sessionId === 0 && frame.event.payload.type === 'profile.claude-compaction.updated') {
@@ -4015,15 +4054,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         sessionOnline.set(online)
         sessionConnecting.set(false)
         if (online) {
+          watchSidebarPins()
           void followUpActions()?.flush()
           if (termOpen()) requestAnimationFrame(showTerminalProcess)
         }
         else terminal.onOffline()
       },
     })
+    watchPins(connection)
     sendFrame = connection.send
     reconnectLiveSession = connection.open
     disconnectLiveSession = () => {
+      pins?.dispose()
       followUpActions()?.dispose()
       terminal.dispose()
       connection.dispose()
@@ -4031,5 +4073,5 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     connection.open()
   }
 
-  if (sessionId && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
+  if ((sessionId || activeProfile) && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
 </script>

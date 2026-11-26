@@ -10,6 +10,7 @@ export type ThreadOrganizationAction =
   | { action: 'rename', title: string }
   | { action: 'snooze', until: number }
   | { action: 'move-pin', direction: 'up' | 'down' }
+  | { action: 'reorder-pin', targetSessionId: number, placement: 'before' | 'after' }
   | { action: 'pin' | 'unpin' | 'settle' | 'unsettle' | 'archive' | 'restore' | 'wake' }
 
 export const maximumThreadSnooze = 366 * 24 * 60 * 60 * 1000

@@ -7,8 +7,8 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
-import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, pinOrder, settingsDelta, validInputAnswers } from '@harness/contract'
-import { forkResponsePoint, isTurnActive, modelFavoriteIndex, providerConversation } from './projections'
+import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, validInputAnswers } from '@harness/contract'
+import { forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -110,19 +110,32 @@ function organizeThread(state: HarnessState, command: Extract<Command, { type: '
       return title === session.navigation?.title ? [] : [change({ title })]
     }
     case 'pin':
+    case 'reorder-pin':
     case 'move-pin': {
       if (settledAt || snoozedUntil) throw new InvalidCommand('Bring this thread back to active work before pinning it.')
       const profileId = state.workspaces.get(session.workspaceId)?.profileId
-      const pins = [...state.sessions.values()].filter(candidate => candidate.navigation?.pinnedOrder != null
-        && state.workspaces.get(candidate.workspaceId)?.profileId === profileId)
+      const pins = profilePinnedThreads(state, profileId)
       if (command.action === 'pin') {
         if (pinnedOrder != null) return []
-        const lastPin = pins.reduce((order, pin) => Math.max(order, pin.navigation!.pinnedOrder!), 0)
+        const lastPin = pins.at(-1)?.navigation?.pinnedOrder ?? 0
         return [change({ pinnedOrder: lastPin + 1 })]
+      }
+      const visiblePins = pins.filter(isVisiblePin)
+      if (command.action === 'reorder-pin') {
+        const { targetSessionId, placement } = command
+        const target = visiblePins.find(candidate => candidate.id === targetSessionId)
+        if (!target || pinnedOrder == null || (placement !== 'before' && placement !== 'after'))
+          throw new InvalidCommand('Choose a visible pin in this profile.')
+        if (target === session) return []
+        const ordered = visiblePins.filter(candidate => candidate !== session)
+        ordered.splice(ordered.indexOf(target) + (placement === 'after' ? 1 : 0), 0, session)
+        return ordered.flatMap((pin, index) => {
+          const order = visiblePins[index]!.navigation!.pinnedOrder!
+          return pin.navigation!.pinnedOrder === order ? [] : [change({ pinnedOrder: order }, pin.id)]
+        })
       }
       if (pinnedOrder == null || !('direction' in command) || (command.direction !== 'up' && command.direction !== 'down'))
         throw new InvalidCommand('Choose a direction for a pinned thread.')
-      const visiblePins = pins.filter(candidate => !candidate.navigation?.archivedAt && !candidate.navigation?.snoozedUntil).sort(pinOrder)
       const index = visiblePins.findIndex(candidate => candidate.id === session.id)
       const neighbor = visiblePins[index + (command.direction === 'up' ? -1 : 1)]
       return neighbor ? [change({ pinnedOrder: neighbor.navigation!.pinnedOrder! }), change({ pinnedOrder }, neighbor.id)] : []

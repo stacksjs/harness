@@ -8,7 +8,7 @@
 
 import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation } from '@harness/contract'
 
-import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, threadDisplayTitle } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 
 export interface InputRequestState {
   attachments?: QuestionAttachment[]
@@ -207,6 +207,15 @@ export interface HarnessState {
   devices: Map<string, DeviceState>
   /** Host-wide preferences, at their defaults until something changes one. */
   settings: HostSettings
+}
+
+export function profilePinnedThreads(state: HarnessState, profileId: number | undefined): SessionState[] {
+  return [...state.sessions.values()].filter(session => session.navigation?.pinnedOrder != null
+    && state.workspaces.get(session.workspaceId)?.profileId === profileId).sort(pinOrder)
+}
+
+export function isVisiblePin(session: SessionState): boolean {
+  return !session.navigation?.archivedAt && !session.navigation?.snoozedUntil
 }
 
 export function emptyState(): HarnessState {

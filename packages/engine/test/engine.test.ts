@@ -221,6 +221,40 @@ describe('Engine — the M1 exit criterion', () => {
 })
 
 describe('Thread navigation', () => {
+  it('moves a pinned thread past multiple rows and preserves the saved order after replay', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const otherWorkspace = await withWorkspace(engine)
+    async function pin(workspaceId: number): Promise<number> {
+      const create = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+      const sessionId = derivedId(create.id)
+      await engine.dispatch(create)
+      await engine.dispatch(envelope({ type: 'session.organize', sessionId, action: 'pin' }))
+      return sessionId
+    }
+    const first = await pin(workspaceId)
+    const hidden = await pin(workspaceId)
+    const third = await pin(workspaceId)
+    const last = await pin(workspaceId)
+    const foreign = await pin(otherWorkspace.workspaceId)
+    await engine.dispatch(envelope({ type: 'session.organize', sessionId: hidden, action: 'archive' }))
+    const move = (targetSessionId: number) => envelope({
+      type: 'session.organize', sessionId: last, action: 'reorder-pin', targetSessionId, placement: 'before',
+    })
+    await expect(engine.dispatch(move(foreign))).rejects.toThrow('Choose a visible pin in this profile')
+    await expect(engine.dispatch(move(hidden))).rejects.toThrow('Choose a visible pin in this profile')
+    const command = move(first)
+    const result = await engine.dispatch(command)
+    expect(result.events).toHaveLength(3)
+    expect((await engine.dispatch(command)).replayed).toBe(true)
+    expect((await engine.dispatch(move(first))).events).toHaveLength(0)
+
+    const restarted = new Engine({ store, reducer: reduce })
+    await restarted.hydrate()
+    expect([last, hidden, first, third, foreign].map(id => restarted.current.sessions.get(id)?.navigation?.pinnedOrder))
+      .toEqual([1, 2, 3, 4, 1])
+  })
+
   it('keeps pin order, archives and restores a seen thread across replay', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)

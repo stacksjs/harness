@@ -133,6 +133,15 @@ const RESPONSIVE_SHELL = `
 [data-brand-bar] [data-sidebar-close] { order: -1; }
 [data-navigation-content] [data-sidebar-item] { min-height: 29px; }
 [data-navigation-content] [data-sidebar-row][data-collapsed] { visibility: hidden; }
+[data-pin-order-ready]:has([data-sidebar-row] + [data-sidebar-row]) a[data-sidebar-item] { cursor: grab; }
+[data-pin-dragging] a[data-sidebar-item] { opacity: .52; cursor: grabbing; }
+[data-pin-insertion] { position: relative; }
+[data-pin-insertion]::after {
+  content: ''; position: absolute; inset-inline: 4px; height: 2px; z-index: 1;
+  background: var(--workspace-accent); border-radius: 2px; pointer-events: none;
+}
+[data-pin-insertion="before"]::after { top: 0; }
+[data-pin-insertion="after"]::after { bottom: 0; }
 @media (prefers-reduced-motion: reduce) {
   [data-navigation-content] :is([data-sidebar-row], [data-sidebar-item], [data-sidebar-section-chevron]) { transition: none; }
 }
