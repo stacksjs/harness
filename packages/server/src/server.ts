@@ -29,8 +29,9 @@ import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
+import type { ProjectScript } from './project-scripts'
 import { ProjectScripts, respondProjectScripts, scriptIdPattern } from './project-scripts'
-import type { ProjectSetupScope } from './project-setup'
+import type { ProjectSetupScope, SettlementReceipt } from './project-setup'
 import { ProjectSetup } from './project-setup'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
@@ -185,6 +186,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const attachments = new QuestionAttachments(resolve(databasePath + '.harness-attachments'))
   const composerAttachments = new ComposerAttachments(resolve(databasePath + '.harness-composer-files'), () => engine.current)
   const attachmentOwners = new WeakMap<CommandEnvelope, string>()
+  const hostSettlements = new WeakSet<CommandEnvelope>()
   const deletionWorktrees = new WeakMap<CommandEnvelope, DoomedWorktree[]>()
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
@@ -193,10 +195,28 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const savedProviders = new SavedProviderInstances(databasePath)
   const projectScripts = new ProjectScripts(databasePath)
   const projectSetup = new ProjectSetup(databasePath)
+  const settlementAbort = new AbortController()
   const chatGptCredentials = new ChatGptCredentialStore(options.chatGptCredentialDirectory ?? chatGptCredentialDirectory())
   const engine = new Engine({
     store,
     reducer: reduce,
+    commitCommand(envelope, events) {
+      const identity = { commandId: envelope.id, at: envelope.at }
+      if (!hostSettlements.has(envelope)) return store.commitCommand(identity, events)
+      return store.commitCommand(identity, events, (writer, committed) => {
+        for (const event of committed) {
+          if (event.payload.type !== 'session.navigation-changed' || typeof event.payload.changes.settledAt !== 'number') continue
+          const session = engine.current.sessions.get(event.sessionId)
+          if (!session?.isolate || !session.worktreePath) continue
+          const workspace = engine.current.workspaces.get(session.workspaceId)
+          if (!workspace?.trusted || workspace.scratch) continue
+          const script = projectScripts.list(workspace.id).find(script => script.runOnSettle)
+          if (!script) continue
+          projectSetup.reserveSettlement(writer, { workspaceId: workspace.id, sessionId: session.id, checkout: session.worktreePath },
+            event.seq, event.payload.changes.settledAt, script, settlementFingerprint(script))
+        }
+      })
+    },
     async prepareClientCommand(command, envelope) {
       if (command.type === 'profile.delete')
         deletionWorktrees.set(envelope, worktreesOfProfile(engine.current, command.profileId))
@@ -269,20 +289,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     runWorktreeSetup(scope, signal) {
       return projectSetup.run(scope, signal, async (receipt) => {
         const script = projectScripts.get(scope.workspaceId, receipt.scriptId)
-        const workspace = engine.current.workspaces.get(scope.workspaceId)
-        const shellKind = engine.current.settings.terminalShell
-        const shell = shellKind === 'den' ? findDenShell() : undefined
-        if (!script?.runOnWorktreeCreate || !workspace?.trusted || workspace.scratch || shell === null) return null
-        const authorized = () => {
-          const session = engine.current.sessions.get(scope.sessionId)
-          return !signal.aborted && !closing && session?.workspaceId === scope.workspaceId && session.worktreePath === scope.checkout
-            && !session.navigation?.archivedAt && engine.current.workspaces.get(scope.workspaceId)?.trusted === true
-        }
-        if (!authorized()) return null
-        const env = { T3CODE_PROJECT_ROOT: workspace.path, T3CODE_WORKTREE_PATH: scope.checkout }
-        return terminals.runProjectJob({ ...scope, resumeKey: receipt.resumeKey }, shellKind, {
-          cwd: scope.checkout, cols: 80, rows: 24, shell, command: script.command, env, authorized, denIntegration: shellKind === 'den',
-        }, script, signal)
+        return script?.runOnWorktreeCreate
+          ? openProjectWorktreeTerminal(scope, receipt.resumeKey, script, signal)
+          : null
       })
     },
     autoApprove: options.autoApprove,
@@ -297,6 +306,59 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       }
     },
   })
+
+  function settlementFingerprint(script: ProjectScript): string {
+    return createHash('sha256').update(JSON.stringify(script)).digest('hex')
+  }
+
+  function projectWorktreeIsTrusted(scope: ProjectSetupScope): boolean {
+    const session = engine.current.sessions.get(scope.sessionId)
+    const workspace = engine.current.workspaces.get(scope.workspaceId)
+    return !closing && session?.workspaceId === scope.workspaceId && session.worktreePath === scope.checkout
+      && !session.navigation?.archivedAt && workspace?.trusted === true && !workspace.scratch
+  }
+
+  function openProjectWorktreeTerminal(scope: ProjectSetupScope, resumeKey: string, script: ProjectScript, signal: AbortSignal,
+    settlement?: SettlementReceipt,
+  ): Promise<number | null> {
+    const authorized = () => !signal.aborted && projectWorktreeIsTrusted(scope)
+      && (!settlement || Boolean(activeSettlementScript(settlement)))
+    const workspace = engine.current.workspaces.get(scope.workspaceId)
+    const shellKind = engine.current.settings.terminalShell
+    const shell = shellKind === 'den' ? findDenShell() : undefined
+    if (!workspace || shell === null || !authorized()) return Promise.resolve(null)
+    const env = { T3CODE_PROJECT_ROOT: workspace.path, T3CODE_WORKTREE_PATH: scope.checkout }
+    return terminals.runProjectJob({ workspaceId: scope.workspaceId, sessionId: scope.sessionId, resumeKey }, shellKind, {
+      cwd: scope.checkout, cols: 80, rows: 24, shell, command: script.command, env, authorized, denIntegration: shellKind === 'den',
+    }, script, signal, settlement !== undefined)
+  }
+
+  function activeSettlementScript(receipt: SettlementReceipt): ProjectScript | undefined {
+    if (!projectWorktreeIsTrusted(receipt) || engine.current.sessions.get(receipt.sessionId)?.settledSeq !== receipt.seq) return
+    const script = projectScripts.get(receipt.workspaceId, receipt.scriptId)
+    if (script?.runOnSettle && settlementFingerprint(script) === receipt.fingerprint) return script
+  }
+
+  function runPendingSettlements(sessionId?: number): void {
+    if (closing) return
+    try {
+      for (const receipt of projectSetup.pendingSettlements(sessionId)) {
+        projectSetup.runSettlement(receipt, async () => {
+          if (!activeSettlementScript(receipt) || !await runtime.checkProjectWorktree(receipt)) return 'skipped'
+          const script = activeSettlementScript(receipt)
+          if (!script) return 'skipped'
+          return openProjectWorktreeTerminal(receipt, receipt.resumeKey, script, settlementAbort.signal, receipt)
+        })
+      }
+    }
+    catch {
+      // The settlement was already accepted. A busy writer cannot un-settle it.
+      settlementRetry ??= setTimeout(() => {
+        settlementRetry = undefined
+        runPendingSettlements()
+      }, 1000)
+    }
+  }
 
   function pruneQuestionAttachments(sessionId: number): void {
     void attachments.prune(sessionId, () => {
@@ -695,7 +757,6 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (event.payload.type === 'session.navigation-changed') {
         const changes = event.payload.changes
         if ('snoozedUntil' in changes) scheduleThreadWake()
-        if (typeof changes.settledAt === 'number') terminals.stopScriptJobs(event.sessionId)
       }
       if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'session.created' || event.payload.type === 'turn.started'
         || event.payload.type === 'turn.completed' || event.payload.type === 'turn.interrupted' || event.payload.type === 'turn.rewind-settled'
@@ -732,6 +793,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   let closing = false
+  let settlementRetry: ReturnType<typeof setTimeout> | undefined
   let wakeTimer: ReturnType<typeof setTimeout> | undefined
   let wakingThreads = false
 
@@ -874,6 +936,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     allowProjectCommands: boolean,
   ): Promise<void> {
     const command = envelope.command
+
+    if (command.type === 'session.organize' && (command.action === 'settle' || command.action === 'drop')) {
+      for (const event of result.events) {
+        if (event.payload.type !== 'session.navigation-changed' || typeof event.payload.changes.settledAt !== 'number') continue
+        terminals.stopScriptJobs(event.sessionId)
+        runPendingSettlements(event.sessionId)
+      }
+      return
+    }
 
     // A worktree is a directory on disk and the log does not own it, so
     // deleting a profile used to leave a full checkout behind per isolated
@@ -1018,19 +1089,19 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return
         }
         const scope = { workspaceId: workspace.id, sessionId: session?.id, resumeKey: frame.resumeKey }
-        const setupHistory = session && frame.resumeKey ? projectSetup.history(workspace.id, session.id, frame.resumeKey) : null
-        if (setupHistory) {
+        const jobHistory = session && frame.resumeKey ? projectSetup.history(workspace.id, session.id, frame.resumeKey) : null
+        if (jobHistory) {
           if (!workspace.trusted || frame.projectScriptId) {
-            send(socket, { t: 'term-error', message: 'Open the worktree setup terminal on its host.' })
+            send(socket, { t: 'term-error', message: 'Open the worktree script terminal in its trusted project.' })
             return
           }
           if (!terminals.resume(socket, scope)) {
             try {
               const history = terminals.savedHistory(scope)
-              if (history !== undefined) terminals.openProjectHistory(socket, scope, engine.current.settings.terminalShell, history, setupHistory.exitCode)
-              else send(socket, { t: 'term-error', message: 'The worktree setup has no saved terminal output.' })
+              if (history !== undefined) terminals.openProjectHistory(socket, scope, engine.current.settings.terminalShell, history, jobHistory.exitCode)
+              else send(socket, { t: 'term-error', message: 'The worktree script has no saved terminal output.' })
             }
-            catch { send(socket, { t: 'term-error', message: 'Could not load the worktree setup output.' }) }
+            catch { send(socket, { t: 'term-error', message: 'Could not load the worktree script output.' }) }
           }
           return
         }
@@ -1186,6 +1257,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             }
           }
           attachmentOwners.set(envelope, socket.data.deviceId ?? 'local')
+          if (socket.data.canUseHostPrivileges && command.type === 'session.organize'
+            && (command.action === 'settle' || (command.action === 'drop' && command.destination === 'settled')))
+            hostSettlements.add(envelope)
           const result = command.type === 'session.input.respond' && Number.isSafeInteger(command.sessionId) && typeof command.requestId === 'string'
             ? await attachments.serialize(command.sessionId, command.requestId, () => engine.dispatch(envelope))
             : (command.type === 'session.turn.start' || command.type === 'session.queue.add' || command.type === 'session.handoff') && command.uploads !== undefined
@@ -1384,7 +1458,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch))
       }
 
-      const projectScriptsRoute = /^\/s\/([1-9]\d*)\/(project-scripts|project-setup)$/u.exec(url.pathname)
+      const projectScriptsRoute = /^\/s\/([1-9]\d*)\/(project-scripts|project-setup|project-settlement)$/u.exec(url.pathname)
       if (projectScriptsRoute) {
         const headers = { 'cache-control': 'private, no-store' }
         const fetchSite = request.headers.get('sec-fetch-site')
@@ -1396,6 +1470,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const scope: ProjectSetupScope | null = session.worktreePath
           ? { sessionId: session.id, workspaceId: session.workspaceId, checkout: session.worktreePath }
           : null
+        if (projectScriptsRoute[2] === 'project-settlement') {
+          if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
+          const receipt = scope && workspaceFileRoot(params) ? projectSetup.latestSettlement(scope) : null
+          return Response.json(receipt && {
+            name: receipt.name, resumeKey: receipt.resumeKey, status: receipt.status, exitCode: receipt.exitCode,
+            output: terminals.projectJobTail(receipt),
+          }, { headers })
+        }
         if (projectScriptsRoute[2] === 'project-setup') {
           if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
           const receipt = scope && workspaceFileRoot(params) ? projectSetup.read(scope) : null
@@ -1677,6 +1759,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const composerStashTimer = setInterval(reapComposerStashes, 60 * 60 * 1000)
   composerStashTimer.unref()
   scheduleThreadWake()
+  runPendingSettlements()
   return {
     server,
     engine,
@@ -1688,11 +1771,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (closing) return
       closing = true
       clearTimeout(wakeTimer)
+      clearTimeout(settlementRetry)
       clearInterval(composerStashTimer)
       for (const timer of compactTimers.values()) clearTimeout(timer)
       compactTimers.clear()
       void tunnel?.close()
       void runtime.stopAll()
+      settlementAbort.abort()
       terminals.shutdown()
       server.stop(true)
       savedProviders.close()

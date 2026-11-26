@@ -11,6 +11,7 @@ export interface ProjectScriptInput {
   stopOnSettle: boolean
   runOnWorktreeCreate?: boolean
   waitForSetup?: boolean
+  runOnSettle?: boolean
 }
 
 export interface ProjectScript extends ProjectScriptInput {
@@ -45,6 +46,7 @@ export function projectScriptInput(value: unknown): ProjectScriptInput {
     name, command, previewUrl,
     autoOpenPreview: Boolean(previewUrl) && input.autoOpenPreview === true,
     stopOnSettle: input.stopOnSettle === true,
+    ...(input.runOnSettle === true && { runOnSettle: true }),
     ...(input.runOnWorktreeCreate === true && { runOnWorktreeCreate: true, waitForSetup: input.waitForSetup === true }),
   }
 }
@@ -109,10 +111,20 @@ export class ProjectScripts {
       if (!id && scripts.length >= maxScripts) throw new ProjectScriptError('A project can have up to 50 scripts.')
       if (scripts.some(script => script.id !== id && (script.name.toLowerCase() === input.name.toLowerCase() || script.command === input.command)))
         throw new ProjectScriptError('This project already has a script with that name or command.')
-      if (input.runOnWorktreeCreate && scripts.some(script => script.id !== id && script.runOnWorktreeCreate))
-        throw new ProjectScriptError('Only one script can run automatically when a worktree is created.')
+      const update = this.db.query('UPDATE harness_project_scripts SET config = ? WHERE workspace_id = ? AND id = ?')
+      for (const { id: otherId, ...config } of scripts) {
+        if (otherId === id) continue
+        const releaseSetup = input.runOnWorktreeCreate && config.runOnWorktreeCreate
+        const releaseSettlement = input.runOnSettle && config.runOnSettle
+        if (!releaseSetup && !releaseSettlement) continue
+        update.run(JSON.stringify({
+          ...config,
+          ...(releaseSetup && { runOnWorktreeCreate: false }),
+          ...(releaseSettlement && { runOnSettle: false }),
+        }), workspaceId, otherId)
+      }
       const key = id ?? randomUUID()
-      if (id) this.db.query('UPDATE harness_project_scripts SET config = ? WHERE workspace_id = ? AND id = ?').run(JSON.stringify(input), workspaceId, id)
+      if (id) update.run(JSON.stringify(input), workspaceId, id)
       else this.db.query('INSERT INTO harness_project_scripts VALUES (?, ?, ?)').run(key, workspaceId, JSON.stringify(input))
       return { ...input, id: key }
     }).immediate()

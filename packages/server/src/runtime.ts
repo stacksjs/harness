@@ -645,6 +645,13 @@ export class ProviderRuntime {
     }))
   }
 
+  async checkProjectWorktree(scope: ProjectSetupScope): Promise<boolean> {
+    const state = this.options.engine.current
+    const session = state.sessions.get(scope.sessionId)
+    return Boolean(session?.workspaceId === scope.workspaceId && session.worktreePath === scope.checkout
+      && isolatedRewindScope(state, session) && await this.registeredWorktree(session))
+  }
+
   private async registeredWorktree(session: SessionState, mode: false | 'recover' | 'resume' = false, authorize?: () => boolean): Promise<boolean> {
     if (session.combinedWorktree) return openCombinedWorktree(session.combinedWorktree, mode, authorize)
     const state = this.options.engine.current
