@@ -817,7 +817,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       <p data-prompt-stash-error role="alert" :hidden="stashOpen() || !stashError()" :text="stashError()" class="text-red-700 text-sm dark:text-red-300"></p>
     </form>
     <div data-background-thread hidden :hidden="!startedBackgroundThread()">
-      <span role="status">Thread started in the background.</span>
+      <span role="status">Started in background.</span>
       <a :href="startedBackgroundThread() ? '/s/' + startedBackgroundThread() : null">Open thread</a>
       <button type="button" @click="dismissBackgroundNotice" aria-label="Dismiss background notification" class="harness-icon-button">
         <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
