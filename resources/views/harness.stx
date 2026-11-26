@@ -779,6 +779,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         rows="2"
         :rows="Math.min(7, Math.max(2, composerText().split('\n').length + 1))"
         aria-label="Message"
+        :aria-keyshortcuts="!sessionId ? shortcutKeys('composer.startBackground') : null"
         placeholder="{{ promptPlaceholder }}"
         :placeholder="composerPlaceholder()"
         class="px-1 py-1 min-h-[46px] max-h-[30dvh] min-w-0 text-sm bg-transparent outline-none resize-none"
@@ -801,7 +802,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
           </button>
           <button type="button" data-idle-compaction hidden :hidden="!idleCompactionOffer()" @click="toggleIdleCompaction" :aria-pressed="compactNextPrompt()" :aria-label="idleCompactionLabel()" :title="idleCompactionLabel()" class="px-2 min-h-8 text-[12px] border border-black/10 rounded-full dark:border-white/20" :text="idleCompactionChip()"></button>
-          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || conversationRewind() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :title="!sessionId && chordLabel('composer.startBackground') ? 'Start in background with ' + chordLabel('composer.startBackground') : null" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || conversationRewind() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
             <span data-send-text :text="sendLabel()">Send</span>
           </button>
@@ -815,6 +816,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
       <p data-prompt-stash-error role="alert" :hidden="stashOpen() || !stashError()" :text="stashError()" class="text-red-700 text-sm dark:text-red-300"></p>
     </form>
+    <div data-background-thread hidden :hidden="!startedBackgroundThread()">
+      <span role="status">Thread started in the background.</span>
+      <a :href="startedBackgroundThread() ? '/s/' + startedBackgroundThread() : null">Open thread</a>
+      <button type="button" @click="dismissBackgroundNotice" aria-label="Dismiss background notification" class="harness-icon-button">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </div>
     @include('../partials/harness-prompt-stash')
     @endif
     @if(!activeSession && draftProjectChoices.length)
@@ -1532,6 +1540,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const hasComposerMessage = derived(() => Boolean(composerText().trim() || (editingFollowUp() ? editingFollowUp()?.attachments?.length : composerFiles().length)))
   const uploadScope = promptScope === 'projectless' ? `scratch:${Number(activeProfile) || 0}` : promptScope
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
+  const startedBackgroundThread = state(null)
   const followUps = state(initialFollowUps)
   const steeringMessage = useRef('steeringMessageBox')
   // Host settings, seeded from the render and kept here so a change shows at
@@ -2361,9 +2370,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return row?.aria || ''
   }
 
-  function matchedCommand(event, terminalFocus = false) {
+  function matchedCommand(event, terminalFocus = false, composerFocus = false) {
     const table = keybindingTable()
-    return keyboard && table ? keyboard.matchCommand(table.bindings, event, { terminalFocus, apple: appleKeyboard }) : null
+    return keyboard && table ? keyboard.matchCommand(table.bindings, event, { terminalFocus, composerFocus, apple: appleKeyboard }) : null
   }
 
   function readKeyboardStore(craft) {
@@ -5219,7 +5228,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     draftBaseBranch.set(event.currentTarget.value)
   }
 
-  async function sendPrompt(mode = followUpPreference()) {
+  async function sendPrompt(mode = followUpPreference(), background = false) {
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
@@ -5350,14 +5359,21 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           if (worktree) worktreePreferences.update(preferences => ({ ...preferences, [draftProject.id]: worktree }))
         }
         const nextSession = derivedSessionId(commandId)
-        pendingFirstPrompt.set({ sessionId: nextSession, text: raw, ...(uploads ? { upload: draft.upload, files } : {}) })
+        // Keep the first turn's receipt stable across retries, including
+        // switching between opening the thread and staying in this composer.
+        await sendCommand({ type: 'session.turn.start', sessionId: nextSession, text, ...attachmentInput }, commandId + '_first')
         if (box.value === raw) {
           box.value = ''
           composerText.set('')
           composerDraft.set(null)
         }
         else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
-        navigate(`/s/${nextSession}`)
+        if (background) {
+          startedBackgroundThread.set(nextSession)
+          startPending.set(false)
+          box.focus()
+        }
+        else navigate(`/s/${nextSession}`)
       }
       catch (error) {
         startPending.set(false)
@@ -5390,6 +5406,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function promptKeydown(event) {
     if (event.isComposing || event.keyCode === 229) return
     if (fileMentionPicker?.keydown(event)) return
+    if (!sessionId && matchedCommand(event, false, true) === 'composer.startBackground') {
+      event.preventDefault()
+      if (!event.repeat) void sendPrompt(followUpPreference(), true)
+      return
+    }
     if (event.key === 'ArrowDown' && offerClearCommand()) {
       event.preventDefault()
       clearCommandBox.current?.focus()
@@ -5429,6 +5450,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       event.preventDefault()
       event.target.form?.requestSubmit()
     }
+  }
+
+  function dismissBackgroundNotice() {
+    startedBackgroundThread.set(null)
+    promptRef.current?.focus()
   }
 
   // Optimistic: Stop hides immediately through `stopPressed`, but the turn is

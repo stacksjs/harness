@@ -326,6 +326,14 @@ const RESPONSIVE_SHELL = `
 }
 [data-composer]:focus-within { border-color: color-mix(in srgb, var(--workspace-accent) 60%, var(--workspace-line)); }
 [data-workspace-draft] [data-composer] { margin-block-end: 4px; }
+[data-background-thread] {
+  position: absolute; z-index: 6; inset-block-start: 12px; inset-inline-end: var(--workspace-gutter);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  max-inline-size: calc(100% - 2 * var(--workspace-gutter)); padding: 4px 6px 4px 12px;
+  color: inherit; font-size: 13px; background: var(--workspace-surface);
+  border: 1px solid var(--workspace-line); border-radius: 9px; box-shadow: 0 6px 18px rgb(0 0 0 / 12%);
+}
+[data-background-thread] a { color: var(--workspace-accent); text-decoration: underline; white-space: nowrap; }
 [data-prompt]::placeholder { color: #656a71; opacity: 1; }
 .dark [data-prompt]::placeholder { color: #a2a6b0; }
 [data-prompt]:focus-visible { outline: none !important; }

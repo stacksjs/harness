@@ -92,6 +92,17 @@ describe('the keyboard registry', () => {
     expect(formatChord(parseChord('Ctrl+`')!, true)).toBe('⌃`')
     expect(formatChord(parseChord('Mod+Shift+Enter')!, true)).toBe('⇧⌘↩')
   })
+
+  it('matches background starts only from the composer and supports rebinding', () => {
+    const enter = press({ key: 'Enter', ctrl: true })
+    const defaults = defaultKeybindings()
+    expect(matchCommand(defaults, enter)).toBeNull()
+    expect(matchCommand(defaults, enter, { terminalFocus: true })).toBeNull()
+    expect(matchCommand(defaults, enter, { composerFocus: true })).toBe('composer.startBackground')
+    const rebound = resolveKeybindings({ 'composer.startBackground': 'Mod+Alt+Enter' }).bindings
+    expect(matchCommand(rebound, enter, { composerFocus: true })).toBeNull()
+    expect(matchCommand(rebound, press({ key: 'Enter', meta: true, alt: true }), { composerFocus: true })).toBe('composer.startBackground')
+  })
 })
 
 describe('stored overrides', () => {

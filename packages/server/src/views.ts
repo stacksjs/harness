@@ -13,6 +13,7 @@ import type { HarnessState, SessionState } from '@harness/engine'
 import { checkpointReviewRepositories, claudeIdleCompaction, conversationRewindPoint, isForkableResponse, isolatedRewindScope, providerConversation } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import type { KeybindingCommand } from './keybindings'
 import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
 import { settingsSections } from './settings-location'
 import type { SettingsSection } from './settings-location'
@@ -73,7 +74,7 @@ export interface ViewProps {
     label: string
     description: string
     chord: string
-    scope?: 'terminal' | 'global'
+    scope?: KeybindingCommand['scope']
     apple: string
     other: string
     /** `aria-keyshortcuts` value, for the controls that advertise a chord. */
