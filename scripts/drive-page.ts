@@ -5713,6 +5713,168 @@ check('collapsed shelves give their numbers to the following visible threads', B
 await savedDraftPage.waitForLoadState('networkidle')
 await savedDraftContext.close()
 
+
+const shareContext = await browser.newContext({ colorScheme, reducedMotion })
+const sharePage = await shareContext.newPage()
+sharePage.on('pageerror', error => {
+  console.error('Share page error at', new URL(sharePage.url()).pathname, error.message)
+  pageErrors.push(error.message)
+})
+await sharePage.addInitScript(() => {
+  Object.assign(window, { craft: {
+    menu: { set: () => {} },
+    clipboard: { writeText: (text: string) => {
+      if (sessionStorage.getItem('fixture.share.deny')) throw new Error('Clipboard permission denied.')
+      localStorage.setItem('fixture.share.clipboard', text)
+    } },
+  } })
+})
+execFileSync('git', ['config', '--local', 'remote.origin.url', 'git@github.com:Fixture/notes-app.git'], { cwd: dir })
+const sharedThreadId = derivedId('linked-prompt-source-session')
+await harness.engine.dispatch({ id: 'linked-prompt-source-session', at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
+const shareWriter = new WebSocket('ws://localhost:' + port + '/ws')
+await new Promise<void>((resolve, reject) => {
+  shareWriter.addEventListener('open', () => resolve(), { once: true })
+  shareWriter.addEventListener('error', () => reject(new Error('Could not open share fixture socket.')), { once: true })
+})
+try {
+  for (const [id, text] of [
+    ['shared-fixture-first', 'Share an earlier prompt & its punctuation?'],
+    ['shared-fixture-second', 'Keep the later message visible in this thread.'],
+  ]) {
+    shareWriter.send(encode({ t: 'dispatch', envelope: {
+      id, at: Date.now(), command: { type: 'session.turn.start', sessionId: sharedThreadId, text },
+    } }))
+    const deadline = Date.now() + 15_000
+    while (!harness.engine.current.sessions.get(sharedThreadId)?.turns.some(turn => turn.prompt === text && turn.status === 'complete')) {
+      if (Date.now() >= deadline) throw new Error('Could not seed the shared thread.')
+      await Bun.sleep(100)
+    }
+  }
+}
+finally { shareWriter.close() }
+const sourceTurnId = harness.engine.current.sessions.get(sharedThreadId)!.turns[0]!.id
+const shareThreadUrl = baseUrl + '/s/' + sharedThreadId
+const sourceTurn = sharePage.locator('[data-turn="' + sourceTurnId + '"]')
+const sharedEditor = sharePage.getByRole('textbox', { name: 'Message', exact: true })
+const shareModal = sharePage.locator('[data-prompt-link-dialog]')
+const clipboard = async () => {
+  await sharePage.waitForFunction(() => Boolean(localStorage.getItem('fixture.share.clipboard')))
+  return new URL(await sharePage.evaluate(() => localStorage.getItem('fixture.share.clipboard') || ''))
+}
+const clearClipboard = () => sharePage.evaluate(() => localStorage.removeItem('fixture.share.clipboard'))
+const shareState = () => [...harness.engine.current.sessions.values()].reduce((totals, thread) =>
+  [totals[0]! + 1, totals[1]! + thread.turns.length], [0, 0])
+const shareBefore = shareState()
+
+await sharePage.setViewportSize({ width: 1440, height: 900 })
+await sharePage.goto(shareThreadUrl)
+await sourceTurn.getByRole('button', { name: 'Copy prompt link', exact: true }).click()
+const sentPrompt = await clipboard()
+check('a sent prompt can be shared as a new editable draft', sentPrompt.pathname === '/new'
+  && sentPrompt.searchParams.get('prompt') === 'Share an earlier prompt & its punctuation?')
+await clearClipboard()
+await sourceTurn.getByRole('button', { name: 'Copy message link', exact: true }).click()
+const sentMessage = await clipboard()
+check('a message link points to its exact historical turn', sentMessage.href === shareThreadUrl + '#turn-' + sourceTurnId)
+await sharePage.evaluate(() => sessionStorage.setItem('fixture.share.deny', '1'))
+const messageCopy = sourceTurn.getByRole('button', { name: 'Copy message link', exact: true })
+await messageCopy.click()
+const clipboardDialog = sharePage.getByRole('dialog', { name: 'Copy link' })
+await clipboardDialog.waitFor()
+check('clipboard denial offers the same address for manual copy',
+  await clipboardDialog.getByRole('textbox', { name: 'Shareable link' }).inputValue() === sentMessage.href)
+await clipboardDialog.getByRole('button', { name: 'Done' }).click()
+await sharePage.waitForFunction(() => document.activeElement?.hasAttribute('data-copy-message-link'))
+await sharePage.evaluate(() => sessionStorage.removeItem('fixture.share.deny'))
+await clearClipboard()
+await sharePage.locator('[data-thread-actions-trigger]').click()
+await sharePage.getByRole('button', { name: 'Copy thread link', exact: true }).click()
+check('Copy thread link uses the clean thread address', (await clipboard()).href === shareThreadUrl)
+await clearClipboard()
+await sharePage.locator('[data-transcript]').focus()
+await pressChord('Control+Shift+C', sharePage)
+check('the registered shortcut copies the same thread link', (await clipboard()).href === shareThreadUrl)
+await sharePage.goto(sentMessage.href)
+await sourceTurn.locator('xpath=self::*[@data-linked-turn]').waitFor()
+await sharePage.waitForFunction(() => document.activeElement?.hasAttribute('data-linked-turn'))
+check('opening a message link focuses its historical turn', true)
+await sharePage.goto(shareThreadUrl + '#turn-999999')
+await sharePage.getByText('This message is unavailable in the current thread.').waitFor()
+check('a missing message shows recovery without losing the thread', await sharedEditor.isVisible())
+
+const unsafeThreadPrompt = 'Review A\u200B&B 👩‍💻\nSecond line'
+await sharePage.goto(shareThreadUrl + '?' + new URLSearchParams({ prompt: unsafeThreadPrompt, branch: 'ignored' }))
+await sharePage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Review A&B 👩‍💻\nSecond line')
+await sharePage.locator('[data-linked-prompt-notice]').getByText('Hidden characters were removed from this prompt.', { exact: false }).waitFor()
+check('an empty thread composer receives sanitized text and consumes the URL prompt',
+  !new URL(sharePage.url()).searchParams.has('prompt') && shareState().join() === shareBefore.join())
+await sharePage.goto(shareThreadUrl + '?' + new URLSearchParams({ prompt: 'Replace this draft only with consent.' }))
+await shareModal.getByRole('heading', { name: 'Replace draft text?' }).waitFor()
+for (const [width, height] of workspaceViewports) {
+  await sharePage.setViewportSize({ width, height })
+  check('linked prompt consent fits at ' + width + '×' + height, await shareModal.evaluate(dialog => {
+    const box = dialog.getBoundingClientRect()
+    const button = dialog.querySelector('[data-share-primary]')?.getBoundingClientRect()
+    return Boolean(button && box.left >= 0 && box.right <= innerWidth + 1 && button.right <= box.right && button.bottom <= box.bottom)
+  }))
+  await capture('linked-prompt-confirmation-' + width + 'x' + height, sharePage)
+}
+await sharePage.keyboard.press('Escape')
+check('cancelling a linked replacement preserves the existing draft', await sharedEditor.inputValue() === 'Review A&B 👩‍💻\nSecond line')
+await sharePage.goto(shareThreadUrl + '?' + new URLSearchParams({ prompt: 'Replace this draft only with consent.' }))
+await shareModal.getByRole('button', { name: 'Replace draft text' }).click()
+check('accepting a linked replacement changes the editor without sending',
+  await sharedEditor.inputValue() === 'Replace this draft only with consent.'
+  && !await sharePage.locator('[data-linked-prompt-notice]').isVisible() && shareState().join() === shareBefore.join())
+
+await sharePage.setViewportSize({ width: 1440, height: 900 })
+await clearClipboard()
+await pressChord('Control+K', sharePage)
+const sharePalette = sharePage.getByRole('dialog', { name: 'Search threads' })
+await sharePalette.getByRole('button', { name: 'Copy prompt link with repo and model', exact: true }).click()
+const contextPrompt = await clipboard()
+check('the palette copies only the public repository and driver context',
+  contextPrompt.searchParams.get('repo')?.toLowerCase() === 'fixture/notes-app'
+  && !contextPrompt.href.includes(dir) && !contextPrompt.href.includes('providerInstance'))
+const repoLink = new URL('/new', baseUrl)
+repoLink.search = new URLSearchParams({
+  prompt: 'Draft in the known project.', repo: 'fixture/notes-app', provider: 'codex', model: 'fixture-fast',
+  branch: 'do-not-checkout', permission: 'full-access',
+}).toString()
+await sharePage.goto(repoLink.href)
+await shareModal.getByRole('button', { name: 'Open project draft' }).click()
+await sharePage.waitForURL(url => url.searchParams.get('workspace') === String(workspaceId) && Boolean(url.searchParams.get('draft')))
+await sharePage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Draft in the known project.')
+await sharePage.locator('[data-model-picker-trigger]').getByText('Fixture Fast', { exact: true }).waitFor()
+check('a known repository opens a fresh draft with the available named model', !new URL(sharePage.url()).searchParams.has('branch'))
+
+await sharePage.waitForLoadState('networkidle')
+await sharePage.goto(sentPrompt.href)
+await sharePage.waitForURL(url => url.searchParams.get('project') === 'none' && Boolean(url.searchParams.get('draft')))
+await sharePage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Share an earlier prompt & its punctuation?')
+check('an unscoped prompt link opens a projectless draft without running it', shareState().join() === shareBefore.join())
+
+await sharePage.waitForLoadState('networkidle')
+await sharePage.goto(baseUrl + '/new?' + new URLSearchParams({ prompt: 'Missing checkout', repo: 'fixture/missing-checkout', provider: 'codex', model: 'missing-model' }))
+await shareModal.getByText('fixture/missing-checkout is unavailable on this host.').waitFor()
+await shareModal.getByRole('button', { name: 'Use without a project' }).click()
+await sharePage.waitForURL(url => url.searchParams.get('project') === 'none' && Boolean(url.searchParams.get('draft')))
+await sharePage.getByText('The linked model is unavailable. Your default model was selected.').waitFor()
+check('missing repositories and models yield a usable draft with an explicit fallback', await sharedEditor.inputValue() === 'Missing checkout')
+
+await sharePage.waitForLoadState('networkidle')
+await sharePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/notes-app/12', prompt: 'Check the PR' }))
+check('pull request links keep an explicit route to GitHub', await shareModal.getByRole('link', { name: 'Open pull request on GitHub' }).getAttribute('href') === 'https://github.com/fixture/notes-app/pull/12')
+await shareModal.getByRole('button', { name: 'Cancel' }).click()
+await sharePage.waitForURL(baseUrl + '/')
+await sharePage.waitForLoadState('networkidle')
+const unavailableThread = await sharePage.goto(baseUrl + '/s/999999999999')
+check('a missing thread has a real 404 and a route back to the workspace',
+  unavailableThread?.status() === 404 && await sharePage.getByRole('link', { name: 'Back to workspace' }).isVisible())
+await sharePage.waitForLoadState('networkidle')
+await shareContext.close()
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

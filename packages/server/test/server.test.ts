@@ -112,6 +112,44 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
+describe('shared workspace addresses', () => {
+  it('serves prompt routes without caching or embedding the prompt in HTML', async () => {
+    const marker = 'UNIQUE_PRIVATE_PROMPT_FOR_SHARE'
+    const response = await fetch(`http://127.0.0.1:${port}/new?prompt=${marker}`)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer')
+    expect(await response.text()).not.toContain(marker)
+    const missing = await fetch(`http://127.0.0.1:${port}/s/999992`)
+    expect(missing.status).toBe(404)
+    expect(await missing.text()).toContain('Thread unavailable')
+  }, 15_000)
+
+  it('preserves only a safe destination while pairing a new device', async () => {
+    const databasePath = join(dir, 'link-pairing.sqlite')
+    prepareDatabase(databasePath)
+    const remote = await serve({ port: 0, remote: true, databasePath, localTokenPath: join(dir, 'link-pairing-token') })
+    try {
+      const base = `http://127.0.0.1:${remote.server.port}`
+      const pending = await fetch(base + '/s/112?prompt=Open+draft&model=fixture&token=ignore-me', { headers: { accept: 'text/html' } })
+      expect(pending.status).toBe(401)
+      const html = await pending.text()
+      expect(html).toContain('/s/112?prompt=Open+draft&amp;model=fixture')
+      expect(html).not.toContain('ignore-me')
+      const redeem = (next: string) => fetch(base + '/pair', {
+        method: 'POST', redirect: 'manual',
+        body: new URLSearchParams({ code: remote.access!.openPairing().code, next, name: 'Shared link fixture' }),
+      })
+      const onThread = await redeem('/s/112?prompt=Open+draft&branch=foreign#turn-56')
+      expect(onThread.status).toBe(303)
+      expect(onThread.headers.get('location')).toBe('/s/112?prompt=Open+draft#turn-56')
+      expect(onThread.headers.get('set-cookie')).toContain('HttpOnly')
+      expect((await redeem('/\\evil.invalid/new?prompt=x')).headers.get('location')).toBe('/')
+    }
+    finally { remote.stop() }
+  })
+})
+
 function url(): string {
   return `ws://127.0.0.1:${port}/ws`
 }
