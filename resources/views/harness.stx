@@ -1502,6 +1502,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     threadActionError.set('')
     try {
       await sendThreadOrganization({ sessionId: target, action, ...fields })
+      if (threadActionsDialog.current?.open) closeThreadActions()
       if (action === 'archive' && target === sessionId) {
         if (activeScratchSession) startWithoutProject()
         else navigate(`/?workspace=${activeWorkspaceId}`)
