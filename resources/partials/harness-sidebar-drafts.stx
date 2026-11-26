@@ -1,0 +1,16 @@
+<section data-saved-drafts aria-label="Unsent drafts">
+  <ul data-saved-draft-list class="grid gap-1">
+    <li data-saved-draft class="relative min-w-0">
+      <a data-saved-draft-link class="grid gap-0.5 px-2 py-1.5 min-w-0 rounded-md">
+        <span class="flex gap-1.5 items-center min-w-0 text-neutral-600 text-xs dark:text-neutral-400">
+          <span class="inline-block shrink-0 size-3.5 text-[var(--workspace-accent)] i-hugeicons-pencil-edit-02" aria-hidden="true"></span>
+          <span data-saved-draft-project class="truncate"></span>
+        </span>
+        <span data-saved-draft-title class="text-[13px] truncate"></span>
+      </a>
+      <button type="button" data-draft-discard-row aria-label="Discard draft" title="Discard draft" class="harness-icon-button">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </li>
+  </ul>
+</section>

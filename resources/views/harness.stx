@@ -186,13 +186,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <button type="button" @click="openProjectPicker" aria-label="Add project" title="Add project" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
           </button>
-          <button type="button" @click="openDraft(visibleProfile())" aria-label="New thread" title="New thread" class="harness-icon-button">
+          <button type="button" data-nav-new-thread @click="openDraft(visibleProfile())" aria-label="New thread" title="New thread" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-pencil-edit-02" aria-hidden="true"></span>
           </button>
         </div>
       @endif
     </div>
     <div data-navigation-content>
+    <template ref="sidebarDraftTemplate">
+      @include('../partials/harness-sidebar-drafts')
+    </template>
     <template ref="draftDiscardTemplate">
       <button type="button" data-draft-discard-row aria-label="Discard draft" title="Discard draft" class="harness-icon-button">
         <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
@@ -374,7 +377,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Files stay in a scratch folder on this host.</p>
           @elseif(draftProject && draftProject.trusted)
             <h1 data-draft-title>What would you like to work on in {{ draftProject.name }}?</h1>
-            <button type="button" @click="startWithoutProject" class="px-2 h-8 text-[13px] text-neutral-600 underline underline-offset-4 dark:text-neutral-300">Start without a project</button>
+            <button type="button" @click="startScratchDraft" class="px-2 h-8 text-[13px] text-neutral-600 underline underline-offset-4 dark:text-neutral-300">Start without a project</button>
           @elseif(draftProject)
             <p class="text-[16px] font-semibold">Trust {{ draftProject.name }} to start</p>
             <p class="max-w-[34ch] text-[13px] text-neutral-600 dark:text-neutral-300">Trust lets agents access this folder when you start a session.</p>
@@ -1416,6 +1419,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // theirs — because tools finish out of order and a row is found by id.
   const toolResults = state({})
   const draftWorktreeOptions = state(null)
+  let draftWorktreeRequest
   const draftWorktreeLoad = state('')
   const draftIsolated = state(false)
   const draftRepositoryKeys = state([])
@@ -1611,6 +1615,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const draftUndo = useSessionStorage(draftUndoKey, [], { listenToStorageChanges: false })
   const threadUndoBatch = useSessionStorage('harness.thread-undo-batch.v1', '', { listenToStorageChanges: false })
   const draftDiscardTemplate = useRef('draftDiscardTemplate')
+  const sidebarDraftTemplate = useRef('sidebarDraftTemplate')
   const draftDiscardReady = state(false)
   let composerDraftTools
   let composerRecall
@@ -2741,6 +2746,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function stopWorkspaceStatusRequests() {
     workspaceStatusPaused = true
     providerCatalogRequest?.abort()
+    draftWorktreeRequest?.abort()
     projectSetupRequest?.abort()
     projectSetupPoll?.stop()
     projectSettlementRequest?.abort()
@@ -3266,14 +3272,34 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (id) navigate(`/?workspace=${id}`)
   }
 
+  function openDraftAddress(href) {
+    stopWorkspaceStatusRequests()
+    navigate(href)
+  }
+
+  function openNewDraft(query) {
+    openDraftAddress(`/?${query}&draft=${newCommandId()}`)
+  }
+
+  function startProjectDraft(id) {
+    openNewDraft(`workspace=${id}`)
+  }
+
   function startWithoutProject() {
     const profile = Number(activeProfile)
-    navigate(profile ? `/?profile=${profile}&project=none` : '/?project=none')
+    openDraftAddress(profile ? `/?profile=${profile}&project=none` : '/?project=none')
+  }
+
+  function startScratchDraft() {
+    const profile = Number(activeProfile)
+    if (profile) openNewDraft(`profile=${profile}&project=none`)
+    else startWithoutProject()
   }
 
   function openDraft(profileId) {
     const project = String(profileId) === String(activeProfile) ? draftProject : profileProjects[String(profileId)]
-    if (project) navigate(`/?workspace=${project.id}`)
+    if (project) startProjectDraft(project.id)
+    else if (draftWithoutProject) openNewDraft(`profile=${Number(profileId) || 0}&project=none`)
     else openProjectPicker()
   }
 
@@ -5083,13 +5109,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function setComposerFiles(files, upload) {
     const previous = composerDraft()
-    const remainder = { ...previous }
+    const remainder = { createdAt: Date.now(), ...previous }
     delete remainder.commandId
     delete remainder.files
     delete remainder.upload
     delete remainder.discardedDraft
     const text = promptRef.current?.value ?? remainder.text ?? ''
     composerDraft.set(files.length ? { ...remainder, text, files, upload } : text ? { ...remainder, text } : null)
+    rememberPrompt()
     sidebarDrafts?.update()
   }
 
@@ -5126,16 +5153,21 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const { value: text, selectionStart: start, selectionEnd: end, selectionDirection: direction } = box
     if (previous?.text === text && composerDraftTools?.wasComposerDraftDiscarded(localStorage, promptDraftKey)) return
     const codexSelection = draftCodexSelection()
-    const provider = pendingProviderSwitch() ? draftProvider() : undefined
+    const provider = !sessionId || pendingProviderSwitch() ? draftProvider() : undefined
     const model = provider ? draftModel() : undefined
+    const worktree = !sessionId && draftWorktreeOptions()
+      ? { isolated: draftIsolated(), selection: draftWorktreeSelection() }
+      : previous?.worktree
     const sameSelection = previous?.provider === provider && previous?.model === model && sameCodexSelection(previous?.codexSelection, codexSelection)
+      && JSON.stringify(previous?.worktree) === JSON.stringify(worktree)
     if (previous?.text === text && previous.start === start && previous.end === end && previous.direction === direction
       && sameSelection) return
     composerDraft.set({
-      text, start, end, direction,
+      text, start, end, direction, createdAt: previous?.createdAt ?? Date.now(),
       ...(previous?.files?.length ? { files: previous.files, upload: previous.upload } : {}),
       ...(codexSelection ? { codexSelection } : {}),
       ...(provider ? { provider, model } : {}),
+      ...(worktree ? { worktree } : {}),
       ...(sameSelection && previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
     })
   }
@@ -5177,7 +5209,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }))
     const sidebar = sidebarRef.current
     const discardTemplate = draftDiscardTemplate.current
-    if (sidebar && discardTemplate) sidebarDrafts = composerDraftTools.watchSidebarDrafts(sidebar, discardTemplate, discardDraft)
+    const sectionTemplate = sidebarDraftTemplate.current
+    if (sidebar && discardTemplate && sectionTemplate) {
+      sidebarDrafts = composerDraftTools.watchSidebarDrafts({
+        root: sidebar, discardTemplate, sectionTemplate, currentKey: promptDraftKey,
+        discard: discardDraft, startProject: startProjectDraft, open: openDraftAddress,
+      })
+    }
     draftDiscardReady.set(true)
     expireUndoNotices()
     if (initialRewoundPrompt && requestedRewind() === initialRewoundPrompt.operation) await restoreEarlierPrompt()
@@ -5241,6 +5279,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         }
         if (editor) {
           composerDraft.set(entry.draft)
+          sidebarDrafts?.restoreCurrent(entry)
           restorePrompt()
           if (!sidebarOpen()) editor.focus()
         }
@@ -5248,7 +5287,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       catch { skipped++ }
     }
     sidebarDrafts?.update()
-    if (sidebarOpen()) sidebarRef.current?.querySelector('a[data-sidebar-item][data-active="true"]')?.focus()
+    if (sidebarOpen()) sidebarRef.current?.querySelector('[data-saved-draft-link][aria-current="page"], a[data-sidebar-item][data-active="true"]')?.focus()
     if (skipped) stxAlert(skipped === 1 ? 'A draft changed and could not be restored.' : `${skipped} drafts changed and could not be restored.`)
   }
 
@@ -5267,11 +5306,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         ? { ...file, status: 'failed', error: 'Upload interrupted. Attach this file again.' } : file)
       composerDraft.set({ ...current, files })
     }
-    if (sessionId && typeof current.provider === 'string' && KNOWN_DRIVERS.includes(agentChoice(current.provider).driverKind)) {
+    if (typeof current.provider === 'string' && KNOWN_DRIVERS.includes(agentChoice(current.provider).driverKind)) {
       draftProvider.set(current.provider)
       draftModel.set(typeof current.model === 'string' ? current.model : '')
     }
     if (draftIsCodex() && typeof current.codexSelection?.model === 'string') showDraftCodexSelection(current.codexSelection)
+    if (!sessionId && current.worktree && draftProject?.trusted) {
+      const selection = current.worktree.selection
+      draftIsolated.set(current.worktree.isolated === true)
+      if (typeof selection?.baseBranch === 'string') draftBaseBranch.set(selection.baseBranch)
+      if (Array.isArray(selection?.repositories)) draftRepositoryKeys.set(selection.repositories.filter(key => typeof key === 'string'))
+      void loadDraftWorktreeOptions()
+    }
     box.value = current.text
     const start = Number.isInteger(current.start) ? current.start : box.value.length
     const end = Number.isInteger(current.end) ? current.end : start
@@ -5305,14 +5351,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   async function loadDraftWorktreeOptions(event) {
-    if ((event && !event.currentTarget.open) || !draftProject?.trusted || draftWorktreeOptions() || draftWorktreeLoad() === 'Loading repositories…') return
+    if (workspaceStatusPaused || (event && !event.currentTarget.open) || !draftProject?.trusted || draftWorktreeOptions() || draftWorktreeRequest) return
+    const request = new AbortController()
+    draftWorktreeRequest = request
     draftWorktreeLoad.set('Loading repositories…')
     try {
-      const response = await fetch('/workspace-repositories?' + new URLSearchParams({ workspace: String(draftProject.id) }))
+      const query = new URLSearchParams({ workspace: String(draftProject.id) })
+      const response = await fetch('/workspace-repositories?' + query, { signal: request.signal })
       if (!response.ok) throw new Error('Could not load project repositories. Close and reopen this panel to retry.')
       const options = await response.json()
+      if (request.signal.aborted) return
       const keys = options.repositories.map(repository => repository.key)
-      const saved = worktreePreferences()?.[draftProject.id]
+      const saved = composerDraft()?.worktree?.selection ?? worktreePreferences()?.[draftProject.id]
       batch(() => {
         draftWorktreeOptions.set(options)
         draftRepositoryKeys.set(Array.isArray(saved?.repositories) ? keys.filter(key => saved.repositories.includes(key)) : keys.length <= 8 ? keys : [])
@@ -5322,20 +5372,24 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           : 'No Git repositories were found in this project.')
       })
     }
-    catch (error) { draftWorktreeLoad.set(error.message) }
+    catch (error) { draftWorktreeLoad.set(request.signal.aborted ? '' : error.message) }
+    finally { draftWorktreeRequest = undefined }
   }
 
   function changeDraftWorktreeMode(event) {
     draftIsolated.set(event.currentTarget.value === 'worktree')
+    rememberPrompt()
   }
 
   function selectDraftRepository(key, event) {
     const selected = event.currentTarget.checked
     draftRepositoryKeys.update(keys => selected ? [...keys, key] : keys.filter(value => value !== key))
+    rememberPrompt()
   }
 
   function editDraftBaseBranch(event) {
     draftBaseBranch.set(event.currentTarget.value)
+    rememberPrompt()
   }
 
   function modelLaunchOptions(selection, model) {
@@ -5455,8 +5509,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     function openFreshDraft() {
       if (!box.isConnected || promptRef.current !== box || box.value || composerFiles().length) return
       const target = activeScratchSession ? `profile=${providerProfileId || 0}&project=none` : `workspace=${activeWorkspaceId}`
-      stopWorkspaceStatusRequests()
-      navigate(`/?${target}&draft=${newCommandId()}`)
+      openNewDraft(target)
     }
 
     function finishSend() {
@@ -6065,7 +6118,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
     if (command === 'thread.startWithoutProject') {
       event.preventDefault()
-      startWithoutProject()
+      startScratchDraft()
       return
     }
     if (command === 'editor.open' && workspaceEditorAllowed && !event.repeat) {
