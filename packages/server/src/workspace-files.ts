@@ -126,10 +126,12 @@ export async function respondWorkspaceFile(workspace: string, url: URL, request:
     if (url.pathname === '/workspace-files/preview') return Response.json(preview, { headers })
     if (preview?.kind === 'html' && !preview.truncated) return htmlResponse(preview.text ?? '')
     if (!download && !media) return unavailable(415)
-    const filename = encodeURIComponent(basename(path)).replace(/['()*]/gu, char => '%' + char.charCodeAt(0).toString(16))
+    const name = basename(path)
+    const fallbackFilename = name.replace(/[^\x20-\x7E]|["\\]/gu, '_')
+    const filename = encodeURIComponent(name).replace(/['()*]/gu, char => '%' + char.charCodeAt(0).toString(16))
     const responseHeaders: Record<string, string> = {
       ...headers, 'content-type': media ?? 'application/octet-stream', 'accept-ranges': 'bytes',
-      'content-disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${filename}`,
+      'content-disposition': `${download ? 'attachment' : 'inline'}; filename="${fallbackFilename}"; filename*=UTF-8''${filename}`,
       'content-security-policy': "frame-ancestors 'self'",
     }
     const requested = request.headers.get('range')

@@ -39,7 +39,7 @@
         <button type="button" data-workspace-file-link :disabled="!workspaceFilePreview()" class="harness-icon-button" @click="copySelectedWorkspaceFileLink" aria-label="Copy file link" title="Copy file link">
           <span class="size-4 i-hugeicons-link-01" aria-hidden="true"></span>
         </button>
-        <a data-workspace-file-download hidden :hidden="!workspaceFilePreview()" :href="workspaceFilePreview()?.download" download class="harness-icon-button" aria-label="Download file" title="Download file">
+        <a data-workspace-file-download hidden :hidden="!workspaceFilePreview()" :href="workspaceFilePreview()?.download" :download="workspaceFileSelected().split('/').pop()" class="harness-icon-button" aria-label="Download file" title="Download file">
           <span class="size-4 i-hugeicons-download-01" aria-hidden="true"></span>
         </a>
       </div>

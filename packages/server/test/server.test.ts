@@ -203,7 +203,7 @@ describe('harness serve — HTTP', () => {
     expect(html).not.toContain('href=')
     const download = await request('download', path, { range: 'bytes=0-4' })
     expect(download.status).toBe(206)
-    expect(download.headers.get('content-disposition')).toContain("attachment; filename*=UTF-8''%5Bdraft%5D%20%231.txt")
+    expect(download.headers.get('content-disposition')).toBe('attachment; filename="[draft] #1.txt"; filename*=UTF-8\'\'%5Bdraft%5D%20%231.txt')
     expect(await download.text()).toBe('First')
     expect((await request('download', path, { range: 'bytes=900-' })).status).toBe(416)
     const pdf = '%PDF-1.4\n'

@@ -1895,8 +1895,10 @@ const [downloaded] = await Promise.all([
   fileLinkPage.waitForEvent('download'),
   fileLinkPage.getByRole('link', { name: 'Download file' }).click(),
 ])
-check('a fresh page opens the shared line and downloads the original file',
-  downloaded.suggestedFilename() === previewFile && readFileSync((await downloaded.path())!, 'utf8') === previewText)
+check(`a shared file downloads with its exact name (received ${JSON.stringify(downloaded.suggestedFilename())})`,
+  downloaded.suggestedFilename() === previewFile)
+check('a fresh page opens the shared line and downloads the original bytes',
+  readFileSync((await downloaded.path())!, 'utf8') === previewText)
 await fileLinkPage.close()
 const fileTools = projectAttachmentDraft.getByRole('button', { name: 'Workspace actions' })
 await fileTools.click()
