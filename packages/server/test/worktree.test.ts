@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { nestedWorktrees, openCombinedWorktree, planCombinedWorktree, releaseCombinedWorktree } from '../src/combined-worktree'
 import { branchFor, commitTurn, create, exists, list, openReserved, plan, prune, release, remove } from '../src/worktree'
 
 /**
@@ -70,6 +71,37 @@ describe('reserved worktrees', () => {
     finally { rmSync(dir, { recursive: true, force: true }) }
   }, GIT_TIMEOUT)
 })
+
+it('keeps commits separate when the project root and a child are both repositories', async () => {
+  const project = repo()
+  const storage = mkdtempSync(join(tmpdir(), 'harness-combined-'))
+  try {
+    const child = join(project, 'packages', 'api')
+    mkdirSync(child, { recursive: true })
+    expect(g(child, 'init', '-qb', 'main')).toBe('')
+    writeFileSync(join(child, 'api.txt'), 'API baseline\n')
+    g(child, 'add', '.')
+    g(child, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'API baseline')
+    const intent = await planCombinedWorktree(project, join(storage, 'worktrees'), 42)
+    if (!intent) throw new Error('No combined worktree was reserved.')
+    expect(await openCombinedWorktree(intent, true)).toBe(true)
+    expect(intent.checkouts.map(checkout => checkout.key)).toEqual(['', 'packages/api'])
+    const [root, api] = intent.checkouts
+    writeFileSync(join(root!.path, 'app.txt'), 'Project update\n')
+    writeFileSync(join(api!.path, 'api.txt'), 'API update\n')
+    expect(await commitTurn(root!.path, 'Project change', nestedWorktrees(intent, root!))).toBeTruthy()
+    expect(await commitTurn(api!.path, 'API change')).toBeTruthy()
+    expect(g(project, 'ls-tree', intent.branch, 'packages')).toBe('')
+    expect(g(child, 'show', `${intent.branch}:api.txt`)).toBe('API update')
+    expect(await releaseCombinedWorktree(intent)).toMatchObject({ removed: true })
+    expect(existsSync(intent.path)).toBe(false)
+    expect(g(project, 'show', `${intent.branch}:app.txt`)).toBe('Project update')
+  }
+  finally {
+    rmSync(storage, { recursive: true, force: true })
+    rmSync(project, { recursive: true, force: true })
+  }
+}, GIT_TIMEOUT)
 
 describe('creating a worktree for a session', () => {
   it('gives it a directory and a branch of its own', async () => {
