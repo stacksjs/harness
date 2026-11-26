@@ -269,7 +269,21 @@ const RESPONSIVE_SHELL = `
   font-size: clamp(21px, 2.15vw, 30px); font-weight: 620;
   letter-spacing: -.035em; line-height: 1.18; overflow-wrap: anywhere; text-wrap: balance;
 }
-[data-draft-context] { width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter))); margin-inline: auto; padding-inline: 10px; }
+[data-draft-context] {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 8px;
+  width: min(var(--workspace-content), calc(100% - 2 * var(--workspace-gutter)));
+  margin-inline: auto; padding-inline: 10px;
+}
+[data-draft-worktree] { min-width: 0; }
+[data-draft-worktree] summary { min-height: 32px; align-content: center; }
+[data-draft-worktree][open] > div {
+  padding: 8px; border: 1px solid var(--workspace-line); border-radius: 8px;
+  background: var(--workspace-surface);
+}
+@media (max-width: 640px) {
+  [data-draft-worktree] summary, [data-draft-worktree] input:not([type="checkbox"]),
+  [data-draft-worktree] select, [data-draft-worktree] fieldset label { min-height: 44px; }
+}
 [data-transcript] { padding-inline: var(--workspace-gutter); padding-block: var(--harness-transcript-top, 24px) 16px; }
 [data-transcript]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
 [data-transcript] > :is([data-turn], [data-follow-ups]) { max-width: var(--workspace-content); margin-inline: auto; }

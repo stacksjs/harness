@@ -3942,6 +3942,41 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
   await capture(`project-repositories-linked-${width}x${height}`)
 }
 
+const worktreeDraft = new URL(`/?workspace=${multiRepoWorkspace}`, baseUrl)
+await page.goto(worktreeDraft.href)
+const worktreeControls = page.locator('[data-draft-worktree]')
+await worktreeControls.locator('summary').click()
+const worktreeMode = worktreeControls.getByRole('combobox', { name: 'Run in' })
+await worktreeMode.selectOption('worktree')
+const selectedApi = worktreeControls.getByRole('checkbox', { name: 'API service' })
+const selectedWeb = worktreeControls.getByRole('checkbox', { name: 'Web frontend' })
+check('worktree drafts select both available repositories by default', await selectedApi.isChecked() && await selectedWeb.isChecked())
+await selectedWeb.uncheck()
+check('the worktree draft supports choosing a subset', await selectedApi.isChecked() && !await selectedWeb.isChecked())
+await selectedWeb.check()
+await worktreeControls.getByRole('textbox', { name: 'Base branch' }).fill('review/fixture')
+check('the worktree controls fit on a 360px phone', await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+await capture('combined-worktree-draft-phone')
+await page.setViewportSize({ width: 1440, height: 900 })
+await capture('combined-worktree-draft-desktop')
+const isolatedPrompt = page.getByRole('textbox', { name: 'Message', exact: true })
+await isolatedPrompt.fill('Open the combined worktree fixture.')
+await isolatedPrompt.press('Enter')
+await page.waitForURL(url => url.pathname.startsWith('/s/'))
+const combinedId = Number(new URL(page.url()).pathname.split('/').at(-1))
+await page.locator('[data-workspace-branch]').filter({ hasText: `harness/session-${combinedId}` }).waitFor()
+const combined = harness.engine.current.sessions.get(combinedId)?.combinedWorktree
+check('the first browser turn uses the selected repositories on one isolated branch',
+  Boolean(combined && combined.checkouts.length === 2 && combined.checkouts.every(checkout =>
+    checkout.branch === combined.branch && !readFileSync(join(checkout.path, 'shared.txt'), 'utf8').includes('working copy'))))
+await capture('combined-worktree-thread-desktop')
+await page.goto(worktreeDraft.href)
+await worktreeControls.locator('summary').click()
+await worktreeMode.selectOption('worktree')
+check('new worktree drafts remember the last repository and base selections for this project',
+  await selectedApi.isChecked() && await selectedWeb.isChecked()
+  && await worktreeControls.getByRole('textbox', { name: 'Base branch' }).inputValue() === 'review/fixture')
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

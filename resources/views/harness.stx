@@ -725,6 +725,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             @endforeach
           </select>
         </label>
+        @if(draftProject?.trusted)
+          @include('../partials/harness-composer-worktree')
+        @endif
       </div>
     @endif
     @if(activeWorkspaceId)
@@ -1267,6 +1270,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // read it through their own `:data-tool-state` binding, loop rows through
   // theirs — because tools finish out of order and a row is found by id.
   const toolResults = state({})
+  const draftWorktreeOptions = state(null)
+  const draftWorktreeLoad = state('')
+  const draftIsolated = state(false)
+  const draftRepositoryKeys = state([])
+  const draftBaseBranch = state('')
+  const worktreePreferences = useLocalStorage('harness.worktreePreferences', {})
   const diffStatus = state('Loading…')
   const diffFiles = state([])
   const diffPatch = state('')
@@ -4432,6 +4441,38 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     promptRef.current?.focus()
   }
 
+  async function loadDraftWorktreeOptions(event) {
+    if (!event.currentTarget.open || !draftProject?.trusted || draftWorktreeOptions() || draftWorktreeLoad() === 'Loading repositories…') return
+    draftWorktreeLoad.set('Loading repositories…')
+    try {
+      const response = await fetch('/workspace-repositories?' + new URLSearchParams({ workspace: String(draftProject.id) }))
+      if (!response.ok) throw new Error('Could not load project repositories. Close and reopen this panel to retry.')
+      const options = await response.json()
+      const keys = options.repositories.map(repository => repository.key)
+      const saved = worktreePreferences()?.[draftProject.id]
+      batch(() => {
+        draftWorktreeOptions.set(options)
+        draftRepositoryKeys.set(Array.isArray(saved?.repositories) ? keys.filter(key => saved.repositories.includes(key)) : keys.length <= 8 ? keys : [])
+        draftBaseBranch.set(typeof saved?.baseBranch === 'string' ? saved.baseBranch : '')
+        draftWorktreeLoad.set(options.hasProjectRepository || keys.length ? '' : 'No Git repositories were found in this project.')
+      })
+    }
+    catch (error) { draftWorktreeLoad.set(error.message) }
+  }
+
+  function changeDraftWorktreeMode(event) {
+    draftIsolated.set(event.currentTarget.value === 'worktree')
+  }
+
+  function selectDraftRepository(key, event) {
+    const selected = event.currentTarget.checked
+    draftRepositoryKeys.update(keys => selected ? [...keys, key] : keys.filter(value => value !== key))
+  }
+
+  function editDraftBaseBranch(event) {
+    draftBaseBranch.set(event.currentTarget.value)
+  }
+
   async function sendPrompt(mode = followUpPreference()) {
     const box = promptRef.current
     const raw = box?.value ?? ''
@@ -4555,7 +4596,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text || files[0]?.name, ...model, ...options }, commandId)
         }
         else {
-          await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice, ...model, ...options }, commandId)
+          const worktree = draftIsolated() ? { repositories: draftRepositoryKeys(), baseBranch: draftBaseBranch().trim() } : undefined
+          await sendCommand({
+            type: 'session.create', workspaceId: draftProject.id, ...choice, ...model, ...options,
+            ...(worktree && { isolate: true, worktree }),
+          }, commandId)
+          if (worktree) worktreePreferences.update(preferences => ({ ...preferences, [draftProject.id]: worktree }))
         }
         const nextSession = derivedSessionId(commandId)
         pendingFirstPrompt.set({ sessionId: nextSession, text: raw, ...(uploads ? { upload: draft.upload, files } : {}) })
@@ -5236,7 +5282,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         threadNavigation.update(previous => ({ ...previous, ...payload.changes }))
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
       }
-      if (payload.type === 'session.isolated') workspaceBranch.set(payload.branch)
+      if (payload.type === 'session.isolated') {
+        workspaceBranch.set(payload.branch)
+        if (diffOpen()) refreshWorkspaceDiff()
+      }
       if (payload.type === 'session.fork-finished' || payload.type === 'session.fork-portable') forkStatus.set('ready')
       if (payload.type === 'session.fork-failed') {
         forkError.set(payload.message)
