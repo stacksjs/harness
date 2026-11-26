@@ -22,7 +22,7 @@ import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePo
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
-import { reviewWorkspaceDiff, workspaceDiff, workspaceDiffRevision, workspaceReviewOptions } from './diff'
+import { reviewWorkspaceDiff, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
@@ -1189,7 +1189,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      const diffRoute = /^\/s\/(\d+)\/diff(\/options)?$/u.exec(url.pathname)
+      const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context))?$/u.exec(url.pathname)
       if (request.method === 'GET' && diffRoute) {
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const id = Number(diffRoute[1])
@@ -1202,18 +1202,26 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (!path) return Response.json(errorDiff('session has no workspace'), { headers })
         const mode = url.searchParams.get('comparison')
         const target = url.searchParams.get('target') || undefined
+        const context = diffRoute[2] === 'context'
         if (diffRoute[2] || mode) {
           const workspace = session && engine.current.workspaces.get(session.workspaceId)
           if (!workspace?.trusted || workspace.scratch) return Response.json({ error: 'Git review is unavailable for this workspace.' }, { status: 404, headers })
           const turns = reviewTurns(session)
-          if (diffRoute[2]) return workspaceReviewOptions(path, turns, target)
+          if (diffRoute[2] === 'options') return workspaceReviewOptions(path, turns, target)
             .then(value => Response.json(value, { headers }))
             .catch(() => Response.json({ error: 'Could not load Git review options.' }, { status: 503, headers }))
+          const readContext = (diff: NonNullable<Awaited<ReturnType<typeof reviewWorkspaceDiff>>>) => workspaceDiffContext(
+            path, diff, url.searchParams.get('file') ?? '', url.searchParams.get('object') ?? '',
+          )
+          if (context && !mode) return workspaceDiff(path, session?.checkpoints[0]?.vcsRef).then(readContext)
+            .catch(() => Response.json({ error: 'Could not load unchanged lines.' }, { status: 503, headers }))
           if (mode !== 'uncommitted' && mode !== 'branch' && mode !== 'commit' && mode !== 'turn')
             return Response.json({ error: 'Unknown Git comparison.' }, { status: 400, headers })
-          return reviewWorkspaceDiff(path, mode, target, turns, url.searchParams.get('knownRevision') ?? undefined)
-            .then(diff => diff ? Response.json(diff, { headers }) : new Response(null, { status: 204, headers }))
-            .catch(() => Response.json(errorDiff('could not read the workspace'), { headers }))
+          return reviewWorkspaceDiff(path, mode, target, turns, context ? undefined : url.searchParams.get('knownRevision') ?? undefined)
+            .then(diff => !diff ? new Response(null, { status: 204, headers })
+              : context ? readContext(diff) : Response.json(diff, { headers }))
+            .catch(() => context ? Response.json({ error: 'Could not load unchanged lines.' }, { status: 503, headers })
+              : Response.json(errorDiff('could not read the workspace'), { headers }))
         }
         // Existing clients review all changes since the first checkpoint,
         // falling back to the uncommitted working tree for older sessions.

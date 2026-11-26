@@ -27,6 +27,7 @@ import { spawn } from 'node:child_process'
 import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { snapshotTree } from './checkpoint'
+import { parseWorkspacePatch } from './diff-patch'
 
 export interface FileChange {
   path: string
@@ -55,7 +56,7 @@ export interface WorkspaceDiff {
 }
 
 /** Run a git command in the workspace, capturing stdout. */
-function git(cwd: string, args: string[]): Promise<{ ok: boolean, out: string }> {
+function git(cwd: string, args: string[], limit = Infinity): Promise<{ ok: boolean, out: string }> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
@@ -69,7 +70,13 @@ function git(cwd: string, args: string[]): Promise<{ ok: boolean, out: string }>
     // A repository with a huge diff must not hang the page. The cap is on time,
     // not bytes, because the byte cap belongs with the caller that renders it.
     const timer = setTimeout(() => { child.kill(); resolve({ ok: false, out }) }, 5000)
-    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
+    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => {
+      if (out.length + chunk.length > limit) {
+        child.kill()
+        resolve({ ok: false, out: '' })
+      }
+      else out += chunk
+    })
     child.on('error', () => { clearTimeout(timer); resolve({ ok: false, out: '' }) })
     child.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
   })
@@ -228,7 +235,7 @@ async function readWorkspaceDiff(workspacePath: string, scope: WorkspaceDiff['sc
   const [status, numstat, patch] = await Promise.all([
     git(workspacePath, againstTree ? ['diff', '--name-status', '-z', ...range] : ['status', '--porcelain=v1', '-z']),
     git(workspacePath, ['diff', '--no-ext-diff', '--no-textconv', '--numstat', '-z', ...range]),
-    git(workspacePath, ['-c', 'diff.suppressBlankEmpty=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
+    git(workspacePath, ['-c', 'diff.suppressBlankEmpty=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index',
       '--src-prefix=a/', '--dst-prefix=b/', '--output-indicator-old=-',
       '--output-indicator-new=+', '--output-indicator-context= ', ...range]),
   ])
@@ -284,6 +291,25 @@ async function resolveCommit(path: string, ref: string): Promise<string | null> 
 async function isWorkspaceGitRoot(path: string): Promise<boolean> {
   const prefix = await git(path, ['rev-parse', '--is-inside-work-tree', '--show-prefix'])
   return prefix.ok && prefix.out.trimEnd() === 'true'
+}
+
+/** Only the before blob of a visible text patch can supply its unchanged lines. */
+export async function workspaceDiffContext(path: string, diff: WorkspaceDiff, file: string, object: string): Promise<Response> {
+  const headers = { 'cache-control': 'private, no-store' }
+  if (!commitId.test(object) || /^0+$/u.test(object) || !file || file.length > 4096 || file.includes('\0'))
+    return Response.json({ error: 'Invalid diff context request.' }, { status: 400, headers })
+  if (diff.error || !diff.files.some(entry => entry.path === file) || !await isWorkspaceGitRoot(path))
+    return Response.json({ error: 'This file is unavailable in the comparison.' }, { status: 404, headers })
+  const hunks = parseWorkspacePatch(diff.patch).get(file)
+  if (!hunks || hunks[0]?.beforeObject !== object)
+    return Response.json({ error: 'The comparison changed. Refresh Changes and try again.' }, { status: 409, headers })
+  const size = await git(path, ['cat-file', '-s', object])
+  if (size.ok && Number(size.out) > MAX_PATCH_BYTES)
+    return Response.json({ error: 'This file is too large to expand in Changes.' }, { status: 413, headers })
+  const blob = await git(path, ['cat-file', 'blob', object], MAX_PATCH_BYTES)
+  if (!blob.ok || blob.out.includes('\0'))
+    return Response.json({ error: 'Git could not read text context for this file.' }, { status: 404, headers })
+  return Response.json({ text: blob.out }, { headers })
 }
 
 async function reviewWorkingState(path: string): Promise<string | null> {
