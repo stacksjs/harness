@@ -32,6 +32,7 @@ import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
 import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
 import { createWorkspaceFileSearch } from './workspace-file-search'
+import { respondWorkspaceFile } from './workspace-files'
 import { threadSidebarLayout } from './thread-sidebar'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
@@ -1202,7 +1203,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       const asset = respondStxAsset(url.pathname) ?? assetCache.respond(url.pathname)
       if (asset) return asset
 
-      if (url.pathname === '/workspace-files/search' && request.method === 'GET') {
+      if (request.method === 'GET' && /^\/workspace-files\/(?:search|tree|preview|content|download)$/u.test(url.pathname)) {
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const headers = { 'cache-control': 'private, no-store' }
         const sessionId = url.searchParams.get('session')
@@ -1213,9 +1214,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return Response.json({ error: 'Workspace files are unavailable.' }, { status: 404, headers })
         const root = session ? defaultWorkspacePath(engine.current, session.id) : workspace.path
         if (!root) return Response.json({ error: 'Workspace files are unavailable.' }, { status: 404, headers })
-        return searchWorkspaceFiles(root, url.searchParams.get('q') ?? '')
-          .then(results => Response.json({ results }, { headers }))
-          .catch(() => Response.json({ error: 'Could not search workspace files.' }, { status: 503, headers }))
+        const response = url.pathname === '/workspace-files/search'
+          ? searchWorkspaceFiles(root, url.searchParams.get('q') ?? '', url.searchParams.get('refresh') === '1')
+            .then(results => Response.json({ results }, { headers }))
+          : respondWorkspaceFile(root, url, request)
+        return response.catch(() => Response.json({ error: 'Could not read workspace files.' }, { status: 503, headers }))
       }
 
       if (url.pathname === '/threads/search' && request.method === 'GET') {

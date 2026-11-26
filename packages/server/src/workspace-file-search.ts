@@ -1,5 +1,6 @@
 import { opendir, realpath, stat } from 'node:fs/promises'
-import { basename, isAbsolute, join, relative, sep } from 'node:path'
+import { basename, join } from 'node:path'
+import { resolveWorkspaceEntry } from './workspace-files'
 
 const INDEX_LIMIT = 25_000
 const INDEX_BYTES = 2 * 1024 * 1024
@@ -59,24 +60,16 @@ async function directoryFileNames(root: string): Promise<string[]> {
 }
 
 async function visibleFile(root: string, name: string): Promise<boolean> {
-  if (!name || isAbsolute(name) || name.split('/').some(segment => segment === '..' || segment.toLowerCase() === '.git')) return false
-  try {
-    const path = await realpath(join(root, name))
-    const inside = relative(root, path)
-    return inside !== '' && inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)
-      && !inside.split(sep).some(segment => segment.toLowerCase() === '.git') && (await stat(path)).isFile()
-  }
-  catch {
-    return false
-  }
+  const path = name ? await resolveWorkspaceEntry(root, name) : null
+  return path ? await stat(path).then(info => info.isFile(), () => false) : false
 }
 
 export function createWorkspaceFileSearch() {
   const indices = new Map<string, { until: number, paths: Promise<string[]> }>()
-  return async (workspace: string, query: string): Promise<string[]> => {
+  return async (workspace: string, query: string, refresh = false): Promise<string[]> => {
     const root = await realpath(workspace)
     let index = indices.get(root)
-    if (!index || index.until <= Date.now()) {
+    if (!index || refresh || index.until <= Date.now()) {
       index = { until: Date.now() + 2000, paths: gitFileNames(root).then(paths => paths ?? directoryFileNames(root)) }
       indices.delete(root)
       indices.set(root, index)

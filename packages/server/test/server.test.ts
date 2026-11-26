@@ -154,6 +154,65 @@ describe('harness serve — HTTP', () => {
     expect(await (await fetch(`${route}?session=${sessionId}&workspace=${workspaceId}&q=parity`)).json())
       .toEqual({ results: ['worktree-parity.md'] })
     expect((await fetch(`${route}?session=999&workspace=${workspaceId}`)).status).toBe(404)
+    const worktreeRoute = `http://127.0.0.1:${port}/workspace-files/preview?session=${sessionId}`
+    const scopedFile = await fetch(`${worktreeRoute}&path=worktree-parity.md`)
+    expect(await scopedFile.json()).toMatchObject({ text: 'worktree fixture\n' })
+    expect((await fetch(`${worktreeRoute}&path=parity%20notes%20%5Bdraft%5D.md`)).status).toBe(404)
+  })
+
+  it('lists, previews, and downloads only scoped workspace files', async () => {
+    const project = join(dir, 'workspace')
+    const folder = join(project, 'notes & tests')
+    mkdirSync(folder, { recursive: true })
+    await Bun.write(join(folder, '[draft] #1.txt'), 'First line\nSecond line\n')
+    await Bun.write(join(folder, 'binary.txt'), new Uint8Array([0, 1, 2, 3]))
+    await Bun.write(join(folder, 'large.txt'), 'row\n'.repeat(5_200))
+    await Bun.write(join(project, 'print.html'), '<title>Print</title><h1>Rendered fixture</h1><script>void 0</script><a href="/">Home</a>')
+    await Bun.write(join(dir, 'outside.txt'), 'Outside fixture\n')
+    symlinkSync(join(dir, 'outside.txt'), join(project, 'outside.txt'))
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    await dispatch('preview-profile', { type: 'profile.create', name: 'File fixture' })
+    const workspaceId = derivedId('preview-workspace')
+    await dispatch('preview-workspace', { type: 'workspace.add', profileId: derivedId('preview-profile'), path: project })
+    const request = (action: string, path = '', headers?: HeadersInit) => {
+      const params = new URLSearchParams({ workspace: String(workspaceId), path })
+      return fetch(`http://127.0.0.1:${port}/workspace-files/${action}?${params}`, { headers })
+    }
+    expect((await request('preview', 'print.html')).status).toBe(404)
+    await dispatch('preview-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+    const listed = await (await request('tree')).json()
+    expect(listed.entries).toEqual([
+      { path: 'notes & tests', name: 'notes & tests', kind: 'directory' },
+      { path: 'print.html', name: 'print.html', kind: 'file' },
+    ])
+    expect((await request('tree', 'notes & tests')).status).toBe(200)
+    expect((await request('tree', '', { origin: 'https://isolated.invalid' })).status).toBe(403)
+    const path = 'notes & tests/[draft] #1.txt'
+    expect(await (await request('preview', path)).json()).toMatchObject({ kind: 'text', text: 'First line\nSecond line\n', truncated: false })
+    expect(await (await request('preview', 'notes & tests/binary.txt')).json()).toMatchObject({ kind: 'binary' })
+    expect(await (await request('preview', 'notes & tests/large.txt')).json()).toMatchObject({ truncated: true })
+    expect((await request('preview', 'outside.txt')).status).toBe(404)
+    expect((await request('download', '../outside.txt')).status).toBe(404)
+    expect((await request('tree', '.git')).status).toBe(404)
+    const view = await request('content', 'print.html')
+    expect(view.headers.get('content-security-policy')).toContain("sandbox; default-src 'none'")
+    const html = await view.text()
+    expect(html).toContain('Rendered fixture')
+    expect(html).not.toContain('<script')
+    expect(html).not.toContain('href=')
+    const download = await request('download', path, { range: 'bytes=0-4' })
+    expect(download.status).toBe(206)
+    expect(download.headers.get('content-disposition')).toContain("attachment; filename*=UTF-8''%5Bdraft%5D%20%231.txt")
+    expect(await download.text()).toBe('First')
+    expect((await request('download', path, { range: 'bytes=900-' })).status).toBe(416)
+    const pdf = '%PDF-1.4\n'
+    await Bun.write(join(project, 'document.pdf'), pdf)
+    expect(await (await request('preview', 'document.pdf')).json()).toMatchObject({ kind: 'pdf' })
+    const content = await request('content', 'document.pdf', { range: 'bytes=-4' })
+    expect(content.headers.get('content-type')).toBe('application/pdf')
+    expect(content.headers.get('content-disposition')).toStartWith('inline;')
+    expect(await content.text()).toBe('1.4\n')
   })
 
   it('404s an unknown path rather than upgrading it', async () => {
