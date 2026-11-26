@@ -1254,6 +1254,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const diffLayout = useLocalStorage('harness.diffLayout', 'stacked')
   const diffWrap = useLocalStorage('harness.diffWrap', true)
   const diffRefresh = state(0)
+  const diffReviewMode = state('session')
+  const diffBaseRef = state('')
+  const diffCommit = state('')
+  const diffTurn = state('')
+  const diffReviewOptions = state(null)
+  const diffReviewError = state('')
+  const reviewOptionsLoader = state(null)
   const diffPageSize = 200
   let diffTools = null
   const diffDisplayFiles = derived(() => {
@@ -3321,6 +3328,37 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     diffRefresh.update(value => value + 1)
   }
 
+  function clearDiffComparison() {
+    batch(() => {
+      diffStatus.set('Loading comparison…')
+      diffFiles.set([])
+      diffPatch.set('')
+      diffHunks.set(new Map())
+      diffFileLimits.set(new Map())
+    })
+  }
+
+  function changeDiffReviewMode(event) {
+    clearDiffComparison()
+    diffReviewMode.set(event.currentTarget.value)
+  }
+
+  function changeDiffBase(event) {
+    clearDiffComparison()
+    diffCommit.set('')
+    diffBaseRef.set(event.currentTarget.value)
+  }
+
+  function changeDiffCommit(event) {
+    clearDiffComparison()
+    diffCommit.set(event.currentTarget.value)
+  }
+
+  function changeDiffTurn(event) {
+    clearDiffComparison()
+    diffTurn.set(event.currentTarget.value)
+  }
+
   function diffLineLabel(cell, side) {
     if (!cell) return ''
     if (diffLayout() === 'split') return side === 0 ? 'Before line ' + cell.before : 'After line ' + cell.after
@@ -3332,13 +3370,20 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   function showWorkspaceChanges(diff) {
     const files = diff.error ? [] : diff.files
     const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
-    const scope = diff.scope === 'session' ? 'since this session started' : 'in the working tree'
+    const scopes = {
+      session: 'since this session started',
+      'working-tree': 'in the working tree',
+      branch: 'against ' + diff.comparisonLabel,
+      commit: 'in commit ' + diff.comparisonLabel,
+      turn: 'in turn ' + diff.comparisonLabel,
+    }
+    const scope = scopes[diff.scope]
     const insertions = files.reduce((total, file) => total + file.insertions, 0)
     const deletions = files.reduce((total, file) => total + file.deletions, 0)
     const status = diff.error ? diff.error
       : !diff.isRepository ? 'This workspace is not a git repository.'
       : files.length ? `${count} ${scope} · +${insertions} −${deletions}`
-      : diff.scope === 'session' ? 'No changes since this session started.' : 'No uncommitted changes.'
+      : diff.scope === 'working-tree' ? 'No uncommitted changes.' : `No changes ${scope}.`
     batch(() => {
       diffStatus.set(status)
       const patch = diff.error ? '' : diff.patch
@@ -3359,10 +3404,48 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   effect(() => {
+    const load = reviewOptionsLoader()
+    const base = diffBaseRef()
+    diffRefresh()
+    if (!sessionId || !load || !diffOpen() || changesVisibility() !== 'visible') return
+    const controller = new AbortController()
+    const { signal } = controller
+    diffReviewError.set('')
+    void load(sessionId, base, signal).then(options => {
+      if (!signal.aborted) diffReviewOptions.set({ ...options, requestedBase: base })
+    }).catch(() => {
+      if (!signal.aborted) diffReviewError.set('Could not load Git review options.')
+    })
+    return () => controller.abort()
+  })
+
+  effect(() => {
     const watchChanges = changesWatcher()
     diffRefresh()
-    if (sessionId && watchChanges && diffOpen() && changesVisibility() === 'visible')
-      return watchChanges(sessionId, showWorkspaceChanges, () => diffStatus.set('Could not refresh changes.'))
+    if (!sessionId || !watchChanges || !diffOpen() || changesVisibility() !== 'visible') return
+    const mode = diffReviewMode()
+    let target
+    if (mode === 'branch') target = diffBaseRef()
+    if (mode === 'commit') {
+      const options = diffReviewOptions()
+      if (!options || options.requestedBase !== diffBaseRef()) return
+      target = diffCommit() || options.commits[0]?.sha
+      if (!target) {
+        diffStatus.set('No commits ahead of this branch base.')
+        return
+      }
+    }
+    if (mode === 'turn') {
+      const options = diffReviewOptions()
+      if (!options) return
+      if (!options.turns.length) {
+        diffStatus.set('No recorded turn comparisons.')
+        return
+      }
+      target = diffTurn()
+    }
+    const comparison = mode === 'session' ? undefined : { mode, target }
+    return watchChanges(sessionId, showWorkspaceChanges, () => diffStatus.set('Could not refresh changes.'), comparison)
   })
 
   let diffTrigger = null
@@ -4636,7 +4719,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, parseWorkspacePatch, workspaceDiffRows } = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions, parseWorkspacePatch, workspaceDiffRows } = await import(codecUrl)
     const sidebar = sidebarRef.current
     const threadSidebar = sidebar && createThreadSidebar({
       root: sidebar,
@@ -4682,6 +4765,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     diffTools = { parseWorkspacePatch, workspaceDiffRows }
     changesWatcher.set(watchWorkspaceChanges)
+    reviewOptionsLoader.set(loadWorkspaceReviewOptions)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({
@@ -4897,6 +4981,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       else if (payload.type === 'checkpoint.restored') {
         // The workspace is actually back now.
         while (revertWaiters.length > 0) revertWaiters.shift()()
+        if (diffOpen()) refreshWorkspaceDiff()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
         const usage = payload.type === 'turn.completed' ? payload.contextUsage : undefined
@@ -4923,6 +5008,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         transcriptAnnouncement.set(payload.type === 'turn.completed'
           ? (payload.contextCompacted ? 'Context compacted.' : 'Agent finished responding.')
           : 'Response stopped.')
+        if (diffOpen()) refreshWorkspaceDiff()
       }
       else if (payload.type === 'session.failed') {
         contextUsage.set(null)

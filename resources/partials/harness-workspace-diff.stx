@@ -13,11 +13,51 @@
       <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
     </button>
   </header>
+  <div data-diff-comparison hidden :hidden="!diffReviewOptions()?.isRepository">
+    <label>
+      <span>Compare</span>
+      <select aria-label="Git comparison" :value="diffReviewMode()" @change="changeDiffReviewMode">
+        <option value="session">Session changes</option>
+        <option value="uncommitted">Uncommitted</option>
+        <option value="branch">Branch changes</option>
+        <option value="commit">Commit</option>
+        <option value="turn">Turn</option>
+      </select>
+    </label>
+    <label hidden :hidden="diffReviewMode() !== 'branch'">
+      <span>Base</span>
+      <select aria-label="Base branch" :value="diffBaseRef()" @change="changeDiffBase">
+        <option value="">Automatic</option>
+        <template :for="branch in diffReviewOptions()?.branches || []" :key="branch.ref">
+          <option :value="branch.ref" :text="branch.label"></option>
+        </template>
+      </select>
+    </label>
+    <label hidden :hidden="diffReviewMode() !== 'commit'">
+      <span>Commit</span>
+      <select aria-label="Branch commit" :value="diffCommit()" :disabled="!diffReviewOptions()?.commits.length" @change="changeDiffCommit">
+        <option value="">Latest commit</option>
+        <template :for="commit in diffReviewOptions()?.commits || []" :key="commit.sha">
+          <option :value="commit.sha" :text="commit.sha.slice(0, 7) + ' ' + commit.subject"></option>
+        </template>
+      </select>
+    </label>
+    <label hidden :hidden="diffReviewMode() !== 'turn'">
+      <span>Turn</span>
+      <select aria-label="Recorded turn" :value="diffTurn()" :disabled="!diffReviewOptions()?.turns.length" @change="changeDiffTurn">
+        <option value="">Latest recorded turn</option>
+        <template :for="turn in diffReviewOptions()?.turns.slice().reverse() || []" :key="turn.id">
+          <option :value="String(turn.id)" :text="'Turn ' + turn.number"></option>
+        </template>
+      </select>
+    </label>
+  </div>
   <div data-diff-body>
     <div data-diff-overview>
       <p data-diff-status role="status" :text="diffStatus()">Loading…</p>
       <button type="button" hidden :hidden="!diffFiles().length" :aria-disabled="diffFileLimits().size ? 'false' : 'true'" @click="diffFileLimits.set(new Map())">Collapse all</button>
     </div>
+    <p data-diff-empty-patch role="status" hidden :hidden="!diffReviewError()" :text="diffReviewError()"></p>
     <div data-diff-patch>
       <p data-diff-empty-patch hidden :hidden="!diffTruncated()">This patch was truncated because it is too large.</p>
       <ul data-diff-files class="list-none">

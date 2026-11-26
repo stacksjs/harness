@@ -1,14 +1,28 @@
-import type { WorkspaceDiff } from './diff'
+import type { WorkspaceDiff, WorkspaceReviewMode, WorkspaceReviewOptions } from './diff'
+
+export async function loadWorkspaceReviewOptions(sessionId: number, base: string, signal: AbortSignal): Promise<WorkspaceReviewOptions> {
+  const query = base ? '?' + new URLSearchParams({ target: base }) : ''
+  const response = await fetch(`/s/${sessionId}/diff/options${query}`, { cache: 'no-store', signal })
+  if (!response.ok) throw new Error('Git review options are unavailable')
+  return response.json()
+}
 
 /** Refresh a visible Changes pane without asking Git to rebuild an unchanged patch. */
-export function watchWorkspaceChanges(sessionId: number, show: (diff: WorkspaceDiff) => void, unavailable: () => void): () => void {
+export function watchWorkspaceChanges(sessionId: number, show: (diff: WorkspaceDiff) => void, unavailable: () => void,
+  comparison?: { mode: WorkspaceReviewMode, target?: string }): () => void {
   const controller = new AbortController()
   const { signal } = controller
   let timer: ReturnType<typeof setTimeout> | undefined
   let knownRevision: string | undefined
 
   async function refresh(): Promise<void> {
-    const query = knownRevision ? `?knownRevision=${encodeURIComponent(knownRevision)}` : ''
+    const params = new URLSearchParams()
+    if (knownRevision) params.set('knownRevision', knownRevision)
+    if (comparison) {
+      params.set('comparison', comparison.mode)
+      if (comparison.target) params.set('target', comparison.target)
+    }
+    const query = params.size ? '?' + params : ''
     try {
       const response = await fetch(`/s/${sessionId}/diff${query}`, { cache: 'no-store', signal })
       if (response.status === 204) return

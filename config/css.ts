@@ -428,6 +428,16 @@ const RESPONSIVE_SHELL = `
   padding-inline: 8px; min-height: 26px; font-size: 12px; border-radius: 4px;
 }
 [data-diff-header] button[aria-pressed="true"], [data-diff-header] button:hover { background: var(--workspace-hover); }
+[data-diff-comparison]:not([hidden]) {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 6px 12px;
+  border-block-end: 1px solid var(--workspace-line); font-size: 12px;
+}
+[data-diff-comparison] label:not([hidden]) { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+[data-diff-comparison] select {
+  min-width: 0; max-width: min(16rem, 64vw); min-height: 28px; padding-inline: 6px;
+  background: var(--workspace-surface); color: inherit; border: 1px solid var(--workspace-line); border-radius: 5px;
+}
+.dark [data-diff-comparison] select { color-scheme: dark; }
 [data-diff-overview] {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px;
   padding: 7px 12px; border-block-end: 1px solid var(--workspace-line); font-size: 12px;
@@ -473,6 +483,14 @@ const RESPONSIVE_SHELL = `
 [data-diff-raw] pre { overflow-x: auto; max-height: 18rem; }
 @media (pointer: coarse) {
   [data-diff-header] button, [data-diff-file-toggle], [data-diff-more], [data-diff-overview] button { min-height: 44px; }
+}
+@media (pointer: coarse), (max-width: 47.999rem) {
+  [data-diff-comparison] label { position: relative; }
+  [data-diff-comparison] label::after {
+    content: ''; pointer-events: none; position: absolute; inset-inline-end: 11px; inset-block-start: calc(50% - 4px);
+    inline-size: 6px; block-size: 6px; border-inline-end: 1px solid; border-block-end: 1px solid; transform: rotate(45deg);
+  }
+  [data-diff-comparison] select { appearance: none; min-height: 44px; padding-inline-end: 26px; font-size: 16px; }
 }
 [data-files]:not([hidden]) { display: flex; flex: 1; flex-direction: column; min-block-size: 0; overflow: hidden; }
 [data-workspace-files-header], [data-workspace-file-toolbar], [data-workspace-file-options] {

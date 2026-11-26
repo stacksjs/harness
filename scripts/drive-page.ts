@@ -664,6 +664,14 @@ await changesPane.getByRole('button', { name: 'Refresh changes' }).click()
 await changedNotes.getByText('hello after refreshing the patch', { exact: true }).waitFor()
 check('a manual refresh reloads in-place edits and keeps the file expanded', true)
 writeFileSync(join(dir, 'notes.txt'), 'hello from the drive\n')
+const reviewComparison = changesPane.getByRole('combobox', { name: 'Git comparison' })
+await reviewComparison.selectOption('turn')
+await changesPane.getByRole('status').getByText('No changes in turn 1.', { exact: true }).waitFor()
+check('recorded turn review excludes a file edit made after completion', await changedNotes.isHidden())
+check('the comparison picker has a full touch target at phone width', (await reviewComparison.boundingBox())!.height >= 44)
+await capture('changes-recorded-turn-phone')
+await reviewComparison.selectOption('session')
+await changedNotes.getByText('hello from the drive', { exact: true }).waitFor()
 const closeChanges = page.getByRole('button', { name: 'Close changes' })
 await closeChanges.waitFor()
 check('phone Changes owns the workspace while the patch stays visible', await page.locator('[data-diff-patch]').isVisible()
@@ -3568,7 +3576,11 @@ check('the Claude fork resumes its own native conversation with an unmodified pr
 const ledgerRepo = join(driveRoot, 'terminal-ledger')
 mkdirSync(ledgerRepo)
 writeFileSync(join(ledgerRepo, 'ledger.txt'), 'Ledger\n')
-execSync('git init -q && git add ledger.txt && git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm Initial', { cwd: ledgerRepo })
+execSync('git init -qb main && git add ledger.txt && git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm Initial', { cwd: ledgerRepo })
+execFileSync('git', ['switch', '-qc', 'review/ledger'], { cwd: ledgerRepo })
+writeFileSync(join(ledgerRepo, 'branch-only.txt'), 'Branch evidence\n')
+execFileSync('git', ['add', '--', 'branch-only.txt'], { cwd: ledgerRepo })
+execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Branch-only marker'], { cwd: ledgerRepo })
 writeFileSync(join(ledgerRepo, 'ledger.txt'), 'Ledger\nSigned\n')
 const ledgerWorkspace = 'commit-from-terminal-workspace'
 const ledgerThread = 'commit-from-terminal-thread'
@@ -3587,6 +3599,41 @@ page.on('request', (request) => {
 const unchangedLedger = page.waitForResponse(response => new URL(response.url()).pathname === `${ledgerPath}/diff` && response.status() === 204)
 await headerChanges.click()
 const ledgerChanges = page.locator('[data-diff-status]')
+await ledgerChanges.getByText('1 changed file in the working tree · +1 −0', { exact: true }).waitFor()
+const ledgerPanel = page.getByRole('region', { name: 'Changes', exact: true })
+const ledgerComparison = ledgerPanel.getByRole('combobox', { name: 'Git comparison' })
+await ledgerComparison.selectOption('branch')
+const ledgerBase = ledgerPanel.getByRole('combobox', { name: 'Base branch' })
+await ledgerBase.getByRole('option', { name: 'Automatic' }).waitFor({ state: 'attached' })
+await ledgerBase.selectOption('refs/heads/review/ledger')
+await ledgerChanges.getByText('1 changed file against review/ledger · +1 −0', { exact: true }).waitFor()
+await ledgerBase.selectOption('refs/heads/main')
+await ledgerChanges.getByText('2 changed files against main · +2 −0', { exact: true }).waitFor()
+check('branch review changes with the selected base', await ledgerPanel.getByText('branch-only.txt', { exact: true }).isVisible())
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`changes-branch-comparison-${width}`)
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+}
+await ledgerComparison.selectOption('commit')
+await ledgerPanel.getByRole('option', { name: /Branch-only marker/ }).waitFor({ state: 'attached' })
+await ledgerPanel.getByText('Branch evidence', { exact: true }).waitFor()
+check('commit review excludes a dirty file while rendering the selected patch',
+  await ledgerPanel.locator('[data-diff-file="ledger.txt"]').count() === 0)
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`changes-commit-comparison-${width}`)
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+}
+await ledgerComparison.selectOption('uncommitted')
+await ledgerChanges.getByText('1 changed file in the working tree · +1 −0', { exact: true }).waitFor()
+check('uncommitted review excludes the branch commit',
+  await ledgerPanel.locator('[data-diff-file="branch-only.txt"]').count() === 0)
+await ledgerComparison.selectOption('session')
 await ledgerChanges.getByText('1 changed file in the working tree · +1 −0', { exact: true }).waitFor()
 await headerTerminal.click()
 await waitForTerminalLine('Harness test terminal')

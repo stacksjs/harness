@@ -37,7 +37,7 @@ export { createThreadSidebar } from './packages/server/src/browser-thread-sideba
 export { createPromptStash, newComposerDraftId, PROMPT_STASH_KEY } from './packages/server/src/browser-prompt-stash'
 export { composerFileStatus, createComposerFileActions, releaseComposerUploads } from './packages/server/src/browser-composer-files'
 export { discardComposerDraft, expireComposerDraft, persistDraftUndo, restoreComposerDraft, wasComposerDraftDiscarded, watchSidebarDrafts } from './packages/server/src/browser-composer-drafts'
-export { watchWorkspaceChanges } from './packages/server/src/browser-workspace-changes'
+export { loadWorkspaceReviewOptions, watchWorkspaceChanges } from './packages/server/src/browser-workspace-changes'
 export { parseWorkspacePatch, workspaceDiffRows } from './packages/server/src/browser-diff'
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
 export { chosenSnoozeTime, threadSnoozeChoices } from './packages/server/src/browser-thread-snooze'
