@@ -3799,6 +3799,9 @@ try {
       return bounds.left >= 0 && bounds.right <= innerWidth && bounds.height > 200 && document.documentElement.scrollWidth === innerWidth
         && Boolean(input && exit && input.width >= 60 && exit.right <= innerWidth)
     }))
+    const transcript = page.locator('[data-workspace-lane]')
+    check(`the preview and transcript use the available workspace width at ${width}×${height}`,
+      (await transcript.isVisible()) === (width >= 1024))
     await capture(`workspace-browser-${width}x${height}`)
   }
   const restoredPage = await page.reload()

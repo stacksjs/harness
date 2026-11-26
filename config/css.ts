@@ -727,6 +727,12 @@ const RESPONSIVE_SHELL = `
   [data-diff]:not([hidden]) { flex: 1; }
   [data-files][data-file-selected="true"] [data-workspace-files-tree] { display: none; }
 }
+@media (min-width: 64rem) and (max-width: 74.999rem) {
+  [data-workspace-layout][data-preview-open="true"] [data-workspace-lane] { display: flex; }
+  [data-workspace-layout][data-preview-open="true"] [data-workspace-rail] {
+    flex: 0 0 clamp(22rem, 38vw, 31rem); width: auto; padding-inline: 0 var(--workspace-gutter);
+  }
+}
 @media (max-width: 47.999rem) {
   [data-workspace-layout] { --workspace-header-height: 52px; }
   [data-workspace-header] { gap: 4px; padding-inline: 6px; min-width: 0; }
