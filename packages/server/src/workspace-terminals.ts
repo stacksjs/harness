@@ -1,4 +1,5 @@
 import type { PtyOptions } from './pty'
+import type { ProjectScript } from './project-scripts'
 import type { SavedTerminalScope, TerminalHistoryStore } from './terminal-history'
 import { Terminal } from '@harness/ansi'
 import { Pty } from './pty'
@@ -22,6 +23,7 @@ interface WorkspaceTerminal<Peer> {
   savedScope?: SavedTerminalScope
   pendingHistory?: ReturnType<typeof setTimeout>
   exit?: { code: number | null }
+  stopOnSettle?: boolean
 }
 
 function savedTerminalScope(scope: TerminalScope): SavedTerminalScope | undefined {
@@ -66,7 +68,7 @@ export class WorkspaceTerminals<Peer> {
     return ids
   }
 
-  open(peer: Peer, scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, saved?: string): void {
+  open(peer: Peer, scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, saved?: string, script?: ProjectScript): void {
     // Scratch directory creation can yield between the first resume check and opening.
     if (this.resume(peer, scope)) return
     const { cols, rows } = options
@@ -76,11 +78,15 @@ export class WorkspaceTerminals<Peer> {
     if (restoring) model?.write('[Host restarted. Previous output restored.]\r\n')
     if (savedScope) {
       try { this.history.register(savedScope) }
-      catch { this.warnHistory() }
+      catch (error) {
+        if (script) throw error
+        this.warnHistory()
+      }
     }
     const terminal: WorkspaceTerminal<Peer> = {
       id: ++this.nextId, scope, shell, cols, rows, peers: new Set(), pty: new Pty(options),
       model, savedScope,
+      stopOnSettle: script?.stopOnSettle,
     }
     this.terminals.set(terminal.id, terminal)
     terminal.pty.onData((data) => {
@@ -97,16 +103,17 @@ export class WorkspaceTerminals<Peer> {
       this.broadcast(terminal, { t: 'term-exit', termId: terminal.id, code })
       if (!scope.resumeKey) this.terminals.delete(terminal.id)
     })
-    this.attach(peer, terminal, restoring)
+    this.attach(peer, terminal, restoring, script?.autoOpenPreview ? script.previewUrl : undefined)
   }
 
-  private attach(peer: Peer, terminal: WorkspaceTerminal<Peer>, replay = true): void {
+  private attach(peer: Peer, terminal: WorkspaceTerminal<Peer>, replay = true, openPreview?: string): void {
     terminal.peers.add(peer)
     this.send(peer, {
       t: 'term-opened', termId: terminal.id, workspaceId: terminal.scope.workspaceId,
       shell: terminal.shell, cols: terminal.cols, rows: terminal.rows,
       ...(replay && terminal.model ? { checkpoint: terminal.model.checkpoint() } : {}),
       ...(terminal.exit ? { exit: terminal.exit } : {}),
+      ...(openPreview ? { openPreview } : {}),
     })
   }
 
@@ -150,6 +157,16 @@ export class WorkspaceTerminals<Peer> {
   disconnect(peer: Peer): void {
     for (const terminal of this.terminals.values()) {
       if (terminal.peers.delete(peer) && !terminal.scope.resumeKey) this.remove(terminal)
+    }
+  }
+
+  stopScriptJobs(sessionId: number): void {
+    for (const terminal of this.terminals.values()) {
+      if (terminal.scope.sessionId !== sessionId || terminal.exit || !terminal.stopOnSettle) continue
+      this.flushHistory(terminal)
+      terminal.exit = { code: null }
+      terminal.pty.kill()
+      this.broadcast(terminal, { t: 'term-exit', termId: terminal.id, code: null })
     }
   }
 

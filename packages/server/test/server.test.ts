@@ -123,6 +123,84 @@ describe('harness serve — HTTP', () => {
     expect(await response.json()).toMatchObject({ ok: true, profiles: 0, sessions: 0 })
   })
 
+  it.skipIf(process.platform === 'win32')('imports and runs a private project script once in its thread checkout', async () => {
+    const project = join(dir, 'script project')
+    mkdirSync(project)
+    const configuration = join(project, 't3.json')
+    const command = "printf '%s\\n' \"$PWD\" >> launched.txt\nprintf 'fixture complete\\n'\nexit 7"
+    const previewUrl = 'https://localhost:7443/dev/status?mode=fixture'
+    const writeProjectScript = (name: string) => writeFileSync(configuration, JSON.stringify({
+      scripts: [{ name, command, previewUrl, autoOpenPreview: true }],
+    }))
+    writeProjectScript('Fixture action')
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    await dispatch('script-profile', { type: 'profile.create', name: 'Script fixture' })
+    const profileId = derivedId('script-profile')
+    const workspaceId = derivedId('script-workspace')
+    await dispatch('script-workspace', { type: 'workspace.add', profileId, path: project })
+    await dispatch('script-initial-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+    await dispatch('script-thread', { type: 'session.create', workspaceId, driverKind: 'claude' })
+    await dispatch('script-withdraw-trust', { type: 'workspace.trust', workspaceId, trusted: false })
+    const sessionId = derivedId('script-thread')
+    const endpoint = `http://127.0.0.1:${port}/s/${sessionId}/project-scripts`
+    const marker = join(project, 'launched.txt')
+    const post = (operation: unknown) => fetch(endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation),
+    })
+    expect((await fetch(endpoint)).status).toBe(403)
+    await dispatch('script-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+    expect((await fetch(endpoint, { headers: { 'sec-fetch-site': 'cross-site' } })).status).toBe(403)
+    const available = await (await fetch(endpoint)).json()
+    expect(available).toMatchObject({ scripts: [], imports: [{ name: 'Fixture action', command, previewUrl }], importError: '' })
+    const key = available.imports[0].key
+    writeProjectScript('Changed action')
+    expect((await post({ action: 'import', key })).status).toBe(409)
+    writeProjectScript('Fixture action')
+    const saved = await post({ action: 'import', key })
+    expect(saved.status).toBe(201)
+    const { script } = await saved.json()
+    expect(script).toMatchObject({ name: 'Fixture action', previewUrl, autoOpenPreview: true })
+    expect((await post({ action: 'import', key })).status).toBe(400)
+    expect(existsSync(marker)).toBe(false)
+
+    const openScript = { t: 'term-open', workspaceId, sessionId, resumeKey: crypto.randomUUID(), projectScriptId: script.id }
+    const client = await TestClient.connect(url())
+    try {
+      client.send(openScript)
+      const opened = await client.until('term-opened', 'term-error')
+      expect(opened).toMatchObject({ t: 'term-opened', openPreview: previewUrl })
+      expect(await client.until('term-exit')).toMatchObject({ code: 7 })
+      client.send(openScript)
+      const resumed = await client.until('term-opened')
+      expect(resumed).toMatchObject({ termId: opened.termId, exit: { code: 7 } })
+      expect(resumed.openPreview).toBeUndefined()
+      expect(readFileSync(marker, 'utf8')).toBe(realpathSync(project) + '\n')
+
+      const live = await post({ action: 'save', script: { name: 'Long action', command: "printf 'started\n'; exec sleep 30", stopOnSettle: true } })
+      expect(live.status).toBe(201)
+      const liveScript = (await live.json()).script
+      client.send({ ...openScript, resumeKey: crypto.randomUUID(), projectScriptId: liveScript.id })
+      const running = await client.until('term-opened')
+      expect(await client.until('term-data')).toMatchObject({ termId: running.termId, data: expect.stringContaining('started') })
+      client.send({ t: 'dispatch', envelope: { id: 'settle-script-thread', at: Date.now(), command: { type: 'session.organize', sessionId, action: 'settle' } } })
+      expect(await client.until('term-exit')).toMatchObject({ termId: running.termId, code: null })
+      expect((await post({ action: 'remove', id: liveScript.id })).status).toBe(204)
+    }
+    finally { client.close() }
+
+    harness.stop()
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+    expect(await (await fetch(endpoint)).json()).toMatchObject({ scripts: [{ id: script.id, command }], imports: [] })
+    const restored = await TestClient.connect(url())
+    try {
+      restored.send(openScript)
+      expect(await restored.until('term-opened')).not.toHaveProperty('openPreview')
+      expect(readFileSync(marker, 'utf8')).toBe(realpathSync(project) + '\n')
+    }
+    finally { restored.close() }
+  })
+
   it('reviews only repositories discovered inside a trusted project', async () => {
     const project = join(dir, 'project repos')
     const outside = join(dir, 'outside')

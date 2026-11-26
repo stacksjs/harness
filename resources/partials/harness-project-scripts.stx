@@ -1,0 +1,70 @@
+<dialog id="harness-project-scripts" ref="projectScriptsDialog" aria-labelledby="harness-project-scripts-title" @cancel.prevent="closeProjectScripts" @close="restoreProjectScriptsFocus" @click.self="closeProjectScripts">
+  <div class="p-4">
+    <header class="flex gap-3 items-center justify-between mb-3">
+      <h2 id="harness-project-scripts-title" class="font-semibold text-sm">Project scripts</h2>
+      <button type="button" class="harness-icon-button" aria-label="Close project scripts" @click="closeProjectScripts">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </header>
+    <p role="alert" class="mb-2 text-red-700 text-sm dark:text-red-300" :hidden="!projectScriptsError()" :text="projectScriptsError()"></p>
+    <p role="status" class="text-sm" :hidden="!projectScriptsLoading()">Loading project scripts…</p>
+    <div :hidden="projectScriptsLoading() || !!projectScriptDraft()">
+      <ul class="grid gap-1 list-none" aria-label="Saved project scripts">
+        <template :for="script in projectScripts().scripts" :key="script.id">
+          <li class="flex gap-1 items-center p-1 min-w-0 border border-black/10 rounded-md dark:border-white/15">
+            <button type="button" :disabled="!sessionOnline() || projectScriptsBusy()" @click="runProjectScript(script)" class="flex flex-1 gap-2 items-center px-2 py-1.5 min-w-0 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10 rounded" :aria-label="'Run ' + script.name">
+              <span class="shrink-0 size-4 i-hugeicons-play" aria-hidden="true"></span><span class="truncate" :title="script.name" :text="script.name"></span>
+            </button>
+            <button type="button" class="harness-icon-button" :hidden="!script.previewUrl" :aria-label="'Open preview for ' + script.name" @click="previewProjectScript(script.previewUrl)">
+              <span class="size-4 i-hugeicons-globe-02" aria-hidden="true"></span>
+            </button>
+            <button type="button" class="harness-icon-button" :aria-label="'Edit ' + script.name" @click="editProjectScript(script)">
+              <span class="size-4 i-hugeicons-pencil-edit-02" aria-hidden="true"></span>
+            </button>
+          </li>
+        </template>
+      </ul>
+      <button type="button" data-project-script-add @click="editProjectScript()" class="mt-2 px-3 py-1.5 text-sm border border-black/15 rounded-md dark:border-white/20">Add script</button>
+      <div class="mt-4" :hidden="!projectScripts().imports.length && !projectScripts().importError">
+        <h3 class="mb-1 font-medium text-sm">Import from t3.json</h3>
+        <p role="status" class="text-xs" :hidden="!projectScripts().importError" :text="projectScripts().importError"></p>
+        <ul class="grid gap-1 list-none" aria-label="Importable project scripts">
+          <template :for="script in projectScripts().imports" :key="script.key">
+            <li class="flex gap-2 items-center p-2 min-w-0 border border-black/10 rounded-md dark:border-white/15">
+              <div class="flex-1 min-w-0">
+                <p class="font-medium text-sm truncate" :text="script.name"></p>
+                <p class="font-mono text-neutral-600 text-xs truncate dark:text-neutral-300" :title="script.command" :text="script.command"></p>
+                <p class="text-neutral-600 text-xs truncate dark:text-neutral-300" :hidden="!script.previewUrl" :title="script.previewUrl" :text="script.previewUrl"></p>
+              </div>
+              <button type="button" :disabled="projectScriptsBusy()" :aria-label="'Import ' + script.name" @click="importProjectScript(script)" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Import</button>
+            </li>
+          </template>
+        </ul>
+      </div>
+    </div>
+    <form :hidden="!projectScriptDraft()" @submit.prevent="saveProjectScript" class="grid gap-3">
+      <label class="grid gap-1 text-sm">Name
+        <input ref="projectScriptName" required maxlength="96" :value="projectScriptDraft()?.name || ''" @input="patchProjectScript('name', $event.target.value)" class="px-2 py-1.5 w-full bg-transparent border border-black/15 rounded-md dark:border-white/20">
+      </label>
+      <label class="grid gap-1 text-sm">Command
+        <textarea required maxlength="4096" rows="3" :value="projectScriptDraft()?.command || ''" @input="patchProjectScript('command', $event.target.value)" class="px-2 py-1.5 w-full font-mono bg-transparent border border-black/15 rounded-md dark:border-white/20"></textarea>
+      </label>
+      <label class="grid gap-1 text-sm">Preview URL
+        <input type="url" maxlength="4096" :value="projectScriptDraft()?.previewUrl || ''" @input="patchProjectScript('previewUrl', $event.target.value)" class="px-2 py-1.5 w-full bg-transparent border border-black/15 rounded-md dark:border-white/20">
+      </label>
+      <label class="flex gap-2 items-center text-sm">
+        <input type="checkbox" :disabled="!projectScriptDraft()?.previewUrl" :checked="!!projectScriptDraft()?.autoOpenPreview" @change="patchProjectScript('autoOpenPreview', $event.target.checked)">
+        Open preview when the script starts
+      </label>
+      <label class="flex gap-2 items-center text-sm">
+        <input type="checkbox" :checked="!!projectScriptDraft()?.stopOnSettle" @change="patchProjectScript('stopOnSettle', $event.target.checked)">
+        Stop when the thread settles
+      </label>
+      <div class="flex flex-wrap gap-2 items-center justify-end">
+        <button type="button" :hidden="!projectScriptDraft()?.id" :disabled="projectScriptsBusy()" @click="removeProjectScript" class="mr-auto px-2 py-1.5 text-red-700 text-sm dark:text-red-300">Remove</button>
+        <button type="button" :disabled="projectScriptsBusy()" @click="cancelProjectScriptEdit" class="px-3 py-1.5 text-sm border border-black/15 rounded-md dark:border-white/20">Cancel</button>
+        <button type="submit" :disabled="projectScriptsBusy()" class="px-3 py-1.5 text-sm text-white bg-blue-700 rounded-md">Save script</button>
+      </div>
+    </form>
+  </div>
+</dialog>

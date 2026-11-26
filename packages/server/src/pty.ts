@@ -42,6 +42,8 @@ export interface PtyOptions {
   shell?: string
   /** Ask Den to send prompt and command metadata. */
   denIntegration?: boolean
+  /** Run one saved project action and keep its exit status and output. */
+  command?: string
 }
 
 export function findDenShell(): string | null {
@@ -81,7 +83,7 @@ interface NativeShim {
     harness_open_pty_slave: (master: number) => number
     harness_set_winsize: (fd: number, cols: number, rows: number, request: bigint) => number
     harness_set_nonblocking: (fd: number, flag: number) => number
-    harness_spawn_on_pty: (master: number, shell: unknown, cwd: unknown, envp: unknown, setsidFlag: number) => number
+    harness_spawn_on_pty: (master: number, shell: unknown, cwd: unknown, envp: unknown, setsidFlag: number, command: unknown) => number
     harness_poll_exit: (pid: number) => number
   }
   io: {
@@ -114,7 +116,7 @@ async function loadDarwinShim(): Promise<NativeShim['shim']> {
       harness_open_pty_slave: { args: ['int'], returns: 'int' },
       harness_set_winsize: { args: ['int', 'int', 'int', 'u64'], returns: 'int' },
       harness_set_nonblocking: { args: ['int', 'int'], returns: 'int' },
-      harness_spawn_on_pty: { args: ['int', 'ptr', 'ptr', 'ptr', 'int'], returns: 'int' },
+      harness_spawn_on_pty: { args: ['int', 'ptr', 'ptr', 'ptr', 'int', 'ptr'], returns: 'int' },
       harness_poll_exit: { args: ['int'], returns: 'int' },
     },
   })
@@ -183,7 +185,7 @@ async function loadLinuxShim(): Promise<NativeShim['shim']> {
       return libc.ioctl(fd, request, ptr(winsize))
     },
     harness_set_nonblocking: (fd: number, flag: number) => libc.fcntl(fd, F_SETFL, flag),
-    harness_spawn_on_pty: (master: number, shell: unknown, cwd: unknown, envp: unknown, setsidFlag: number) => {
+    harness_spawn_on_pty: (master: number, shell: unknown, cwd: unknown, envp: unknown, setsidFlag: number, command: unknown) => {
       const slavePath = libc.ptsname(master)
       if (!slavePath) return -1
       const slaveBuf = cstr(new CString(slavePath as never).toString())
@@ -206,12 +208,14 @@ async function loadLinuxShim(): Promise<NativeShim['shim']> {
       libc.posix_spawn_file_actions_adddup2(ptr(fa), 0, 1)
       libc.posix_spawn_file_actions_adddup2(ptr(fa), 0, 2)
       libc.posix_spawn_file_actions_addclose(ptr(fa), master)
-      libc.posix_spawn_file_actions_addchdir_np(ptr(fa), cwd as never)
+      if (libc.posix_spawn_file_actions_addchdir_np(ptr(fa), cwd as never) !== 0) {
+        libc.posix_spawn_file_actions_destroy(ptr(fa))
+        return -1
+      }
       libc.posix_spawnattr_init(ptr(attr))
       libc.posix_spawnattr_setflags(ptr(attr), exePath ? 0 : setsidFlag)
-      const argvArr = exePath
-        ? new BigUint64Array([BigInt(ptr(exePath)), BigInt(ptr(dashC)), BigInt(shell as number), 0n])
-        : new BigUint64Array([BigInt(shell as number), 0n])
+      const shellArgv = command ? [BigInt(shell as number), BigInt(ptr(dashC)), BigInt(command as number), 0n] : [BigInt(shell as number), 0n]
+      const argvArr = new BigUint64Array(exePath ? [BigInt(ptr(exePath)), BigInt(ptr(dashC)), ...shellArgv] : shellArgv)
       const pidOut = new Int32Array(1)
       const rc = libc.posix_spawn(ptr(pidOut), exePath ? ptr(exePath) as never : shell as never, ptr(fa), ptr(attr), ptr(argvArr), envp as never)
       libc.posix_spawn_file_actions_destroy(ptr(fa))
@@ -291,8 +295,10 @@ class NativePty implements PtyBackend {
     const envArr = new BigUint64Array([...envStrings.map(b => BigInt(native.ptr(b))), 0n])
     const shellBuf = cstr(shell)
     const cwdBuf = cstr(options.cwd)
+    const commandBuf = options.command === undefined ? undefined : cstr(options.command)
 
-    this.pid = shim.harness_spawn_on_pty(this.master, native.ptr(shellBuf), native.ptr(cwdBuf), native.ptr(envArr), PLATFORM.setsidFlag)
+    this.pid = shim.harness_spawn_on_pty(this.master, native.ptr(shellBuf), native.ptr(cwdBuf), native.ptr(envArr), PLATFORM.setsidFlag,
+      commandBuf ? native.ptr(commandBuf) : null)
     if (this.pid < 0) {
       native.io.close(this.slave)
       native.io.close(this.master)
@@ -386,10 +392,13 @@ class ScriptPty implements PtyBackend {
     // `"$0"` carries the shell path through untouched, so a path with spaces
     // never meets the shell's word splitter.
     const pipeline = process.platform === 'darwin'
-      ? 'cat | exec script -q /dev/null "$0"'
+      ? 'cat | exec script -q /dev/null "$0" "$@"'
       : 'cat | exec script -qec "$0" /dev/null'
+    const args = options.command === undefined ? [] : ['-c', options.command]
+    const argv = process.platform === 'darwin' ? [shell, ...args]
+      : [options.command === undefined ? shell : [shell, ...args].map(value => "'" + value.replaceAll("'", "'\\''") + "'").join(' ')]
 
-    this.child = spawn('sh', ['-c', pipeline, shell], {
+    this.child = spawn('sh', ['-c', pipeline, ...argv], {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       // Its own group, so kill() can take down the whole pipeline — killing

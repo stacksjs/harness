@@ -100,3 +100,23 @@ export function watchPreviewServers(sessionId: number, changed: (snapshot: Previ
     clearTimeout(timer)
   }
 }
+
+/** Wait for a just-started local script to bind its port using host socket metadata. */
+export async function waitForProjectPreview(sessionId: number, address: string): Promise<void> {
+  const url = new URL(address)
+  if (!loopback(url.hostname)) return
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80')
+  const deadline = performance.now() + 6000
+  while (performance.now() < deadline) {
+    try {
+      const response = await fetch(`/s/${sessionId}/preview-servers`, {
+        cache: 'no-store', signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))),
+      })
+      if (!response.ok) return
+      const result = await response.json() as PreviewServerSnapshot
+      if (result.status === 'unavailable' || result.servers.some(server => (new URL(server.url).port || '80') === port)) return
+    }
+    catch { return }
+    await new Promise(resolve => setTimeout(resolve, 250))
+  }
+}

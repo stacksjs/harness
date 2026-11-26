@@ -333,6 +333,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           </button>
         @endif
         @if(activeWorkspaceId)
+          @if(activeSession && workspaceEditorAllowed)
+            <button type="button" data-header-pane data-header-project-scripts @click="openProjectScripts" aria-label="Project scripts" title="Project scripts" aria-haspopup="dialog" class="harness-icon-button">
+              <span class="size-4 i-hugeicons-play" aria-hidden="true"></span>
+            </button>
+          @endif
           <button type="button" data-header-pane data-header-terminal ref="termHeaderToggle" @click="toggleTerminal" aria-label="Open terminal" :title="terminalShortcutTitle('terminal.toggle')" :aria-keyshortcuts="shortcutKeys('terminal.toggle')" aria-controls="harness-terminal" :aria-expanded="termOpen() ? 'true' : 'false'" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
           </button>
@@ -895,6 +900,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           </button>
         @endif
         @if(activeWorkspaceId)
+          @if(activeSession && workspaceEditorAllowed)
+            <button type="button" data-project-scripts-toggle @click="openProjectScripts" aria-haspopup="dialog">
+              <span class="size-4 i-hugeicons-play" aria-hidden="true"></span><span>Project scripts</span>
+            </button>
+          @endif
           <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" :title="terminalShortcutTitle('terminal.toggle')" :aria-keyshortcuts="shortcutKeys('terminal.toggle')" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
             <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
             <span>Terminal</span>
@@ -934,6 +944,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   @if(workspaceEditorAllowed)
     @include('../partials/harness-workspace-editor')
+    @includeWhen(activeSession, '../partials/harness-project-scripts')
   @endif
 
   @if(activeSession)
@@ -2011,6 +2022,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const termOpen = useLocalStorage(`harness.terminal-open:${sessionId}`, false, { listenToStorageChanges: false })
   const legacyTerminalSession = useLocalStorage(`harness.terminal-session:${sessionId}`, null, { listenToStorageChanges: false })
   const terminalDock = useLocalStorage(`harness.terminal-tabs:${sessionId}`, null, { listenToStorageChanges: false })
+  const projectScriptsDialog = useRef('projectScriptsDialog')
+  const projectScriptName = useRef('projectScriptName')
+  const projectScripts = state({ scripts: [], imports: [], importError: '' })
+  const projectScriptsError = state('')
+  const projectScriptsLoading = state(false)
+  const projectScriptsBusy = state(false)
+  const projectScriptDraft = state(null)
+  let projectScriptsTrigger = null
+  let projectScriptsRead = 0
   const terminalTabs = derived(() => {
     const dock = terminalDock()
     if (Array.isArray(dock?.tabs)) return dock
@@ -2024,10 +2044,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     for (const tab of terminalTabs().tabs) {
       const key = tab.group || tab.key
       const members = groups.get(key) || []
-      members.push(tab.number)
+      members.push(tab)
       groups.set(key, members)
     }
-    return Array.from(groups, ([key, members]) => ({ key, label: members.length === 1 ? 'Terminal ' + members[0] : 'Terminals ' + members.join(' + ') }))
+    return Array.from(groups, ([key, members]) => ({ key, label: members.length === 1 ? members[0].name || 'Terminal ' + members[0].number : 'Terminals ' + members.map(tab => tab.number).join(' + ') }))
   })
   const visibleTerminalTabs = derived(() => terminalTabs().tabs.filter(tab => (tab.group || tab.key) === activeTerminalGroup()))
   const terminalDirection = derived(() => terminalTabs().directions?.[activeTerminalGroup()] === 'rows' ? 'rows' : 'columns')
@@ -2563,6 +2583,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   async function toggleBrowserPreview(event) {
     if (browserPreviewOpen()) { closeBrowserPreview(); return }
+    await showBrowserPreview(event)
+  }
+
+  async function showBrowserPreview(event) {
+    if (browserPreviewOpen()) return
     browserPreviewTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
     workspaceActionsOpen.set(false)
     if (workspaceFilesOpen()) closeWorkspaceFiles(false)
@@ -2584,6 +2609,120 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const trigger = browserPreviewTrigger
     browserPreviewTrigger = null
     if (restoreFocus) void nextTick(() => [trigger, browserPreviewToggle.current, workspaceActionsToggle.current].find(element => element?.getClientRects().length)?.focus())
+  }
+
+  async function previewProjectScript(url, starting = false) {
+    if (!url) return
+    closeProjectScripts(false)
+    if (!wideWorkspace()) termOpen.set(false)
+    await showBrowserPreview()
+    if (starting && browserPreviewTools()) {
+      const tabId = activePreviewTab()?.id
+      const address = activePreviewUrl()
+      await browserPreviewTools().waitForProjectPreview(sessionId, url)
+      if (!browserPreviewOpen() || activePreviewTab()?.id !== tabId || activePreviewUrl() !== address || previewAddressDraft() !== address) return
+    }
+    openDiscoveredPreview({ url })
+  }
+
+  async function refreshProjectScripts() {
+    const read = ++projectScriptsRead
+    projectScriptsLoading.set(true)
+    try {
+      const response = await fetch(`/s/${sessionId}/project-scripts`)
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'Could not open project scripts.')
+      if (read === projectScriptsRead) projectScripts.set(body)
+    }
+    catch (error) {
+      if (read === projectScriptsRead) projectScriptsError.set(error instanceof Error ? error.message : 'Could not open project scripts.')
+    }
+    finally { if (read === projectScriptsRead) projectScriptsLoading.set(false) }
+  }
+
+  function openProjectScripts(event) {
+    const dialog = projectScriptsDialog.current
+    if (!dialog || dialog.open) return
+    projectScriptsTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event.currentTarget
+    workspaceActionsOpen.set(false)
+    projectScriptDraft.set(null)
+    projectScriptsError.set('')
+    dialog.showModal()
+    void refreshProjectScripts()
+  }
+
+  function closeProjectScripts(restore = true) {
+    if (!restore) projectScriptsTrigger = null
+    projectScriptsRead++
+    projectScriptsDialog.current?.close()
+  }
+
+  function restoreProjectScriptsFocus() {
+    projectScriptsTrigger?.focus()
+    projectScriptsTrigger = null
+  }
+
+  function editProjectScript(script) {
+    projectScriptsError.set('')
+    projectScriptDraft.set(script || { name: '', command: '', previewUrl: '', autoOpenPreview: false, stopOnSettle: false })
+    void nextTick(() => projectScriptName.current?.focus())
+  }
+
+  function cancelProjectScriptEdit() {
+    projectScriptsError.set('')
+    projectScriptDraft.set(null)
+    void nextTick(() => projectScriptsDialog.current?.querySelector('[data-project-script-add]')?.focus())
+  }
+
+  async function updateProjectScripts(operation) {
+    if (projectScriptsBusy()) return
+    projectScriptsBusy.set(true)
+    projectScriptsError.set('')
+    try {
+      const response = await fetch(`/s/${sessionId}/project-scripts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation),
+      })
+      if (!response.ok) {
+        const body = await response.json()
+        throw new Error(body.error || 'Could not update project scripts.')
+      }
+      if (projectScriptsDialog.current?.open) {
+        projectScriptDraft.set(null)
+        await refreshProjectScripts()
+      }
+    }
+    catch (error) { projectScriptsError.set(error instanceof Error ? error.message : 'Could not update project scripts.') }
+    finally { projectScriptsBusy.set(false) }
+  }
+
+  function patchProjectScript(field, value) { projectScriptDraft.update(draft => ({ ...draft, [field]: value })) }
+
+  function importProjectScript(script) { return updateProjectScripts({ action: 'import', key: script.key }) }
+
+  function saveProjectScript() {
+    const script = projectScriptDraft()
+    if (script) return updateProjectScripts({ action: 'save', id: script.id, script })
+  }
+
+  async function removeProjectScript() {
+    const id = projectScriptDraft()?.id
+    if (id && await stxConfirm('Remove this project script?', { confirmText: 'Remove script', cancelText: 'Keep script' }))
+      await updateProjectScripts({ action: 'remove', id })
+  }
+
+  function runProjectScript(script) {
+    const dock = terminalController()
+    if (!dock || !sessionOnline() || projectScriptsBusy()) return
+    const { tabs, directions } = terminalTabs()
+    const tab = { key: crypto.randomUUID(), number: (tabs.at(-1)?.number ?? 0) + 1, name: script.name, started: true }
+    dock.queueProjectScript(tab.key, script.id)
+    closeProjectScripts(false)
+    terminalTrigger = termHeaderToggle.current
+    if (!wideWorkspace() && browserPreviewOpen()) closeBrowserPreview(false)
+    if (!wideWorkspace() && workspaceFilesOpen()) closeWorkspaceFiles(false)
+    if (!wideWorkspace()) diffOpen.set(false)
+    termOpen.set(true)
+    showSelectedTerminal([...tabs, tab], tab.key, directions)
   }
 
   function previewTabLabel(tab) {
@@ -5373,7 +5512,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (!tab) return
     const group = tab.group || tab.key
     if (action === 'restart') {
-      const replacement = { ...tab, key: crypto.randomUUID(), group, started: false }
+      const replacement = { ...tab, key: crypto.randomUUID(), group, name: undefined, started: false }
       const updated = tabs.map(item => item.key === key ? replacement : item)
       if (activeKey === key) showSelectedTerminal(updated, replacement.key)
       else {
@@ -5699,6 +5838,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           saveTerminalTabs(dock.tabs.map(tab => tab.key === key ? { ...tab, started: true } : tab), dock.activeKey)
       },
       closed: finishTerminalClose,
+      openPreview: url => previewProjectScript(url, true),
       updateStatus(key, status) {
         terminalStates.update((previous) => {
           if (status) return { ...previous, [key]: status }
