@@ -25,7 +25,7 @@
     <button type="button" class="harness-icon-button" aria-label="Browser forward" title="Forward" :disabled="!activePreviewTab() || activePreviewTab().index >= activePreviewTab().history.length - 1" @click="stepPreviewHistory(1)">
       <span class="size-4 i-hugeicons-arrow-right-01" aria-hidden="true"></span>
     </button>
-    <button type="button" class="harness-icon-button" aria-label="Reload preview" title="Reload" :disabled="!activePreviewUrl()" @click="reloadBrowserPreview">
+    <button type="button" ref="browserPreviewReloadBox" class="harness-icon-button" aria-label="Reload preview" title="Reload" :disabled="!activePreviewUrl()" @click="reloadBrowserPreview">
       <span class="size-4 i-hugeicons-refresh" aria-hidden="true"></span>
     </button>
     <input type="text" inputmode="url" ref="browserPreviewAddressBox" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Preview address" placeholder="Enter a URL" :disabled="!activePreviewTab()" :value="previewAddressDraft()" @input="previewAddressDraft.set($event.currentTarget.value)" @keydown="guardPreviewComposition" class="flex-1 px-2 min-w-0 rounded-md">
@@ -38,10 +38,27 @@
   </form>
   <p role="alert" data-preview-error class="px-3 py-2 text-red-700 text-xs dark:text-red-300" hidden :hidden="!previewError()" :text="previewError()"></p>
   <div data-preview-documents class="relative flex-1 min-h-0 min-w-0">
-    <div data-preview-empty class="grid absolute inset-0 gap-1 place-content-center px-4 text-center" :hidden="Boolean(activePreviewUrl())">
+    <div data-preview-empty class="grid absolute inset-0 gap-1 place-content-center px-4 text-center" :hidden="Boolean(activePreviewUrl() || previewServerRows().length)">
       <p class="font-medium text-sm">New tab</p>
       <p class="text-neutral-600 text-xs dark:text-neutral-400">Enter a website or local development server address.</p>
+      <p :hidden="previewServers()?.status !== 'unavailable'" class="text-neutral-600 text-xs dark:text-neutral-400">Automatic server discovery is unavailable.</p>
     </div>
+    <section data-preview-servers aria-labelledby="preview-servers-title" class="absolute inset-0 overflow-auto p-3" hidden :hidden="activePreviewUrl() || !previewServerRows().length">
+      <h3 id="preview-servers-title" class="mb-2 font-medium text-xs">Local servers</h3>
+      <ul class="grid gap-1.5" aria-label="Local servers">
+        <template :for="server in previewServerRows()" :key="server.url">
+          <li>
+            <button type="button" data-preview-server :data-preview-server="server.url" @click="openDiscoveredPreview(server)" class="flex gap-2 items-center p-2 w-full text-start rounded-md">
+              <span class="shrink-0 size-4 i-hugeicons-globe-02" aria-hidden="true"></span>
+              <span class="grid min-w-0">
+                <span :text="server.label" class="font-medium text-xs truncate"></span>
+                <span :text="previewServerAddress(server)" class="text-neutral-600 text-xs truncate dark:text-neutral-400"></span>
+              </span>
+            </button>
+          </li>
+        </template>
+      </ul>
+    </section>
     <template :for="tab in browserPreviewTabs()" :key="tab.id">
       <template :if="tab.history[tab.index]">
         <iframe :data-preview-frame="tab.id" :title="'Preview of ' + previewTabLabel(tab)" :src="tab.history[tab.index]" :hidden="activePreviewTab()?.id !== tab.id" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>

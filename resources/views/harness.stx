@@ -127,6 +127,7 @@ const activeWorkspace = activeSession && !activeScratchSession
 export const workspaceName = activeWorkspace?.name
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
+export const previewDiscoveryAllowed = Boolean(activeSession && $props.canLaunchWorkspaceEditor)
 export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
 export const profileProjects = Object.fromEntries(profiles.map(profile => {
   const projects = profile.workspaces || []
@@ -2082,6 +2083,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const browserPreviewTabs = derived(() => browserPreview()?.tabs || [])
   const activePreviewTab = derived(() => browserPreviewTabs().find(tab => tab.id === browserPreview()?.active))
   const activePreviewUrl = derived(() => activePreviewTab()?.history[activePreviewTab().index] || '')
+  const previewServers = state(null)
+  const previewServerRows = derived(() => previewServers()?.servers || [])
+  const browserPreviewReload = useRef('browserPreviewReloadBox')
+  let stopPreviewScan = null
+  effect(() => {
+    const tools = browserPreviewTools()
+    const shouldWatch = previewDiscoveryAllowed && sessionId && browserPreviewOpen() && !activePreviewUrl()
+    stopPreviewScan?.()
+    stopPreviewScan = null
+    if (tools && shouldWatch) stopPreviewScan = tools.watchPreviewServers(sessionId, snapshot => previewServers.set(snapshot))
+    else previewServers.set(null)
+  })
+  onDestroy(() => stopPreviewScan?.())
   const previewAddressDraft = state('')
   const previewError = state('')
   const browserPreviewPane = useRef('browserPreviewPaneBox')
@@ -2541,6 +2555,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (result.url === activePreviewUrl()) { reloadBrowserPreview(); return }
     const next = browserPreviewTools().navigatePreviewTab(tab, result.url)
     setBrowserPreview(browserPreviewTabs().map(entry => entry.id === tab.id ? next : entry), tab.id)
+  }
+
+  function openDiscoveredPreview(server) {
+    previewAddressDraft.set(server.url)
+    openPreviewAddress()
+    void nextTick(() => { if (activePreviewUrl()) browserPreviewReload.current?.focus() })
+  }
+
+  function previewServerAddress(server) {
+    return new URL(server.url).host
   }
 
   function stepPreviewHistory(direction) {

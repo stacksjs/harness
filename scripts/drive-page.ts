@@ -3819,6 +3819,45 @@ try {
   await page.waitForFunction(() => document.activeElement?.hasAttribute('data-workspace-actions-toggle'))
   check('closing the phone browser returns focus to Workspace actions', true)
   await page.setViewportSize({ width: 1440, height: 900 })
+
+  const ownedPreviewScript = join(driveRoot, 'terminal-preview.ts')
+  const ownedPreviewPort = join(driveRoot, 'terminal-preview-port')
+  writeFileSync(ownedPreviewScript, `const site = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('<h1>Terminal development server</h1>', { headers: { 'content-type': 'text/html' } }) })\nawait Bun.write(${JSON.stringify(ownedPreviewPort)}, String(site.port))\n`)
+  await headerTerminal.click()
+  await waitForTerminalLine('Harness test terminal')
+  await terminalHost.focus()
+  await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${ownedPreviewScript}"`)
+  await page.keyboard.press('Enter')
+  for (let attempt = 0; attempt < 100 && !existsSync(ownedPreviewPort); attempt++) await Bun.sleep(50)
+  const ownedAddress = `http://127.0.0.1:${readFileSync(ownedPreviewPort, 'utf8')}/`
+  await previewTrigger.click()
+  const newPreview = browserPane.getByRole('button', { name: 'New browser tab' })
+  await newPreview.click()
+  const ownedCard = browserPane.locator(`[data-preview-server="${ownedAddress}"]`)
+  await ownedCard.waitFor()
+  check('the browser lists a real terminal listener and omits an unrelated development server',
+    await browserPane.locator('[data-preview-server]').count() === 1 && await ownedCard.isVisible())
+  const otherThread = await page.request.get(`${baseUrl}/s/${derivedId(claudeForkSource)}/preview-servers`)
+  const crossSite = await page.request.get(`${baseUrl}${ledgerPath}/preview-servers`, { headers: { 'sec-fetch-site': 'same-site' } })
+  check('preview discovery is scoped to the thread and rejects other origins',
+    otherThread.ok() && (await otherThread.json()).servers.length === 0 && crossSite.status() === 403)
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`workspace-browser-local-servers-${width}x${height}`)
+  }
+  await ownedCard.click()
+  await activeFrame.getByRole('heading', { name: 'Terminal development server' }).waitFor()
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Reload preview')
+  check('opening a discovered server loads it and leaves focus in the browser toolbar', true)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await newPreview.click()
+  await ownedCard.waitFor()
+  await terminalHost.focus()
+  await page.keyboard.press('Control+c')
+  await ownedCard.waitFor({ state: 'hidden' })
+  check('the discovered server disappears when its terminal command exits', true)
+  await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
+  await headerTerminal.click()
 }
 finally { previewSite.stop(true) }
 let ledgerReads = 0
