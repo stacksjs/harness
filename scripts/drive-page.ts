@@ -17,7 +17,7 @@ import type { ConversationRewindInput, Driver, ForkInput, ProviderEvent, Provide
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import process from 'node:process'
 import { chromium, webkit } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
@@ -4215,6 +4215,7 @@ for (const [index, text] of ['Keep this worktree change.', 'Rewrite these notes.
 }
 const worktrees = harness.engine.current.sessions.get(worktreeRewindSession)?.combinedWorktree?.checkouts ?? []
 const sourceContents = worktrees.map(checkout => readFileSync(join(checkout.repository, 'shared.txt'), 'utf8'))
+const checkoutHeads = worktrees.map(checkout => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkout.path, encoding: 'utf8' }))
 for (const checkout of worktrees) {
   const file = join(checkout.path, 'shared.txt')
   writeFileSync(file, 'Staged local worktree edit.\n')
@@ -4234,12 +4235,16 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
     && await rewindDialog.evaluate(el => el.matches(':modal')))
   await capture(`combined-conversation-rewind-confirm-${width}x${height}`)
 }
+const deletedCheckout = worktrees.find(checkout => checkout.key === 'packages/web')
+if (!deletedCheckout || !deletedCheckout.path.startsWith(realpathSync(driveRoot) + sep)) throw new Error('Could not identify the fixture worktree')
+rmSync(deletedCheckout.path, { recursive: true })
 await revertConversationFiles.click()
 await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Rewind worktree fixture: Rewrite these notes.')
-check('one combined rewind restores both worktrees and staging, trims the transcript, and keeps source files', worktrees.length === 2
+check('combined rewind recreates the missing checkout, restores both working trees, and keeps their branches and source files', worktrees.length === 2
   && worktrees.every((checkout, i) => readFileSync(join(checkout.path, 'shared.txt'), 'utf8') === 'Worktree fixture turn 1\n'
     && !existsSync(join(checkout.path, 'new-note.txt'))
     && !execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: checkout.path, encoding: 'utf8' })
+    && execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkout.path, encoding: 'utf8' }) === checkoutHeads[i]
     && readFileSync(join(checkout.repository, 'shared.txt'), 'utf8') === sourceContents[i])
   && await rewindMessage(1).isVisible() && await rewindMessage(2).count() === 0 && await rewindMessage(3).count() === 0
   && fixtureCodexRewinds.length === 2 && fixtureCodexRewinds.at(-1)?.providerSessionId === 'rewind-worktree-fixture-thread')
