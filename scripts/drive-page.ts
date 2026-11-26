@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { release, tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import process from 'node:process'
-import { chromium, webkit } from 'playwright-core'
+import { chromium, webkit, type Route } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
 import { PREVIEW_THREAD_ENV } from '../packages/drivers/src/index'
 import { derivedId } from '../packages/engine/src/index'
@@ -4760,6 +4760,44 @@ await setupStatus.waitFor({ state: 'hidden', timeout: 12_000 })
 await restoredSetupReplies.nth(responsesBeforeRestore).waitFor()
 await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
 await page.setViewportSize({ width: 1440, height: 900 })
+
+const settlementRequests = new URL(new URL(page.url()).pathname + '/project-settlement', page.url()).href
+const firstSettlementRead = Promise.withResolvers<void>()
+const releaseSettlementRead = Promise.withResolvers<void>()
+let settlementReads = 0
+let overlappingSettlementRead = false
+let settlementReadReleased = false
+async function handleSettlementRead(route: Route) {
+  settlementReads++
+  if (settlementReads === 1) {
+    firstSettlementRead.resolve()
+    await releaseSettlementRead.promise
+  }
+  else if (!settlementReadReleased) overlappingSettlementRead = true
+  await route.continue()
+}
+await page.waitForLoadState('networkidle')
+await page.route(settlementRequests, handleSettlementRead)
+const scriptsTrigger = page.locator('[data-header-project-scripts]')
+const openScripts = () => scriptsTrigger.click()
+const closeScripts = () => scriptDialog.getByRole('button', { name: 'Close project scripts' }).click()
+try {
+  await Promise.all([page.waitForRequest(settlementRequests), openScripts()])
+  await firstSettlementRead.promise
+  await closeScripts()
+  await openScripts()
+  await scriptDialog.waitFor()
+  await closeScripts()
+  check('reopening project scripts leaves the settlement status request in flight', !overlappingSettlementRead && settlementReads === 1)
+  const followUpRead = page.waitForResponse(response => response.url() === settlementRequests && settlementReads === 2)
+  settlementReadReleased = true
+  releaseSettlementRead.resolve()
+  check('settlement status refreshes once more after the pending read', (await followUpRead).ok())
+}
+finally {
+  releaseSettlementRead.resolve()
+  await page.unroute(settlementRequests, handleSettlementRead)
+}
 
 const failedCleanupGate = join(driveRoot, 'finish-failed-cleanup')
 const successfulCleanupGate = join(driveRoot, 'finish-successful-cleanup')

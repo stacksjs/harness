@@ -2205,6 +2205,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectSettlementTerminalAvailable = derived(() => ['running', 'failed', 'interrupted'].includes(projectSettlement()?.status))
   let projectSettlementPoll
   let projectSettlementRequest
+  let projectSettlementPending = false
   let projectScriptsTrigger = null
   let projectScriptsRead = 0
   const terminalTabs = derived(() => {
@@ -2816,6 +2817,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     linkedPromptRequest?.abort()
     projectSetupRequest?.abort()
     projectSetupPoll?.stop()
+    projectSettlementPending = false
     projectSettlementRequest?.abort()
     projectSettlementPoll?.stop()
   }
@@ -2849,7 +2851,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function refreshProjectSettlement() {
     if (workspaceStatusPaused || !sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
     projectSettlementPoll?.stop()
-    projectSettlementRequest?.abort()
+    if (projectSettlementRequest) {
+      projectSettlementPending = true
+      return
+    }
     const request = new AbortController()
     projectSettlementRequest = request
     try {
@@ -2872,6 +2877,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     catch {
       if (!request.signal.aborted && sessionOnline() && projectSettlement()?.status === 'running')
         projectSettlementPoll = useTimeout(refreshProjectSettlement, 1500)
+    }
+    finally {
+      projectSettlementRequest = undefined
+      if (projectSettlementPending) {
+        projectSettlementPending = false
+        void refreshProjectSettlement()
+      }
     }
   }
 
