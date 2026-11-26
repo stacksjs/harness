@@ -4772,6 +4772,73 @@ await cleanupTab.nth(1).waitFor({ state: 'hidden' })
 await settlementCard.waitFor({ state: 'hidden' })
 check('successful cleanup closes its terminal and failed cleanup stays available', await cleanupTab.count() === 1)
 
+const staleThread = derivedId('auto-settle-stale')
+const retainedThread = derivedId('auto-settle-retained')
+for (const id of ['auto-settle-stale', 'auto-settle-retained'])
+  await harness.engine.dispatch({ id, at: Date.now(), command: { type: 'session.create', workspaceId: scriptWorkspace, driverKind: 'claude' } })
+await page.goto(`${baseUrl}/settings/threads`)
+const settingsThreadPane = page.locator('[data-settings-section="threads"]').locator('..')
+const autoSettleSwitch = settingsThreadPane.getByLabel('Auto-settle inactive threads')
+const autoSettleDays = settingsThreadPane.getByLabel('Days before auto-settle')
+await autoSettleDays.waitFor()
+check('inactive threads default to seven days on the host', await autoSettleSwitch.isChecked() && await autoSettleDays.inputValue() === '7')
+await autoSettleDays.fill('14')
+await autoSettleDays.press('Tab')
+for (let attempt = 0; attempt < 80 && harness.engine.current.settings.autoSettleAfterDays !== 14; attempt++) await Bun.sleep(50)
+check('the inactivity duration is stored on the host', harness.engine.current.settings.autoSettleAfterDays === 14)
+await page.reload()
+await page.waitForFunction(() => (document.querySelector('#settings-auto-settle-days') as HTMLInputElement)?.value === '14')
+for (const [width, height] of workspaceViewports) {
+  await page.setViewportSize({ width, height })
+  await capture(`settings-auto-settle-${width}x${height}`)
+}
+check('thread settings fit the phone viewport', await autoSettleDays.evaluate(input => {
+  const rect = input.getBoundingClientRect()
+  return rect.left >= 0 && rect.right <= innerWidth
+}))
+await page.goto(`${baseUrl}/s/${retainedThread}`)
+const autoSettleMenu = page.getByRole('dialog', { name: 'Thread actions' })
+const openAutoSettleMenu = async () => {
+  await page.locator('[data-thread-actions-trigger]').click()
+  await autoSettleMenu.getByRole('button', { name: 'Auto-settle behavior' }).click()
+}
+await openAutoSettleMenu()
+await autoSettleMenu.getByRole('button', { name: 'Never', exact: true }).click()
+for (let attempt = 0; attempt < 80 && harness.engine.current.sessions.get(retainedThread)?.navigation?.autoSettle !== 'never'; attempt++) await Bun.sleep(50)
+await page.reload()
+await openAutoSettleMenu()
+check('the per-thread opt-out survives reload', await autoSettleMenu.getByRole('button', { name: 'Never', exact: true }).getAttribute('aria-pressed') === 'true')
+await capture('workspace-auto-settle-never-mobile')
+await page.keyboard.press('Escape')
+await autoSettleMenu.waitFor({ state: 'hidden' })
+
+harness.stop()
+{
+  using aged = new Database(databasePath)
+  aged.query("UPDATE events SET created_at = datetime('now', '-8 days') WHERE session_id IN (?, ?)").run(staleThread, retainedThread)
+}
+harness = await startHarness()
+await page.setViewportSize({ width: 1440, height: 900 })
+await page.goto(`${baseUrl}/settings/threads`)
+await autoSettleSwitch.uncheck()
+for (let attempt = 0; attempt < 80 && harness.engine.current.settings.autoSettleAfterDays !== null; attempt++) await Bun.sleep(50)
+check('auto-settle can be disabled from thread settings', harness.engine.current.settings.autoSettleAfterDays === null)
+await autoSettleDays.waitFor({ state: 'hidden' })
+await autoSettleSwitch.check()
+for (let attempt = 0; attempt < 80 && harness.engine.current.settings.autoSettleAfterDays !== 7; attempt++) await Bun.sleep(50)
+await page.goto(`${baseUrl}/s/${staleThread}`)
+const automaticallySettled = page.locator('[data-thread-settled-note]')
+await automaticallySettled.getByText('Settled after inactivity', { exact: true }).waitFor()
+check('only a thread following the host policy settles after inactivity', !harness.engine.current.sessions.get(retainedThread)?.navigation?.settledAt)
+await capture('workspace-settled-after-inactivity')
+await Promise.all([
+  page.waitForEvent('load'),
+  automaticallySettled.getByRole('button', { name: 'Un-settle', exact: true }).click(),
+])
+await automaticallySettled.waitFor({ state: 'hidden' })
+await page.reload()
+check('manually reopened inactive work stays active through reload', !await automaticallySettled.isVisible())
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()
