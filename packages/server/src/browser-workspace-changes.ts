@@ -1,5 +1,18 @@
 import type { WorkspaceDiff, WorkspaceReviewMode, WorkspaceReviewOptions } from './diff'
 
+export async function loadWorkspaceDiffContext(sessionId: number, file: string, object: string,
+  comparison: { mode: WorkspaceReviewMode | 'session', target?: string }, signal: AbortSignal): Promise<string[]> {
+  const query = new URLSearchParams({ file, object })
+  if (comparison.mode !== 'session') query.set('comparison', comparison.mode)
+  if (comparison.target) query.set('target', comparison.target)
+  const response = await fetch(`/s/${sessionId}/diff/context?${query}`, { cache: 'no-store', signal })
+  const result = await response.json()
+  if (!response.ok || typeof result.text !== 'string') throw new Error(result.error || 'Could not load unchanged lines.')
+  const lines = result.text.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines
+}
+
 export async function loadWorkspaceReviewOptions(sessionId: number, base: string, signal: AbortSignal): Promise<WorkspaceReviewOptions> {
   const query = base ? '?' + new URLSearchParams({ target: base }) : ''
   const response = await fetch(`/s/${sessionId}/diff/options${query}`, { cache: 'no-store', signal })

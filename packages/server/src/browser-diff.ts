@@ -1,6 +1,9 @@
 import type { WorkspaceReviewMode } from './diff'
+import type { DiffHunk, DiffLine } from './diff-patch'
 import type { NativeClipboard } from './browser-clipboard'
 import { writeClipboardText } from './browser-clipboard'
+
+export { parseWorkspacePatch } from './diff-patch'
 
 export interface DiffLineLocation {
   path: string
@@ -13,101 +16,107 @@ export interface DiffLineLink extends DiffLineLocation {
   target?: string
 }
 
-interface DiffLine {
-  kind: 'context' | 'addition' | 'deletion'
-  text: string
-  before: number | null
-  after: number | null
-  newlineNote?: string
-}
-
-interface DiffHunk {
-  header: string
-  lines: DiffLine[]
-}
-
 interface DiffRow {
   id: number
+  key: string
   header?: string
+  gap?: DiffGap
   cells: (DiffLine | null)[]
 }
 
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
-const gitEscapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 }
-
-function patchPath(header: string): string | undefined {
-  const token = header.slice(4).replace(/\t$/u, '')
-  if (token === '/dev/null') return undefined
-  if (!token.startsWith('"')) return token.slice(2)
-  const bytes: number[] = []
-  for (const part of token.slice(1, -1).matchAll(/\\([0-7]{3}|.)|([^\\]+)/gu)) {
-    const escaped = part[1]
-    if (escaped) bytes.push(gitEscapes[escaped] ?? Number.parseInt(escaped, 8))
-    else for (const byte of encoder.encode(part[2])) bytes.push(byte)
-  }
-  return decoder.decode(new Uint8Array(bytes)).slice(2)
+interface DiffGap {
+  index: number
+  before: number
+  after: number
+  count: number
+  above: boolean
+  below: boolean
 }
 
-export function parseWorkspacePatch(patch: string): ReadonlyMap<string, DiffHunk[]> {
-  const files = new Map<string, DiffHunk[]>()
-  let original: string | undefined
-  let current: string | undefined
-  let before = 0
-  let after = 0
-  let hunk: DiffHunk | undefined
-
-  for (const text of patch.split('\n')) {
-    if (text.startsWith('diff --git ')) {
-      original = undefined
-      current = undefined
-      hunk = undefined
-    }
-    else if (text.startsWith('@@ ')) {
-      const range = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(text)
-      const path = current ?? original
-      if (!range || path === undefined) continue
-      before = Number(range[1])
-      after = Number(range[2])
-      hunk = { header: text, lines: [] }
-      const hunks = files.get(path)
-      if (hunks) hunks.push(hunk)
-      else files.set(path, [hunk])
-    }
-    else if (!hunk) {
-      if (text.startsWith('--- ')) original = patchPath(text)
-      else if (text.startsWith('+++ ')) current = patchPath(text)
-    }
-    else {
-      switch (text[0]) {
-        case ' ': hunk.lines.push({ kind: 'context', before: before++, after: after++, text: text.slice(1) }); break
-        case '-': hunk.lines.push({ kind: 'deletion', before: before++, after: null, text: text.slice(1) }); break
-        case '+': hunk.lines.push({ kind: 'addition', before: null, after: after++, text: text.slice(1) }); break
-        case '\\': {
-          const previous = hunk.lines.at(-1)
-          if (previous) previous.newlineNote = text.slice(2)
-          break
-        }
-      }
-    }
-  }
-
-  return files
+interface VisibleContext {
+  lines: string[]
+  revealed: ReadonlyMap<number, { start: number, end: number }>
 }
 
-export function workspaceDiffRows(hunks: DiffHunk[], split: boolean, limit: number): { rows: DiffRow[], more: boolean } {
+const CONTEXT_STEP = 20
+
+export function workspaceDiffContextKey(hunks?: DiffHunk[]): string | undefined {
+  const object = hunks?.[0]?.beforeObject
+  if (!object || /^0+$/u.test(object) || !hunks?.every(hunk => {
+    let before = 0
+    let after = 0
+    for (const line of hunk.lines) {
+      if (line.before !== null) before++
+      if (line.after !== null) after++
+    }
+    return before === hunk.beforeCount && after === hunk.afterCount
+  })) return
+  return `${object}:${hunks.map(hunk => hunk.header).join('\n')}`
+}
+
+function* diffContextGaps(hunks: DiffHunk[], lines: string[]): Generator<DiffGap> {
+  let before = 1
+  let after = 1
+  for (let index = 0; index <= hunks.length; index++) {
+    const hunk = hunks[index]
+    const startBefore = hunk ? hunk.beforeStart + Number(hunk.beforeCount === 0) : lines.length + 1
+    const startAfter = hunk ? hunk.afterStart + Number(hunk.afterCount === 0) : after + (startBefore - before)
+    const count = startBefore - before
+    if (count > 0 && startAfter - after === count && startBefore <= lines.length + 1)
+      yield { index, before, after, count, above: Boolean(hunk), below: index > 0 }
+    if (hunk) {
+      before = startBefore + hunk.beforeCount
+      after = startAfter + hunk.afterCount
+    }
+  }
+}
+
+export function expandWorkspaceDiffGap(context: VisibleContext, gap: DiffGap, action: 'above' | 'below' | 'all'): VisibleContext {
+  const current = context.revealed.get(gap.index) ?? { start: 0, end: 0 }
+  const step = action === 'all' ? gap.count : Math.min(CONTEXT_STEP, gap.count)
+  const updated = action === 'above' ? { ...current, end: current.end + step } : { ...current, start: current.start + step }
+  return { ...context, revealed: new Map(context.revealed).set(gap.index, updated) }
+}
+
+export function revealWorkspaceDiffContext(hunks: DiffHunk[], context: VisibleContext, location: DiffLineLocation): VisibleContext | undefined {
+  for (const gap of diffContextGaps(hunks, context.lines)) {
+    const offset = location.line - gap[location.side]
+    if (offset >= 0 && offset < gap.count) return expandWorkspaceDiffGap(context, gap, 'all')
+  }
+}
+
+export function workspaceDiffRows(hunks: DiffHunk[], split: boolean, limit: number, context?: VisibleContext): { rows: DiffRow[], more: boolean } {
   const rows: DiffRow[] = []
-  for (const row of diffRows(hunks, split)) {
+  for (const row of diffRows(hunks, split, context)) {
     if (rows.length === limit) return { rows, more: true }
     rows.push(row)
   }
   return { rows, more: false }
 }
 
-function* diffRows(hunks: DiffHunk[], split: boolean): Generator<DiffRow> {
+function* diffRows(hunks: DiffHunk[], split: boolean, context?: VisibleContext): Generator<DiffRow> {
   let id = 0
-  for (const hunk of hunks) {
-    yield { id: id++, header: hunk.header, cells: [] }
+  const gaps = context ? new Map([...diffContextGaps(hunks, context.lines)].map(gap => [gap.index, gap])) : undefined
+  for (let hunkIndex = 0; hunkIndex <= hunks.length; hunkIndex++) {
+    const gap = gaps?.get(hunkIndex)
+    if (gap && context) {
+      const shown = context.revealed.get(hunkIndex) ?? { start: 0, end: 0 }
+      const hiddenEnd = gap.count - shown.end
+      for (let offset = 0; offset < gap.count; offset++) {
+        if (offset >= shown.start && offset < hiddenEnd) {
+          yield { id: id++, key: `gap-${hunkIndex}`, cells: [], gap: { ...gap, before: gap.before + offset, after: gap.after + offset, count: hiddenEnd - offset } }
+          offset = hiddenEnd - 1
+          continue
+        }
+        const before = gap.before + offset
+        const after = gap.after + offset
+        const line = { kind: 'context', before, after, text: context.lines[before - 1]! } as const
+        yield { id: id++, key: `context-${before}`, cells: split ? [line, line] : [line] }
+      }
+    }
+    const hunk = hunks[hunkIndex]
+    if (!hunk) break
+    yield { id: id++, key: `hunk-${hunkIndex}`, header: hunk.header, cells: [] }
     let index = 0
     while (index < hunk.lines.length) {
       const line = hunk.lines[index++]!
@@ -123,20 +132,20 @@ function* diffRows(hunks: DiffHunk[], split: boolean): Generator<DiffRow> {
         }
         const count = Math.max(deletions.length, additions.length)
         for (let offset = 0; offset < count; offset++)
-          yield { id: id++, cells: [deletions[offset] ?? null, additions[offset] ?? null] }
+          yield { id: id++, key: `edit-${deletions[offset]?.before ?? ''}-${additions[offset]?.after ?? ''}`, cells: [deletions[offset] ?? null, additions[offset] ?? null] }
       }
-      else yield { id: id++, cells: split ? [line, line] : [line] }
+      else yield { id: id++, key: `line-${line.before ?? ''}-${line.after ?? ''}`, cells: split ? [line, line] : [line] }
     }
   }
 }
 
 /** Render at most a page around a linked line, even when the patch has thousands of rows. */
-export function workspaceDiffLinkedRows(hunks: DiffHunk[], split: boolean, limit: number, location: DiffLineLocation, pageSize = limit) {
+export function workspaceDiffLinkedRows(hunks: DiffHunk[], split: boolean, limit: number, location: DiffLineLocation, pageSize = limit, context?: VisibleContext) {
   const lead = Math.min(24, Math.floor(pageSize / 2))
-  const id = linkedRowId(hunks, split, location)
+  const id = linkedRowId(hunks, split, location, context)
   const start = id === undefined || id < pageSize ? 0 : id - lead
   const rows: DiffRow[] = []
-  for (const row of diffRows(hunks, split)) {
+  for (const row of diffRows(hunks, split, context)) {
     if (row.id < start) continue
     if (rows.length === limit) return { rows, earlier: start > 0, more: true }
     rows.push(row)
@@ -144,15 +153,24 @@ export function workspaceDiffLinkedRows(hunks: DiffHunk[], split: boolean, limit
   return { rows, earlier: start > 0, more: false }
 }
 
-function linkedRowId(hunks: DiffHunk[], split: boolean, location: DiffLineLocation): number | undefined {
-  for (const row of diffRows(hunks, split)) {
+function linkedRowId(hunks: DiffHunk[], split: boolean, location: DiffLineLocation, context?: VisibleContext): number | undefined {
+  for (const row of diffRows(hunks, split, context)) {
     const cells = split ? [row.cells[location.side === 'before' ? 0 : 1]] : row.cells
     if (cells.some(cell => cell?.[location.side] === location.line)) return row.id
   }
 }
 
-export function hasWorkspaceDiffLine(hunks: DiffHunk[] | undefined, location: DiffLineLocation): boolean {
-  return Boolean(hunks?.some(hunk => hunk.lines.some(line => line[location.side] === location.line)))
+export function hasWorkspaceDiffLine(hunks: DiffHunk[] | undefined, location: DiffLineLocation, context?: VisibleContext): boolean {
+  if (!hunks) return false
+  if (hunks.some(hunk => hunk.lines.some(line => line[location.side] === location.line))) return true
+  if (!context) return false
+  for (const gap of diffContextGaps(hunks, context.lines)) {
+    const offset = location.line - gap[location.side]
+    const revealed = context.revealed.get(gap.index)
+    if (revealed && offset >= 0 && offset < gap.count)
+      return offset < revealed.start || offset >= gap.count - revealed.end
+  }
+  return false
 }
 
 export function workspaceDiffLocation(hash: string): DiffLineLink | null {

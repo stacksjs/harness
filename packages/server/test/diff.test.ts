@@ -3,8 +3,26 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { parseWorkspacePatch, workspaceDiffLink, workspaceDiffLinkedRows, workspaceDiffLocation, workspaceDiffRows } from '../src/browser-diff'
+import { expandWorkspaceDiffGap, parseWorkspacePatch, revealWorkspaceDiffContext, workspaceDiffContextKey, workspaceDiffLink, workspaceDiffLinkedRows, workspaceDiffLocation, workspaceDiffRows } from '../src/browser-diff'
 import { MAX_PATCH_BYTES, parseNumstat, parseStatus, workspaceDiff } from '../src/diff'
+
+it('expands unchanged lines with distinct before and after numbers across an insertion', () => {
+  const path = 'sample.txt'
+  const object = 'c'.repeat(40)
+  const patch = `diff --git a/${path} b/${path}\nindex ${object}..${'d'.repeat(40)} 100644\n--- a/${path}\n+++ b/${path}\n@@ -2,0 +3 @@\n+Inserted\n@@ -65 +66 @@\n-Row 65\n+Changed\n`
+  const hunks = parseWorkspacePatch(patch).get(path)!
+  expect(workspaceDiffContextKey(hunks)).toContain(object)
+  const context = { lines: Array.from({ length: 70 }, (_, index) => `Row ${index + 1}`), revealed: new Map() }
+  const gap = workspaceDiffRows(hunks, true, 200, context).rows.find(row => row.gap?.index === 1)!.gap!
+  expect(gap).toMatchObject({ before: 3, after: 4, count: 62 })
+  const smaller = expandWorkspaceDiffGap(context, gap, 'below')
+  const partial = workspaceDiffRows(hunks, true, 200, smaller).rows
+  expect(partial.find(row => row.key === 'context-22')?.cells[1]).toEqual({ kind: 'context', before: 22, after: 23, text: 'Row 22' })
+  expect(partial.find(row => row.gap?.index === 1)?.gap?.count).toBe(42)
+  const linked = revealWorkspaceDiffContext(hunks, smaller, { path, side: 'after', line: 41 })!
+  expect(workspaceDiffRows(hunks, false, 200, linked).rows.find(row => row.key === 'context-40')?.cells[0]?.text).toBe('Row 40')
+  expect(workspaceDiffContextKey(parseWorkspacePatch(patch.replace('+Changed\n', '')).get(path))).toBeUndefined()
+})
 
 describe('linking to a diff line', () => {
   it('resolves the same path, comparison, and original side without copying unrelated query parameters', () => {

@@ -120,9 +120,11 @@ export const initialCodexSelection = activeCodex && activeSession.model
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
 export const activeScratchSession = activeSession?.scratch === true
 export const hasWorkspaceFiles = Boolean((activeWorkspaceId && !activeScratchSession) || draftProject?.trusted)
-export const workspaceName = activeSession && !activeScratchSession
-  ? profiles.flatMap(profile => profile.workspaces || []).find(workspace => workspace.id === activeWorkspaceId)?.name
-  : draftProject?.name
+const activeWorkspace = activeSession && !activeScratchSession
+  ? profiles.flatMap(profile => profile.workspaces || []).find(workspace => workspace.id === activeWorkspaceId)
+  : draftProject
+export const workspaceName = activeWorkspace?.name
+export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
 export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
 export const profileProjects = Object.fromEntries(profiles.map(profile => {
   const projects = profile.workspaces || []
@@ -1263,6 +1265,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const diffLineSelection = state(null)
   const diffLineNotice = state('')
   const diffLineReveal = state(null)
+  const diffContexts = state(new Map())
+  const diffContextRequests = new Map()
   const reviewOptionsLoader = state(null)
   const diffPageSize = 200
   let diffTools = null
@@ -1276,11 +1280,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return diffFiles().map(file => {
       const limit = limits.get(file.path) || 0
       const fileHunks = hunks.get(file.path)
+      const context = limit && matchingDiffContext(file.path, fileHunks)
       let view = null
       if (limit && fileHunks) view = reveal?.path === file.path
-        ? diffTools.workspaceDiffLinkedRows(fileHunks, split, limit, reveal, diffPageSize)
-        : diffTools.workspaceDiffRows(fileHunks, split, limit)
-      return { ...file, open: limit > 0, rows: view?.rows ?? [], more: view?.more ?? false, earlier: view?.earlier ?? false }
+        ? diffTools.workspaceDiffLinkedRows(fileHunks, split, limit, reveal, diffPageSize, context?.value)
+        : diffTools.workspaceDiffRows(fileHunks, split, limit, context?.value)
+      return { ...file, open: limit > 0, rows: view?.rows ?? [], more: view?.more ?? false, earlier: view?.earlier ?? false, contextError: context?.error }
     })
   })
   const changesWatcher = state(null)
@@ -3329,9 +3334,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   function toggleDiffFile(file) {
     if (file.open && diffLineSelection()?.path === file.path) diffLineSelection.set(null)
     setDiffFileLimit(file.path, file.open ? 0 : diffPageSize)
+    if (!file.open) void loadDiffContext(file.path)
+    else {
+      diffContextRequests.get(file.path)?.controller.abort()
+      diffContextRequests.delete(file.path)
+      diffContexts.update(current => {
+        const next = new Map(current)
+        next.delete(file.path)
+        return next
+      })
+    }
   }
 
   function collapseDiffFiles() {
+    stopDiffContextRequests()
+    diffContexts.set(new Map())
     diffLineSelection.set(null)
     diffFileLimits.set(new Map())
   }
@@ -3344,7 +3361,61 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     diffRefresh.update(value => value + 1)
   }
 
+  function matchingDiffContext(path, hunks) {
+    const entry = diffContexts().get(path)
+    return entry && entry.key === diffTools?.workspaceDiffContextKey(hunks) ? entry : undefined
+  }
+
+  function setDiffContext(path, entry) {
+    diffContexts.update(current => new Map(current).set(path, entry))
+  }
+
+  function stopDiffContextRequests() {
+    for (const request of diffContextRequests.values()) request.controller.abort()
+    diffContextRequests.clear()
+  }
+  onDestroy(stopDiffContextRequests)
+
+  async function loadDiffContext(path, retry = false) {
+    if (!canExpandDiffContext) return
+    const hunks = diffHunks().get(path)
+    const key = diffTools?.workspaceDiffContextKey(hunks)
+    if (!key) return
+    const existing = diffContexts().get(path)
+    if (existing?.key === key && (!retry || !existing.error)) return existing.value
+    const previous = diffContextRequests.get(path)
+    if (previous?.key === key) return previous.promise
+    previous?.controller.abort()
+    const controller = new AbortController()
+    const active = () => !controller.signal.aborted && diffTools.workspaceDiffContextKey(diffHunks().get(path)) === key
+    const promise = diffTools.loadWorkspaceDiffContext(sessionId, path, hunks[0].beforeObject, {
+      mode: diffReviewMode(), target: diffComparisonTarget,
+    }, controller.signal).then(lines => {
+      if (!active()) return
+      const value = { lines, revealed: new Map() }
+      setDiffContext(path, { key, value })
+      return value
+    }).catch(error => {
+      if (active()) setDiffContext(path, { key, error: error.message })
+    }).finally(() => {
+      if (diffContextRequests.get(path)?.controller === controller) diffContextRequests.delete(path)
+    })
+    diffContextRequests.set(path, { key, controller, promise })
+    return promise
+  }
+
+  function expandDiffContext(path, gap, direction, event) {
+    const entry = matchingDiffContext(path, diffHunks().get(path))
+    if (!entry?.value) return
+    const button = event.currentTarget
+    setDiffContext(path, { ...entry, value: diffTools.expandWorkspaceDiffGap(entry.value, gap, direction) })
+    void nextTick(() => {
+      if (!button.isConnected) diffTools.revealWorkspaceDiffLine(changesPane.current, { path, side: 'after', line: gap.after }, true)
+    })
+  }
+
   function clearDiffComparison() {
+    stopDiffContextRequests()
     pendingDiffLineLink = null
     diffComparisonTarget = undefined
     batch(() => {
@@ -3356,6 +3427,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       diffLineSelection.set(null)
       diffLineNotice.set('')
       diffLineReveal.set(null)
+      diffContexts.set(new Map())
     })
   }
 
@@ -3452,6 +3524,31 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
   useEventListener('hashchange', openLinkedDiffLine)
 
+  async function selectLinkedDiffLine(link) {
+    let hunks = diffHunks().get(link.path)
+    let found = diffTools.hasWorkspaceDiffLine(hunks, link)
+    if (!found && hunks) {
+      const context = await loadDiffContext(link.path)
+      if (pendingDiffLineLink !== link) return
+      hunks = diffHunks().get(link.path)
+      const entry = matchingDiffContext(link.path, hunks)
+      const revealed = context && hunks && entry?.value === context && diffTools.revealWorkspaceDiffContext(hunks, context, link)
+      if (revealed) {
+        found = true
+        setDiffContext(link.path, { ...entry, value: revealed })
+      }
+    }
+    if (pendingDiffLineLink !== link) return
+    pendingDiffLineLink = null
+    if (!found) {
+      diffLineNotice.set('The selected line is no longer in this comparison.')
+      return
+    }
+    diffLineReveal.set(link)
+    selectDiffLine(link.path, link.side, link.line)
+    void nextTick(() => diffTools.revealWorkspaceDiffLine(changesPane.current, link, true))
+  }
+
   function showWorkspaceChanges(diff) {
     const files = diff.error ? [] : diff.files
     const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
@@ -3471,7 +3568,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       : diff.scope === 'working-tree' ? 'No uncommitted changes.' : `No changes ${scope}.`
     diffComparisonTarget = diff.comparisonTarget
     const linked = pendingDiffLineLink
-    pendingDiffLineLink = null
     batch(() => {
       diffStatus.set(status)
       const patch = diff.error ? '' : diff.patch
@@ -3484,23 +3580,21 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         const first = files.find(file => hunks.has(file.path))
         if (first) limits.set(first.path, diffPageSize)
       }
-      const selection = linked || diffLineSelection()
-      if (selection && !diffTools.hasWorkspaceDiffLine(hunks.get(selection.path), selection)) {
+      const selection = diffLineSelection()
+      const selectionHunks = selection && hunks.get(selection.path)
+      if (selection && !diffTools.hasWorkspaceDiffLine(selectionHunks, selection, matchingDiffContext(selection.path, selectionHunks)?.value)) {
         diffLineSelection.set(null)
         diffLineReveal.set(null)
         diffLineNotice.set('The selected line is no longer in this comparison.')
       }
-      else if (linked) {
-        limits.set(linked.path, diffPageSize)
-        diffLineReveal.set(linked)
-        selectDiffLine(linked.path, linked.side, linked.line)
-        void nextTick(() => diffTools.revealWorkspaceDiffLine(changesPane.current, linked, true))
-      }
+      if (linked && hunks.has(linked.path)) limits.set(linked.path, diffPageSize)
       diffFiles.set(files)
       diffPatch.set(patch)
       diffHunks.set(hunks)
       diffFileLimits.set(limits)
     })
+    for (const [path] of diffFileLimits()) void loadDiffContext(path)
+    if (linked) void selectLinkedDiffLine(linked)
   }
 
   effect(() => {

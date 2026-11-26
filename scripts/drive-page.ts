@@ -3754,6 +3754,56 @@ if (screenshotDir) {
   }
 }
 
+const contextFile = 'context-example [draft].txt'
+const contextPath = join(ledgerRepo, contextFile)
+const oldContext = Array.from({ length: 160 }, (_, index) => `Context row ${index + 1}`).join('\n') + '\n'
+writeFileSync(contextPath, oldContext)
+execFileSync('git', ['add', '--', contextFile], { cwd: ledgerRepo })
+execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Context fixture baseline'], { cwd: ledgerRepo })
+writeFileSync(contextPath, oldContext.replace('Context row 8\n', 'Changed at top\n').replace('Context row 151\n', 'Changed at bottom\n'))
+execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'Context final markers'], { cwd: ledgerRepo })
+// The commit comparison must read the immutable context even with later edits on disk.
+writeFileSync(contextPath, oldContext.replace('Context row 80\n', 'Later working copy edit\n'))
+await page.setViewportSize({ width: 1440, height: 900 })
+await page.goto(new URL(ledgerPath, baseUrl).href)
+await headerChanges.click()
+await ledgerComparison.selectOption('commit')
+const contextPatch = ledgerPanel.getByRole('region', { name: `Patch for ${contextFile}`, exact: true })
+const middleGap = contextPatch.locator('[data-diff-gap]').filter({ has: page.getByRole('button', { name: 'Show all 136 unchanged lines' }) })
+await middleGap.waitFor()
+check('context controls identify the leading, middle, and trailing gaps',
+  await contextPatch.getByRole('button', { name: 'Show all 4 unchanged lines' }).isVisible()
+  && await contextPatch.getByRole('button', { name: 'Show all 6 unchanged lines' }).isVisible())
+await capture('changes-context-collapsed')
+await middleGap.getByRole('button', { name: 'Show unchanged lines below' }).press('Enter')
+const smallerGap = contextPatch.locator('[data-diff-gap]').filter({ has: page.getByRole('button', { name: 'Show all 116 unchanged lines' }) })
+await smallerGap.waitFor()
+check('one action expands twenty lines from the preceding hunk',
+  await contextPatch.getByText('Context row 31', { exact: true }).isVisible()
+  && await contextPatch.getByText('Context row 32', { exact: true }).isHidden())
+await smallerGap.getByRole('button', { name: 'Show unchanged lines above' }).click()
+const remainingContext = contextPatch.getByRole('button', { name: 'Show all 96 unchanged lines' })
+await remainingContext.waitFor()
+await capture('changes-context-partial')
+await remainingContext.click()
+await contextPatch.getByText('Context row 80', { exact: true }).waitFor()
+check('commit context excludes later working-tree edits', await contextPatch.getByText('Later working copy edit', { exact: true }).isHidden())
+await ledgerPanel.getByRole('button', { name: 'Split', exact: true }).click()
+await ledgerPanel.getByRole('button', { name: 'Refresh changes' }).click()
+await contextPatch.getByRole('button', { name: 'After line 80', exact: true }).click()
+check('expanded context survives layout switching and a patch refresh',
+  await contextPatch.getByRole('button', { name: 'After line 80', pressed: true }).isVisible())
+const contextCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ledgerRepo, encoding: 'utf8' }).trim()
+const contextLink = new URL(ledgerPath, baseUrl)
+contextLink.hash = `diff?${new URLSearchParams({ file: contextFile, side: 'after', line: '80', mode: 'commit', target: contextCommit })}`
+await page.setViewportSize({ width: 390, height: 844 })
+await page.goto(contextLink.href)
+const linkedContext = contextPatch.getByRole('button', { name: 'After line 80', pressed: true })
+await linkedContext.waitFor()
+await page.waitForFunction(() => document.activeElement?.matches('[data-diff-side="after"][data-diff-number="80"][aria-pressed="true"]'))
+check('a linked unchanged line expands its gap and receives focus', true)
+await capture('changes-context-linked-phone')
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

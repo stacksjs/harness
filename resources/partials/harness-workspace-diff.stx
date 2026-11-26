@@ -75,13 +75,26 @@
             <template :if="file.open">
               <div data-diff-file-content>
                 <p data-diff-empty-patch :hidden="file.rows.length > 0" :text="file.status === 'untracked' ? 'Untracked file' : 'No text patch available.'"></p>
+                <p data-diff-empty-patch role="status" :hidden="!file.contextError" :text="file.contextError"></p>
+                <button type="button" data-diff-more :hidden="!file.contextError" @click="loadDiffContext(file.path, true)">Retry context</button>
                 <button type="button" data-diff-more :hidden="!file.earlier" @click="diffLineReveal.set(null)">Show from beginning</button>
                 <div data-diff-lines role="region" :aria-label="'Patch for ' + file.path" :data-diff-path="file.path" tabindex="0" :hidden="!file.rows.length" @keydown="navigateDiffLines">
                   <div data-diff-grid>
                     <div data-diff-side-headings hidden :hidden="diffLayout() !== 'split'"><span>Before</span><span>After</span></div>
-                    <template :for="row in file.rows" :key="row.id">
+                    <template :for="row in file.rows" :key="row.key">
+                      <template :if="row.gap">
+                        <div data-diff-gap>
+                          <button type="button" :hidden="!row.gap?.above" aria-label="Show unchanged lines above" title="Show unchanged lines above" @click="expandDiffContext(file.path, row.gap, 'above', $event)">
+                            <span class="size-3.5 i-hugeicons-arrow-up-01" aria-hidden="true"></span>
+                          </button>
+                          <button type="button" :hidden="!row.gap?.below" aria-label="Show unchanged lines below" title="Show unchanged lines below" @click="expandDiffContext(file.path, row.gap, 'below', $event)">
+                            <span class="size-3.5 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+                          </button>
+                          <button type="button" :aria-label="'Show all ' + row.gap?.count + ' unchanged lines'" :text="row.gap?.count + (row.gap?.count === 1 ? ' unchanged line' : ' unchanged lines')" @click="expandDiffContext(file.path, row.gap, 'all', $event)"></button>
+                        </div>
+                      </template>
                       <div data-diff-hunk :hidden="!row.header" :text="row.header || ''"></div>
-                      <div data-diff-row :hidden="Boolean(row.header)">
+                      <div data-diff-row :hidden="Boolean(row.header || row.gap)">
                         <template :for="(cell, side) in row.cells">
                           <div data-diff-cell :data-kind="cell?.kind || 'empty'">
                             <button type="button" data-diff-line-number data-diff-side="before" tabindex="-1"
