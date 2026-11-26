@@ -107,6 +107,66 @@ describe('reserved worktrees', () => {
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   }, GIT_TIMEOUT)
+
+  it.each(['origin', 'upstream', 'attached project head', 'detached remote head', 'detached project head', 'unborn head'] as const)(
+    'reconstructs a deleted branch before sending using %s', async (source) => {
+      const dir = repo()
+      try {
+        const git = (...args: string[]) => {
+          const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
+          if (result.status !== 0) throw new Error(result.stderr)
+          return result.stdout.trim()
+        }
+        const intent = await plan(dir, 42, crypto.randomUUID())
+        if ('reason' in intent) throw new Error(intent.reason)
+        expect(await openReserved(intent, true)).toMatchObject({ path: intent.path })
+        writeFileSync(join(intent.path, 'app.txt'), 'Committed by the session\n')
+        const published = await commitTurn(intent.path, 'Session change')
+        expect(published).toBeTruthy()
+
+        const remote = source === 'origin' || source === 'upstream' ? source : undefined
+        const upstream = remote && `refs/remotes/${remote}/${intent.branch}`
+        // The remote URL cannot work. Only its cached Git ref is needed.
+        if (remote || source === 'detached remote head') {
+          git('remote', 'add', remote ?? 'upstream', join(dir, 'unreachable.git'))
+          if (remote === 'origin') {
+            git('remote', 'add', 'aaa', join(dir, 'also-unreachable.git'))
+            git('update-ref', `refs/remotes/aaa/${intent.branch}`, intent.base)
+          }
+          if (upstream) git('update-ref', upstream, published!)
+          else {
+            git('update-ref', 'refs/remotes/upstream/main', published!)
+            git('symbolic-ref', 'refs/remotes/upstream/HEAD', 'refs/remotes/upstream/main')
+          }
+        }
+        writeFileSync(join(dir, 'app.txt'), 'Latest project checkout\n')
+        git('commit', '-qam', 'Move project forward')
+        const projectHead = git('rev-parse', 'HEAD')
+        git('config', 'branch.autoSetupMerge', 'always')
+        if (source.startsWith('detached')) git('switch', '--detach', projectHead)
+        if (source === 'unborn head') git('switch', '--orphan', 'unborn')
+
+        rmSync(intent.path, { recursive: true })
+        // Retain the stale worktree registration while simulating a deleted ref.
+        git('update-ref', '-d', `refs/heads/${intent.branch}`, published!)
+        expect(await openReserved(intent, 'recover', undefined, () => true)).toMatchObject({ path: null })
+        expect(existsSync(intent.path)).toBe(false)
+        const restored = await openReserved(intent, 'resume', undefined, () => true)
+        if (source === 'unborn head') {
+          expect(restored.path).toBeNull()
+          expect(await exists(dir, intent.path)).toBe(true)
+          return
+        }
+        expect(restored).toMatchObject({ path: intent.path, branch: intent.branch })
+        expect(g(intent.path, 'symbolic-ref', '--short', 'HEAD')).toBe(intent.branch)
+        expect(g(intent.path, 'rev-parse', 'HEAD')).toBe(upstream || source === 'detached remote head' ? published! : projectHead)
+        expect(g(intent.path, 'rev-parse', '--symbolic-full-name', '@{upstream}')).toBe(upstream ?? '')
+        expect(g(dir, 'rev-parse', 'HEAD')).toBe(projectHead)
+        expect(readFileSync(join(dir, 'app.txt'), 'utf8')).toBe('Latest project checkout\n')
+      }
+      finally { rmSync(dir, { recursive: true, force: true }) }
+    }, GIT_TIMEOUT,
+  )
 })
 
 it('keeps commits separate when the project root and a child are both repositories', async () => {

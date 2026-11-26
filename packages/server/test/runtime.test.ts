@@ -1585,7 +1585,7 @@ describe('a session can have a checkout of its own', () => {
     client.close()
   }, 30_000)
 
-  it.each(['present', 'missing before send', 'missing before file rewind'] as const)('reuses the same worktree across turns with checkout %s', async (scenario) => {
+  it.each(['present', 'missing before send', 'missing before file rewind', 'deleted branch before file rewind and send'] as const)('reuses the same worktree across turns with checkout %s', async (scenario) => {
     const workspace = repoWorkspace2()
     const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
     const opened: string[] = []
@@ -1604,6 +1604,14 @@ describe('a session can have a checkout of its own', () => {
     const session = harness.engine.current.sessions.get(sessionId)!
     const first = session.worktreePath
     if (scenario !== 'present') rmSync(first, { recursive: true })
+    if (scenario === 'deleted branch before file rewind and send') {
+      const deleted = spawnSync('git', ['update-ref', '-d', `refs/heads/${session.branch}`], { cwd: workspace })
+      expect(deleted.status).toBe(0)
+      const checkpointId = session.checkpoints.find(checkpoint => checkpoint.kind === 'turn-start')!.id
+      client.send({ t: 'dispatch', envelope: { id: 'reject-file-recovery', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId } } })
+      expect(await client.waitFor('checkpoint.restore-failed', 8000)).toMatchObject({ checkpointId, message: expect.stringContaining('branch') })
+      expect(existsSync(first)).toBe(false)
+    }
     if (scenario === 'missing before file rewind') {
       const checkpointId = session.checkpoints.find(checkpoint => checkpoint.kind === 'turn-start')!.id
       client.send({ t: 'dispatch', envelope: { id: 'file-recovery', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId } } })

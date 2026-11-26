@@ -3,6 +3,7 @@ import { lstat, mkdir, readdir, readlink, realpath, rmdir, symlink, unlink, writ
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { isWorkspaceGitRoot } from './diff'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
+import type { WorktreeOpenMode } from './worktree'
 import { branchFor, checkoutBase, includesCheckoutBase, isCleanForLayoutRemoval, openReserved, release, remove } from './worktree'
 import { clearWorktreeLayoutReceipts, runWorktreeLayout, worktreeLayoutOutcome } from './worktree-layout'
 
@@ -122,11 +123,11 @@ async function rollbackCleanLayoutCheckouts(intent: CombinedWorktreeIntent, root
   }
 }
 
-/** Startup only adopts a full layout. Recovery checks out existing branches at their recorded paths. */
-export async function openCombinedWorktree(intent: CombinedWorktreeIntent, mode: boolean | 'recover',
+/** Startup only adopts a full layout. Recovery uses the recorded checkout paths. */
+export async function openCombinedWorktree(intent: CombinedWorktreeIntent, mode: WorktreeOpenMode,
   authorize = () => false, signal?: AbortSignal): Promise<boolean> {
   const create = mode === true
-  const recover = mode === 'recover'
+  const recover = typeof mode === 'string'
   if (create && intent.layout && !authorize())
     throw new Error('This project uses a worktree layout command. Start its first turn from the trusted Harness host.')
   try {

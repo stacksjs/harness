@@ -148,11 +148,32 @@ export async function create(workspacePath: string, sessionId: number): Promise<
   return 'reason' in intent ? { path: null, branch: null, reason: intent.reason } : add(intent)
 }
 
+export type WorktreeOpenMode = boolean | 'recover' | 'resume'
+
+/** Rebuild from local refs only. Only an existing copy of this branch is tracked. */
+async function resumeBase(repository: string, branch: string): Promise<{ commit: string, upstream?: string } | null> {
+  const remotes = await git(repository, ['remote'])
+  const names = remotes.ok ? remotes.out.trim().split('\n').filter(Boolean) : []
+  const remote = names.includes('origin') ? 'origin' : names[0]
+  if (remote) {
+    const upstream = `refs/remotes/${remote}/${branch}`
+    const commit = await commitAt(repository, upstream)
+    if (commit) return { commit, upstream }
+    const branchHead = await git(repository, ['symbolic-ref', '--quiet', 'HEAD'])
+    if (!branchHead.ok) {
+      const commit = await commitAt(repository, `refs/remotes/${remote}/HEAD`)
+      if (commit) return { commit }
+    }
+  }
+  const commit = await commitAt(repository, 'HEAD')
+  return commit ? { commit } : null
+}
+
 /** Find the exact registered checkout and leave conflicts untouched. */
-export async function openReserved(intent: CheckoutIntent, mode: boolean | 'recover', combinedRoot?: string,
+export async function openReserved(intent: CheckoutIntent, mode: WorktreeOpenMode, combinedRoot?: string,
   authorize = () => false): Promise<WorktreeResult> {
   const { repository, path, branch } = intent
-  const recovering = mode === 'recover'
+  const recovering = typeof mode === 'string'
   const conflict = { path: null, branch: null, reason: 'checkout-conflict' } as const
   const common = await gitDirectory(repository)
   if (!common || normalize(path) !== path) return conflict
@@ -182,8 +203,14 @@ export async function openReserved(intent: CheckoutIntent, mode: boolean | 'reco
     if (await occupied()) return conflict
     const parent = dirname(path)
     const root = combinedRoot ?? common
-    if (recovering && (!authorize() || registrations.some(entry => entry.path !== path && entry.branch === branch)
-      || !await commitAt(repository, `refs/heads/${branch}`))) return conflict
+    let base: Awaited<ReturnType<typeof resumeBase>> = null
+    if (recovering) {
+      if (!authorize() || registrations.some(entry => entry.path !== path && entry.branch === branch)) return conflict
+      if (!await commitAt(repository, `refs/heads/${branch}`)) {
+        base = mode === 'resume' ? await resumeBase(repository, branch) : null
+        if (!base) return conflict
+      }
+    }
     if (await realpath(root) !== root) return conflict
     let current = root
     for (const part of relative(root, parent).split(sep).filter(Boolean)) {
@@ -197,8 +224,13 @@ export async function openReserved(intent: CheckoutIntent, mode: boolean | 'reco
       if (await occupied() || !authorize()) return conflict
       if (existing && !(await git(repository, ['worktree', 'remove', '--', path])).ok) return conflict
       if (await occupied() || !authorize()) return conflict
-      const added = await git(repository, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--', path, branch])
-      return added.ok ? openReserved(intent, false, combinedRoot) : conflict
+      const checkout = base ? ['--no-track', '-b', branch, '--', path, base.commit] : ['--', path, branch]
+      const added = await git(repository, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--no-guess-remote', ...checkout])
+      if (!added.ok) return conflict
+      const opened = await openReserved(intent, false, combinedRoot)
+      if (opened.path && base?.upstream && authorize())
+        await git(repository, ['branch', `--set-upstream-to=${base.upstream}`, '--', branch])
+      return opened
     }
     const created = await add(intent)
     return created.path ? openReserved(intent, false, combinedRoot) : created
