@@ -125,6 +125,13 @@ const activeWorkspace = activeSession && !activeScratchSession
   ? profiles.flatMap(profile => profile.workspaces || []).find(workspace => workspace.id === activeWorkspaceId)
   : draftProject
 export const workspaceName = activeWorkspace?.name
+// The same name, as `null` rather than `undefined`, for the island's own top
+// level. The server to client bridge seeds a null and drops an undefined, and
+// a name read while the island is setting up is a ReferenceError that stops
+// the whole root from hydrating — silently, since what you see is a page
+// whose buttons never respond.
+export const projectName = activeWorkspace?.name || null
+export const projectWorkspaceId = activeWorkspace?.id || 0
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
 export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
@@ -1097,6 +1104,25 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">New terminals use the selected shell. Den must be installed on this host.</p>
       <p data-host-settings-note class="mt-3 mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">These apply to every client of this host. Appearance and keyboard shortcuts stay with this browser.</p>
       <p data-settings-error role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
+      </section>
+      <section :hidden="settingsSelection() !== 'projects'" data-settings-pane>
+      <h3 data-settings-section="projects" tabindex="-1">Projects</h3>
+      {{--
+        What the open project covers on this host, read from its disk when the
+        section opens. The composer's worktree panel asks the same endpoint for
+        the repositories a new thread can take; this is the place to see the
+        whole set, including the project folder itself and whether the project
+        lays its own worktrees out with a command.
+      --}}
+      <p class="mb-2 font-medium text-[13px]" data-project-name :text="projectRepositoryTitle()"></p>
+      <ul class="mb-2" data-repository-list aria-label="Repositories">
+        <li :for="repository in projectRepositories()" :key="repository.key" data-repository-row class="flex gap-2 items-center py-1 text-[13px]">
+          <span data-repository-name class="flex-1 truncate" :text="repository.label"></span>
+          <span class="text-[11px] opacity-60" :text="repository.note"></span>
+        </li>
+      </ul>
+      <p data-repository-status role="status" :hidden="!projectRepositoryStatus()" :text="projectRepositoryStatus()" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-300"></p>
+      <p data-repository-layout :hidden="!projectRepositoryLayout()" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">This project lays its own worktrees out with the command in its t3.json, so a thread here starts from the Harness host.</p>
       </section>
       <section :hidden="settingsSelection() !== 'providers'" data-settings-pane>
       <h3 data-settings-section="providers" tabindex="-1">Providers</h3>
@@ -2095,6 +2121,63 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return settingsSections.filter(section => section.label.toLowerCase().includes(query) || section.id.includes(query))
   })
   const settingsSelectionLabel = derived(() => settingsSections.find(section => section.id === settingsSelection())?.label || 'General')
+
+  // What the open project covers, for the Projects section. Asked for when
+  // the section opens rather than carried by the render: no event says a
+  // repository was cloned into the project folder, so a set baked into the
+  // page would be wrong the moment someone clones one, and a person opening
+  // this section is usually there because the folder has just changed.
+  const projectRepositories = state([])
+  const projectRepositoryStatus = state('')
+  const projectRepositoryLayout = state(false)
+  const projectRepositoryTitle = derived(() => projectName ? `Repositories in ${projectName}` : 'No project open')
+
+  async function loadProjectRepositories() {
+    if (!projectWorkspaceId) {
+      batch(() => {
+        projectRepositories.set([])
+        projectRepositoryLayout.set(false)
+        projectRepositoryStatus.set('Open a project to see the repositories it covers.')
+      })
+      return
+    }
+
+    projectRepositoryStatus.set('Reading the project…')
+    const query = activeSessionId
+      ? new URLSearchParams({ session: String(activeSessionId) })
+      : new URLSearchParams({ workspace: String(projectWorkspaceId) })
+    const covered = await fetch(`/workspace-repositories?${query}`)
+      .then(response => response.ok ? response.json() : null)
+      .catch(() => null)
+    if (!covered) {
+      batch(() => {
+        projectRepositories.set([])
+        projectRepositoryLayout.set(false)
+        // Trust is the usual reason: reading what is inside a folder is
+        // exactly what the host is asked to be trusted for.
+        projectRepositoryStatus.set('Could not read this project. Trust it first if you have not.')
+      })
+      return
+    }
+
+    // The project folder is a repository of the project where it is one, and
+    // it has no name of its own, so it is shown by the project's name.
+    const rows = covered.hasProjectRepository
+      ? [{ key: '', label: projectName || 'This project', note: 'project folder' }]
+      : []
+    for (const repository of covered.repositories ?? [])
+      rows.push({ key: repository.key, label: repository.label, note: repository.key === repository.label ? '' : repository.key })
+
+    batch(() => {
+      projectRepositories.set(rows)
+      projectRepositoryLayout.set(covered.requiresProjectCommand === true)
+      projectRepositoryStatus.set(rows.length ? '' : 'No Git repositories in this project folder yet.')
+    })
+  }
+
+  effect(() => {
+    if (settingsSelection() === 'projects') void loadProjectRepositories()
+  })
 
   // The keyboard registry's live state. `keybindingTable` is null until the
   // shared module loads; the rows fall back to the server-rendered defaults

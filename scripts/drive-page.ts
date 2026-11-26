@@ -23,6 +23,7 @@ import { chromium, webkit } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
 import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/index'
+import { settingsSections } from '../packages/server/src/settings-location'
 
 const checks: Array<[string, boolean]> = []
 function check(name: string, ok: boolean): void {
@@ -1433,7 +1434,7 @@ if (screenshotDir) {
   await settingsSearch.press('Enter')
   await page.waitForURL(url => url.pathname === '/settings/keybindings')
   check('Enter opens the matching settings section and clears search', await settingsSearch.inputValue() === ''
-    && await settingsNavigation.getByRole('button').count() === 6)
+    && await settingsNavigation.getByRole('button').count() === settingsSections.length)
   // The Keyboard section at a desktop and the narrowest width: its rows carry
   // a chord and two controls, which is the densest line in the whole sheet.
   for (const [width, height] of [[1280, 800], [360, 800]] as const) {
@@ -4088,6 +4089,45 @@ check('rewind restores both working copies, resets the selected index, and repor
 await capture('project-rewind-finished-desktop')
 rmSync(lateRepository, { recursive: true })
 
+// 15. The Projects section: what this project covers on this host, read from
+// its folder when the section opens rather than from anything the page was
+// rendered with.
+await page.setViewportSize({ width: 1280, height: 800 })
+await page.goto(new URL(multiRepoPath, baseUrl).href)
+await pressChord('Meta+,')
+await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
+await settingsNavigation.getByRole('button', { name: 'Projects' }).click()
+await page.waitForURL(url => url.pathname === '/settings/projects')
+const repositoryRows = page.locator('[data-repository-row]')
+const repositoryNames = (): Promise<string[]> =>
+  repositoryRows.locator('[data-repository-name]').allTextContents().then(names => names.map(name => name.trim()))
+await repositoryRows.nth(1).waitFor({ state: 'visible', timeout: 4000 })
+check('the Projects section lists every repository the project covers',
+  (await repositoryNames()).join() === 'API service,Web frontend'
+  && (await repositoryRows.nth(1).textContent())?.includes('packages/web') === true
+  && await page.locator('[data-repository-layout]').isHidden())
+await capture('settings-projects-desktop')
+
+// Read from the folder, not from the render: a repository cloned into the
+// project belongs to it with no command run and no event written.
+const clonedRepository = join(multiRepoProject, 'tools')
+mkdirSync(clonedRepository, { recursive: true })
+writeFileSync(join(clonedRepository, 'build.sh'), 'echo build\n')
+execFileSync('git', ['init', '-qb', 'main'], { cwd: clonedRepository })
+execFileSync('git', ['add', 'build.sh'], { cwd: clonedRepository })
+execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Tools'], { cwd: clonedRepository, env: multiRepoGit })
+await settingsNavigation.getByRole('button', { name: 'General' }).click()
+await settingsNavigation.getByRole('button', { name: 'Projects' }).click()
+await repositoryRows.nth(2).waitFor({ state: 'visible', timeout: 4000 })
+check('a repository cloned into the project folder belongs to it at once',
+  (await repositoryNames()).join() === 'API service,Web frontend,tools')
+await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+// Closing the sheet navigates back to the thread. Waiting for that to land
+// keeps the next navigation from aborting this one.
+await settingsDialog.waitFor({ state: 'hidden' })
+await page.waitForURL(url => url.pathname === multiRepoPath)
+rmSync(clonedRepository, { recursive: true, force: true })
+
 if (process.platform !== 'win32') {
   writeFileSync(join(multiRepoProject, 't3.json'), JSON.stringify({
     worktreeLayout: {
@@ -4101,6 +4141,19 @@ if (process.platform !== 'win32') {
     },
   }))
 }
+// The same section says when the project lays its own worktrees out, because
+// that is what decides whether a thread can start one from this client.
+if (process.platform !== 'win32') {
+  await pressChord('Meta+,')
+  await settingsDialog.waitFor({ state: 'visible', timeout: 4000 })
+  await settingsNavigation.getByRole('button', { name: 'Projects' }).click()
+  await page.locator('[data-repository-layout]').waitFor({ state: 'visible', timeout: 4000 })
+  check('the Projects section says when the project lays out its own worktrees', true)
+  await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+  await settingsDialog.waitFor({ state: 'hidden' })
+  await page.waitForURL(url => url.pathname === multiRepoPath)
+}
+
 const worktreeDraft = new URL(`/?workspace=${multiRepoWorkspace}`, baseUrl)
 await page.goto(worktreeDraft.href)
 const worktreeControls = page.locator('[data-draft-worktree]')

@@ -6,6 +6,7 @@ describe('workspace settings routes', () => {
     expect(settingsSection('/settings')).toBe('general')
     expect(settingsSection('/settings/providers')).toBe('providers')
     expect(settingsSection('/settings/keybindings')).toBe('keybindings')
+    expect(settingsSection('/settings/projects')).toBe('projects')
     expect(settingsSection('/settings/archived')).toBe('archived')
     expect(settingsSection('/settings/not-a-section')).toBeNull()
   })
