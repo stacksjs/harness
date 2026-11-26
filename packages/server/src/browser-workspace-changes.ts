@@ -36,6 +36,7 @@ export function watchWorkspaceChanges(sessionId: number, show: (diff: WorkspaceD
   let controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   let knownRevision: string | undefined
+  const fixedComparison = comparison?.mode === 'commit' || (comparison?.mode === 'turn' && Boolean(comparison.target))
 
   async function refresh(): Promise<void> {
     const { signal } = controller
@@ -69,7 +70,7 @@ export function watchWorkspaceChanges(sessionId: number, show: (diff: WorkspaceD
       unavailable()
     }
     finally {
-      if (!signal.aborted) timer = setTimeout(refresh, 2000)
+      if (!signal.aborted && !fixedComparison) timer = setTimeout(refresh, 2000)
     }
   }
 
