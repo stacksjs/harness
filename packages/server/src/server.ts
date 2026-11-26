@@ -10,6 +10,7 @@
 import type { CommandEnvelope, DriverKind, HarnessEvent } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver, DriverConfig, ProbeResult } from '@harness/drivers'
+import { createHash } from 'node:crypto'
 import { access as checkAccess, constants, realpath, stat } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -184,6 +185,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const deletionWorktrees = new WeakMap<CommandEnvelope, DoomedWorktree[]>()
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
+  const previewDatabase = await realpath(databasePath).catch(() => resolve(databasePath))
+  const previewOwner = (sessionId: number) => createHash('sha256').update(previewDatabase).update('\0').update(String(sessionId)).digest('hex')
   const savedProviders = new SavedProviderInstances(databasePath)
   const chatGptCredentials = new ChatGptCredentialStore(options.chatGptCredentialDirectory ?? chatGptCredentialDirectory())
   const engine = new Engine({
@@ -252,6 +255,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     chatGptCredentials,
     composerAttachmentPath: attachment => composerAttachments.path(attachment),
     workspacePath: options.workspacePath,
+    previewOwner,
     combinedWorktreesDirectory: resolve(databasePath + '.harness-worktrees'),
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
@@ -1322,13 +1326,19 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (!session || !engine.current.workspaces.has(session.workspaceId)) return new Response(null, { status: 404, headers })
         const scope = { workspaceId: session.workspaceId, sessionId: session.id }
         const roots = terminals.processIds(scope)
-        const key = roots.join(',')
+        const rootKey = roots.join(',')
+        const key = `${scope.sessionId}:${rootKey}`
         let scan = previewScans.get(key)
         if (!scan) {
-          scan = readPreviewServers(roots).finally(() => previewScans.delete(key))
+          scan = readPreviewServers(roots, previewOwner(session.id)).finally(() => previewScans.delete(key))
           previewScans.set(key, scan)
         }
-        return scan.then(result => Response.json({ ...result, servers: key === terminals.processIds(scope).join(',') ? result.servers : [] }, { headers }))
+        return scan.then(result => {
+          const current = engine.current.sessions.get(scope.sessionId)
+          if (!current || current.workspaceId !== scope.workspaceId) return new Response(null, { status: 404, headers })
+          const servers = rootKey === terminals.processIds(scope).join(',') ? result.servers : []
+          return Response.json({ ...result, servers }, { headers })
+        })
       }
 
       // Shared page assets. Checked before the page routes because their
