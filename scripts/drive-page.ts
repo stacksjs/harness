@@ -4250,6 +4250,31 @@ check('combined rewind recreates the missing checkout, restores both working tre
   && fixtureCodexRewinds.length === 2 && fixtureCodexRewinds.at(-1)?.providerSessionId === 'rewind-worktree-fixture-thread')
 await capture('combined-conversation-rewind-restored-phone')
 
+const resumeBases = worktrees.map((checkout, index) => {
+  if (!checkout.path.startsWith(realpathSync(driveRoot) + sep)) throw new Error('Could not identify the fixture worktree')
+  const cachedBranch = checkout.key === 'api'
+  if (cachedBranch) {
+    execFileSync('git', ['remote', 'add', 'origin', join(driveRoot, 'unreachable.git')], { cwd: checkout.repository })
+    execFileSync('git', ['update-ref', `refs/remotes/origin/${checkout.branch}`, checkoutHeads[index]!.trim()], { cwd: checkout.repository })
+  }
+  rmSync(checkout.path, { recursive: true })
+  execFileSync('git', ['update-ref', '-d', `refs/heads/${checkout.branch}`], { cwd: checkout.repository })
+  return cachedBranch ? checkoutHeads[index] : execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkout.repository, encoding: 'utf8' })
+})
+await rewindPrompt.fill('Rewind worktree fixture: Continue after branch recovery.')
+await page.locator('[data-send]').click()
+await rewindMessage(4).locator('[data-edit-earlier-prompt]').waitFor()
+check('sending rebuilds missing branches from their cached remote or the project checkout and resumes the same thread',
+  worktrees.length === 2 && worktrees.every((checkout, index) =>
+    execFileSync('git', ['rev-parse', 'HEAD^'], { cwd: checkout.path, encoding: 'utf8' }) === resumeBases[index]
+    && readFileSync(join(checkout.repository, 'shared.txt'), 'utf8') === sourceContents[index])
+  && fixtureCodexTurns.at(-1)?.providerSessionId === 'rewind-worktree-fixture-thread')
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  await capture(`worktree-branch-recovery-${width}x${height}`)
+}
+await page.setViewportSize({ width: 1440, height: 900 })
+
 const claudeRewindId = 'claude-rewind-thread'
 const claudeRewindSession = derivedId(claudeRewindId)
 await harness.engine.dispatch({ id: claudeRewindId, at: Date.now(), command: {
