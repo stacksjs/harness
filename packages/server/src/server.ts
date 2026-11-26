@@ -22,11 +22,12 @@ import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePo
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
-import { reviewWorkspaceDiff, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
+import { isWorkspaceGitRoot, reviewWorkspaceDiff, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
+import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -383,6 +384,56 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
     if (!workspace?.trusted || workspace.scratch) return null
     return session ? defaultWorkspacePath(engine.current, session.id) : workspace.path
+  }
+
+  async function renderWorkspaceReview(root: string | null, url: URL, operation: string | undefined,
+    session: SessionState | undefined, trusted: boolean): Promise<Response> {
+    const headers = { 'cache-control': 'private, no-store' }
+    const errorDiff = (error: string) => ({ isRepository: false, scope: 'working-tree', files: [], patch: '', error })
+    const repository = url.searchParams.get('repository')
+    const mode = url.searchParams.get('comparison')
+    const target = url.searchParams.get('target') || undefined
+    if ((operation || mode || repository) && !trusted)
+      return Response.json({ error: 'Git review is unavailable for this workspace.' }, { status: 404, headers })
+    if (!root) return Response.json(errorDiff('session has no workspace'), { headers })
+    const path = repository ? await resolveProjectRepository(root, repository) : root
+    if (!path) return Response.json({ error: 'This project repository is unavailable.' }, { status: 404, headers })
+
+    const turns = repository ? [] : reviewTurns(session)
+    try {
+      if (operation === 'options') {
+        const [options, repositories, rootIsGit] = await Promise.all([
+          workspaceReviewOptions(path, turns, target),
+          scanProjectRepositories(root),
+          repository ? isWorkspaceGitRoot(root) : null,
+        ])
+        return Response.json({ ...options, repositories, hasProjectRepository: rootIsGit ?? options.isRepository }, { headers })
+      }
+
+      const baseline = repository ? undefined : session?.checkpoints[0]?.vcsRef
+      const context = operation === 'context'
+      const readContext = (diff: NonNullable<Awaited<ReturnType<typeof reviewWorkspaceDiff>>>) =>
+        workspaceDiffContext(path, diff, url.searchParams.get('file') ?? '', url.searchParams.get('object') ?? '')
+      if (mode) {
+        if (mode !== 'uncommitted' && mode !== 'branch' && mode !== 'commit' && mode !== 'turn')
+          return Response.json({ error: 'Unknown Git comparison.' }, { status: 400, headers })
+        if (repository && mode === 'turn')
+          return Response.json({ error: 'There are no recorded turns for this repository.' }, { status: 404, headers })
+        const diff = await reviewWorkspaceDiff(path, mode, target, turns, context ? undefined : url.searchParams.get('knownRevision') ?? undefined)
+        if (!diff) return new Response(null, { status: 204, headers })
+        return context ? await readContext(diff) : Response.json(diff, { headers })
+      }
+      if (context) return await readContext(await workspaceDiff(path, baseline))
+
+      // Preserve the first-checkpoint comparison for older clients.
+      const revision = await workspaceDiffRevision(path, baseline)
+      if (url.searchParams.get('knownRevision') === revision) return new Response(null, { status: 204, headers })
+      return Response.json({ ...await workspaceDiff(path, baseline), revision }, { headers })
+    }
+    catch {
+      if (operation) return Response.json({ error: operation === 'options' ? 'Could not load Git review options.' : 'Could not load unchanged lines.' }, { status: 503, headers })
+      return Response.json(errorDiff('could not read the workspace'), { headers })
+    }
   }
 
   function reviewTurns(session: SessionState | undefined): WorkspaceReviewTurn[] {
@@ -1208,43 +1259,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const path = options.workspacePath
           ? options.workspacePath(engine.current, id)
           : defaultWorkspacePath(engine.current, id)
-        const headers = { 'cache-control': 'private, no-store' }
-        const errorDiff = (error: string) => ({ isRepository: false, scope: 'working-tree', files: [], patch: '', error })
-        if (!path) return Response.json(errorDiff('session has no workspace'), { headers })
-        const mode = url.searchParams.get('comparison')
-        const target = url.searchParams.get('target') || undefined
-        const context = diffRoute[2] === 'context'
-        if (diffRoute[2] || mode) {
-          const workspace = session && engine.current.workspaces.get(session.workspaceId)
-          if (!workspace?.trusted || workspace.scratch) return Response.json({ error: 'Git review is unavailable for this workspace.' }, { status: 404, headers })
-          const turns = reviewTurns(session)
-          if (diffRoute[2] === 'options') return workspaceReviewOptions(path, turns, target)
-            .then(value => Response.json(value, { headers }))
-            .catch(() => Response.json({ error: 'Could not load Git review options.' }, { status: 503, headers }))
-          const readContext = (diff: NonNullable<Awaited<ReturnType<typeof reviewWorkspaceDiff>>>) => workspaceDiffContext(
-            path, diff, url.searchParams.get('file') ?? '', url.searchParams.get('object') ?? '',
-          )
-          if (context && !mode) return workspaceDiff(path, session?.checkpoints[0]?.vcsRef).then(readContext)
-            .catch(() => Response.json({ error: 'Could not load unchanged lines.' }, { status: 503, headers }))
-          if (mode !== 'uncommitted' && mode !== 'branch' && mode !== 'commit' && mode !== 'turn')
-            return Response.json({ error: 'Unknown Git comparison.' }, { status: 400, headers })
-          return reviewWorkspaceDiff(path, mode, target, turns, context ? undefined : url.searchParams.get('knownRevision') ?? undefined)
-            .then(diff => !diff ? new Response(null, { status: 204, headers })
-              : context ? readContext(diff) : Response.json(diff, { headers }))
-            .catch(() => context ? Response.json({ error: 'Could not load unchanged lines.' }, { status: 503, headers })
-              : Response.json(errorDiff('could not read the workspace'), { headers }))
-        }
-        // Existing clients review all changes since the first checkpoint,
-        // falling back to the uncommitted working tree for older sessions.
-        const baseline = session?.checkpoints[0]?.vcsRef
-        return workspaceDiffRevision(path, baseline)
-          .then(async (revision) => {
-            if (url.searchParams.get('knownRevision') === revision)
-              return new Response(null, { status: 204, headers })
-            const diff = await workspaceDiff(path, baseline)
-            return Response.json({ ...diff, revision }, { headers })
-          })
-          .catch(() => Response.json(errorDiff('could not read the workspace'), { headers }))
+        const workspace = session && engine.current.workspaces.get(session.workspaceId)
+        return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch))
       }
 
       // Shared page assets. Checked before the page routes because their

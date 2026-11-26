@@ -288,7 +288,7 @@ async function resolveCommit(path: string, ref: string): Promise<string | null> 
   return result.ok && commitId.test(sha) ? sha : null
 }
 
-async function isWorkspaceGitRoot(path: string): Promise<boolean> {
+export async function isWorkspaceGitRoot(path: string): Promise<boolean> {
   const prefix = await git(path, ['rev-parse', '--is-inside-work-tree', '--show-prefix'])
   return prefix.ok && prefix.out.trimEnd() === 'true'
 }

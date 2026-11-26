@@ -123,6 +123,94 @@ describe('harness serve — HTTP', () => {
     expect(await response.json()).toMatchObject({ ok: true, profiles: 0, sessions: 0 })
   })
 
+  it('reviews only repositories discovered inside a trusted project', async () => {
+    const project = join(dir, 'project repos')
+    const outside = join(dir, 'outside')
+    const runGit = (cwd: string, ...args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd })
+      expect(result.exitCode).toBe(0)
+      return result.stdout.toString().trim()
+    }
+    const repo = async (path: string, label: string) => {
+      mkdirSync(path, { recursive: true })
+      runGit(path, 'init', '-qb', 'main')
+      await Bun.write(join(path, 'fixture.txt'), 'Original\n')
+      runGit(path, 'add', 'fixture.txt')
+      runGit(path, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Initial')
+      await Bun.write(join(path, 'fixture.txt'), `Original\n${label}\n`)
+    }
+    await repo(join(project, 'api'), 'API change')
+    await repo(join(project, 'packages', 'web'), 'Web change')
+    await repo(join(project, 'deep', 'tools', 'composer'), 'Listed change')
+    await repo(join(project, 'vendor', 'ignored'), 'Ignored change')
+    await repo(outside, 'Outside change')
+    runGit(join(project, 'api'), 'worktree', 'add', '-qb', 'scratch', join(project, 'checkout'))
+    symlinkSync(outside, join(project, 'link'))
+    await Bun.write(join(project, 'fixture.code-workspace'), `{
+      // Folder names can come from a workspace file.
+      "folders": [
+        { "path": "api", "name": "API" },
+        { "path": "deep/tools/composer", "name": "Composer" },
+        { "path": "../outside", "name": "Outside" },
+        { "path": "checkout", "name": "Linked checkout" },
+      ],
+    }`)
+    await Bun.write(join(project, 't3.json'), '{"ignoreRepositories":["vendor"]}')
+
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    await dispatch('repo-profile', { type: 'profile.create', name: 'Project fixture' })
+    const workspaceId = derivedId('repo-workspace')
+    await dispatch('repo-workspace', { type: 'workspace.add', profileId: derivedId('repo-profile'), path: project })
+    await dispatch('repo-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+    await dispatch('repo-session', { type: 'session.create', workspaceId, driverKind: 'claude' })
+    const route = `http://127.0.0.1:${port}/s/${derivedId('repo-session')}/diff`
+    const review = (key: string, mode = 'uncommitted') =>
+      fetch(route + '?' + new URLSearchParams({ repository: key, comparison: mode }))
+    await dispatch('repo-untrust', { type: 'workspace.trust', workspaceId, trusted: false })
+    expect((await review('api')).status).toBe(404)
+    expect((await fetch(route + '/options')).status).toBe(404)
+    await dispatch('repo-trust-again', { type: 'workspace.trust', workspaceId, trusted: true })
+
+    const getOptions = async () => (await fetch(route + '/options')).json()
+    expect(await getOptions()).toMatchObject({
+      hasProjectRepository: false,
+      repositories: [
+        { key: 'api', label: 'API' },
+        { key: 'deep/tools/composer', label: 'Composer' },
+        { key: 'packages/web', label: 'web' },
+      ],
+    })
+    for (const [key, label] of [['api', 'API change'], ['packages/web', 'Web change'], ['deep/tools/composer', 'Listed change']]) {
+      const response = await review(key!)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ scope: 'working-tree', patch: expect.stringContaining(`+${label}`) })
+    }
+    const web = join(project, 'packages', 'web')
+    runGit(web, 'switch', '-qc', 'review/web')
+    runGit(web, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'Web review')
+    const branches = await (await fetch(route + '/options?repository=packages%2Fweb')).json()
+    expect(branches).toMatchObject({
+      hasProjectRepository: false,
+      branches: [{ ref: 'refs/heads/main' }, { ref: 'refs/heads/review/web' }],
+      commits: [{ subject: 'Web review' }],
+    })
+    expect(await (await review('packages/web', 'branch')).json()).toMatchObject({
+      scope: 'branch', comparisonTarget: 'refs/heads/main', patch: expect.stringContaining('+Web change'),
+    })
+    expect(await (await review('api', 'branch')).json()).toMatchObject({
+      scope: 'branch', patch: expect.not.stringContaining('Web change'),
+    })
+
+    for (const invalid of ['../outside', outside, 'link', 'checkout', 'vendor/ignored', 'packages/../api', 'api/.git'])
+      expect((await review(invalid)).status).toBe(404)
+    expect((await review('api', 'turn')).status).toBe(404)
+
+    rmSync(join(project, 'packages', 'web'), { recursive: true })
+    expect((await review('packages/web')).status).toBe(404)
+    expect((await getOptions()).repositories.map((item: { key: string }) => item.key)).toEqual(['api', 'deep/tools/composer'])
+  })
+
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')
     mkdirSync(project)
