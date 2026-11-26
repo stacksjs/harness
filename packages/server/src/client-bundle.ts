@@ -25,7 +25,7 @@ import { join } from 'node:path'
  * names on `window` that anything could overwrite.
  */
 const ENTRY = `export { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, encode, decode, threadDisplayTitle } from '@harness/contract'
-export { Terminal, toHtml } from '@harness/ansi'
+export { createTerminalDock } from './packages/server/src/browser-terminal-dock'
 export { updateTranscriptMarkdown } from './packages/server/src/transcript-markdown'
 export { sendBrowserCommand } from './packages/server/src/browser-command'
 export { createFollowUpActions } from './packages/server/src/browser-follow-ups'

@@ -650,18 +650,27 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       </div>
     @endif
     @if(activeWorkspaceId)
-    <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" aria-label="Terminal" class="terminal-panel">
+    <section id="harness-terminal" data-terminal hidden :hidden="!termOpen()" :style="{ '--terminal-dock-height': terminalHeight() + 'dvh' }" aria-label="Terminal" class="terminal-panel">
+      <div data-terminal-resize role="separator" tabindex="0" aria-label="Resize terminal dock" aria-orientation="horizontal" aria-controls="harness-terminal-output"
+        aria-valuemin="22" aria-valuemax="58" :aria-valuenow="String(terminalHeight())" :aria-valuetext="terminalHeight() + '% of window'"
+        @keydown="resizeTerminalByKey" @pointerdown="beginTerminalResize" @pointermove="moveTerminalResize" @pointerup="endTerminalResize" @pointercancel="cancelTerminalResize" @lostpointercapture="cancelTerminalResize"></div>
       <div data-terminal-toolbar>
         <div ref="terminalTabStrip" data-terminal-tabs role="tablist" aria-label="Terminal tabs" @keydown="terminalTabKeydown">
-          <button :for="tab in terminalTabs().tabs" :key="tab.key" type="button" role="tab" :id="'terminal-tab-' + tab.number"
-            :aria-selected="tab.key === terminalTabs().activeKey ? 'true' : 'false'" :tabindex="tab.key === terminalTabs().activeKey ? 0 : -1"
-            aria-controls="harness-terminal-output" @click="selectTerminalTab(tab.key)" :text="'Terminal ' + tab.number"></button>
+          <button :for="group in terminalGroups()" :key="group.key" type="button" role="tab" :id="'terminal-tab-' + group.key"
+            :aria-selected="group.key === activeTerminalGroup() ? 'true' : 'false'" :tabindex="group.key === activeTerminalGroup() ? 0 : -1"
+            aria-controls="harness-terminal-output" @click="selectTerminalGroup(group.key)" :text="group.label"></button>
         </div>
         <div class="flex items-center shrink-0">
           <span data-terminal-activity role="status" hidden :hidden="!terminalStatus()" :text="terminalStatus()" class="px-2 text-xs"></span>
           <button type="button" data-terminal-restart hidden :hidden="!terminalExited() && !terminalError()" :disabled="terminalBusy() || !sessionOnline()" @click="restartTerminal" class="px-2 h-8 text-xs rounded-md">Restart terminal</button>
-          <button type="button" aria-label="New terminal" title="New terminal" :disabled="terminalBusy() || !sessionOnline()" @click="addTerminalTab" class="harness-icon-button">
+          <button type="button" aria-label="New terminal" title="New terminal" :disabled="terminalBusy() || !sessionOnline()" @click="addTerminalTab()" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-add-01" aria-hidden="true"></span>
+          </button>
+          <button type="button" data-terminal-split="columns" aria-label="Split terminal side by side" title="Split terminal side by side" :disabled="!canSplitTerminal()" @click="addTerminalTab('columns')" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-layout-2-column" aria-hidden="true"></span>
+          </button>
+          <button type="button" data-terminal-split="rows" aria-label="Split terminal top and bottom" title="Split terminal top and bottom" :disabled="!canSplitTerminal()" @click="addTerminalTab('rows')" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-layout-2-row" aria-hidden="true"></span>
           </button>
           <button type="button" aria-label="End terminal session" title="End terminal session" hidden :hidden="!activeTerminalTab()" :disabled="terminalBusy() || !sessionOnline()" @click="endTerminal" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-stop" aria-hidden="true"></span>
@@ -671,14 +680,20 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           </button>
         </div>
       </div>
-      <p data-terminal-error role="alert" hidden :hidden="!terminalError()" :text="terminalError()" class="px-3 py-2 text-red-300 text-sm"></p>
-      <div id="harness-terminal-output" data-terminal-host ref="termHostBox" role="tabpanel" :aria-labelledby="activeTerminalTab() ? 'terminal-tab-' + activeTerminalTab().number : null" :aria-label="terminalLabel() + ' input and output'" @keydown="termKeydown" @paste="termPaste" @scroll="trackTerminalPosition" tabindex="0" class="terminal-host">
-        {{--
-          Ten glyphs in the host's own font, laid out but invisible: the ruler
-          the island measures to turn pixels into columns and rows.
-        --}}
-        <span data-term-metric ref="termMetricBox" aria-hidden="true" class="term-metric">0123456789</span>
-        <div data-terminal-screen ref="termScreenBox"></div>
+      <div data-terminal-pane-picker role="group" aria-label="Terminals in split" :hidden="visibleTerminalTabs().length < 2">
+        <button :for="pane in visibleTerminalTabs()" :key="pane.key" type="button" :aria-pressed="pane.key === terminalTabs().activeKey ? 'true' : 'false'" @click="focusTerminalPane(pane.key)" :text="'Terminal ' + pane.number"></button>
+      </div>
+      <div id="harness-terminal-output" data-terminal-output ref="termSurface" role="tabpanel"
+        :aria-labelledby="activeTerminalGroup() ? 'terminal-tab-' + activeTerminalGroup() : null" :data-direction="terminalDirection()">
+        <div :for="pane in visibleTerminalTabs()" :key="pane.key" data-terminal-pane :data-active="pane.key === terminalTabs().activeKey ? 'true' : 'false'">
+          <p data-terminal-error role="alert" hidden :hidden="!terminalStates()[pane.key]?.error" :text="terminalStates()[pane.key]?.error || ''" class="px-3 py-2 text-red-300 text-sm"></p>
+          <div role="group" :data-terminal-host="pane.key" :aria-label="(terminalStates()[pane.key]?.shell || 'Terminal') + ' ' + pane.number + ' input and output'"
+            @focus="selectTerminalPane(pane.key)" @keydown="termKeydown(pane, $event)" @paste="terminalController()?.paste(pane.key, $event)"
+            @scroll="terminalController()?.track(pane.key, $event)" tabindex="0" class="terminal-host">
+            <span data-term-metric aria-hidden="true" class="term-metric">0123456789</span>
+            <div data-terminal-screen></div>
+          </div>
+        </div>
       </div>
     </section>
   @endif
@@ -1508,6 +1523,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return legacy?.key ? { tabs: [{ ...legacy, number: 1 }], activeKey: legacy.key } : { tabs: [], activeKey: '' }
   })
   const activeTerminalTab = derived(() => terminalTabs().tabs.find(tab => tab.key === terminalTabs().activeKey))
+  const activeTerminalGroup = derived(() => activeTerminalTab()?.group || activeTerminalTab()?.key || '')
+  const terminalGroups = derived(() => {
+    const groups = new Map()
+    for (const tab of terminalTabs().tabs) {
+      const key = tab.group || tab.key
+      const members = groups.get(key) || []
+      members.push(tab.number)
+      groups.set(key, members)
+    }
+    return Array.from(groups, ([key, members]) => ({ key, label: members.length === 1 ? 'Terminal ' + members[0] : 'Terminals ' + members.join(' + ') }))
+  })
+  const visibleTerminalTabs = derived(() => terminalTabs().tabs.filter(tab => (tab.group || tab.key) === activeTerminalGroup()))
+  const terminalDirection = derived(() => terminalTabs().directions?.[activeTerminalGroup()] === 'rows' ? 'rows' : 'columns')
+  const storedTerminalHeight = useLocalStorage(`harness.terminal-height:${sessionId}`, 31, { listenToStorageChanges: false })
+  const terminalHeight = state(boundedTerminalHeight(storedTerminalHeight()))
+  let terminalDrag = null
   const startPending = state(false)
   const projectBusy = state(false)
   const projectError = state('')
@@ -1815,10 +1846,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   onDestroy(() => transcriptFinder?.close())
 
-  const termScreenRef = useRef('termScreenBox')
-  const termHostRef = useRef('termHostBox')
+  const termSurface = useRef('termSurface')
   const termHeaderToggle = useRef('termHeaderToggle')
-  const termMetricRef = useRef('termMetricBox')
   const terminalTabStrip = useRef('terminalTabStrip')
 
   function toggleSidebar() {
@@ -2535,10 +2564,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     closeSettings()
     if (!termOpen()) toggleTerminal()
-    if (activeTerminalTab()) addTerminalTab()
-    // The measured PTY opens on the next animation frame. Hold the command
-    // until it binds, and discard it if the connection drops in the meantime.
-    termSend(`${command}\r`)
+    addTerminalTab()
+    const tab = activeTerminalTab()
+    // The controller holds this input for the selected pane until its PTY binds.
+    if (tab) terminalController()?.input(tab, `${command}`)
   }
 
   requestAnimationFrame(() => {
@@ -3340,118 +3369,58 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     else updateClientTurn(request.turnId, turn => ({ ...turn, inputRequests: applyActivity(turn.inputRequests) }))
   }
 
-  // ── Terminal (M6): a shell in the session's workspace ─────────────────
-  // The server owns the PTY and streams bytes as term-data frames; the page
-  // renders them through @harness/ansi's grid and sends keystrokes back
-  // whole. The same host-privilege check applies to opening and reattaching.
-  let term = null
-  let termId = null
-  let termToHtml = null
-  let termRenderQueued = false
-  let termFollowing = true
-  let terminalCloseAction = ''
-  const terminalBusy = state(false)
-  const terminalLabel = state('Terminal')
-  const terminalError = state('')
-  const terminalExited = state(false)
-  const terminalActivity = state('')
-  const terminalReconnecting = state(false)
-  const terminalStatus = derived(() => terminalReconnecting() ? 'Reconnecting…' : terminalActivity())
-
-  function trackTerminalPosition(event) {
-    const { scrollHeight, clientHeight, scrollTop } = event.currentTarget
-    termFollowing = scrollHeight - clientHeight - scrollTop < 25
-  }
-
-  function renderTerm() {
-    const screen = termScreenRef.current
-    if (termRenderQueued || !term || !termToHtml || !screen) return
-    termRenderQueued = true
-    requestAnimationFrame(() => {
-      termRenderQueued = false
-      if (!term) return
-      const scroller = screen.parentElement
-      screen.innerHTML = termToHtml(term.snapshot())
-      if (termFollowing || term.onAltScreen) scroller.scrollTop = scroller.scrollHeight
-    })
-  }
-
-  function updateTerminalActivity() {
-    const { phase, lastExitStatus } = term.shellActivity
-    if (phase === 'running') terminalActivity.set('Running')
-    else if (phase === 'ready') terminalActivity.set(lastExitStatus ? `Exit ${lastExitStatus}` : 'Ready')
-  }
-
-  // Named keys → the bytes a terminal expects. Anything printable goes as-is.
-  const TERM_KEYS = {
-    'Enter': '\r',
-    'Backspace': '\x7F',
-    'Tab': '\t',
-    'Escape': '\x1B',
-    'ArrowUp': '\x1B[A',
-    'ArrowDown': '\x1B[B',
-    'ArrowRight': '\x1B[C',
-    'ArrowLeft': '\x1B[D',
-    'Home': '\x1B[H',
-    'End': '\x1B[F',
-    'PageUp': '\x1B[5~',
-    'PageDown': '\x1B[6~',
-  }
-
-  // Typed-ahead keys arrive before term-opened does — the PTY takes a
-  // moment to spawn — and dropping them loses the first characters of the
-  // first command. Held here, flushed the moment the terminal binds.
-  let termPendingInput = ''
-
-  function termSend(data) {
-    if (!sessionOnline() || terminalReconnecting()) return
-    if (termId === null) {
-      if (termOpen() && !terminalError()) termPendingInput += data
-      return
-    }
-    sendFrame({ t: 'term-input', termId, data })
-  }
-
-  // Pixels -> columns and rows, via the ruler span rendered in the host's own
-  // font. Falls back to the classic 100x24 until the panel has laid out.
-  let termMeasured = { cols: 100, rows: 24 }
-  function measureTerm() {
-    const host = termHostRef.current
-    const metric = termMetricRef.current
-    if (!host || !metric) return termMeasured
-    const cell = metric.getBoundingClientRect()
-    const box = host.getBoundingClientRect()
-    if (cell.width > 0 && cell.height > 0 && box.width > 0) {
-      termMeasured = {
-        // The host has 10px side and 8px top padding; the ruler is 10 glyphs.
-        cols: Math.min(500, Math.max(20, Math.floor((box.width - 20) / (cell.width / 10)))),
-        rows: Math.min(200, Math.max(5, Math.floor((box.height - 16) / cell.height))),
-      }
-    }
-    return termMeasured
-  }
-
-  function resizeTerminal() {
-    if (termId === null || !term || !termOpen() || terminalExited()) return
-    const { cols, rows } = measureTerm()
-    if (cols === term.cols && rows === term.rows) return
-    sendFrame({ t: 'term-resize', termId, cols, rows })
-  }
-
-  // Live resize: when the panel's box changes — a narrow window shrinks it —
-  // the PTY is told the new size (the shell sees SIGWINCH) and the local grid
-  // follows. Watching starts on first open, when the host exists to observe.
-  let termObserver = null
-  onDestroy(() => termObserver?.disconnect())
-  function watchTermSize() {
-    if (termObserver || typeof ResizeObserver === 'undefined') return
-    const host = termHostRef.current
-    if (!host) return
-    termObserver = new ResizeObserver(resizeTerminal)
-    termObserver.observe(host)
-  }
-
+  const terminalController = state(null)
+  const terminalStates = state({})
+  const activeTerminalStatus = derived(() => terminalStates()[terminalTabs().activeKey])
+  const terminalBusy = derived(() => Boolean(activeTerminalStatus()?.busy))
+  const terminalExited = derived(() => Boolean(activeTerminalStatus()?.exited))
+  const terminalError = derived(() => activeTerminalStatus()?.error || '')
+  const terminalStatus = derived(() => activeTerminalStatus()?.reconnecting ? 'Reconnecting…' : activeTerminalStatus()?.activity || '')
+  const canSplitTerminal = derived(() => sessionOnline() && !terminalBusy() && visibleTerminalTabs().length > 0 && visibleTerminalTabs().length < 4)
   let terminalTrigger = null
+
+  function boundedTerminalHeight(height) {
+    return Number.isFinite(height) ? Math.min(58, Math.max(22, Math.round(height))) : 31
+  }
+
+  function resizeTerminalByKey(event) {
+    const step = event.shiftKey ? 10 : 3
+    const heights = { ArrowUp: terminalHeight() + step, ArrowDown: terminalHeight() - step, Home: 22, End: 58 }
+    if (!Object.hasOwn(heights, event.key)) return
+    event.preventDefault()
+    const height = boundedTerminalHeight(heights[event.key])
+    terminalHeight.set(height)
+    storedTerminalHeight.set(height)
+  }
+
+  function beginTerminalResize(event) {
+    if (event.button !== 0) return
+    const grip = event.currentTarget
+    const viewportHeight = grip.ownerDocument.documentElement.clientHeight
+    if (!viewportHeight) return
+    event.preventDefault()
+    grip.focus({ preventScroll: true })
+    grip.setPointerCapture(event.pointerId)
+    terminalDrag = { pointerId: event.pointerId, y: event.clientY, height: terminalHeight(), viewportHeight }
+  }
+
+  function moveTerminalResize(event) {
+    if (terminalDrag?.pointerId !== event.pointerId) return
+    const delta = (terminalDrag.y - event.clientY) * 100 / terminalDrag.viewportHeight
+    terminalHeight.set(boundedTerminalHeight(terminalDrag.height + delta))
+  }
+
+  function endTerminalResize(event) {
+    if (terminalDrag?.pointerId !== event.pointerId) return
+    storedTerminalHeight.set(terminalHeight())
+    terminalDrag = null
+  }
+
+  function cancelTerminalResize(event) {
+    if (terminalDrag?.pointerId !== event.pointerId) return
+    terminalHeight.set(terminalDrag.height)
+    terminalDrag = null
+  }
 
   function restoreTerminalFocus() {
     const trigger = terminalTrigger?.getClientRects().length ? terminalTrigger : termHeaderToggle.current
@@ -3459,72 +3428,66 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     terminalTrigger = null
   }
 
-  function showTerminalProcess() {
-    if (!termOpen() || !sessionOnline()) return
-    if (termId === null && !terminalBusy() && !terminalError()) {
-      const dock = terminalTabs()
-      const stored = activeTerminalTab() ?? { key: crypto.randomUUID(), number: (dock.tabs.at(-1)?.number ?? 0) + 1, started: false }
-      if (!activeTerminalTab() || !terminalDock()) {
-        const tabs = activeTerminalTab() ? dock.tabs : [...dock.tabs, stored]
-        saveTerminalTabs(tabs, stored.key)
-      }
-      const { cols, rows } = measureTerm()
-      const opening = sendFrame({
-        t: 'term-open', workspaceId: Number(activeWorkspaceId), sessionId, resumeKey: stored.key, cols, rows,
-        ...(stored.started ? { resumeOnly: true } : {}),
-      })
-      terminalBusy.set(opening)
-      if (!opening) terminalError.set('The terminal could not connect to this host.')
-    }
-    else resizeTerminal()
-    watchTermSize()
-  }
-
-  function saveTerminalTabs(tabs, activeKey) {
-    terminalDock.set({ tabs, activeKey })
-    if (legacyTerminalSession()?.key) legacyTerminalSession.set(null)
-  }
-
-  function clearTerminalView() {
-    termId = null
-    term = null
-    termFollowing = true
-    termPendingInput = ''
-    terminalLabel.set('Terminal')
-    terminalReconnecting.set(false)
-    if (termScreenRef.current) termScreenRef.current.textContent = ''
-    terminalExited.set(false)
-    terminalError.set('')
-    terminalActivity.set('')
-  }
-
   function focusActiveTerminalTab() {
     const active = terminalTabStrip.current?.querySelector('[aria-selected="true"]')
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-    termHostRef.current?.focus({ preventScroll: true })
+    terminalController()?.focus(terminalTabs().activeKey)
   }
 
-  function showSelectedTerminal(tabs, key) {
-    clearTerminalView()
-    saveTerminalTabs(tabs, key)
+  function showTerminalProcess() {
+    if (!termOpen() || !sessionOnline()) return
+    const dock = terminalTabs()
+    if (!activeTerminalTab()) {
+      const tab = { key: crypto.randomUUID(), number: 1, started: false }
+      saveTerminalTabs([tab], tab.key)
+      requestAnimationFrame(showTerminalProcess)
+      void nextTick(focusActiveTerminalTab)
+      return
+    }
+    if (!terminalDock()) saveTerminalTabs(dock.tabs, dock.activeKey)
+    terminalController()?.show(visibleTerminalTabs())
+  }
+
+  function saveTerminalTabs(tabs, activeKey, directions = terminalTabs().directions || {}) {
+    terminalDock.set({ tabs, activeKey, directions })
+    if (legacyTerminalSession()?.key) legacyTerminalSession.set(null)
+  }
+
+  function showSelectedTerminal(tabs, key, directions) {
+    saveTerminalTabs(tabs, key, directions)
     void nextTick(focusActiveTerminalTab)
     requestAnimationFrame(showTerminalProcess)
   }
 
-  function detachTerminalView() {
-    return termId === null || sendFrame({ t: 'term-detach', termId })
-  }
-
-  function addTerminalTab() {
-    if (!sessionOnline() || terminalBusy() || !detachTerminalView()) return
-    const { tabs } = terminalTabs()
+  function addTerminalTab(direction) {
+    if (!sessionOnline() || terminalBusy() || (direction && !canSplitTerminal())) return
+    const { tabs, directions } = terminalTabs()
     const tab = { key: crypto.randomUUID(), number: (tabs.at(-1)?.number ?? 0) + 1, started: false }
-    showSelectedTerminal([...tabs, tab], tab.key)
+    if (direction) {
+      const group = activeTerminalGroup()
+      showSelectedTerminal([...tabs, { ...tab, group }], tab.key, { ...directions, [group]: direction })
+    }
+    else showSelectedTerminal([...tabs, tab], tab.key)
   }
 
-  function selectTerminalTab(key) {
-    if (!sessionOnline() || terminalBusy() || key === terminalTabs().activeKey || !detachTerminalView()) return
-    showSelectedTerminal(terminalTabs().tabs, key)
+  function selectTerminalGroup(key) {
+    if (key === activeTerminalGroup()) {
+      void nextTick(focusActiveTerminalTab)
+      return
+    }
+    const { tabs } = terminalTabs()
+    const tab = tabs.find(item => (item.group || item.key) === key)
+    if (tab) showSelectedTerminal(tabs, tab.key)
+  }
+
+  function selectTerminalPane(key) {
+    if (key !== terminalTabs().activeKey && visibleTerminalTabs().some(tab => tab.key === key))
+      saveTerminalTabs(terminalTabs().tabs, key)
+  }
+
+  function focusTerminalPane(key) {
+    selectTerminalPane(key)
+    void nextTick(focusActiveTerminalTab)
   }
 
   function terminalTabKeydown(event) {
@@ -3541,46 +3504,53 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     target.focus()
   }
 
-  function finishTerminalClose(action) {
-    const tab = activeTerminalTab()
+  function finishTerminalClose(key, action) {
+    const { tabs, activeKey, directions } = terminalTabs()
+    const tab = tabs.find(item => item.key === key)
     if (!tab) return
-    const { tabs } = terminalTabs()
-    const index = tabs.indexOf(tab)
+    const group = tab.group || tab.key
     if (action === 'restart') {
-      const replacement = { ...tab, key: crypto.randomUUID(), started: false }
-      showSelectedTerminal(tabs.map(item => item.key === tab.key ? replacement : item), replacement.key)
+      const replacement = { ...tab, key: crypto.randomUUID(), group, started: false }
+      const updated = tabs.map(item => item.key === key ? replacement : item)
+      if (activeKey === key) showSelectedTerminal(updated, replacement.key)
+      else {
+        saveTerminalTabs(updated, activeKey)
+        requestAnimationFrame(showTerminalProcess)
+      }
       return
     }
-    const remaining = tabs.filter(item => item.key !== tab.key)
-    const next = remaining[index] ?? remaining.at(-1)
-    if (next) showSelectedTerminal(remaining, next.key)
-    else {
-      clearTerminalView()
-      saveTerminalTabs([], '')
-      termOpen.set(false)
-      restoreTerminalFocus()
+    const remaining = tabs.filter(item => item.key !== key)
+    const groupTabs = tabs.filter(item => (item.group || item.key) === group)
+    const groupIndex = groupTabs.indexOf(tab)
+    const next = remaining.find(item => item.key === activeKey) ?? groupTabs[groupIndex + 1] ?? groupTabs[groupIndex - 1]
+      ?? remaining[tabs.indexOf(tab)] ?? remaining.at(-1)
+    const nextDirections = { ...directions }
+    if (!remaining.some(item => (item.group || item.key) === group)) delete nextDirections[group]
+    if (next?.key === activeKey) {
+      saveTerminalTabs(remaining, activeKey, nextDirections)
+      requestAnimationFrame(showTerminalProcess)
     }
-  }
-
-  function requestTerminalClose(action) {
-    if (termId === null) finishTerminalClose(action)
-    else if (sendFrame({ t: 'term-close', termId })) {
-      terminalCloseAction = action
-      terminalBusy.set(true)
+    else if (next) showSelectedTerminal(remaining, next.key, nextDirections)
+    else {
+      saveTerminalTabs([], '', {})
+      if (termOpen()) {
+        termOpen.set(false)
+        restoreTerminalFocus()
+      }
     }
   }
 
   function restartTerminal() {
-    if (!sessionOnline() || terminalBusy()) return
-    if (!termOpen()) termOpen.set(true)
-    requestTerminalClose('restart')
+    const tab = activeTerminalTab()
+    if (!tab || !sessionOnline() || terminalBusy()) return
+    terminalController()?.close(tab.key, 'restart')
   }
 
   async function endTerminal() {
     const tab = activeTerminalTab()
     if (!tab || !sessionOnline() || terminalBusy()) return
-    if (termId !== null && !terminalExited() && !await stxConfirm(`End Terminal ${tab.number}? Its shell will stop and its scrollback will be cleared.`, { confirmText: 'End terminal', cancelText: 'Keep terminal' })) return
-    if (tab.key === activeTerminalTab()?.key && sessionOnline() && !terminalBusy()) requestTerminalClose('end')
+    if (terminalController()?.canEnd(tab.key) && !await stxConfirm(`End Terminal ${tab.number}? Its shell will stop and its scrollback will be cleared.`, { confirmText: 'End terminal', cancelText: 'Keep terminal' })) return
+    if (tab.key === activeTerminalTab()?.key && sessionOnline() && !terminalBusy()) terminalController()?.close(tab.key, 'end')
   }
 
   function toggleTerminal(event) {
@@ -3590,7 +3560,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       diffOpen.set(false)
       diffTrigger = null
       if (termOpen()) {
-        void nextTick(() => termHostRef.current?.focus())
+        void nextTick(focusActiveTerminalTab)
         return
       }
     }
@@ -3600,13 +3570,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       return
     }
     terminalTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current
-      : event?.currentTarget ?? termHostRef.current?.ownerDocument.activeElement
+      : event?.currentTarget ?? termSurface.current?.ownerDocument.activeElement
     closeWorkspaceActions()
     termOpen.set(true)
-    terminalError.set('')
     // Focused now, not in the frame callback: keys typed right after the
     // click must land in the host (they buffer until the PTY binds).
-    void nextTick(() => termHostRef.current?.focus())
+    void nextTick(focusActiveTerminalTab)
     // Measured after the binding has shown the panel — a display:none box
     // measures zero — and the PTY opens at the size actually on screen.
     requestAnimationFrame(showTerminalProcess)
@@ -3682,44 +3651,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     toggleTerminal()
   }, { target: window })
 
-  function termKeydown(event) {
-    const host = termHostRef.current
-    if (host && term && !term.onAltScreen && event.shiftKey) {
-      const edge = (event.ctrlKey || event.metaKey) && (event.key === 'Home' || event.key === 'End')
-      const page = event.key === 'PageUp' || event.key === 'PageDown'
-      if (edge || page) {
-        event.preventDefault()
-        if (edge) host.scrollTop = event.key === 'Home' ? 0 : host.scrollHeight
-        else host.scrollTop += (event.key === 'PageUp' ? -1 : 1) * host.clientHeight
-        return
-      }
-    }
-    if (event.metaKey) return
-    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') return
-    if (terminalExited() || terminalError()) return
-    // The toggle chord belongs to the window handler, not the shell — asked
-    // of the registry, so rebinding it moves both halves at once.
-    if (matchedCommand(event) === 'terminal.toggle') return
-    let data = null
-    if (event.ctrlKey && event.key.length === 1) {
-      const code = event.key.toLowerCase().charCodeAt(0)
-      if (code >= 97 && code <= 122) data = String.fromCharCode(code - 96)
-    }
-    else if (TERM_KEYS[event.key]) {
-      data = TERM_KEYS[event.key]
-    }
-    else if (event.key.length === 1) {
-      data = event.key
-    }
-    if (data === null) return
-    event.preventDefault()
-    termSend(data)
-  }
-
-  function termPaste(event) {
-    event.preventDefault()
-    const text = event.clipboardData?.getData('text/plain')
-    if (text && termId !== null && term && !terminalExited()) termSend(term.formatPaste(text))
+  function termKeydown(tab, event) {
+    if (matchedCommand(event) !== 'terminal.toggle') terminalController()?.keydown(tab, event)
   }
 
   // The page speaks CBOR to the socket, so it needs the same codec the server
@@ -3729,7 +3662,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
     changesWatcher.set(watchWorkspaceChanges)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
@@ -3772,7 +3705,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     else paintTranscript(updateTranscriptMarkdown)
 
     let cursor = Number(sinceSeq) || 0
-    termToHtml = toHtml
     followUpActions.set(createFollowUpActions({
       sessionId, online: sessionOnline, inputBlocked: () => Boolean(inputRequest()),
       editor: () => promptRef.current, setText: text => composerText.set(text),
@@ -3782,76 +3714,28 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       transcript: () => transcriptRef.current, steeringMessage: () => steeringMessage.current,
     }))
 
-    const terminalHistory = { scrollback: 5000, scrollbackBytes: 8 * 1024 * 1024 }
-    function finishTerminal(code) {
-      term.write(`\r\n[exited${code === null ? '' : ` (${code})`}]`)
-      terminalExited.set(true)
-      terminalActivity.set('')
-      renderTerm()
-    }
+    const terminal = createTerminalDock({
+      workspaceId: Number(activeWorkspaceId), sessionId,
+      surface: () => termSurface.current, visible: termOpen, online: sessionOnline,
+      send: frame => sendFrame(frame),
+      started(key) {
+        const dock = terminalTabs()
+        if (dock.tabs.some(tab => tab.key === key && !tab.started))
+          saveTerminalTabs(dock.tabs.map(tab => tab.key === key ? { ...tab, started: true } : tab), dock.activeKey)
+      },
+      closed: finishTerminalClose,
+      updateStatus(key, status) {
+        terminalStates.update((previous) => {
+          if (status) return { ...previous, [key]: status }
+          const { [key]: removed, ...remaining } = previous
+          return remaining
+        })
+      },
+    })
+    terminalController.set(terminal)
 
     function onMessage(frame) {
-      if (frame?.t === 'term-opened') {
-        terminalBusy.set(false)
-        terminalReconnecting.set(false)
-        terminalError.set('')
-        terminalExited.set(false)
-        terminalActivity.set('')
-        terminalLabel.set(frame.shell === 'den' ? 'Den terminal' : 'Terminal')
-        termId = frame.termId
-        const dock = terminalTabs()
-        saveTerminalTabs(dock.tabs.map(tab => tab.key === dock.activeKey ? { ...tab, started: true } : tab), dock.activeKey)
-        term = frame.checkpoint ? Terminal.fromCheckpoint(frame.checkpoint, terminalHistory)
-          : new Terminal({ cols: frame.cols, rows: frame.rows, ...terminalHistory })
-        if (frame.exit) {
-          termPendingInput = ''
-          finishTerminal(frame.exit.code)
-          return
-        }
-        updateTerminalActivity()
-        resizeTerminal()
-        if (termPendingInput) {
-          sendFrame({ t: 'term-input', termId, data: termPendingInput })
-          termPendingInput = ''
-        }
-        renderTerm()
-        return
-      }
-      if (frame?.t === 'term-data') {
-        if (frame.termId === termId && term) {
-          term.write(frame.data)
-          updateTerminalActivity()
-          renderTerm()
-        }
-        return
-      }
-      if (frame?.t === 'term-exit') {
-        if (frame.termId === termId && term) finishTerminal(frame.code)
-        return
-      }
-      if (frame?.t === 'term-sized') {
-        if (frame.termId === termId && term) {
-          term.resize(frame.cols, frame.rows)
-          renderTerm()
-        }
-        return
-      }
-      if (frame?.t === 'term-closed') {
-        if (frame.termId === termId) {
-          const action = terminalCloseAction
-          terminalCloseAction = ''
-          terminalBusy.set(false)
-          finishTerminalClose(action)
-        }
-        return
-      }
-      if (frame?.t === 'term-error') {
-        terminalBusy.set(false)
-        termPendingInput = ''
-        terminalReconnecting.set(false)
-        terminalError.set(frame.message)
-        return
-      }
+      if (frame && terminal.receive(frame)) return
       if (frame?.t !== 'event') return
       if (frame.event.sessionId === 0 && frame.event.payload.type === 'profile.claude-compaction.updated') {
         const { profileId, providerInstanceId, changes } = frame.event.payload
@@ -4075,19 +3959,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           void followUpActions()?.flush()
           if (termOpen()) requestAnimationFrame(showTerminalProcess)
         }
-        else if (terminalBusy() || termId !== null || termPendingInput) {
-          terminalBusy.set(false)
-          terminalCloseAction = ''
-          termId = null
-          termPendingInput = ''
-          terminalReconnecting.set(termOpen())
-        }
+        else terminal.onOffline()
       },
     })
     sendFrame = connection.send
     reconnectLiveSession = connection.open
     disconnectLiveSession = () => {
       followUpActions()?.dispose()
+      terminal.dispose()
       connection.dispose()
     }
     connection.open()

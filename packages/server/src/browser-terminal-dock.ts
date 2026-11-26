@@ -1,0 +1,310 @@
+import { Terminal, toHtml } from '@harness/ansi'
+
+export interface TerminalTab {
+  key: string
+  started: boolean
+}
+
+type CloseAction = 'end' | 'restart'
+
+interface PaneStatus {
+  activity: string
+  busy: boolean
+  error: string
+  exited: boolean
+  reconnecting: boolean
+  shell: string
+}
+
+interface Pane {
+  tab: TerminalTab
+  id: number | null
+  model: Terminal | null
+  status: PaneStatus
+  pendingInput: string
+  closing?: CloseAction
+  following: boolean
+  renderQueued: boolean
+}
+
+type TerminalFrame =
+  | { t: 'term-opened', termId: number, shell: string, cols: number, rows: number, checkpoint?: Parameters<typeof Terminal.fromCheckpoint>[0], exit?: { code: number | null } }
+  | { t: 'term-data', termId: number, data: string }
+  | { t: 'term-sized', termId: number, cols: number, rows: number }
+  | { t: 'term-exit', termId: number, code: number | null }
+  | { t: 'term-closed', termId: number }
+  | { t: 'term-error', message: string }
+
+interface TerminalDockOptions {
+  workspaceId: number
+  sessionId: number
+  surface: () => HTMLElement | undefined
+  visible: () => boolean
+  online: () => boolean
+  send: (frame: Record<string, unknown>) => boolean
+  started: (key: string) => void
+  closed: (key: string, action: CloseAction) => void
+  updateStatus: (key: string, status: PaneStatus | null) => void
+}
+
+const terminalHistory = { scrollback: 5000, scrollbackBytes: 8 * 1024 * 1024 }
+const keys: Record<string, string> = {
+  Enter: '\r', Backspace: '\x7F', Tab: '\t', Escape: '\x1B',
+  ArrowUp: '\x1B[A', ArrowDown: '\x1B[B', ArrowRight: '\x1B[C', ArrowLeft: '\x1B[D',
+  Home: '\x1B[H', End: '\x1B[F', PageUp: '\x1B[5~', PageDown: '\x1B[6~',
+}
+
+export function createTerminalDock(options: TerminalDockOptions) {
+  const panes = new Map<string, Pane>()
+  const detachedClosingPanes = new Map<number, Pane>()
+  // Old hosts reply to term-open without a correlation key. Submit one open
+  // at a time. Once attached, every pane streams independently by PTY id.
+  let opening: Pane | undefined
+  let disposed = false
+  const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
+    for (const pane of panes.values()) resize(pane)
+  })
+
+  function paneFor(tab: TerminalTab): Pane {
+    const current = panes.get(tab.key)
+    if (current) return current
+    const pane: Pane = {
+      tab, id: null, model: null, pendingInput: '', following: true, renderQueued: false,
+      status: { busy: false, activity: '', error: '', exited: false, reconnecting: false, shell: 'Terminal' },
+    }
+    panes.set(tab.key, pane)
+    return pane
+  }
+
+  function host(key: string): HTMLElement | undefined {
+    return Array.from(options.surface()?.querySelectorAll<HTMLElement>('[data-terminal-host]') ?? [])
+      .find(element => element.dataset.terminalHost === key)
+  }
+
+  function status(pane: Pane, changes: Partial<PaneStatus>): void {
+    if (Object.entries(changes).every(([key, value]) => pane.status[key as keyof PaneStatus] === value)) return
+    pane.status = { ...pane.status, ...changes }
+    if (panes.get(pane.tab.key) === pane) options.updateStatus(pane.tab.key, pane.status)
+  }
+
+  function paint(pane: Pane): void {
+    if (pane.renderQueued || !pane.model) return
+    pane.renderQueued = true
+    requestAnimationFrame(() => {
+      pane.renderQueued = false
+      if (panes.get(pane.tab.key) !== pane || !pane.model) return
+      const viewport = host(pane.tab.key)
+      const screen = viewport?.querySelector('[data-terminal-screen]')
+      if (!viewport || !screen) return
+      screen.innerHTML = toHtml(pane.model.snapshot())
+      if (pane.following || pane.model.onAltScreen) viewport.scrollTop = viewport.scrollHeight
+    })
+  }
+
+  function dimensions(pane: Pane): { cols: number, rows: number } | undefined {
+    const viewport = host(pane.tab.key)
+    const cell = viewport?.querySelector('[data-term-metric]')?.getBoundingClientRect()
+    const box = viewport?.getBoundingClientRect()
+    if (!cell?.width || !cell.height || !box?.width || !box.height) return
+    return {
+      cols: Math.min(500, Math.max(20, Math.floor((box.width - 20) / (cell.width / 10)))),
+      rows: Math.min(200, Math.max(5, Math.floor((box.height - 16) / cell.height))),
+    }
+  }
+
+  function resize(pane: Pane): void {
+    if (pane.id === null || !pane.model || pane.status.exited || !options.visible()) return
+    const size = dimensions(pane)
+    if (size && (size.cols !== pane.model.cols || size.rows !== pane.model.rows))
+      options.send({ t: 'term-resize', termId: pane.id, ...size })
+  }
+
+  function openNext(): void {
+    if (disposed || opening || !options.online() || !options.visible()) return
+    for (const pane of panes.values()) {
+      if (pane.id !== null || pane.status.error || [...detachedClosingPanes.values()].some(closing => closing.tab.key === pane.tab.key)) continue
+      const size = dimensions(pane) ?? { cols: 100, rows: 24 }
+      if (options.send({ t: 'term-open', workspaceId: options.workspaceId, sessionId: options.sessionId,
+        resumeKey: pane.tab.key, ...size, ...(pane.tab.started ? { resumeOnly: true } : {}) })) {
+        opening = pane
+        status(pane, { busy: true })
+        return
+      }
+      status(pane, { reconnecting: false, error: 'The terminal could not connect to this host.' })
+    }
+  }
+
+  function show(tabs: TerminalTab[]): void {
+    const visible = new Set(tabs.map(tab => tab.key))
+    observer?.disconnect()
+    for (const [key, pane] of panes) {
+      if (visible.has(key)) continue
+      if (pane.id !== null) {
+        if (pane.closing) detachedClosingPanes.set(pane.id, pane)
+        else options.send({ t: 'term-detach', termId: pane.id })
+      }
+      panes.delete(key)
+      options.updateStatus(key, null)
+    }
+    for (const tab of tabs) {
+      const pane = paneFor(tab)
+      pane.tab = tab
+      const viewport = host(tab.key)
+      if (viewport) observer?.observe(viewport)
+      resize(pane)
+      paint(pane)
+    }
+    openNext()
+  }
+
+  function sendInput(pane: Pane, data: string): void {
+    if (!data || !options.online() || pane.status.reconnecting || pane.status.exited || pane.status.error || pane.closing) return
+    if (pane.id === null) pane.pendingInput += data
+    else options.send({ t: 'term-input', termId: pane.id, data })
+  }
+
+  function exit(pane: Pane, code: number | null): void {
+    pane.model?.write(`\r\n[exited${code === null ? '' : ` (${code})`}]`)
+    pane.pendingInput = ''
+    status(pane, { exited: true, activity: '' })
+    paint(pane)
+  }
+
+  function activity(pane: Pane): void {
+    const shell = pane.model?.shellActivity
+    if (shell?.phase === 'running') status(pane, { activity: 'Running' })
+    else if (shell?.phase === 'ready') status(pane, { activity: shell.lastExitStatus ? `Exit ${shell.lastExitStatus}` : 'Ready' })
+  }
+
+  function receive(frame: TerminalFrame): boolean {
+    if (frame.t === 'term-opened' || frame.t === 'term-error') {
+      const pane = opening
+      opening = undefined
+      if (!pane) return true
+      if (frame.t === 'term-opened') {
+        options.started(pane.tab.key)
+        const current = panes.get(pane.tab.key)
+        if (current) current.tab = { ...current.tab, started: true }
+      }
+      if (panes.get(pane.tab.key) !== pane) {
+        if (frame.t === 'term-opened') options.send({ t: 'term-detach', termId: frame.termId })
+      }
+      else if (frame.t === 'term-error') {
+        pane.pendingInput = ''
+        status(pane, { busy: false, reconnecting: false, error: frame.message })
+      }
+      else {
+        pane.id = frame.termId
+        pane.model = frame.checkpoint ? Terminal.fromCheckpoint(frame.checkpoint, terminalHistory)
+          : new Terminal({ cols: frame.cols, rows: frame.rows, ...terminalHistory })
+        status(pane, { busy: false, reconnecting: false, exited: false, activity: '', shell: frame.shell === 'den' ? 'Den terminal' : 'Terminal' })
+        if (frame.exit) exit(pane, frame.exit.code)
+        else {
+          activity(pane)
+          resize(pane)
+          sendInput(pane, pane.pendingInput)
+          pane.pendingInput = ''
+          paint(pane)
+        }
+      }
+      openNext()
+      return true
+    }
+    if (frame.t !== 'term-data' && frame.t !== 'term-sized' && frame.t !== 'term-exit' && frame.t !== 'term-closed') return false
+    const pane = [...panes.values()].find(pane => pane.id === frame.termId)
+      ?? (frame.t === 'term-closed' ? detachedClosingPanes.get(frame.termId) : undefined)
+    if (!pane) return true
+    if (frame.t === 'term-closed') {
+      detachedClosingPanes.delete(frame.termId)
+      panes.delete(pane.tab.key)
+      options.updateStatus(pane.tab.key, null)
+      options.closed(pane.tab.key, pane.closing ?? 'end')
+    }
+    else if (frame.t === 'term-exit') exit(pane, frame.code)
+    else {
+      if (frame.t === 'term-sized') pane.model?.resize(frame.cols, frame.rows)
+      else {
+        pane.model?.write(frame.data)
+        activity(pane)
+      }
+      paint(pane)
+    }
+    return true
+  }
+
+  function onOffline(): void {
+    const pending = opening
+    opening = undefined
+    detachedClosingPanes.clear()
+    for (const pane of panes.values()) {
+      const reattaching = pane === pending || pane.id !== null
+      pane.id = null
+      pane.closing = undefined
+      pane.pendingInput = ''
+      status(pane, { busy: false, reconnecting: reattaching })
+    }
+  }
+
+  function close(key: string, action: CloseAction): void {
+    const pane = panes.get(key)
+    if (!pane || pane.id === null) {
+      panes.delete(key)
+      options.updateStatus(key, null)
+      options.closed(key, action)
+    }
+    else if (options.send({ t: 'term-close', termId: pane.id })) {
+      pane.closing = action
+      status(pane, { busy: true })
+    }
+  }
+
+  function keydown(tab: TerminalTab, event: KeyboardEvent): void {
+    const viewport = event.currentTarget as HTMLElement
+    const pane = paneFor(tab)
+    if (pane.model && !pane.model.onAltScreen && event.shiftKey) {
+      const edge = (event.ctrlKey || event.metaKey) && (event.key === 'Home' || event.key === 'End')
+      const page = event.key === 'PageUp' || event.key === 'PageDown'
+      if (edge || page) {
+        event.preventDefault()
+        if (edge) viewport.scrollTop = event.key === 'Home' ? 0 : viewport.scrollHeight
+        else viewport.scrollTop += (event.key === 'PageUp' ? -1 : 1) * viewport.clientHeight
+        return
+      }
+    }
+    if (event.metaKey || (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v')) return
+    if (pane.status.exited || pane.status.error || event.isComposing || event.keyCode === 229) return
+    let data = keys[event.key]
+    if (event.ctrlKey && event.key.length === 1) {
+      const code = event.key.toLowerCase().charCodeAt(0)
+      data = code >= 97 && code <= 122 ? String.fromCharCode(code - 96) : ''
+    }
+    else if (event.key.length === 1) data = event.key
+    if (!data) return
+    event.preventDefault()
+    sendInput(pane, data)
+  }
+
+  return {
+    show, receive, onOffline, close, keydown,
+    canEnd: (key: string) => panes.get(key)?.id != null && !panes.get(key)?.status.exited,
+    focus: (key: string) => host(key)?.focus({ preventScroll: true }),
+    input: (tab: TerminalTab, data: string) => sendInput(paneFor(tab), data),
+    paste(key: string, event: ClipboardEvent) {
+      event.preventDefault()
+      const pane = panes.get(key)
+      const text = event.clipboardData?.getData('text/plain')
+      if (text && pane?.model) sendInput(pane, pane.model.formatPaste(text))
+    },
+    track(key: string, event: Event) {
+      const pane = panes.get(key)
+      const { scrollHeight, clientHeight, scrollTop } = event.currentTarget as HTMLElement
+      if (pane) pane.following = scrollHeight - clientHeight - scrollTop < 25
+    },
+    dispose() {
+      disposed = true
+      observer?.disconnect()
+      panes.clear()
+      detachedClosingPanes.clear()
+    },
+  }
+}

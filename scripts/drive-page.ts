@@ -730,6 +730,105 @@ await waitForTerminalLine('away-42')
 check('ending one terminal selects the remaining live tab', await secondTerminalTab.count() === 0
   && await firstTerminalTab.getAttribute('aria-selected') === 'true')
 
+const splitOutput = page.locator('[data-terminal-output]')
+const terminalGroupPicker = page.getByRole('group', { name: 'Terminals in split' })
+const splitColumns = page.getByRole('button', { name: 'Split terminal side by side' })
+const splitRows = page.getByRole('button', { name: 'Split terminal top and bottom' })
+const paneHost = (number: number) => page.getByLabel(`Terminal ${number} input and output`, { exact: true })
+const typeInPane = async (number: number, command: string) => {
+  await paneHost(number).focus()
+  await page.keyboard.type(command)
+  await page.keyboard.press('Enter')
+}
+const waitForPaneLine = (number: number, line: string) => page.waitForFunction(({ label, line }) =>
+  Array.from(document.querySelectorAll('[data-terminal-host]')).some(host =>
+    host.getAttribute('aria-label') === label && host.querySelector('[data-terminal-screen]')?.textContent?.includes(line)),
+{ label: `Terminal ${number} input and output`, line })
+
+await page.setViewportSize({ width: 1280, height: 800 })
+await splitColumns.click()
+await waitForPaneLine(2, 'Harness test terminal')
+await typeInPane(2, 'n=73; echo "split-$n"')
+await waitForPaneLine(2, 'split-73')
+await typeInPane(1, 'echo "left-$n"')
+await waitForPaneLine(1, 'left-42')
+const leftPane = await paneHost(1).boundingBox()
+const rightPane = await paneHost(2).boundingBox()
+check('side-by-side split panes have independent live shells and input', Boolean(leftPane && rightPane && leftPane.x + leftPane.width <= rightPane.x + 1)
+  && !(await paneHost(2).textContent())?.includes('left-42') && !(await paneHost(1).textContent())?.includes('split-73'))
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`terminal-split-side-by-side-${width}`)
+  }
+  await page.setViewportSize({ width: 1280, height: 800 })
+}
+
+await page.reload()
+await waitForPaneLine(1, 'left-42')
+await waitForPaneLine(2, 'split-73')
+check('reload restores both split PTYs and the active pane', await splitOutput.getAttribute('data-direction') === 'columns'
+  && await terminalGroupPicker.getByRole('button', { name: 'Terminal 1' }).getAttribute('aria-pressed') === 'true')
+
+await page.setViewportSize({ width: 360, height: 800 })
+await terminalGroupPicker.getByRole('button', { name: 'Terminal 2' }).click()
+await paneHost(2).waitFor({ state: 'visible' })
+check('phone shows one full-width pane and keeps the other usable', !await paneHost(1).isVisible()
+  && await paneHost(2).evaluate(host => host.clientWidth >= 320 && document.documentElement.scrollWidth <= innerWidth))
+await typeInPane(2, 'echo "phone-$n"')
+await waitForPaneLine(2, 'phone-73')
+await capture('terminal-split-phone-360')
+
+await page.setViewportSize({ width: 1280, height: 800 })
+await splitRows.click()
+await waitForPaneLine(3, 'Harness test terminal')
+const topPane = await paneHost(1).boundingBox()
+const bottomPane = await paneHost(3).boundingBox()
+check('top-and-bottom split keeps the existing panes and changes the group direction', await splitOutput.getAttribute('data-direction') === 'rows'
+  && Boolean(topPane && bottomPane && topPane.y + topPane.height <= bottomPane.y + 1))
+const terminalGrip = page.getByRole('separator', { name: 'Resize terminal dock' })
+const terminalHeightBefore = (await phoneTerminal.boundingBox())?.height ?? 0
+const grip = await terminalGrip.boundingBox()
+if (!grip) throw new Error('Terminal resize handle was not visible')
+await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+await page.mouse.down()
+await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 - 136, { steps: 5 })
+await page.mouse.up()
+await terminalGrip.press('ArrowUp')
+check('the terminal dock resizes by pointer and keyboard', (await terminalGrip.getAttribute('aria-valuenow')) === '51'
+  && ((await phoneTerminal.boundingBox())?.height ?? 0) > terminalHeightBefore + 140)
+await terminalGrip.press('End')
+const enlargedHeight = await terminalGrip.getAttribute('aria-valuenow')
+await page.waitForFunction(height => {
+  const terminal = document.querySelector('[data-terminal]')
+  return Boolean(terminal && terminal.getBoundingClientRect().height > height + 200)
+}, terminalHeightBefore)
+await typeInPane(3, 'set -- $(stty size); echo "tty-rows-$1"')
+const paneRows = await page.waitForFunction(() => {
+  const pane = document.querySelector('[aria-label="Terminal 3 input and output"] [data-terminal-screen]')
+  return Number(pane?.textContent?.match(/tty-rows-(\d+)/)?.[1]) || false
+})
+check('enlarging the dock resizes the PTY inside its split pane', Number(await paneRows.jsonValue()) > 5)
+await page.reload()
+await waitForPaneLine(3, 'tty-rows-')
+check('resized dock height and stacked orientation survive reload', await terminalGrip.getAttribute('aria-valuenow') === enlargedHeight
+  && await splitOutput.getAttribute('data-direction') === 'rows')
+await capture('terminal-split-stacked-1280')
+await splitRows.click()
+await waitForPaneLine(4, 'Harness test terminal')
+check('the fifth pane is refused without disabling standalone tabs', await splitRows.isDisabled() && await splitColumns.isDisabled()
+  && await page.getByRole('button', { name: 'New terminal', exact: true }).isEnabled())
+
+for (const number of [4, 3, 2]) {
+  await paneHost(number).focus()
+  await endTerminal.click()
+  await terminalCloseDialog.getByRole('button', { name: 'End terminal', exact: true }).click()
+  await paneHost(number).waitFor({ state: 'detached' })
+}
+await waitForPaneLine(1, 'left-42')
+check('closing split panes leaves the first PTY and its scrollback running', await firstTerminalTab.getAttribute('aria-selected') === 'true'
+  && !await terminalGroupPicker.isVisible())
+
 await page.keyboard.type('exit')
 await page.keyboard.press('Enter')
 const restartTerminal = page.getByRole('button', { name: 'Restart terminal' })
