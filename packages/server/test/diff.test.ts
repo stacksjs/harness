@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { parseWorkspacePatch, workspaceDiffRows } from '../src/browser-diff'
 import { MAX_PATCH_BYTES, parseNumstat, parseStatus, workspaceDiff } from '../src/diff'
 
 /**
@@ -69,6 +70,7 @@ describe('reading a real workspace', () => {
     run('init', '-q')
     run('config', 'user.email', 'test@example.com')
     run('config', 'user.name', 'Test')
+    run('config', 'core.precomposeunicode', 'false')
     writeFileSync(join(dir, initialPath), 'one\ntwo\nthree\n')
     run('add', '.')
     run('commit', '-qm', 'first')
@@ -121,6 +123,34 @@ describe('reading a real workspace', () => {
       expect((await workspaceDiff(dir)).files).toEqual([
         { path, status: 'modified', insertions: 1, deletions: 1 },
       ])
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform === 'win32')('renders quoted Git paths and aligns replacements without a final newline', async () => {
+    const path = 'café [draft]\nwith\ta tab.txt'
+    const dir = repo(path)
+    try {
+      spawnSync('git', ['config', 'diff.noprefix', 'true'], { cwd: dir })
+      spawnSync('git', ['config', 'color.diff', 'always'], { cwd: dir })
+      spawnSync('git', ['config', 'diff.suppressBlankEmpty', 'true'], { cwd: dir })
+      writeFileSync(join(dir, path), 'first\n\nsecond')
+      spawnSync('git', ['commit', '-qam', 'Remove trailing newline'], { cwd: dir })
+      writeFileSync(join(dir, path), 'first\n\nreplacement\nadded')
+      const { patch, error } = await workspaceDiff(dir)
+      expect(error).toBeUndefined()
+      const hunks = parseWorkspacePatch(patch).get(path)!
+      const stacked = workspaceDiffRows(hunks, false, 200)
+      expect(stacked.rows.map(row => row.cells[0]?.text)).toEqual([undefined, 'first', '', 'second', 'replacement', 'added'])
+      const split = workspaceDiffRows(hunks, true, 200)
+      expect(split.rows[3]?.cells).toMatchObject([
+        { kind: 'deletion', text: 'second', before: 3, newlineNote: expect.any(String) },
+        { kind: 'addition', text: 'replacement', after: 3 },
+      ])
+      expect(split.rows[4]?.cells).toEqual([
+        null, { kind: 'addition', text: 'added', before: null, after: 4, newlineNote: expect.any(String) },
+      ])
+      expect(workspaceDiffRows(hunks, true, 3)).toEqual({ rows: split.rows.slice(0, 3), more: true })
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   })

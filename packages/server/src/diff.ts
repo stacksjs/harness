@@ -222,7 +222,9 @@ export async function workspaceDiff(workspacePath: string, baseline?: string): P
   const [status, numstat, patch] = await Promise.all([
     git(workspacePath, ['status', '--porcelain=v1', '-z']),
     git(workspacePath, ['diff', ...range, '--numstat', '-z']),
-    git(workspacePath, ['diff', ...range]),
+    git(workspacePath, ['-c', 'diff.suppressBlankEmpty=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
+      '--src-prefix=a/', '--dst-prefix=b/', '--output-indicator-old=-',
+      '--output-indicator-new=+', '--output-indicator-context= ', ...range]),
   ])
 
   if (!status.ok)
