@@ -30,6 +30,7 @@ export { updateTranscriptMarkdown } from './packages/server/src/transcript-markd
 export { sendBrowserCommand } from './packages/server/src/browser-command'
 export { createPromptRecall } from './packages/server/src/browser-prompt-recall'
 export { createFileMentionPicker } from './packages/server/src/browser-file-mentions'
+export { createWorkspaceFiles, workspaceFileLocation, copyWorkspaceFileLink, scrollWorkspaceFileLine } from './packages/server/src/browser-workspace-files'
 export { createFollowUpActions } from './packages/server/src/browser-follow-ups'
 export { createSessionSocket } from './packages/server/src/browser-session-socket'
 export { createThreadSidebar } from './packages/server/src/browser-thread-sidebar'

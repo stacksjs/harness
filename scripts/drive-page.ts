@@ -1596,6 +1596,7 @@ const mentionDirectory = join(dir, 'fixture context')
 mkdirSync(mentionDirectory)
 writeFileSync(join(mentionDirectory, 'parity-notes (draft).md'), 'Synthetic workspace context\n')
 writeFileSync(join(mentionDirectory, 'parity-notes-extra.md'), 'Another workspace file\n')
+writeFileSync(join(mentionDirectory, 'report.html'), '<main><h1>Workspace report</h1><p>Read-only document</p></main>')
 const mentionEditor = projectAttachmentDraft.getByRole('textbox', { name: 'Message', exact: true })
 const workspaceFiles = projectAttachmentDraft.getByRole('listbox', { name: 'Workspace files' })
 const mentionOption = workspaceFiles.getByRole('option', { name: /parity-notes \(draft\)\.md/ })
@@ -1842,6 +1843,113 @@ await projectAttachmentDraft.getByText('Referenced fixture read.', { exact: true
 check('the provider receives the relative link and can open the original workspace file',
   harness.engine.current.sessions.get(filePromptThread)?.turns.at(-1)?.prompt === `Read ${referenceLink}`
   && fixtureMentionContents === 'Synthetic workspace context\n')
+const previewFile = 'syntax [draft] #1.txt'
+const previewPath = `fixture context/${previewFile}`
+const previewText = Array.from({ length: 160 }, (_, index) => `Source line ${index + 1}\n`).join('')
+writeFileSync(join(mentionDirectory, previewFile), previewText)
+await projectAttachmentDraft.setViewportSize({ width: 1440, height: 900 })
+const filesPane = projectAttachmentDraft.getByRole('region', { name: 'Files', exact: true })
+const filesToggle = projectAttachmentDraft.getByRole('button', { name: 'Workspace files', exact: true })
+await filesToggle.click()
+await filesPane.getByRole('button', { name: 'fixture context', exact: true }).click()
+await filesPane.getByRole('button', { name: previewFile, exact: true }).click()
+const sourceView = filesPane.getByRole('region', { name: 'File source' })
+await sourceView.waitFor()
+await filesPane.getByRole('spinbutton', { name: 'Line number' }).fill('125')
+await filesPane.getByRole('button', { name: 'Go', exact: true }).click()
+await projectAttachmentDraft.waitForFunction(() => {
+  const source = document.querySelector('[data-workspace-source]')
+  return source?.getAttribute('data-view-line') === '125' && source.scrollTop > 0
+})
+check('the Files pane reveals the requested source line and preserves special characters in the title',
+  await filesPane.getByRole('heading', { name: previewFile, exact: true }).isVisible())
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await projectAttachmentDraft.setViewportSize({ width, height })
+    check(`the file preview and its actions fit at ${width}×${height}`, await filesPane.evaluate((pane) => {
+      const box = pane.getBoundingClientRect()
+      const actions = pane.querySelectorAll('[data-workspace-file-link], [data-workspace-file-download]')
+      return box.width > 0 && box.right <= innerWidth && box.bottom <= innerHeight
+        && [...actions].every(action => action.getBoundingClientRect().right <= box.right)
+        && document.documentElement.scrollWidth <= innerWidth
+    }))
+    await capture(`workspace-file-source-${width}`, projectAttachmentDraft)
+  }
+}
+await projectAttachmentDraft.setViewportSize({ width: 1440, height: 900 })
+await projectAttachmentDraft.evaluate(() => {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (text: string) => { sessionStorage.setItem('workspace-file-test-link', text) } },
+  })
+})
+await filesPane.getByRole('button', { name: 'Copy file link' }).click()
+await filesPane.getByText('Link copied.').waitFor()
+const copiedFileLink = new URL(await projectAttachmentDraft.evaluate(() => sessionStorage.getItem('workspace-file-test-link')) ?? '')
+check('the copied link preserves the workspace path and selected line',
+  copiedFileLink.searchParams.get('file') === previewPath && copiedFileLink.searchParams.get('line') === '125')
+const fileLinkPage = await browserContext.newPage()
+await fileLinkPage.goto(copiedFileLink.href)
+await fileLinkPage.waitForFunction(() => document.querySelector('[data-workspace-source]')?.getAttribute('data-view-line') === '125')
+const [downloaded] = await Promise.all([
+  fileLinkPage.waitForEvent('download'),
+  fileLinkPage.getByRole('link', { name: 'Download file' }).click(),
+])
+check('a fresh page opens the shared line and downloads the original file',
+  downloaded.suggestedFilename() === previewFile && readFileSync((await downloaded.path())!, 'utf8') === previewText)
+await fileLinkPage.close()
+const fileTools = projectAttachmentDraft.getByRole('button', { name: 'Workspace actions' })
+await fileTools.click()
+await filesPane.waitFor({ state: 'hidden' })
+await projectAttachmentDraft.locator('[data-files-toggle]').click()
+await sourceView.waitFor()
+await projectAttachmentDraft.setViewportSize({ width: 390, height: 844 })
+await filesPane.getByRole('button', { name: 'Back to files' }).click()
+const searchFiles = filesPane.getByRole('searchbox', { name: 'Search workspace files' })
+const [workspaceSearch] = await Promise.all([
+  projectAttachmentDraft.waitForResponse(response => new URL(response.url()).pathname === '/workspace-files/search'),
+  searchFiles.fill('report.html'),
+])
+const workspaceSearchResult = await workspaceSearch.json()
+if (!workspaceSearchResult.results?.includes('fixture context/report.html'))
+  throw new Error(`The Files pane search did not find the HTML fixture: ${JSON.stringify(workspaceSearchResult)}`)
+writeFileSync(join(mentionDirectory, 'new-report.html'), '<p>New file</p>')
+await filesPane.getByRole('button', { name: 'Refresh workspace files' }).click()
+await filesPane.locator('[data-file-path="fixture context/new-report.html"]').waitFor()
+check('refresh updates the running search after a new file is written',
+  await filesPane.locator('[data-file-path="fixture context/report.html"]').isVisible())
+await filesPane.locator('[data-file-path="fixture context/report.html"]').click()
+await filesPane.frameLocator('iframe[title="HTML file preview"]').getByText('Workspace report').waitFor()
+await capture('workspace-file-html-phone', projectAttachmentDraft)
+await filesPane.getByRole('button', { name: 'Source', exact: true }).click()
+await sourceView.waitFor()
+check('a phone can return to file search, open rendered HTML, and switch to source',
+  (await sourceView.innerText()).includes('<h1>Workspace report</h1>'))
+await filesPane.getByRole('button', { name: 'Close workspace files' }).press('Escape')
+await filesPane.waitFor({ state: 'hidden' })
+await projectAttachmentDraft.waitForFunction(() => document.activeElement?.hasAttribute('data-workspace-actions-toggle'))
+check('closing on a phone restores focus to Workspace actions',
+  await fileTools.evaluate(element => element === document.activeElement))
+await fileTools.click()
+await projectAttachmentDraft.locator('[data-files-toggle]').click()
+await filesPane.waitFor()
+await filesPane.getByRole('button', { name: 'Close workspace files' }).click()
+const touchFilesContext = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, colorScheme, reducedMotion })
+const touchFilesPage = await touchFilesContext.newPage()
+await touchFilesPage.goto(`${baseUrl}/?workspace=${workspaceId}`)
+await touchFilesPage.getByRole('button', { name: 'Workspace actions' }).tap()
+await touchFilesPage.locator('[data-files-toggle]').tap()
+await touchFilesPage.getByRole('button', { name: 'fixture context', exact: true }).tap()
+await touchFilesPage.getByRole('button', { name: previewFile, exact: true }).tap()
+const touchSource = touchFilesPage.getByRole('region', { name: 'File source' })
+await touchSource.waitFor()
+await capture('workspace-file-touch-portrait', touchFilesPage)
+await touchFilesPage.setViewportSize({ width: 820, height: 390 })
+check('touch can browse files from a project draft and keep the file open after rotation',
+  await touchSource.getByText('Source line 125', { exact: false }).isVisible()
+  && await touchSource.evaluate(source => source.getBoundingClientRect().right <= innerWidth))
+await capture('workspace-file-touch-landscape', touchFilesPage)
+await touchFilesContext.close()
 rmSync(mentionDirectory, { recursive: true })
 await projectAttachmentDraft.close()
 

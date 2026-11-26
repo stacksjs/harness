@@ -1,0 +1,79 @@
+<section id="harness-workspace-files" data-files aria-labelledby="workspace-files-title" hidden :hidden="!workspaceFilesOpen()" :data-file-selected="Boolean(workspaceFileSelected())">
+  <header data-workspace-files-header class="flex gap-2 items-center justify-between px-3 py-1.5">
+    <h2 id="workspace-files-title" class="font-semibold text-[13px]">Files</h2>
+    <div class="flex gap-1 items-center">
+      <button type="button" class="harness-icon-button" aria-label="Refresh workspace files" title="Refresh files" @click="refreshWorkspaceFiles">
+        <span class="size-4 i-hugeicons-refresh" aria-hidden="true"></span>
+      </button>
+      <button type="button" ref="workspaceFileCloseBox" class="harness-icon-button" aria-label="Close workspace files" title="Close files" @click="closeWorkspaceFiles()">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </div>
+  </header>
+  <div data-workspace-files-body>
+    <div data-workspace-files-tree>
+      <input type="search" ref="workspaceFileSearchBox" aria-label="Search workspace files" placeholder="Search files" :value="workspaceFileState()?.query || ''" @input="searchWorkspaceFiles" class="mx-2 my-2 px-2 py-1 min-w-0 text-xs bg-transparent border border-black/15 rounded-md dark:border-white/20">
+      <p role="status" class="px-3 text-xs" hidden :hidden="!workspaceFileState()?.treeBusy">Loading files…</p>
+      <p role="status" class="px-3 text-xs" hidden :hidden="!workspaceFileState()?.treeError" :text="workspaceFileState()?.treeError || ''"></p>
+      <p class="px-3 text-xs opacity-70" hidden :hidden="!workspaceFileState() || workspaceFileState().treeBusy || workspaceFileState().treeError || workspaceFileState().rows.length" :text="workspaceFileState()?.query?.trim() ? 'No matching files' : 'No files in this folder'"></p>
+      <ul aria-label="Workspace entries" data-workspace-file-entries class="list-none">
+        <template :for="row in workspaceFileState()?.rows || []" :key="row.kind + ':' + row.path + ':' + row.depth">
+          <li>
+            <button type="button" data-workspace-file-row :data-entry-kind="row.kind" :data-file-path="row.path" :data-selected="row.kind === 'file' && row.path === workspaceFileSelected()" :aria-current="row.kind === 'file' && row.path === workspaceFileSelected() ? 'true' : null" :aria-expanded="row.kind === 'directory' ? String(row.open) : null" :style="{ '--workspace-file-depth': row.depth }" :title="row.path" @click="selectWorkspaceEntry(row)">
+              <span aria-hidden="true" class="shrink-0 size-4" :class="row.kind === 'directory' ? (row.open ? 'i-hugeicons-arrow-down-01' : 'i-hugeicons-arrow-right-01') : row.kind === 'more' ? 'i-hugeicons-more-horizontal' : 'i-hugeicons-file-02'"></span>
+              <span class="truncate" :text="row.kind === 'more' ? 'Load more' : row.name"></span>
+            </button>
+          </li>
+        </template>
+      </ul>
+    </div>
+    <div data-workspace-file-detail hidden :hidden="!workspaceFileSelected()">
+      <div data-workspace-file-toolbar>
+        <button type="button" data-workspace-file-back @click="backWorkspaceFiles" class="harness-icon-button" aria-label="Back to files" title="Back to files">
+          <span class="size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>
+        </button>
+        <div class="flex-1 min-w-0">
+          <h3 ref="workspaceFileHeadingBox" tabindex="-1" class="font-semibold text-xs truncate" :title="workspaceFileSelected()" :text="workspaceFileSelected().split('/').pop()"></h3>
+          <p class="text-[11px] truncate opacity-70" :hidden="!workspaceFileSelected().includes('/')" :text="workspaceFileSelected()"></p>
+        </div>
+        <button type="button" data-workspace-file-link :disabled="!workspaceFilePreview()" class="harness-icon-button" @click="copySelectedWorkspaceFileLink" aria-label="Copy file link" title="Copy file link">
+          <span class="size-4 i-hugeicons-link-01" aria-hidden="true"></span>
+        </button>
+        <a data-workspace-file-download hidden :hidden="!workspaceFilePreview()" :href="workspaceFilePreview()?.download" download class="harness-icon-button" aria-label="Download file" title="Download file">
+          <span class="size-4 i-hugeicons-download-01" aria-hidden="true"></span>
+        </a>
+      </div>
+      <div data-workspace-file-options hidden :hidden="!workspaceFilePreview()?.lines">
+        <div class="flex gap-1 items-center" hidden :hidden="workspaceFilePreview()?.kind !== 'html' || workspaceFilePreview()?.truncated" aria-label="HTML preview mode" role="group">
+          <button type="button" :aria-pressed="workspaceFileMode() === 'rendered'" @click="workspaceFileMode.set('rendered')">Preview</button>
+          <button type="button" :aria-pressed="workspaceFileMode() === 'source'" @click="workspaceFileMode.set('source')">Source</button>
+        </div>
+        <form class="flex gap-1 items-center" @submit.prevent="showWorkspaceFileLine(Number(workspaceFileJump()))">
+          <input type="number" aria-label="Line number" inputmode="numeric" placeholder="Line" min="1" :max="workspaceFilePreview()?.lines || 1" required :value="workspaceFileJump()" @input="workspaceFileJump.set($event.currentTarget.value)">
+          <button type="submit">Go</button>
+        </form>
+      </div>
+      <p role="status" class="px-3 py-2 text-xs" hidden :hidden="!workspaceFileState()?.previewBusy">Loading preview…</p>
+      <p role="status" class="px-3 py-2 text-xs" hidden :hidden="!workspaceFileState()?.previewError" :text="workspaceFileState()?.previewError || ''"></p>
+      <p class="px-3 py-1 text-xs opacity-70" hidden :hidden="!workspaceFilePreview()?.truncated">Showing the start of this file. Download it to read the rest.</p>
+      <div data-workspace-source ref="workspaceFileSourceBox" aria-label="File source" role="region" tabindex="0" hidden :hidden="!workspaceFilePreview()?.lines || workspaceFileMode() !== 'source'" :data-view-line="workspaceFileLine()" :style="{ '--workspace-file-line': workspaceFileLine() }">
+        <div data-workspace-source-inner>
+          <pre data-workspace-source-numbers aria-hidden="true" :text="workspaceFilePreview()?.numbers || ''"></pre>
+          <pre data-workspace-source-text :text="workspaceFilePreview()?.text || ''"></pre>
+        </div>
+      </div>
+      <template :if="workspaceFilePreview()?.kind === 'html' && workspaceFileMode() === 'rendered'">
+        <iframe data-workspace-file-frame :src="workspaceFilePreview()?.content" title="HTML file preview" sandbox referrerpolicy="no-referrer"></iframe>
+      </template>
+      <template :if="workspaceFilePreview()?.kind === 'pdf'">
+        <a :href="workspaceFilePreview()?.content" target="_blank" rel="noopener" class="mx-3 my-2 text-xs underline">Open PDF in a new tab</a>
+        <iframe data-workspace-file-frame :src="workspaceFilePreview()?.content" title="PDF file preview"></iframe>
+      </template>
+      <template :if="workspaceFilePreview()?.kind === 'image'">
+        <div data-workspace-file-image><img :src="workspaceFilePreview()?.content" :alt="workspaceFileSelected().split('/').pop()"></div>
+      </template>
+      <p class="px-3 py-2 text-xs opacity-70" hidden :hidden="workspaceFilePreview()?.kind !== 'binary'">Download this file to view it.</p>
+    </div>
+  </div>
+  <p role="status" data-workspace-file-notice class="px-3 py-1 text-xs" hidden :hidden="!workspaceFileNotice()" :text="workspaceFileNotice()"></p>
+</section>
