@@ -23,6 +23,7 @@ export const keybindings = $props.keybindings || []
 export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
+export const freshDraftId = $props.freshDraftId || ''
 export const serverUrl = $props.serverUrl || ''
 // The browser CBOR bundle. Empty when the server could not build one, which
 // costs the page its live updates but not its rendered transcript.
@@ -779,7 +780,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         rows="2"
         :rows="Math.min(7, Math.max(2, composerText().split('\n').length + 1))"
         aria-label="Message"
-        :aria-keyshortcuts="!sessionId ? shortcutKeys('composer.startBackground') : null"
+        @if(freshDraftId && !initialSettingsSection)autofocus@endif
+        :aria-keyshortcuts="composerShortcuts()"
         placeholder="{{ promptPlaceholder }}"
         :placeholder="composerPlaceholder()"
         class="px-1 py-1 min-h-[46px] max-h-[30dvh] min-w-0 text-sm bg-transparent outline-none resize-none"
@@ -802,7 +804,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
           </button>
           <button type="button" data-idle-compaction hidden :hidden="!idleCompactionOffer()" @click="toggleIdleCompaction" :aria-pressed="compactNextPrompt()" :aria-label="idleCompactionLabel()" :title="idleCompactionLabel()" class="px-2 min-h-8 text-[12px] border border-black/10 rounded-full dark:border-white/20" :text="idleCompactionChip()"></button>
-          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :title="!sessionId && chordLabel('composer.startBackground') ? 'Start in background with ' + chordLabel('composer.startBackground') : null" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || conversationRewind() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :title="composerShortcutTitle()" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || conversationRewind() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
             <span data-send-text :text="sendLabel()">Send</span>
           </button>
@@ -1506,7 +1508,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return Boolean(sessionId && runningTurnId() > 0 && !editingFollowUp()
       && text.startsWith('/') && '/clear'.startsWith(text))
   })
-  const promptDraftKey = `harness.composer.v1:${activeProfile || 0}:${promptScope}`
+  const draftStorageScope = freshDraftId ? [promptScope, 'draft', freshDraftId].join(':') : promptScope
+  const promptDraftKey = `harness.composer.v1:${activeProfile || 0}:${draftStorageScope}`
   const composerDraft = useLocalStorage(promptDraftKey, null, {
     listenToStorageChanges: false,
   })
@@ -2368,6 +2371,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (chord) return keyboard.ariaKeyshortcuts(chord, appleKeyboard && row?.scope === 'terminal')
     }
     return row?.aria || ''
+  }
+
+  function composerShortcuts() {
+    const sendAndNew = shortcutKeys('composer.sendAndNewThread')
+    return sessionId ? sendAndNew : [shortcutKeys('composer.startBackground'), sendAndNew].filter(Boolean).join(' ')
+  }
+
+  function composerShortcutTitle() {
+    const chord = chordLabel(sessionId ? 'composer.sendAndNewThread' : 'composer.startBackground')
+    if (!chord) return null
+    return sessionId ? `Send and open a new draft with ${chord}` : `Start in background with ${chord}`
   }
 
   function matchedCommand(event, terminalFocus = false, composerFocus = false) {
@@ -5245,6 +5259,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     if (handoffBlocked()) return
+    if (sessionId && background && !editing && !sessionOnline()) {
+      stxAlert('Reconnect to send and open a new draft.')
+      return
+    }
     if (editing) {
       startPending.set(true)
       try {
@@ -5268,6 +5286,23 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const attachmentInput = uploads ? { uploads } : {}
     if (draft) composerDraft.set({ ...draft, commandId })
 
+    function openFreshDraft() {
+      if (!box.isConnected || promptRef.current !== box || box.value || composerFiles().length) return
+      const target = activeScratchSession ? `profile=${providerProfileId || 0}&project=none` : `workspace=${activeWorkspaceId}`
+      navigate(`/?${target}&draft=${newCommandId()}`)
+    }
+
+    function finishSend() {
+      if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
+      if (box.value === raw) {
+        box.value = ''
+        composerText.set('')
+        composerDraft.set(null)
+        if (background && sessionId) openFreshDraft()
+      }
+      else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+    }
+
     const codexSelection = draftCodexSelection()
     if (pendingProviderSwitch()) {
       startPending.set(true)
@@ -5277,13 +5312,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         const { model: _model, ...options } = codexSelection ?? {}
         await sendCommand({ type: 'session.handoff', sessionId, afterTurnId: runningTurnId(), text, ...attachmentInput, ...choice, ...model,
           ...(codexSelection ? { codexTurnOptions: options } : {}), ...freshContext }, commandId)
-        if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
-        if (box.value === raw) {
-          box.value = ''
-          composerText.set('')
-          composerDraft.set(null)
-        }
-        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+        finishSend()
       }
       catch (error) {
         stxAlert(error.message || 'Could not switch providers. Your draft is still here.')
@@ -5299,12 +5328,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       startPending.set(true)
       try {
         await sendCommand({ type: 'session.turn.steer', sessionId, turnId: runningTurnId(), text }, commandId)
-        if (box.value === raw) {
-          box.value = ''
-          composerText.set('')
-          composerDraft.set(null)
-        }
-        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+        finishSend()
       }
       catch (error) {
         stxAlert(error.message || 'Could not steer the turn. Your draft is still here.')
@@ -5319,7 +5343,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       || (freshContext.freshContext && followUps().entries.length))) {
       const actions = followUpActions()
       if (!actions) return
-      actions.stage({ id: commandId, text, ...attachmentInput, ...(uploads ? { fileNames: files.map(file => file.name) } : {}), ...(codexSelection ? { codexSelection } : {}), ...freshContext })
+      const accepted = actions.stage({ id: commandId, text, ...attachmentInput, ...(uploads ? { fileNames: files.map(file => file.name) } : {}), ...(codexSelection ? { codexSelection } : {}), ...freshContext })
       if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
       box.value = ''
       composerText.set('')
@@ -5329,6 +5353,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         const transcript = transcriptRef.current
         if (transcript) transcript.scrollTop = transcript.scrollHeight
       })
+      if (background) {
+        startPending.set(true)
+        try {
+          if (await accepted) openFreshDraft()
+        }
+        finally { startPending.set(false) }
+      }
       return
     }
 
@@ -5362,12 +5393,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         // Keep the first turn's receipt stable across retries, including
         // switching between opening the thread and staying in this composer.
         await sendCommand({ type: 'session.turn.start', sessionId: nextSession, text, ...attachmentInput }, commandId + '_first')
-        if (box.value === raw) {
-          box.value = ''
-          composerText.set('')
-          composerDraft.set(null)
-        }
-        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+        finishSend()
         if (background) {
           startedBackgroundThread.set(nextSession)
           startPending.set(false)
@@ -5387,13 +5413,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const compactAfterTurnId = compactNextPrompt() ? idleCompactionOffer()?.afterTurnId : undefined
       await sendCommand({ type: 'session.turn.start', sessionId, text, ...attachmentInput, ...(codexSelection ? { codexSelection } : {}),
         ...(compactAfterTurnId === undefined ? {} : { compactAfterTurnId }), ...freshContext }, commandId)
-      if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
-      if (box.value === raw) {
-        box.value = ''
-        composerText.set('')
-        composerDraft.set(null)
-      }
-      else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+      finishSend()
     }
     catch (error) {
       stxAlert(error.message || 'Could not send the prompt. Your draft is still here.')
@@ -5406,7 +5426,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function promptKeydown(event) {
     if (event.isComposing || event.keyCode === 229) return
     if (fileMentionPicker?.keydown(event)) return
-    if (!sessionId && matchedCommand(event, false, true) === 'composer.startBackground') {
+    const command = matchedCommand(event, false, true)
+    if (command === 'composer.sendAndNewThread' || (!sessionId && command === 'composer.startBackground')) {
       event.preventDefault()
       if (!event.repeat) void sendPrompt(followUpPreference(), true)
       return
@@ -5416,7 +5437,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       clearCommandBox.current?.focus()
       return
     }
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && (event.shiftKey ? canSteer() : canSteerDraft()) && !editingFollowUp()) {
+    if (event.key === 'Enter' && !event.altKey && (event.metaKey || event.ctrlKey) && (event.shiftKey ? canSteer() : canSteerDraft()) && !editingFollowUp()) {
       event.preventDefault()
       if (event.shiftKey) {
         const entry = followUps().entries[0]
@@ -5446,7 +5467,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       followUpActions()?.endEdit()
       return
     }
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+    if (event.key === 'Enter' && !event.altKey && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault()
       event.target.form?.requestSubmit()
     }

@@ -1703,6 +1703,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           profileId: Number(workspaceUrl.searchParams.get('profile')) || undefined,
           workspaceId: Number(workspaceUrl.searchParams.get('workspace')) || undefined,
           withoutProject: workspaceUrl.searchParams.get('project') === 'none',
+          freshDraftId: workspaceUrl.searchParams.get('draft'),
           settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,

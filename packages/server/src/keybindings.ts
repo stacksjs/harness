@@ -101,6 +101,13 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     scope: 'composer',
   },
   {
+    id: 'composer.sendAndNewThread',
+    label: 'Send and open a new draft',
+    description: 'Send the message and open an empty draft in the same project.',
+    chord: 'Mod+Alt+Enter',
+    scope: 'composer',
+  },
+  {
     id: 'thread.undo',
     label: 'Undo thread action',
     description: 'Restore the previous thread position while Undo is available.',

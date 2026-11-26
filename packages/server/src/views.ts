@@ -42,6 +42,7 @@ export interface ViewProps {
   claudeCompactionByAccount: Record<number, ClaudeAccountCompaction>
   draftWorkspace: ProjectSummary | null
   draftWithoutProject: boolean
+  freshDraftId: string | null
   activeSession: {
     turns: ReadonlyArray<{ id: number, response: string, status: string }>
     [key: string]: unknown
@@ -114,6 +115,7 @@ export function viewProps(state: HarnessState, options: {
   profileId?: number
   workspaceId?: number
   withoutProject?: boolean
+  freshDraftId?: string | null
   serverUrl: string
   codecUrl?: string
   remoteEnabled?: boolean
@@ -208,6 +210,9 @@ export function viewProps(state: HarnessState, options: {
     activeProfile: String(selectedProfile?.id ?? ''),
     draftWorkspace,
     draftWithoutProject,
+    freshDraftId: !active && (draftWorkspace || draftWithoutProject) && /^web_[a-z0-9]{1,16}_[a-z0-9]{1,6}$/.test(options.freshDraftId ?? '')
+      ? options.freshDraftId ?? null
+      : null,
     activeSession: active
       ? {
           id: active.id,
