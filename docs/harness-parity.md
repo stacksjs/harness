@@ -107,6 +107,12 @@ The managed ChatGPT preview opens account consent in the system browser on a mac
 
 ## Stacks upgrade
 
+Buddy previewed and applied the current upgrade from a clean checkout of Stacks main at `d338d3d89ff2863c47cb664532b3ebf92f148729`. The frozen Bun 1.3.14 install resolves the published Stacks 0.75.695 and stx, components, and the Bun plugin at 0.2.951. Buddy updated both lockfiles and synchronized the 0.75.695 defaults. [Stacks source](https://github.com/stacksjs/stacks/commit/d338d3d89ff2863c47cb664532b3ebf92f148729) · [Published Stacks 0.75.695](https://github.com/stacksjs/stacks/releases/tag/v0.75.695)
+
+Fresh and copied v0.0.1 SQLite databases passed migration and integrity checks. All seven historical events retained the same digest, and the original session URL loaded the saved conversation and its assets. The Chromium light and WebKit dark drives passed, with paired desktop and phone captures reviewed for onboarding and Changes. The synchronized passkey removal tests passed in isolation.
+
+### Prior upgrade evidence
+
 Buddy previewed and applied the upgrade from a clean checkout of [Stacks main `80eb865`](https://github.com/stacksjs/stacks/commit/80eb865121a2824147c6d44b68870bfe1279275f). The app resolves [published Stacks and Buddy 0.75.692](https://github.com/stacksjs/stacks/releases/tag/v0.75.692) with the published 0.75.692 defaults. The frozen Bun 1.3.14 install resolves stx, components, and the Bun plugin at 0.2.946. That version includes the [stx analysis cache change](https://github.com/stacksjs/stx/commit/55e71a5ca5b56424b5f88de127659e3fb5965600). Both lockfiles reflect the upgrade, and Pantry keeps the Bun 1.3.14 pin.
 
 An in-place upgrade had left an older stx 0.2.944 under `packages/server/node_modules`. A clean frozen install resolves 0.2.946 from the server package. The performance drive now checks that runtime against `bun.lock`, and the [Buddy source fix](https://github.com/stacksjs/stacks/commit/f17b7533fc797b6ed0e52572ea424c9221513f54) removed the stale copy when tested against the installed Harness package tree.
