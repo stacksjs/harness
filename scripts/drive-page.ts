@@ -311,7 +311,7 @@ function importProjectFixture(workspace: string, name: string) {
   writeFileSync(join(source, name), 'Only the upstream repository wrote this.\n')
   execFileSync('git', ['add', '--', name], { cwd: source })
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', name], { cwd: source })
-  execFileSync('git', ['pull', '-q', '--ff-only', 'fixture-upstream', 'review/fixture'], { cwd: join(workspace, 'api') })
+  execFileSync('git', ['pull', '-q', '--no-rebase', '--ff-only', 'fixture-upstream', 'review/fixture'], { cwd: join(workspace, 'api') })
 }
 
 const providerPreviewScript = join(driveRoot, 'provider-preview.ts')
@@ -5196,6 +5196,12 @@ check('the existing thread continues running after the composer opens a draft',
   harness.engine.current.sessions.get(sourceThreadId)?.turns.at(-1)?.prompt === 'Background fixture: keep source busy')
 for (const [width, height] of workspaceViewports) {
   await backgroundPage.setViewportSize({ width, height })
+  const composer = await backgroundMessage.boundingBox()
+  const send = await backgroundPage.locator('[data-send]').boundingBox()
+  check(`the fresh draft composer and send action fit at ${width}×${height}`,
+    Boolean(composer && send && composer.x >= 0 && composer.x + composer.width <= width
+      && send.y >= 0 && send.y + send.height <= height
+      && await backgroundPage.evaluate(() => document.documentElement.scrollWidth === innerWidth)))
   await capture(`workspace-send-and-new-${width}x${height}`, backgroundPage)
 }
 await backgroundMessage.fill('Keep this separate fresh draft.')
