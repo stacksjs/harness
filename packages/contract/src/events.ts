@@ -22,12 +22,28 @@ export interface EventBase {
   at: number
 }
 
-export interface WorktreeIntent {
+export interface CheckoutIntent {
   repository: string
   path: string
   branch: string
   base: string
 }
+
+/** Client selections use project-relative repository keys. */
+export interface WorktreeSelection {
+  repositories?: string[]
+  baseBranch?: string
+}
+
+export interface CombinedWorktreeIntent {
+  repository: string
+  path: string
+  branch: string
+  checkouts: Array<CheckoutIntent & { key: string, label: string }>
+  links: Array<{ source: string, path: string }>
+}
+
+export type WorktreeIntent = CheckoutIntent | CombinedWorktreeIntent
 
 export interface ProviderContextUsage {
   usedTokens: number
@@ -44,7 +60,7 @@ export interface ForkSource {
 }
 
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, forkFrom?: ForkSource }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, worktree?: WorktreeSelection, forkFrom?: ForkSource }
   | { type: 'session.stopped' }
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation>, undo?: ThreadUndoRecord, undoScope?: ThreadUndoScopeUpdate }
   | { type: 'session.failed', message: string }
@@ -92,7 +108,7 @@ export type EventPayload =
   /** The host reserved this exact checkout before asking Git to create it. */
   | { type: 'session.worktree-reserved', intent: WorktreeIntent }
   /** This session got its own checkout and branch. */
-  | { type: 'session.isolated', worktreePath: string, branch: string }
+  | { type: 'session.isolated', worktreePath: string, branch: string, combined?: CombinedWorktreeIntent }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number }
   /** Only the settings that actually changed, for the same reason as below. */
   | { type: 'settings.updated', changes: Partial<HostSettings> }

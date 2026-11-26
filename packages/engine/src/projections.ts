@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord, WorktreeIntent } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -59,7 +59,9 @@ export interface SessionState {
   pendingInputs: InputRequestState[]
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
+  worktree?: WorktreeSelection
   worktreeIntent?: WorktreeIntent
+  combinedWorktree?: CombinedWorktreeIntent
   /**
    * Where the agent actually runs, once isolated.
    *
@@ -463,6 +465,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         pendingApprovals: [],
         pendingInputs: [],
         isolate: p.isolate === true,
+        ...(p.worktree && { worktree: p.worktree }),
         worktreePath: '',
         branch: '',
       })
@@ -647,6 +650,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session) break
       session.worktreePath = p.worktreePath
       session.branch = p.branch
+      if (p.combined) session.combinedWorktree = p.combined
       delete session.worktreeIntent
       break
     }

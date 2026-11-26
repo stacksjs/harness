@@ -35,10 +35,10 @@
  * own merge flow would be a worse version of one you have.
  */
 
-import type { WorktreeIntent } from '@harness/contract'
+import type { CheckoutIntent } from '@harness/contract'
 import { spawn } from 'node:child_process'
 import { lstat, mkdir, realpath } from 'node:fs/promises'
-import { basename, dirname, join, normalize } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 
 export interface WorktreeResult {
   /** Directory the agent should run in, or null when none was made. */
@@ -84,26 +84,54 @@ async function gitDirectory(path: string): Promise<string | null> {
   return result.ok ? realpath(result.out.trimEnd()).catch(() => null) : null
 }
 
+async function commitAt(path: string, ref: string): Promise<string | null> {
+  const result = await git(path, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`])
+  return result.ok ? result.out.trim() : null
+}
+
+/** Resolve an explicit branch, then the repository's configured or usual default. */
+export async function checkoutBase(path: string, requested?: string, defaultBranch = false): Promise<string | null> {
+  if (requested && requested !== 'HEAD') {
+    const name = requested.replace(/^refs\/heads\/|^origin\//u, '')
+    if (!(await git(path, ['check-ref-format', `refs/heads/${name}`])).ok) throw new Error('Enter a valid Git base branch.')
+    const selected = await commitAt(path, `refs/heads/${name}`) ?? await commitAt(path, `refs/remotes/origin/${name}`)
+    if (selected) return selected
+  }
+  if (defaultBranch && requested !== 'HEAD') {
+    const originHead = await git(path, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'])
+    if (originHead.ok && originHead.out.startsWith('refs/remotes/origin/')) {
+      const defaultRef = originHead.out.trimEnd()
+      const resolved = await commitAt(path, defaultRef.replace('refs/remotes/origin/', 'refs/heads/')) ?? await commitAt(path, defaultRef)
+      if (resolved) return resolved
+    }
+    for (const name of ['main', 'master', 'trunk', 'develop']) {
+      const resolved = await commitAt(path, `refs/heads/${name}`)
+      if (resolved) return resolved
+    }
+  }
+  return commitAt(path, 'HEAD')
+}
+
 /** Resolve a stable base and a checkout path before any Git mutation. */
-export async function plan(workspacePath: string, sessionId: number, reservation?: string): Promise<WorktreeIntent | { reason: NonNullable<WorktreeResult['reason']> }> {
+export async function plan(workspacePath: string, sessionId: number, reservation?: string, baseBranch?: string): Promise<CheckoutIntent | { reason: NonNullable<WorktreeResult['reason']> }> {
   const inside = await git(workspacePath, ['rev-parse', '--is-inside-work-tree'])
   if (!inside.ok || inside.out.trim() !== 'true')
     return { reason: 'not-a-repository' }
 
   // A worktree branches from a commit. An empty repository has none, and
   // `worktree add` on one fails with a message about an invalid reference.
-  const head = await git(workspacePath, ['rev-parse', 'HEAD'])
-  if (!head.ok) return { reason: 'no-commits' }
+  const base = await checkoutBase(workspacePath, baseBranch, Boolean(baseBranch))
+  if (!base) return { reason: 'no-commits' }
 
   // The repository's own git directory, resolved rather than assumed: in a
   // worktree or a submodule, `.git` is a file pointing elsewhere.
   const [gitDir, repository] = await Promise.all([gitDirectory(workspacePath), realpath(workspacePath).catch(() => null)])
   if (!gitDir || !repository) return { reason: 'git-failed' }
   const leaf = reservation ? `${sessionId}-${reservation}` : String(sessionId)
-  return { path: join(gitDir, 'harness', 'worktrees', leaf), branch: branchFor(sessionId), repository, base: head.out.trim() }
+  return { path: join(gitDir, 'harness', 'worktrees', leaf), branch: branchFor(sessionId), repository, base }
 }
 
-async function add(intent: WorktreeIntent): Promise<WorktreeResult> {
+async function add(intent: CheckoutIntent): Promise<WorktreeResult> {
   const { repository, path, branch, base } = intent
   const added = await git(repository, ['worktree', 'add', '-b', branch, path, base])
   if (!added.ok) {
@@ -121,11 +149,16 @@ export async function create(workspacePath: string, sessionId: number): Promise<
 }
 
 /** Find the exact registered checkout and leave conflicts untouched. */
-export async function openReserved(intent: WorktreeIntent, createIfMissing: boolean): Promise<WorktreeResult> {
+export async function openReserved(intent: CheckoutIntent, createIfMissing: boolean, combinedRoot?: string): Promise<WorktreeResult> {
   const { repository, path, branch } = intent
   const conflict = { path: null, branch: null, reason: 'checkout-conflict' } as const
   const common = await gitDirectory(repository)
-  if (!common || join(common, 'harness', 'worktrees', basename(path)) !== path) return conflict
+  if (!common) return conflict
+  if (combinedRoot) {
+    const entry = relative(combinedRoot, path)
+    if (!entry || entry.startsWith(`..${sep}`) || entry === '..' || isAbsolute(entry)) return conflict
+  }
+  else if (join(common, 'harness', 'worktrees', basename(path)) !== path) return conflict
   const registrations = await gitWorktrees(repository)
   if (!registrations) return conflict
   const existing = registrations.find(entry => entry.path === path)
@@ -145,10 +178,18 @@ export async function openReserved(intent: WorktreeIntent, createIfMissing: bool
       throw error
     })) return conflict
     const parent = dirname(path)
-    await mkdir(parent, { recursive: true })
+    if (combinedRoot) {
+      let current = combinedRoot
+      for (const part of relative(combinedRoot, parent).split(sep).filter(Boolean)) {
+        current = join(current, part)
+        await mkdir(current).catch((error) => { if (error.code !== 'EEXIST') throw error })
+        if (await realpath(current) !== current) return conflict
+      }
+    }
+    else await mkdir(parent, { recursive: true })
     if (await realpath(parent) !== parent) return conflict
     const created = await add(intent)
-    return created.path ? openReserved(intent, false) : created
+    return created.path ? openReserved(intent, false, combinedRoot) : created
   }
   catch { return conflict }
 }
@@ -166,13 +207,14 @@ export async function openReserved(intent: WorktreeIntent, createIfMissing: bool
  * rewrite every commit's author on a machine that had one configured — while
  * passing nothing fails outright on a machine that does not.
  */
-export async function commitTurn(worktreePath: string, message: string): Promise<string | null> {
-  const staged = await git(worktreePath, ['add', '-A'])
+export async function commitTurn(worktreePath: string, message: string, excluded: string[] = []): Promise<string | null> {
+  const paths = excluded.length ? ['--', '.', ...excluded.map(key => `:(exclude,literal)${key}`)] : []
+  const staged = await git(worktreePath, ['add', '-A', ...paths])
   if (!staged.ok) return null
 
   // Nothing changed: `diff --cached --quiet` exits 0 when the index matches
   // HEAD, which is exactly "no work to record".
-  const unchanged = await git(worktreePath, ['diff', '--cached', '--quiet'])
+  const unchanged = await git(worktreePath, ['diff', '--cached', '--quiet', ...paths])
   if (unchanged.ok) return null
 
   const [name, email] = await Promise.all([
@@ -281,8 +323,13 @@ export async function list(workspacePath: string): Promise<WorktreeEntry[]> {
  *
  * The branch always survives: it is the deliverable, the directory is scratch.
  */
-export async function release(workspacePath: string, path: string): Promise<{ removed: boolean, committed: string | null, reason?: string }> {
-  const committed = await commitTurn(path, 'harness: work left uncommitted when the session went away')
+export async function release(workspacePath: string, path: string, excluded?: string[], preserveIgnored = false): Promise<{ removed: boolean, committed: string | null, reason?: string }> {
+  const committed = await commitTurn(path, 'harness: work left uncommitted when the session went away', excluded)
+  if (preserveIgnored) {
+    const ignored = await git(path, ['ls-files', '--others', '--ignored', '--exclude-standard'])
+    if (!ignored.ok || ignored.out.length)
+      return { removed: false, committed, reason: 'the worktree may contain ignored files' }
+  }
   const removed = await remove(workspacePath, path, false)
   if (!removed.ok) return { removed: false, committed, reason: removed.reason }
   return { removed: true, committed }

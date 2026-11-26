@@ -1,4 +1,4 @@
-import type { Command, InputAnswer } from '@harness/contract'
+import type { Command, InputAnswer, WorktreeSelection } from '@harness/contract'
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance, StartTurnInput } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
@@ -142,7 +142,7 @@ class Client {
   close(): void { this.socket.close() }
 }
 
-async function bootstrap(client: Client, workspace: string = dir, isolate = false): Promise<{ sessionId: number }> {
+async function bootstrap(client: Client, workspace: string = dir, isolate = false, worktree?: WorktreeSelection): Promise<{ sessionId: number }> {
   client.send({ t: 'dispatch', envelope: { id: 'c_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
   const profileId = derivedId('c_p')
   client.send({
@@ -156,7 +156,7 @@ async function bootstrap(client: Client, workspace: string = dir, isolate = fals
   })
   client.send({
     t: 'dispatch',
-    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate } },
+    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate, ...(worktree && { worktree }) } },
   })
   return { sessionId: await client.subscribeCreatedSession('c_s') }
 }
@@ -1603,6 +1603,100 @@ describe('a session can have a checkout of its own', () => {
     expect(harness.engine.current.sessions.get(sessionId)!.worktreePath).toBe(first)
     expect(client.payloads('session.isolated')).toHaveLength(1)
     client.close()
+  }, 30_000)
+
+  it('resumes a partially created combined checkout and preserves other Git worktrees', async () => {
+    const workspace = join(dir, 'multi-repo')
+    const api = join(workspace, 'api')
+    const web = join(workspace, 'packages', 'web')
+    const git = (cwd: string, ...args: string[]) => {
+      const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+      if (result.status !== 0) throw new Error(result.stderr)
+      return result.stdout.trim()
+    }
+    for (const [path, branch] of [[api, 'main'], [web, 'trunk']] as const) {
+      mkdirSync(path, { recursive: true })
+      git(path, 'init', '-qb', branch)
+      git(path, 'config', 'user.email', 'fixture@example.invalid')
+      git(path, 'config', 'user.name', 'Fixture')
+      writeFileSync(join(path, 'base.txt'), `${branch} baseline\n`)
+      git(path, 'add', '.')
+      git(path, 'commit', '-qm', 'Baseline')
+    }
+    git(api, 'switch', '-qc', 'feature/team')
+    writeFileSync(join(api, 'base.txt'), 'Chosen branch\n')
+    git(api, 'commit', '-qam', 'Selected base')
+    const apiBase = git(api, 'rev-parse', 'HEAD')
+    git(api, 'switch', 'main')
+    const webBase = git(web, 'rev-parse', 'HEAD')
+    git(web, 'switch', '-qc', 'draft/local')
+    writeFileSync(join(web, 'base.txt'), 'Unrelated local branch\n')
+    git(web, 'commit', '-qam', 'Unrelated local branch')
+    const other = join(dir, 'user-checkout')
+    git(web, 'worktree', 'add', '-qb', 'user/checkout', other, 'trunk')
+    writeFileSync(join(other, 'unsaved.txt'), 'User checkout stays\n')
+    writeFileSync(join(workspace, 'shared.txt'), 'Shared project file\n')
+
+    const databasePath = join(dir, 'test.sqlite')
+    const opened: string[] = []
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => ({
+      ...driver,
+      async create(config: DriverConfig) {
+        opened.push(config.workspacePath)
+        writeFileSync(join(config.workspacePath, 'api', 'agent.txt'), 'API changes\n')
+        writeFileSync(join(config.workspacePath, 'packages', 'web', 'agent.txt'), 'Web changes\n')
+        return driver.create(config)
+      },
+    }) }
+    harness = await serve(options)
+    const url = `ws://127.0.0.1:${port}/ws`
+    let client = await Client.connect(url)
+    try {
+      const { sessionId } = await bootstrap(client, workspace, true, { baseBranch: 'feature/team', repositories: ['api', 'packages/web'] })
+      const branch = `harness/session-${sessionId}`
+      git(web, 'branch', branch, 'trunk')
+      const turn = (id: string) => client.send({ t: 'dispatch', envelope: { id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'Work in both repositories' } } })
+      turn('multi-reservation')
+      expect(await client.waitFor('session.failed', 8000)).toMatchObject({ message: expect.stringContaining('reserved worktree') })
+      expect(opened).toEqual([])
+      const intent = harness.engine.current.sessions.get(sessionId)?.worktreeIntent
+      if (!intent || !('checkouts' in intent)) throw new Error('The combined worktree was not reserved.')
+      expect(intent.checkouts.map(entry => [entry.key, entry.base])).toEqual([['api', apiBase], ['packages/web', webBase]])
+      const first = join(intent.path, 'api')
+      expect(git(first, 'rev-parse', 'HEAD')).toBe(apiBase)
+      expect(existsSync(join(intent.path, 'packages', 'web'))).toBe(false)
+      writeFileSync(join(first, 'retained.txt'), 'Survived the incomplete checkout\n')
+      client.close()
+      harness.stop()
+      git(web, 'branch', '-D', branch)
+      harness = await serve(options)
+      client = await Client.connect(url)
+      expect(harness.engine.current.sessions.get(sessionId)?.worktreePath).toBe('')
+      expect(existsSync(join(intent.path, 'packages', 'web'))).toBe(false)
+      client.send({ t: 'subscribe', sessionId })
+      turn('multi-retry')
+      expect(await client.waitFor('turn.completed', 8000)).toBeTruthy()
+      expect(opened).toEqual([intent.path])
+      expect(readFileSync(join(intent.path, 'shared.txt'), 'utf8')).toBe('Shared project file\n')
+      expect(readFileSync(join(first, 'base.txt'), 'utf8')).toBe('Chosen branch\n')
+      expect(readFileSync(join(intent.path, 'packages', 'web', 'base.txt'), 'utf8')).toBe('trunk baseline\n')
+      expect(git(api, 'show', `${branch}:retained.txt`)).toBe('Survived the incomplete checkout')
+      expect(git(web, 'show', `${branch}:agent.txt`)).toBe('Web changes')
+      expect(existsSync(join(web, 'agent.txt'))).toBe(false)
+      const review = await fetch(`http://127.0.0.1:${port}/s/${sessionId}/diff/options?repository=packages%2Fweb`)
+      expect(await review.json()).toMatchObject({ isRepository: true, repositories: [{ key: 'api' }, { key: 'packages/web' }] })
+
+      client.send({ t: 'dispatch', envelope: { id: 'multi-delete', at: 6, command: { type: 'profile.delete', profileId: derivedId('c_p') } } })
+      expect(await client.waitForDispatch('multi-delete')).toMatchObject({ t: 'dispatched' })
+      for (let attempt = 0; attempt < 300 && existsSync(intent.path); attempt++) await Bun.sleep(20)
+      expect(existsSync(intent.path)).toBe(false)
+      expect(git(api, 'worktree', 'list', '--porcelain')).not.toContain(first)
+      expect(git(web, 'worktree', 'list', '--porcelain')).toContain('branch refs/heads/user/checkout')
+      expect(readFileSync(join(other, 'unsaved.txt'), 'utf8')).toBe('User checkout stays\n')
+      expect(git(web, 'show', `${branch}:agent.txt`)).toBe('Web changes')
+    }
+    finally { client.close() }
   }, 30_000)
 
   it.each(['session.worktree-reserved', 'session.isolated'] as const)('recovers safely when recording %s fails', async (failure) => {

@@ -8,7 +8,7 @@
  * ordering and one audit trail rather than two.
  */
 
-import type { ProviderContextUsage, WorktreeIntent } from './events'
+import type { ProviderContextUsage, WorktreeIntent, WorktreeSelection } from './events'
 import type { SteeringOutcome } from './follow-ups'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { ComposerAttachment, ComposerUploads } from './composer-attachments'
@@ -65,10 +65,10 @@ export type ClientCommand =
        * Run this session in a git worktree of its own.
        *
        * Sessions otherwise share the workspace, which is fine until two run at
-       * once and edit the same files. Ignored for a workspace that is not a
-       * repository — there is nothing to branch from.
+       * once and edit the same files. A plain project can contain repositories.
        */
       isolate?: boolean
+      worktree?: WorktreeSelection
       providerInstanceId?: number
     }
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }

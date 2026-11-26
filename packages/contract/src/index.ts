@@ -23,7 +23,7 @@ export type {
   ModelFavorite,
 } from './commands'
 export { codexSelectionLabel, isClearCommand, isClientCommand, isCompactCommand } from './commands'
-export type { EventBase, EventPayload, EventType, ForkSource, HarnessEvent, ProviderContextUsage, WorktreeIntent } from './events'
+export type { CheckoutIntent, CombinedWorktreeIntent, EventBase, EventPayload, EventType, ForkSource, HarnessEvent, ProviderContextUsage, WorktreeIntent, WorktreeSelection } from './events'
 export { GLOBAL_SESSION_ID, isGlobalEvent } from './events'
 export type { InputAnswer, InputOption, InputQuestion, InputResponse } from './input'
 export { inputResponseValues, MAX_INPUT_ANSWER_LENGTH, validInputAnswers } from './input'

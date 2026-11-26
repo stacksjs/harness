@@ -614,6 +614,13 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (!workspace.trusted)
         throw new InvalidCommand(`workspace ${command.workspaceId} is not trusted`)
 
+      const selection = command.worktree
+      if (selection !== undefined && (!command.isolate || !selection || typeof selection !== 'object'
+        || (selection.baseBranch !== undefined && (typeof selection.baseBranch !== 'string' || selection.baseBranch.length > 255))
+        || (selection.repositories !== undefined && (!Array.isArray(selection.repositories) || selection.repositories.length > 128
+          || selection.repositories.some(key => typeof key !== 'string' || !key || key.length > 4096)))))
+        throw new InvalidCommand('Choose valid repositories and a base branch for this worktree.')
+
       return [{
         sessionId: derivedId(commandId),
         commandId,
@@ -625,6 +632,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           ...(command.providerInstanceId !== undefined ? { providerInstanceId: command.providerInstanceId } : {}),
           ...sessionModel(command),
           ...(command.isolate ? { isolate: true } : {}),
+          ...(selection && { worktree: selection }),
         },
       }]
     }
@@ -704,6 +712,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           type: 'session.isolated',
           worktreePath: command.worktreePath,
           branch: command.branch,
+          ...(intent && 'checkouts' in intent && { combined: intent }),
         },
       }]
     }

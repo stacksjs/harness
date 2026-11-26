@@ -24,6 +24,7 @@ import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
 import { isWorkspaceGitRoot, reviewWorkspaceDiff, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
+import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
@@ -179,6 +180,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const attachments = new QuestionAttachments(resolve(databasePath + '.harness-attachments'))
   const composerAttachments = new ComposerAttachments(resolve(databasePath + '.harness-composer-files'), () => engine.current)
   const attachmentOwners = new WeakMap<CommandEnvelope, string>()
+  const deletionWorktrees = new WeakMap<CommandEnvelope, DoomedWorktree[]>()
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
   const savedProviders = new SavedProviderInstances(databasePath)
@@ -187,6 +189,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     store,
     reducer: reduce,
     async prepareClientCommand(command, envelope) {
+      if (command.type === 'profile.delete')
+        deletionWorktrees.set(envelope, worktreesOfProfile(engine.current, command.profileId))
       if (command.type === 'profile.claude-compaction.update'
         && !savedProviders.find(command.providerInstanceId, command.profileId, 'claude', tmpdir()))
         throw new Error('This Claude account is unavailable in the selected profile.')
@@ -247,6 +251,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     chatGptCredentials,
     composerAttachmentPath: attachment => composerAttachments.path(attachment),
     workspacePath: options.workspacePath,
+    combinedWorktreesDirectory: resolve(databasePath + '.harness-worktrees'),
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
     // than appearing all at once when the turn ends.
@@ -396,7 +401,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if ((operation || mode || repository) && !trusted)
       return Response.json({ error: 'Git review is unavailable for this workspace.' }, { status: 404, headers })
     if (!root) return Response.json(errorDiff('session has no workspace'), { headers })
-    const path = repository ? await resolveProjectRepository(root, repository) : root
+    const combined = session?.combinedWorktree
+    const checkout = combined?.checkouts.find(entry => entry.key === (repository || ''))
+    const path = combined
+      ? (checkout ? await openCombinedRepository(combined, checkout) : repository ? null : root)
+      : repository ? await resolveProjectRepository(root, repository) : root
     if (!path) return Response.json({ error: 'This project repository is unavailable.' }, { status: 404, headers })
 
     const turns = repository ? [] : reviewTurns(session)
@@ -404,7 +413,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (operation === 'options') {
         const [options, repositories, rootIsGit] = await Promise.all([
           workspaceReviewOptions(path, turns, target),
-          scanProjectRepositories(root),
+          combined ? combined.checkouts.filter(entry => entry.key).map(({ key, label }) => ({ key, label }))
+            : scanProjectRepositories(root),
           repository ? isWorkspaceGitRoot(root) : null,
         ])
         return Response.json({ ...options, repositories, hasProjectRepository: rootIsGit ?? options.isRepository }, { headers })
@@ -800,8 +810,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (command.type === 'profile.delete') {
       const deleted = result.events.find(event => event.payload.type === 'profile.deleted')
       if (!deleted) return
-      if (deleted.payload.type === 'profile.deleted')
-        for (const id of deleted.payload.sessionIds ?? []) pruneQuestionAttachments(id)
+      if (deleted.payload.type === 'profile.deleted') {
+        const removedSessions = deleted.payload.sessionIds ?? []
+        await Promise.all(removedSessions.map(id => runtime.stopRemovedSession(id)))
+        for (const id of removedSessions) pruneQuestionAttachments(id)
+      }
       const released = await releaseWorktrees(doomed)
       for (const entry of released) {
         console.warn(
@@ -1022,12 +1035,6 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const useHostClock = received.command.type === 'session.organize'
           || (received.command.type === 'session.turn.start' && received.command.compactAfterTurnId !== undefined)
         let envelope = useHostClock ? { ...received, at: Date.now() } : received
-        // Read before dispatching: a deleted profile takes its sessions with
-        // it, and their worktree paths go with them.
-        const doomed = envelope.command.type === 'profile.delete'
-          ? worktreesOfProfile(engine.current, envelope.command.profileId)
-          : []
-
         try {
           if (envelope.command.type === 'session.organize' && envelope.command.undoScope !== undefined) {
             const tab = envelope.command.undoScope
@@ -1097,7 +1104,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           broadcast(result.events)
           // Then act on it. A retry (`replayed`) must not start a second agent
           // run — the receipt already accounted for the first.
-          if (!result.replayed) await react(envelope, result, doomed)
+          if (!result.replayed) await react(envelope, result, deletionWorktrees.get(envelope))
         }
         catch (error) {
           send(socket, {
@@ -1256,9 +1263,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const id = Number(diffRoute[1])
         const session = engine.current.sessions.get(id)
-        const path = options.workspacePath
+        const path = session?.worktreePath || (options.workspacePath
           ? options.workspacePath(engine.current, id)
-          : defaultWorkspacePath(engine.current, id)
+          : defaultWorkspacePath(engine.current, id))
         const workspace = session && engine.current.workspaces.get(session.workspaceId)
         return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch))
       }
@@ -1278,6 +1285,16 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const root = workspaceFileRoot(url.searchParams)
         if (!root) return Response.json({ error: 'Open a trusted workspace to launch an editor.' }, { status: 404, headers })
         return respondWorkspaceEditor(root, url, request.method)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/workspace-repositories') {
+        if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
+        const headers = { 'cache-control': 'private, no-store' }
+        const root = workspaceFileRoot(url.searchParams)
+        if (!root) return Response.json({ error: 'Project repositories are unavailable.' }, { status: 404, headers })
+        return Promise.all([isWorkspaceGitRoot(root), scanProjectRepositories(root)])
+          .then(([hasProjectRepository, repositories]) => Response.json({ hasProjectRepository, repositories }, { headers }))
+          .catch(() => Response.json({ error: 'Could not read project repositories.' }, { status: 503, headers }))
       }
 
       if (request.method === 'GET' && /^\/workspace-files\/(?:search|tree|preview|content|download)$/u.test(url.pathname)) {

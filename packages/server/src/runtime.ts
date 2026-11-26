@@ -11,7 +11,7 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { ApprovalChoice, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, SteeringOutcome } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
@@ -19,6 +19,7 @@ import { realpath } from 'node:fs/promises'
 import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
 import { effectiveClaudeCompaction, providerConversation } from '@harness/engine'
+import { nestedWorktrees, openCombinedRepository, openCombinedWorktree, planCombinedWorktree, releaseCombinedWorktree } from './combined-worktree'
 import { capture, restore } from './checkpoint'
 import { estimateNativeContext, HandoffCapacityError, historicalContext } from './handoff'
 import { missingReferences, resolveForDriver } from './mcp'
@@ -36,6 +37,7 @@ export interface RuntimeOptions {
   composerAttachmentPath?: (attachment: ComposerAttachment) => string
   /** Resolve a session's workspace path. Defaults to the projection. */
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
+  combinedWorktreesDirectory: string
   now?: () => number
   /** Auto-approve tool calls. Off by default; see PLAN.md §12. */
   autoApprove?: boolean
@@ -138,6 +140,7 @@ export class ProviderRuntime {
       ? effectiveClaudeCompaction(this.options.engine.current, session).autoCompactAfter
       : undefined
     const existing = this.sessions.get(sessionId)
+    if (existing && session?.combinedWorktree && !await this.ensureWorktree(sessionId)) return null
     if (existing) {
       if (existing.savedLaunch?.binaryPath !== savedLaunch?.binaryPath
         || existing.savedLaunch?.home !== savedLaunch?.home
@@ -251,7 +254,12 @@ export class ProviderRuntime {
       }
     }
 
+    if (!this.options.engine.current.sessions.has(sessionId)) return null
     const instance = await driver.create({ ...launch, mcpServers })
+    if (!this.options.engine.current.sessions.has(sessionId)) {
+      await instance.stop().catch(() => {})
+      return null
+    }
     const running: Running = {
       instance,
       ...(savedLaunch ? { savedLaunch } : {}),
@@ -617,17 +625,23 @@ export class ProviderRuntime {
     if (!intent || session.worktreePath || session.navigation?.archivedAt || !state.workspaces.get(session.workspaceId)?.trusted) return
     const source = this.worktreeSource(sessionId)
     if (!source || await realpath(source).catch(() => null) !== intent.repository) return
-    const found = await worktree.openReserved(intent, false)
-    if (!found.path || !found.branch) return
+    const completed = 'checkouts' in intent ? await openCombinedWorktree(intent, false)
+      : Boolean((await worktree.openReserved(intent, false)).path)
+    if (!completed) return
     // No clients are listening yet. This appends the isolated event without
     // using the live event observer, which is initialized later in serve().
     await this.options.engine.dispatchInternal(this.envelope({
-      type: 'thread.worktree.set', sessionId, worktreePath: found.path, branch: found.branch,
+      type: 'thread.worktree.set', sessionId, worktreePath: intent.path, branch: intent.branch,
     }))
   }
 
   private async ensureWorktree(sessionId: number): Promise<boolean> {
     const session = this.options.engine.current.sessions.get(sessionId)
+    if (session?.combinedWorktree) {
+      if (await openCombinedWorktree(session.combinedWorktree, false)) return true
+      await this.emit({ type: 'thread.error', sessionId, message: 'The combined worktree is unavailable. Restore its checkout folders before retrying.' })
+      return false
+    }
     if (!session?.isolate || session.worktreePath) return true
     const pending = this.worktreeCreations.get(sessionId)
     if (pending) return pending
@@ -648,10 +662,19 @@ export class ProviderRuntime {
     try {
       if (!scoped()) throw new Error('Trust this workspace before creating its worktree.')
       if (!intent) {
-        if (!repository || !existsSync(repository)) return true
-        const proposed = await worktree.plan(repository, sessionId, crypto.randomUUID())
+        const session = engine.current.sessions.get(sessionId)!
+        if (!repository || !existsSync(repository)) {
+          if (session.worktree) throw new Error('Restore the project folder before starting a worktree.')
+          return true
+        }
+        const fork = session.fork && engine.current.sessions.get(session.fork.sessionId)?.combinedWorktree
+        const proposed = await planCombinedWorktree(repository, this.options.combinedWorktreesDirectory, sessionId, session.worktree, fork)
+          ?? await worktree.plan(repository, sessionId, crypto.randomUUID(), session.worktree?.baseBranch)
         if ('reason' in proposed) {
-          if (proposed.reason === 'not-a-repository' || proposed.reason === 'no-commits') return true
+          if (proposed.reason === 'not-a-repository' || proposed.reason === 'no-commits') {
+            if (session.worktree) throw new Error('Create at least one Git commit in the project before starting a worktree.')
+            return true
+          }
           throw new Error('Could not plan a worktree for this session.')
         }
         await this.record({ type: 'thread.worktree.reserve', sessionId, intent: proposed }).catch(() => {
@@ -661,10 +684,11 @@ export class ProviderRuntime {
       }
       if (!scoped() || !intent || !repository || await realpath(repository).catch(() => null) !== intent.repository)
         throw new Error('The reserved worktree is outside the current trusted checkout. Restore access and retry.')
-      const created = await worktree.openReserved(intent, true)
-      if (!created.path || !created.branch)
+      const complete = 'checkouts' in intent ? await openCombinedWorktree(intent, true)
+        : Boolean((await worktree.openReserved(intent, true)).path)
+      if (!complete)
         throw new Error('Could not open the reserved worktree. Check its Git branch and checkout, then retry.')
-      await this.record({ type: 'thread.worktree.set', sessionId, worktreePath: created.path, branch: created.branch }).catch(() => {
+      await this.record({ type: 'thread.worktree.set', sessionId, worktreePath: intent.path, branch: intent.branch }).catch(() => {
         throw new Error('Could not record the checkout. Retry the turn to recover it.')
       })
       return true
@@ -689,7 +713,15 @@ export class ProviderRuntime {
   private async commitIsolatedTurn(sessionId: number, turnId: number): Promise<void> {
     const session = this.options.engine.current.sessions.get(sessionId)
     if (!session?.worktreePath) return
-    await worktree.commitTurn(session.worktreePath, `harness: turn ${turnId}`)
+    const combined = session.combinedWorktree
+    if (!combined) {
+      await worktree.commitTurn(session.worktreePath, `harness: turn ${turnId}`)
+      return
+    }
+    for (const checkout of combined.checkouts) {
+      if (await openCombinedRepository(combined, checkout))
+        await worktree.commitTurn(checkout.path, `harness: turn ${turnId}`, nestedWorktrees(combined, checkout))
+    }
   }
 
   /**
@@ -705,6 +737,8 @@ export class ProviderRuntime {
     kind: 'turn-start' | 'turn-end' | 'manual',
   ): Promise<void> {
     const state = this.options.engine.current
+    // A checkpoint of the wrapper would omit the selected checkouts.
+    if (state.sessions.get(sessionId)?.combinedWorktree) return
     const workspacePath = this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
       : defaultWorkspacePath(state, sessionId)
@@ -828,6 +862,11 @@ export class ProviderRuntime {
     await running.instance.stop()
   }
 
+  async stopRemovedSession(sessionId: number): Promise<void> {
+    await this.worktreeCreations.get(sessionId)?.catch(() => {})
+    await this.stopSession(sessionId).catch(() => {})
+  }
+
   /** Tear every provider down. Called when the server shuts down. */
   async stopAll(): Promise<void> {
     await Promise.all([...this.sessions.keys()].map(id => this.stopSession(id)))
@@ -838,6 +877,7 @@ export interface DoomedWorktree {
   sessionId: number
   path: string
   repository: string
+  combined?: CombinedWorktreeIntent
 }
 
 /**
@@ -851,10 +891,12 @@ export interface DoomedWorktree {
 export function worktreesOfProfile(state: HarnessState, profileId: number): DoomedWorktree[] {
   const doomed: DoomedWorktree[] = []
   for (const session of state.sessions.values()) {
-    if (!session.worktreePath) continue
     const workspace = state.workspaces.get(session.workspaceId)
     if (!workspace || workspace.profileId !== profileId) continue
-    doomed.push({ sessionId: session.id, path: session.worktreePath, repository: workspace.path })
+    const intent = session.worktreeIntent
+    const combined = session.combinedWorktree ?? (intent && 'checkouts' in intent ? intent : undefined)
+    if (combined) doomed.push({ sessionId: session.id, path: combined.path, repository: workspace.path, combined })
+    else if (session.worktreePath) doomed.push({ sessionId: session.id, path: session.worktreePath, repository: workspace.path })
   }
   return doomed
 }
@@ -865,7 +907,7 @@ export async function releaseWorktrees(
 ): Promise<Array<{ sessionId: number, path: string, committed: string | null, removed: boolean }>> {
   const released = []
   for (const entry of doomed) {
-    const result = await worktree.release(entry.repository, entry.path)
+    const result = entry.combined ? await releaseCombinedWorktree(entry.combined) : await worktree.release(entry.repository, entry.path)
     released.push({ sessionId: entry.sessionId, path: entry.path, committed: result.committed, removed: result.removed })
   }
   return released
