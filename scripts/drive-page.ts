@@ -589,7 +589,81 @@ check('desktop docks Changes beside the conversation', await page.evaluate(() =>
   return Boolean(changes && conversation && conversation.width > 0 && changes.left >= conversation.right)
 }))
 await capture('changes-docked-desktop')
+const changesPane = page.getByRole('region', { name: 'Changes', exact: true })
+const changedNotes = changesPane.getByRole('region', { name: 'Patch for notes.txt', exact: true })
+await changedNotes.getByText('hello from the drive', { exact: true }).waitFor()
+const splitChanges = changesPane.getByRole('button', { name: 'Split', exact: true })
+const stackedChanges = changesPane.getByRole('button', { name: 'Stacked', exact: true })
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`changes-stacked-${width}`)
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+}
+await splitChanges.click()
+const splitReplacement = changedNotes.locator('[data-diff-row]').filter({ hasText: 'hello from the drive' })
+await splitReplacement.locator('[data-kind="deletion"]').waitFor()
+check('split diff aligns the original and replacement with the same line number',
+  await splitReplacement.locator('[data-kind="deletion"] [data-diff-line-number]:visible').innerText() === '1'
+  && await splitReplacement.locator('[data-kind="addition"] [data-diff-line-number]:visible').innerText() === '1')
+check('changed lines have readable contrast against their backgrounds', await splitReplacement.evaluate((row) => {
+  const canvas = document.createElement('canvas')
+  canvas.width = 1
+  canvas.height = 1
+  const context = canvas.getContext('2d')!
+  function luminance(color: string): number {
+    context.clearRect(0, 0, 1, 1)
+    context.fillStyle = color
+    context.fillRect(0, 0, 1, 1)
+    const channels = Array.from(context.getImageData(0, 0, 1, 1).data.slice(0, 3), component => component / 255)
+    const weights = [0.2126, 0.7152, 0.0722]
+    return channels.reduce((sum, channel, index) => sum + weights[index]! * (
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+    ), 0)
+  }
+  return [...row.querySelectorAll('[data-diff-cell]')].every((cell) => {
+    const foreground = luminance(getComputedStyle(cell.querySelector('code')!).color)
+    const background = luminance(getComputedStyle(cell).backgroundColor)
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) >= 4.5
+  })
+}))
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`changes-split-${width}`)
+  }
+}
+const diffLayoutObserver = await browserContext.newPage()
+await diffLayoutObserver.goto(page.url())
+await diffLayoutObserver.getByRole('button', { name: 'Show changes' }).click()
+await diffLayoutObserver.locator('[data-diff-layout="split"]').waitFor()
+await diffLayoutObserver.close()
+check('the split layout preference carries to a new client tab', true)
 await page.setViewportSize({ width: 390, height: 844 })
+const wrapLines = changesPane.getByRole('button', { name: 'Wrap diff lines' })
+await wrapLines.click()
+await page.waitForFunction(() => {
+  const patch = document.querySelector('[data-diff-lines]')
+  return Boolean(patch && patch.scrollWidth > patch.clientWidth)
+})
+check('an unwrapped split patch scrolls locally on a phone',
+  await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+await wrapLines.click()
+await stackedChanges.click()
+const collapseChanges = changesPane.getByRole('button', { name: 'Collapse all' })
+await collapseChanges.focus()
+await collapseChanges.press('Enter')
+await changedNotes.waitFor({ state: 'hidden' })
+check('collapsing the files leaves focus on the control',
+  await collapseChanges.evaluate(button => button === document.activeElement && button.getAttribute('aria-disabled') === 'true'))
+await changesPane.locator('[data-diff-file-toggle]').click()
+await changedNotes.waitFor()
+writeFileSync(join(dir, 'notes.txt'), 'hello after refreshing the patch\n')
+await changesPane.getByRole('button', { name: 'Refresh changes' }).click()
+await changedNotes.getByText('hello after refreshing the patch', { exact: true }).waitFor()
+check('a manual refresh reloads in-place edits and keeps the file expanded', true)
+writeFileSync(join(dir, 'notes.txt'), 'hello from the drive\n')
 const closeChanges = page.getByRole('button', { name: 'Close changes' })
 await closeChanges.waitFor()
 check('phone Changes owns the workspace while the patch stays visible', await page.locator('[data-diff-patch]').isVisible()

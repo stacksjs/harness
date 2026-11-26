@@ -308,7 +308,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           </button>
         @endif
         @if(draftProject || activeSession || draftWithoutProject)
-          <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" title="Workspace tools" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="(wideWorkspace() ? workspaceDetailsOpen() && !workspaceFilesOpen() : workspaceActionsOpen()) ? 'true' : 'false'" class="harness-icon-button">
+          <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" title="Workspace tools" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="(wideWorkspace() ? workspaceDetailsOpen() && !workspaceFilesOpen() && !diffOpen() : workspaceActionsOpen()) ? 'true' : 'false'" class="harness-icon-button">
             <span data-workspace-tools-icon hidden :hidden="!wideWorkspace()" class="size-4 i-hugeicons-sidebar-right" aria-hidden="true"></span>
             <span data-workspace-menu-icon :hidden="wideWorkspace()" class="size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
           </button>
@@ -819,29 +819,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           </div>
         @endif
       </div>
-    <section id="harness-changes" aria-labelledby="harness-changes-title" data-diff hidden :hidden="!diffOpen()">
-      <div data-diff-header class="flex gap-2 items-center justify-between">
-        <h2 id="harness-changes-title" class="font-semibold text-[13px]">Changes</h2>
-        <button type="button" ref="diffCloseBox" @click="toggleDiff" aria-label="Close changes" title="Close changes" class="harness-icon-button">
-          <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
-        </button>
-      </div>
-      <div data-diff-body>
-        <div data-diff-status role="status" class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
-        <ul data-diff-files class="mb-2 list-none">
-          <template :for="file in diffFiles" :key="file.path">
-            <li class="flex gap-[8px] items-center py-[1px] text-[12px]" :data-diff-file="file.path">
-              <span class="shrink-0 w-[64px] text-[11px] uppercase opacity-50" :text="file.status"></span>
-              {{-- :text assigns text, never markup — a path is data, and a repository can contain anything. --}}
-              <span class="font-mono truncate" :text="file.path"></span>
-              {{-- Untracked files have no counts; showing +0 -0 implies an empty file. --}}
-              <span class="shrink-0 ml-auto font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
-            </li>
-          </template>
-        </ul>
-        <pre data-diff-patch class="overflow-x-auto leading-[17px] text-[12px]" :text="diffPatch()"></pre>
-      </div>
-    </section>
+        @include('../partials/harness-workspace-diff')
         @if(hasWorkspaceFiles)
           @include('../partials/harness-workspace-files')
         @endif
@@ -1270,6 +1248,25 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const diffStatus = state('Loading…')
   const diffFiles = state([])
   const diffPatch = state('')
+  const diffTruncated = derived(() => /\n\n… truncated at \d+KB\n$/u.test(diffPatch()))
+  const diffHunks = state(new Map())
+  const diffFileLimits = state(new Map())
+  const diffLayout = useLocalStorage('harness.diffLayout', 'stacked')
+  const diffWrap = useLocalStorage('harness.diffWrap', true)
+  const diffRefresh = state(0)
+  const diffPageSize = 200
+  let diffTools = null
+  const diffDisplayFiles = derived(() => {
+    const hunks = diffHunks()
+    const limits = diffFileLimits()
+    const split = diffLayout() === 'split'
+    return diffFiles().map(file => {
+      const limit = limits.get(file.path) || 0
+      const fileHunks = hunks.get(file.path)
+      const view = limit && fileHunks ? diffTools.workspaceDiffRows(fileHunks, split, limit) : null
+      return { ...file, open: limit > 0, rows: view?.rows ?? [], more: view?.more ?? false }
+    })
+  })
   const changesWatcher = state(null)
   const changesVisibility = useDocumentVisibility()
 
@@ -2293,6 +2290,12 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       workspaceDetailsOpen.set(true)
       return
     }
+    if (diffOpen()) {
+      diffOpen.set(false)
+      diffTrigger = null
+      workspaceDetailsOpen.set(true)
+      return
+    }
     workspaceDetailsOpen.update(open => !open)
   }
 
@@ -3297,6 +3300,35 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     navigate(`/?profile=${encodeURIComponent(id)}`)
   }, { target: document })
 
+  function setDiffFileLimit(path, limit) {
+    diffFileLimits.update(current => {
+      const next = new Map(current)
+      if (limit) next.set(path, limit)
+      else next.delete(path)
+      return next
+    })
+  }
+
+  function toggleDiffFile(file) {
+    setDiffFileLimit(file.path, file.open ? 0 : diffPageSize)
+  }
+
+  function showMoreDiffRows(path) {
+    setDiffFileLimit(path, (diffFileLimits().get(path) || 0) + diffPageSize)
+  }
+
+  function refreshWorkspaceDiff() {
+    diffRefresh.update(value => value + 1)
+  }
+
+  function diffLineLabel(cell, side) {
+    if (!cell) return ''
+    if (diffLayout() === 'split') return side === 0 ? 'Before line ' + cell.before : 'After line ' + cell.after
+    if (cell.kind === 'deletion') return 'Removed line ' + cell.before
+    if (cell.kind === 'addition') return 'Added line ' + cell.after
+    return 'Before line ' + cell.before + ', after line ' + cell.after
+  }
+
   function showWorkspaceChanges(diff) {
     const files = diff.error ? [] : diff.files
     const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
@@ -3309,13 +3341,26 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       : diff.scope === 'session' ? 'No changes since this session started.' : 'No uncommitted changes.'
     batch(() => {
       diffStatus.set(status)
+      const patch = diff.error ? '' : diff.patch
+      const hunks = diffTools.parseWorkspacePatch(patch)
+      const previousFiles = diffFiles()
+      const limits = new Map(diffFileLimits())
+      const paths = new Set(files.map(file => file.path))
+      for (const path of limits.keys()) if (!paths.has(path)) limits.delete(path)
+      if (!previousFiles.length) {
+        const first = files.find(file => hunks.has(file.path))
+        if (first) limits.set(first.path, diffPageSize)
+      }
       diffFiles.set(files)
-      diffPatch.set(diff.error ? '' : diff.patch)
+      diffPatch.set(patch)
+      diffHunks.set(hunks)
+      diffFileLimits.set(limits)
     })
   }
 
   effect(() => {
     const watchChanges = changesWatcher()
+    diffRefresh()
     if (sessionId && watchChanges && diffOpen() && changesVisibility() === 'visible')
       return watchChanges(sessionId, showWorkspaceChanges, () => diffStatus.set('Could not refresh changes.'))
   })
@@ -4591,7 +4636,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, parseWorkspacePatch, workspaceDiffRows } = await import(codecUrl)
     const sidebar = sidebarRef.current
     const threadSidebar = sidebar && createThreadSidebar({
       root: sidebar,
@@ -4635,6 +4680,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       connection.open()
       return
     }
+    diffTools = { parseWorkspacePatch, workspaceDiffRows }
     changesWatcher.set(watchWorkspaceChanges)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu

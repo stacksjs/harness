@@ -1,0 +1,69 @@
+<section id="harness-changes" aria-labelledby="harness-changes-title" data-diff hidden :hidden="!diffOpen()" :data-diff-layout="diffLayout() === 'split' ? 'split' : 'stacked'" :data-diff-wrap="diffWrap()">
+  <header data-diff-header class="flex flex-wrap gap-1.5 items-center">
+    <h2 id="harness-changes-title" class="mr-auto font-semibold text-[13px]">Changes</h2>
+    <div data-diff-layout-controls role="group" aria-label="Diff layout">
+      <button type="button" @click="diffLayout.set('stacked')" :aria-pressed="diffLayout() === 'split' ? 'false' : 'true'">Stacked</button>
+      <button type="button" @click="diffLayout.set('split')" :aria-pressed="diffLayout() === 'split' ? 'true' : 'false'">Split</button>
+    </div>
+    <button type="button" data-diff-wrap-control @click="diffWrap.set(!diffWrap())" :aria-pressed="diffWrap() ? 'true' : 'false'" aria-label="Wrap diff lines" title="Wrap lines">Wrap</button>
+    <button type="button" @click="refreshWorkspaceDiff" aria-label="Refresh changes" title="Refresh changes" class="harness-icon-button">
+      <span class="inline-block size-4 i-hugeicons-refresh" aria-hidden="true"></span>
+    </button>
+    <button type="button" ref="diffCloseBox" @click="toggleDiff" aria-label="Close changes" title="Close changes" class="harness-icon-button">
+      <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+    </button>
+  </header>
+  <div data-diff-body>
+    <div data-diff-overview>
+      <p data-diff-status role="status" :text="diffStatus()">Loading…</p>
+      <button type="button" hidden :hidden="!diffFiles().length" :aria-disabled="diffFileLimits().size ? 'false' : 'true'" @click="diffFileLimits.set(new Map())">Collapse all</button>
+    </div>
+    <div data-diff-patch>
+      <p data-diff-empty-patch hidden :hidden="!diffTruncated()">This patch was truncated because it is too large.</p>
+      <ul data-diff-files class="list-none">
+        <template :for="file in diffDisplayFiles()" :key="file.path">
+          <li :data-diff-file="file.path">
+            <button type="button" data-diff-file-toggle :aria-expanded="file.open ? 'true' : 'false'" :title="file.path" @click="toggleDiffFile(file)">
+              <span class="shrink-0 size-4" :class="file.open ? 'i-hugeicons-arrow-down-01' : 'i-hugeicons-arrow-right-01'" aria-hidden="true"></span>
+              <span data-diff-file-kind :data-status="file.status" :text="file.status"></span>
+              <span class="min-w-0 font-mono truncate" :text="file.path"></span>
+              <span class="shrink-0 ml-auto font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
+            </button>
+            <template :if="file.open">
+              <div data-diff-file-content>
+                <p data-diff-empty-patch :hidden="file.rows.length > 0" :text="file.status === 'untracked' ? 'Untracked file' : 'No text patch available.'"></p>
+                <div data-diff-lines role="region" :aria-label="'Patch for ' + file.path" tabindex="0" :hidden="!file.rows.length">
+                  <div data-diff-grid>
+                    <div data-diff-side-headings hidden :hidden="diffLayout() !== 'split'"><span>Before</span><span>After</span></div>
+                    <template :for="row in file.rows" :key="row.id">
+                      <div data-diff-hunk :hidden="!row.header" :text="row.header || ''"></div>
+                      <div data-diff-row :hidden="Boolean(row.header)">
+                        <template :for="(cell, side) in row.cells">
+                          <div data-diff-cell :data-kind="cell?.kind || 'empty'">
+                            <span data-diff-line-number aria-hidden="true" :hidden="diffLayout() === 'split'" :text="cell?.before ?? ''"></span>
+                            <span data-diff-line-number aria-hidden="true" :text="diffLayout() === 'split' && side === 0 ? (cell?.before ?? '') : (cell?.after ?? '')"></span>
+                            <span data-diff-mark aria-hidden="true" :text="cell?.kind === 'addition' ? '+' : cell?.kind === 'deletion' ? '−' : ''"></span>
+                            <div data-diff-line-content>
+                              <span class="sr-only" :text="diffLineLabel(cell, side)"></span>
+                              <code :text="cell?.text ?? ''"></code>
+                              <span data-diff-newline-note :hidden="!cell?.newlineNote" :text="cell?.newlineNote ?? ''"></span>
+                            </div>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+                <button type="button" data-diff-more :hidden="!file.more" @click="showMoreDiffRows(file.path)">Show more lines</button>
+              </div>
+            </template>
+          </li>
+        </template>
+      </ul>
+      <details data-diff-raw hidden :hidden="!diffPatch()">
+        <summary>Raw patch</summary>
+        <pre :text="diffPatch()"></pre>
+      </details>
+    </div>
+  </div>
+</section>
