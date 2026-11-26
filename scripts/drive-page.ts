@@ -3738,6 +3738,85 @@ await harness.engine.dispatch({ id: ledgerThread, at: Date.now(), command: { typ
 const ledgerPath = `/s/${derivedId(ledgerThread)}`
 await page.setViewportSize({ width: 1440, height: 900 })
 await page.goto(new URL(ledgerPath, baseUrl).href)
+const previewSite = Bun.serve({
+  hostname: '127.0.0.1', port: 0,
+  fetch(request) {
+    const path = new URL(request.url).pathname
+    if (path === '/counter.js') return new Response("const button = document.querySelector('button'); button.disabled = false; button.addEventListener('click', () => { button.textContent = 'Updated' })", { headers: { 'content-type': 'text/javascript' } })
+    const heading = path === '/second' ? 'Second preview page' : 'Local development preview'
+    return new Response(`<h1>${heading}</h1><button disabled>Update</button><script type="module" src="/counter.js"></script>`, { headers: { 'content-type': 'text/html' } })
+  },
+})
+try {
+  const browserPane = page.getByRole('region', { name: 'Browser', exact: true })
+  const previewTrigger = page.getByRole('button', { name: 'Open workspace browser' })
+  const previewAddress = browserPane.getByRole('textbox', { name: 'Preview address' })
+  const activeFrame = browserPane.frameLocator('iframe:not([hidden])')
+  const loopback = `127.0.0.1:${previewSite.port}`
+  const visitPreview = async (address: string) => {
+    await previewAddress.fill(address)
+    await previewAddress.press('Enter')
+  }
+  await previewTrigger.click()
+  await previewAddress.waitFor()
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Preview address')
+  check('the preview address uses the active Harness appearance',
+    await previewAddress.evaluate(input => getComputedStyle(input).backgroundColor === 'rgba(0, 0, 0, 0)'))
+  await capture('workspace-browser-empty')
+  await visitPreview(loopback)
+  await activeFrame.getByRole('heading', { name: 'Local development preview' }).waitFor()
+  await activeFrame.getByRole('button', { name: 'Update' }).click()
+  await activeFrame.getByRole('button', { name: 'Updated' }).waitFor()
+  check('a live local app can run its own frontend modules in the Browser pane', true)
+  await browserPane.getByRole('button', { name: 'New browser tab' }).click()
+  await visitPreview(`${loopback}/second`)
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  await browserPane.locator('[data-preview-select="1"]').click()
+  await activeFrame.getByRole('button', { name: 'Updated' }).waitFor()
+  check('switching browser tabs preserves the first page’s runtime', true)
+  await visitPreview(`${loopback}/second`)
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  await browserPane.getByRole('button', { name: 'Browser back' }).click()
+  await activeFrame.getByRole('heading', { name: 'Local development preview' }).waitFor()
+  await browserPane.getByRole('button', { name: 'Browser forward' }).click()
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  const openExternally = browserPane.getByRole('link', { name: 'Open preview in browser' })
+  check('browser back and forward restore entered addresses with an isolated pop-out link',
+    await openExternally.getAttribute('href') === `http://${loopback}/second` && await openExternally.getAttribute('rel') === 'noopener noreferrer')
+  await visitPreview(new URL(ledgerPath, baseUrl).href)
+  await browserPane.getByRole('alert').getByText('Open Harness in its main window.').waitFor()
+  check('the browser pane rejects Harness itself and leaves the current preview in place',
+    await activeFrame.getByRole('heading', { name: 'Second preview page' }).isVisible())
+  await capture('workspace-browser-address-error')
+  await browserPane.getByRole('button', { name: 'Reload preview' }).click()
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    check(`browser controls and preview fit at ${width}×${height}`, await browserPane.evaluate((pane) => {
+      const bounds = pane.getBoundingClientRect()
+      const input = pane.querySelector('input')?.getBoundingClientRect()
+      const exit = pane.querySelector('[aria-label="Close browser pane"]')?.getBoundingClientRect()
+      return bounds.left >= 0 && bounds.right <= innerWidth && bounds.height > 200 && document.documentElement.scrollWidth === innerWidth
+        && Boolean(input && exit && input.width >= 60 && exit.right <= innerWidth)
+    }))
+    await capture(`workspace-browser-${width}x${height}`)
+  }
+  const restoredPage = await page.reload()
+  await page.getByRole('button', { name: 'Workspace actions' }).click()
+  await page.locator('[data-preview-toggle]').click()
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  check('phone workspace actions restore both browser tabs after reloading the thread',
+    await browserPane.locator('[data-preview-select]').count() === 2
+    && restoredPage?.headers()['x-frame-options'] === 'DENY'
+    && restoredPage?.headers()['content-security-policy'] === "frame-ancestors 'none'")
+  await browserPane.getByRole('button', { name: /^Close tab:/u }).last().click()
+  check('closing a saved browser tab keeps the selected page available', await browserPane.locator('[data-preview-select]').count() === 1)
+  await page.keyboard.press('Escape')
+  await browserPane.waitFor({ state: 'hidden' })
+  await page.waitForFunction(() => document.activeElement?.hasAttribute('data-workspace-actions-toggle'))
+  check('closing the phone browser returns focus to Workspace actions', true)
+  await page.setViewportSize({ width: 1440, height: 900 })
+}
+finally { previewSite.stop(true) }
 let ledgerReads = 0
 page.on('request', (request) => {
   if (new URL(request.url()).pathname === `${ledgerPath}/diff`) ledgerReads++
