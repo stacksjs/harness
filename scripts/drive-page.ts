@@ -3870,16 +3870,21 @@ await capture('changes-context-linked-phone')
 
 // Both repositories use the same path so a stale patch or link cannot pass by filename.
 const multiRepoProject = join(driveRoot, 'project-repositories')
+const multiRepoGit = {
+  ...process.env,
+  GIT_AUTHOR_DATE: '2026-06-01T12:00:00Z',
+  GIT_COMMITTER_DATE: '2026-06-01T12:00:00Z',
+}
 for (const [folder, label] of [['api', 'API'], ['packages/web', 'Web']] as const) {
   const path = join(multiRepoProject, folder)
   mkdirSync(path, { recursive: true })
   writeFileSync(join(path, 'shared.txt'), 'Shared baseline\n')
   execFileSync('git', ['init', '-qb', 'main'], { cwd: path })
   execFileSync('git', ['add', 'shared.txt'], { cwd: path })
-  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Shared baseline'], { cwd: path })
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Shared baseline'], { cwd: path, env: multiRepoGit })
   execFileSync('git', ['switch', '-qc', 'review/fixture'], { cwd: path })
   writeFileSync(join(path, 'shared.txt'), `Shared baseline\n${label} in commit\n`)
-  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', `${label} review fixture`], { cwd: path })
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', `${label} review fixture`], { cwd: path, env: multiRepoGit })
   writeFileSync(join(path, 'shared.txt'), `Shared baseline\n${label} in commit\n${label} working copy\n`)
 }
 writeFileSync(join(multiRepoProject, 'fixture.code-workspace'), '{"folders":[{"name":"API service","path":"api"},{"name":"Web frontend","path":"packages/web"}]}')
@@ -3928,6 +3933,14 @@ check('the repository link restores the right line and selection on phones',
   && await repoPicker.evaluate(element => element.getBoundingClientRect().height >= 44)
   && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
 await capture('project-repositories-linked-phone')
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  const picker = await repoPicker.boundingBox()
+  check(`the project repository picker stays usable at ${width}×${height}`,
+    Boolean(picker && picker.x >= 0 && picker.x + picker.width <= width
+      && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth)))
+  await capture(`project-repositories-linked-${width}x${height}`)
+}
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
