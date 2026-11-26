@@ -5296,6 +5296,145 @@ check('sending from a scratch thread keeps the fresh draft projectless and on th
   && harness.engine.current.sessions.get(resumedBackgroundId)?.turns.filter(turn => turn.prompt === scratchFollowUp).length === 1)
 await backgroundContext.close()
 
+const modelBatchContext = await browser.newContext({ colorScheme, reducedMotion })
+const modelBatchPage = await modelBatchContext.newPage()
+modelBatchPage.on('pageerror', error => pageErrors.push(error.message))
+const batchEditor = modelBatchPage.getByRole('textbox', { name: 'Message', exact: true })
+const batchPicker = modelBatchPage.locator('[data-model-picker-trigger]')
+const batchDialog = modelBatchPage.getByRole('dialog', { name: 'Agent and model' })
+const batchNotice = modelBatchPage.locator('[data-model-batch]')
+const batchText = 'Background fixture: compare two models'
+const modelBatchIds = new Map<string, string>()
+const modelBatchTurns = new Map<number, string[]>()
+let lostBatchReceipt = false
+await modelBatchPage.routeWebSocket('**/ws', (client) => {
+  const upstream = client.connectToServer()
+  client.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (frame?.t === 'dispatch') {
+      const { command, id } = frame.envelope
+      if (command.type === 'session.create' && ['fixture-fast', 'fixture-balanced'].includes(command.model))
+        modelBatchIds.set(command.model, id)
+      if (command.type === 'session.turn.start' && command.text === batchText) {
+        const attempts = modelBatchTurns.get(command.sessionId) ?? []
+        modelBatchTurns.set(command.sessionId, [...attempts, id])
+      }
+    }
+    upstream.send(message)
+  })
+  upstream.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (!lostBatchReceipt && frame?.t === 'dispatched' && frame.id === modelBatchIds.get('fixture-balanced') + '_first') {
+      lostBatchReceipt = true
+      return
+    }
+    client.send(message)
+  })
+})
+await modelBatchPage.setViewportSize({ width: 1440, height: 900 })
+await modelBatchPage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
+await modelBatchPage.goto(backgroundDraftUrl)
+await batchPicker.click()
+await batchDialog.getByRole('button', { name: 'Codex · Catalog fixture', exact: true }).click()
+const batchFast = batchDialog.getByRole('button', { name: 'Fixture Fast', exact: true })
+const batchBalanced = batchDialog.getByRole('button', { name: 'Fixture Balanced', exact: true })
+const batchCompare = batchDialog.getByRole('button', { name: 'Compare with Fixture Balanced' })
+await batchCompare.waitFor()
+await batchFast.click()
+await batchDialog.getByRole('button', { name: 'High', exact: true }).click()
+await batchBalanced.click({ modifiers: ['Shift'] })
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').nth(1).waitFor()
+check('Shift-click selects two models in a Git project', await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').count() === 2)
+await batchCompare.click()
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').first().waitFor()
+check('the compare button removes the second model', await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').count() === 1)
+await batchCompare.click()
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').nth(1).waitFor()
+const batchSearch = batchDialog.getByRole('combobox', { name: 'Search models' })
+await batchSearch.fill('Fixture Balanced')
+await batchSearch.press('Shift+Enter')
+await batchDialog.locator('[data-draft-model-row][aria-selected="false"]').waitFor()
+check('Shift+Enter toggles a comparison without moving focus out of the model search',
+  await batchSearch.evaluate(search => search === document.activeElement))
+await batchCompare.click()
+await batchSearch.fill('')
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').nth(1).waitFor()
+for (const [width, height] of workspaceViewports) {
+  await modelBatchPage.setViewportSize({ width, height })
+  const fitted = await modelBatchPage.waitForFunction(() => {
+    const box = document.querySelector('[data-draft-model-dialog]')?.getBoundingClientRect()
+    return !!box && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight
+  }, undefined, { timeout: 2000 }).then(() => true, () => false)
+  check(`multi-model selection fits at ${width}×${height}`, fitted)
+  await capture(`workspace-model-batch-picker-${width}x${height}`, modelBatchPage)
+}
+await batchDialog.getByRole('button', { name: 'Done', exact: true }).click()
+check('the mobile composer shows the compact model count with both names accessible',
+  await batchPicker.getByText('2 models', { exact: true }).isVisible()
+  && (await batchPicker.getAttribute('aria-label'))?.includes('Fixture Fast, Fixture Balanced') === true)
+await modelBatchPage.locator('[data-draft-worktree] summary').click()
+const batchMode = modelBatchPage.getByLabel('Run in', { exact: true })
+await batchMode.locator('option[value="worktree"]').waitFor({ state: 'attached' })
+check('a comparison forces one new worktree per model', await batchMode.inputValue() === 'worktree' && await batchMode.isDisabled())
+await modelBatchPage.getByRole('textbox', { name: 'Base branch', exact: true }).fill('background-fixture-base')
+await modelBatchPage.locator('[data-draft-worktree] summary').click()
+await batchEditor.fill(batchText)
+await modelBatchPage.locator('[data-composer-file-input]').setInputFiles({
+  name: 'comparison-notes.txt',
+  mimeType: 'text/plain',
+  buffer: Buffer.from('Both model turns receive this attachment.'),
+})
+await modelBatchPage.locator('[data-send]:enabled').waitFor()
+await batchEditor.press('Enter')
+await modelBatchPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === '')
+check('the composer stays open and accepts a new message during multi-model send', modelBatchPage.url() === backgroundDraftUrl)
+await batchEditor.fill('Keep this next draft.')
+await batchNotice.getByRole('button', { name: 'Retry pending' }).waitFor({ timeout: 12_000 })
+check('a lost receipt keeps only the affected model pending', lostBatchReceipt
+  && await batchNotice.getByRole('link', { name: 'Fixture Fast' }).count() === 1
+  && await batchNotice.getByRole('link', { name: 'Fixture Balanced' }).count() === 0)
+await modelBatchPage.reload()
+await modelBatchPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Keep this next draft.')
+await batchNotice.getByRole('button', { name: 'Retry pending' }).click()
+await batchNotice.getByRole('link', { name: 'Fixture Balanced' }).waitFor()
+const batchThreads = () => [...harness.engine.current.sessions.values()].filter(thread => thread.turns.some(turn => turn.prompt === batchText))
+for (let attempt = 0; attempt < 160 && batchThreads().filter(thread => thread.turns.at(-1)?.status === 'complete').length < 2; attempt++) await Bun.sleep(50)
+const finishedBatchThreads = batchThreads()
+check('the two models run the same prompt and file in independent checkouts',
+  finishedBatchThreads.length === 2
+  && finishedBatchThreads.every(thread => thread.turns.length === 1 && thread.turns[0]?.status === 'complete'
+    && thread.turns[0].attachments?.[0]?.name === 'comparison-notes.txt' && thread.providerInstanceId === 4 && thread.worktreePath)
+  && new Set(finishedBatchThreads.map(thread => thread.worktreePath)).size === 2
+  && finishedBatchThreads.find(thread => thread.model === 'fixture-fast')?.codexTurnOptions?.effort === 'high'
+  && finishedBatchThreads.some(thread => thread.model === 'fixture-balanced'))
+const batchFiles = await Promise.all(finishedBatchThreads.map(thread => {
+  const file = thread.turns[0]?.attachments?.[0]
+  return file ? fetch(`${baseUrl}/composer-attachments/${file.id}?session=${thread.id}`).then(response => response.text()) : null
+}))
+check('both threads can download the original attachment bytes',
+  batchFiles.length === 2 && batchFiles.every(contents => contents === 'Both model turns receive this attachment.'))
+check('only the pending model retries and the new draft survives',
+  await batchEditor.inputValue() === 'Keep this next draft.'
+  && await batchNotice.getByRole('link').count() === 2
+  && [...modelBatchTurns.values()].map(attempts => attempts.length).sort().join(',') === '1,2'
+  && [...modelBatchTurns.values()].every(attempts => new Set(attempts).size === 1))
+for (const [width, height] of workspaceViewports) {
+  await modelBatchPage.setViewportSize({ width, height })
+  await capture(`workspace-model-batch-result-${width}x${height}`, modelBatchPage)
+}
+await batchPicker.click()
+await batchDialog.getByRole('button', { name: 'Codex · Catalog fixture', exact: true }).click()
+await batchFast.click()
+await batchDialog.getByRole('button', { name: 'Done', exact: true }).click()
+await modelBatchPage.locator('[data-draft-worktree] summary').click()
+check('a regular model click exits comparison and restores the selected checkout mode',
+  await batchMode.inputValue() === 'project' && await batchMode.isEnabled())
+await modelBatchPage.goto(`${baseUrl}/?project=none&profile=${providerProfileId}`)
+await batchPicker.click()
+await batchDialog.getByRole('button', { name: 'Provider default', exact: true }).waitFor()
+check('projectless drafts offer single-model sends', await batchDialog.locator('[data-compare-model]:visible').count() === 0)
+await modelBatchContext.close()
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()
