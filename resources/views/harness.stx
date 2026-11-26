@@ -145,6 +145,11 @@ export const initialCompactedTurn = liveTurn?.contextCompacted ? liveTurn.id : 0
 export const initialInterrupted = liveTurn?.status === 'interrupted'
 export const initialSteerable = liveTurn?.steerable === true
 export const initialInputActivity = liveTurn?.inputRequests || []
+export const initialRewind = activeSession?.pendingRewind ?? 0
+export const initialRewindNotice = activeSession?.rewindNotice || ''
+export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => turn.checkpointId).map(turn => [turn.id, {
+  id: turn.checkpointId, resetsStaging: turn.checkpointResetsStaging,
+}]))
 </script>
 
 {{--
@@ -450,9 +455,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
               data-revert="{{ turn.checkpointId }}"
               class="mt-2 px-2 py-[2px] text-[11px] border border-black/10 rounded-[6px] dark:border-white/15 opacity-60 hover:opacity-100"
               :hidden="uiBusy()"
-              :disabled="revertingId() === {{ turn.checkpointId }}"
+              :disabled="Boolean(revertingId()) || !sessionOnline()"
               :text="revertingId() === {{ turn.checkpointId }} ? 'Reverting…' : 'Revert this turn'"
-              @click="revertTurn({{ turn.checkpointId }})"
+              @click="revertTurn({{ turn.id }})"
             >Revert this turn</button>
           @endif
         </article>
@@ -556,9 +561,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
               data-revert="{{ liveTurn.checkpointId }}"
               class="mt-2 px-2 py-[2px] text-[11px] border border-black/10 rounded-[6px] dark:border-white/15 opacity-60 hover:opacity-100"
               :hidden="uiBusy()"
-              :disabled="revertingId() === {{ liveTurn.checkpointId }}"
+              :disabled="Boolean(revertingId()) || !sessionOnline()"
               :text="revertingId() === {{ liveTurn.checkpointId }} ? 'Reverting…' : 'Revert this turn'"
-              @click="revertTurn({{ liveTurn.checkpointId }})"
+              @click="revertTurn({{ liveTurn.id }})"
             >Revert this turn</button>
           @endif
         </article>
@@ -614,6 +619,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || uiState() !== 'running' || runningTurnId() !== turn.id" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           <div class="transcript-markdown" data-response></div>
           <p data-turn-interrupted hidden :hidden="!turn.interrupted" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
+          <button type="button" hidden :data-revert="rewindCheckpoints()[turn.id]?.id"
+            :hidden="!rewindCheckpoints()[turn.id] || uiBusy()" :disabled="Boolean(revertingId()) || !sessionOnline()"
+            class="harness-response-action" @click="revertTurn(turn.id)"
+            :text="revertingId() && revertingId() === rewindCheckpoints()[turn.id]?.id ? 'Reverting…' : 'Revert this turn'">Revert this turn</button>
           <button type="button" data-open-turn-diff aria-controls="harness-changes"
             hidden :hidden="!turnDiffs()[turn.id]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String(turn.id) ? 'true' : 'false'"
             @click="openTurnDiff(turn.id, $event)" class="harness-response-action">
@@ -655,6 +664,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(activeSession)
+      <p data-rewind-status role="status" @if(!initialRewind && !initialRewindNotice)hidden@endif :hidden="!revertingId() && !rewindNotice()" :text="revertingId() ? 'Restoring files…' : rewindNotice()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300"></p>
       <p data-worktree-setup role="status" @if(!initialWorktreeSetup || sessionState !== 'running')hidden@endif :hidden="!worktreeSetup() || !uiBusy()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300">Preparing the project worktree</p>
       <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
     @endif
@@ -2398,7 +2408,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const pairCode = state('')
   // The checkpoint currently being restored; its button reads this for its
   // label and disabled state.
-  const revertingId = state(0)
+  const revertingId = state(initialRewind)
+  const rewindNotice = state(initialRewindNotice)
+  const rewindCheckpoints = state(initialRewindCheckpoints)
 
   // A global shortcut, so harness is reachable without finding its window.
   //
@@ -2452,47 +2464,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // These dispatch over the socket like every other command, then reload —
   // the sidebar is server-rendered, and re-rendering it here would be a second
   // implementation of what the server already does.
-  // Resolved when the server reports a restore finished. A list because the
-  // socket handler is registered separately from the button that is waiting.
-  const revertWaiters = []
-
-  // Reverting throws away work on disk, so it asks first. The confirmation
-  // names what will happen rather than saying "are you sure": the destructive
-  // part is the files created since, which is exactly what people forget.
-  // Each revert button calls this through its own @click, with its checkpoint.
-  async function revertTurn(checkpointId) {
-    if (!checkpointId || !sessionId) return
+  async function revertTurn(turnId) {
+    const checkpoint = rewindCheckpoints()[turnId]
+    if (!checkpoint || !sessionId || revertingId()) return
+    const detail = checkpoint.resetsStaging ? ' Git staging will reset in the recorded repositories.' : ''
     const confirmed = await stxConfirm(
-      'Put the workspace back to before this turn? Files the agent created since will be deleted.',
+      'Restore files from before this turn? Changes made since then, including new files, will be removed.' + detail,
       { type: 'warning', confirmText: 'Revert', cancelText: 'Keep my files' },
     )
-    if (!confirmed) return
-
-    revertingId.set(checkpointId)
-
-    // Waits for `checkpoint.restored`, not for the dispatch ack.
-    // `checkpoint.reverted` only means the revert was accepted; the git work
-    // runs after it, so reloading on the ack showed a half-restored tree —
-    // files rewritten, files the agent added not yet removed.
-    const restored = new Promise((resolve) => {
-      revertWaiters.push(resolve)
-      // A revert that never reports back should still let go of the page.
-      useTimeout(resolve, 15000)
-    })
-
-    try {
-      await sendCommand({ type: 'session.checkpoint.revert', sessionId, checkpointId })
-    }
+    if (!confirmed || revertingId()) return
+    revertingId.set(checkpoint.id)
+    rewindNotice.set('')
+    try { await sendCommand({ type: 'session.checkpoint.revert', sessionId, checkpointId: checkpoint.id }) }
     catch (error) {
       revertingId.set(0)
-      stxAlert(error.message)
-      return
+      rewindNotice.set(error.message)
     }
-    await restored
-
-    // Reloaded rather than patched: the diff, the turn list and the workspace
-    // have all moved, and re-deriving that here would be a second renderer.
-    refresh()
   }
 
   // Set by the transcript's socket once it opens, so a sidebar command reuses
@@ -5448,9 +5435,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         }
         paintTranscript(updateTranscriptMarkdown)
       }
-      else if (payload.type === 'checkpoint.restored') {
-        // The workspace is actually back now.
-        while (revertWaiters.length > 0) revertWaiters.shift()()
+      else if (payload.type === 'checkpoint.captured' && payload.kind === 'turn-start') {
+        rewindCheckpoints.update(points => ({ ...points, [payload.turnId]: { id: payload.checkpointId, resetsStaging: Boolean(payload.repositories) } }))
+      }
+      else if (payload.type === 'checkpoint.reverted') {
+        revertingId.set(payload.checkpointId)
+        rewindNotice.set('')
+      }
+      else if (payload.type === 'checkpoint.restored' || payload.type === 'checkpoint.restore-failed') {
+        revertingId.set(0)
+        rewindNotice.set(payload.type === 'checkpoint.restore-failed' ? payload.message : payload.skipped?.length
+          ? `Rewind finished. No earlier checkpoint for ${payload.skipped.join(', ')}.` : 'Rewind finished.')
         if (diffOpen()) refreshWorkspaceDiff()
       }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {

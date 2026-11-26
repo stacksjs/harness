@@ -3716,6 +3716,9 @@ await ledgerPanel.getByRole('option', { name: /Branch-only marker/ }).waitFor({ 
 await ledgerPanel.getByText('Branch evidence', { exact: true }).waitFor()
 check('commit review excludes a dirty file while rendering the selected patch',
   await ledgerPanel.locator('[data-diff-file="ledger.txt"]').count() === 0)
+const readsWhileCommitOpen = ledgerReads
+await page.waitForTimeout(2200)
+check('a fixed commit remains visible without periodic Git requests', ledgerReads === readsWhileCommitOpen)
 await page.evaluate(() => {
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
@@ -4015,6 +4018,35 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
     && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
   await capture(`project-recorded-turn-${width}x${height}`)
 }
+
+const apiCheckout = join(multiRepoProject, 'api')
+writeFileSync(join(apiCheckout, 'shared.txt'), 'A staged change after the first turn.\n')
+execFileSync('git', ['add', 'shared.txt'], { cwd: apiCheckout })
+const lateRepository = join(multiRepoProject, 'late[repo]')
+mkdirSync(lateRepository)
+execFileSync('git', ['init', '-qb', 'main'], { cwd: lateRepository })
+writeFileSync(join(lateRepository, 'late.txt'), 'Keep the repository without a checkpoint.')
+await ledgerPanel.getByRole('button', { name: 'Close changes' }).click()
+const rewindFirstTurn = page.getByRole('button', { name: 'Revert this turn', exact: true }).first()
+await rewindFirstTurn.click()
+await page.getByText(/Git staging will reset in the recorded repositories/u).waitFor()
+await capture('project-rewind-confirm-phone')
+const cancelRewind = page.getByRole('button', { name: 'Keep my files', exact: true })
+await cancelRewind.click()
+await cancelRewind.waitFor({ state: 'hidden' })
+check('cancelling rewind keeps the staged change', execFileSync('git', ['show', ':shared.txt'], { cwd: apiCheckout, encoding: 'utf8' }).includes('A staged change'))
+await page.setViewportSize({ width: 1440, height: 900 })
+await rewindFirstTurn.click()
+await capture('project-rewind-confirm-desktop')
+await page.getByRole('button', { name: 'Revert', exact: true }).click()
+await page.locator('[data-rewind-status]').filter({ hasText: 'Rewind finished. No earlier checkpoint for late[repo].' }).waitFor()
+check('rewind restores both working copies, resets the selected index, and reports the new repository',
+  readFileSync(join(apiCheckout, 'shared.txt'), 'utf8') === 'Shared baseline\nAPI in commit\nAPI working copy\n'
+  && readFileSync(join(multiRepoProject, 'packages/web/shared.txt'), 'utf8') === 'Shared baseline\nWeb in commit\nWeb working copy\n'
+  && execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: apiCheckout, encoding: 'utf8' }) === ''
+  && readFileSync(join(lateRepository, 'late.txt'), 'utf8') === 'Keep the repository without a checkpoint.')
+await capture('project-rewind-finished-desktop')
+rmSync(lateRepository, { recursive: true })
 
 if (process.platform !== 'win32') {
   writeFileSync(join(multiRepoProject, 't3.json'), JSON.stringify({

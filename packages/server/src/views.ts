@@ -220,6 +220,8 @@ export function viewProps(state: HarnessState, options: {
           } : undefined,
           state: active.state,
           lastError: active.state === 'failed' ? active.lastError : undefined,
+          pendingRewind: active.pendingRewind?.checkpointId ?? 0,
+          rewindNotice: active.rewindNotice ?? '',
           worktreeSetup: Boolean(active.worktreeIntent && 'checkouts' in active.worktreeIntent && active.worktreeIntent.layout),
           // Which agent this session runs — shown in the header and preselected
           // in the composer's picker, so switching has a visible ground truth.
@@ -268,7 +270,8 @@ export function viewProps(state: HarnessState, options: {
             // The snapshot taken before this turn ran, which is what "undo
             // this turn" reverts to. 0 when there is none — a workspace that
             // is not a repository, or a turn from before checkpointing.
-            checkpointId: checkpointStarts.get(turn.id)?.repositories ? 0 : checkpointStarts.get(turn.id)?.id ?? 0,
+            checkpointId: activeWorkspaceTrusted ? checkpointStarts.get(turn.id)?.id ?? 0 : 0,
+            checkpointResetsStaging: Boolean(checkpointStarts.get(turn.id)?.repositories),
             reviewRepositories: activeWorkspaceTrusted && turn.status === 'complete'
               ? checkpointReviewRepositories(checkpointStarts.get(turn.id), checkpointEnds.get(turn.id)) : [],
             toolCalls: turn.toolCalls.map(call => ({
