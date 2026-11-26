@@ -119,6 +119,7 @@ type ClientFrame =
   | { t: 'unsubscribe', sessionId: number }
   | { t: 'watch-pins', profileId: number }
   | { t: 'watch-sidebar', profileId: number }
+  | { t: 'read-settings' }
   | { t: 'ping' }
   | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number, projectScriptId?: string }
   | { t: 'term-input', termId: number, data: string }
@@ -1109,6 +1110,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     switch (frame?.t) {
       case 'ping':
         send(socket, { t: 'pong' })
+        return
+
+      case 'read-settings':
+        send(socket, { t: 'host-settings', settings: engine.current.settings })
         return
 
       case 'watch-pins':

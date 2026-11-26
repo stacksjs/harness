@@ -1,4 +1,4 @@
-import type { Command, InputAnswer, WorktreeSelection } from '@harness/contract'
+import type { Command, HostSettings, InputAnswer, WorktreeSelection } from '@harness/contract'
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance, StartTurnInput } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { decode, encode } from '@harness/contract'
+import { decode, defaultHostSettings, encode } from '@harness/contract'
 import { ChatGptCredentialStore, CodexDriver, PREVIEW_THREAD_ENV } from '@harness/drivers'
 import { derivedId } from '@harness/engine'
 import { addSavedProvider, removeSavedProvider } from '../src/provider-instances'
@@ -127,6 +127,12 @@ class Client {
 
   waitForRejection(id: string): Promise<unknown> {
     return this.waitForFrame(frame => frame?.t === 'rejected' && frame.id === id, 3000)
+  }
+
+  async readSettings(): Promise<HostSettings | null> {
+    this.send({ t: 'read-settings' })
+    const frame = await this.waitForFrame(frame => frame?.t === 'host-settings', 3000)
+    return frame?.settings ?? null
   }
 
   async subscribeCreatedSession(id: string): Promise<number> {
@@ -3316,10 +3322,21 @@ describe('host settings belong to the host', () => {
     const { driver } = fakeDriver([])
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
 
-    const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
-    first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' } } } })
+    const endpoint = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(endpoint)
+    const observer = await Client.connect(endpoint)
+    const changes = {
+      defaultDriver: 'codex',
+      followUpBehavior: 'steer',
+      terminalShell: 'den',
+      snoozePresets: [{ kind: 'at', day: 'friday', time: '16:15' }, { kind: 'after', minutes: 45 }],
+    } as const
+    const expected = { ...defaultHostSettings, ...changes }
+    first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes } } })
     expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    expect(harness.engine.current.settings).toEqual(expected)
+    expect(await observer.waitFor('settings.updated')).toEqual({ type: 'settings.updated', changes })
+    expect(await observer.readSettings()).toEqual(expected)
 
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
@@ -3340,13 +3357,16 @@ describe('host settings belong to the host', () => {
     }
     expect(page).toMatch(/defaultDriver\\?["']\s*:\s*\\?["']codex/)
     expect(page).toMatch(/terminalShell\\?["']\s*:\s*\\?["']den/)
+    observer.close()
     first.close()
     harness.stop()
 
     // The setting is in the log, so a fresh process over the same database
     // still has it.
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    const reconnected = await Client.connect(endpoint)
+    expect(await reconnected.readSettings()).toEqual(expected)
+    reconnected.close()
     harness.stop()
 
     // A different host, which is a different log: independent by construction
@@ -3354,7 +3374,7 @@ describe('host settings belong to the host', () => {
     const otherDatabase = join(dir, 'other.sqlite')
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    expect(harness.engine.current.settings).toEqual(defaultHostSettings)
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {
