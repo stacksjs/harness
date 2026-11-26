@@ -2197,11 +2197,15 @@ check('assistant markup stays text while Markdown code renders',
 check('reloading mid-turn preserves literal entities when streaming resumes',
   await transcript.locator('p code').last().textContent() === '&lt;')
 await jump.click()
+await jump.waitFor({ state: 'hidden' })
+await page.waitForFunction(() => {
+  const pane = document.querySelector('[data-transcript]')
+  return pane && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16
+})
+check('jump returns to the latest response and restores transcript focus', await transcript.evaluate(element => element.ownerDocument.activeElement === element))
 const copy = transcript.getByRole('button', { name: 'Copy code' })
 await copy.click()
 check('the copy action preserves the fenced code', await page.locator('body').getAttribute('data-fixture-clipboard') === 'const result = 42\nconst format = "{{ value }}"\n')
-check('jump returns to the latest response', await jump.isHidden()
-  && await transcript.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight < 16))
 await capture('transcript-markdown-mobile')
 await page.setViewportSize({ width: 1280, height: 800 })
 await page.reload()
@@ -4039,12 +4043,14 @@ check('the streamed turn lists each repository and the recorded line counts', aw
 for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
   await page.setViewportSize({ width, height })
   await changedFilesForTurn.scrollIntoViewIfNeeded()
+  await webChange.scrollIntoViewIfNeeded()
   check(`transcript file rows fit at ${width}×${height}`, await webChange.evaluate(el => {
     const bounds = el.getBoundingClientRect()
     const transcript = el.closest('[data-transcript]')?.getBoundingClientRect()
     const jump = document.querySelector('[data-jump-to-latest]:not([hidden])')?.getBoundingClientRect()
     return bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
-      && (!jump || Boolean(transcript && jump.top >= transcript.bottom))
+      && Boolean(transcript && bounds.top >= transcript.top && bounds.bottom <= transcript.bottom + 1
+        && (!jump || jump.top >= transcript.bottom))
   }))
   await capture(`turn-changed-files-${width}x${height}`)
 }

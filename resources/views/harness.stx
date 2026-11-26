@@ -4159,10 +4159,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const transcript = transcriptRef.current
     if (!transcript) return
     followingTranscript.set(true)
-    void nextTick(() => {
-      transcript.scrollTop = transcript.scrollHeight
-      transcript.focus({ preventScroll: true })
-    })
+    transcript.scrollTop = transcript.scrollHeight
+    transcript.focus({ preventScroll: true })
+    void nextTick(() => { transcript.scrollTop = transcript.scrollHeight })
   }
 
   async function handleTranscriptControl(event) {
