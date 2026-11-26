@@ -433,7 +433,7 @@ describe('harness serve — HTTP', () => {
     expect(await content.text()).toBe('1.4\n')
   })
 
-  it('keeps editor discovery and launch private when pairing is enabled', async () => {
+  it('keeps editor and terminal listener discovery private when pairing is enabled', async () => {
     const databasePath = join(dir, 'paired.sqlite')
     prepareDatabase(databasePath)
     const remote = await serve({ port: 0, remote: true, databasePath, localTokenPath: join(dir, 'host-token') })
@@ -447,12 +447,22 @@ describe('harness serve — HTTP', () => {
       const workspaceId = derivedId('editor-workspace')
       await dispatch('editor-workspace', { type: 'workspace.add', profileId: derivedId('editor-profile'), path: dir })
       await dispatch('editor-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+      await dispatch('editor-thread', { type: 'session.create', workspaceId, driverKind: 'claude' })
       const base = `http://127.0.0.1:${remote.server.port}`
       const endpoint = `${base}/workspace-editor?workspace=${workspaceId}`
       const headers = (token: string) => ({ authorization: `Bearer ${token}` })
       expect((await fetch(endpoint, { headers: headers(access.localToken) })).status).toBe(200)
       expect((await fetch(endpoint, { headers: headers(paired.token) })).status).toBe(403)
       expect((await fetch(endpoint, { method: 'POST', headers: headers(paired.token) })).status).toBe(403)
+      const listeners = `${base}/s/${derivedId('editor-thread')}/preview-servers`
+      const localListeners = await fetch(listeners, { headers: headers(access.localToken) })
+      expect(localListeners.status).toBe(200)
+      expect(localListeners.headers.get('cache-control')).toBe('private, no-store')
+      expect(await localListeners.json()).toMatchObject({ servers: [] })
+      expect((await fetch(listeners, { headers: headers(paired.token) })).status).toBe(403)
+      expect((await fetch(listeners, { headers: { ...headers(access.localToken), origin: 'https://other.invalid' } })).status).toBe(403)
+      expect((await fetch(listeners, { method: 'POST', headers: headers(access.localToken) })).status).toBe(405)
+      expect((await fetch(`${base}/s/9007199254740992/preview-servers`, { headers: headers(access.localToken) })).status).toBe(404)
       const page = `${base}/?workspace=${workspaceId}`
       const previousCwd = process.cwd()
       process.chdir(join(import.meta.dir, '../../..'))

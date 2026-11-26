@@ -580,6 +580,8 @@ const RESPONSIVE_SHELL = `
 [data-preview-address] .harness-icon-button:disabled, [data-browser-pane] header .harness-icon-button:disabled { opacity: .4; }
 [data-preview-documents] iframe { display: block; width: 100%; height: 100%; border: none; background: white; }
 [data-preview-documents] iframe[hidden], [data-preview-empty][hidden] { display: none; }
+[data-preview-server] { min-height: 44px; border: 1px solid var(--workspace-line); }
+[data-preview-server]:hover { background: var(--workspace-hover); }
 @media (pointer: coarse) {
   [data-browser-pane] .harness-icon-button, [data-preview-address] > input { min-height: 44px; }
   [data-preview-address] > input { font-size: 16px; }

@@ -9,6 +9,16 @@ export interface BrowserPreview {
   active: number
 }
 
+export interface PreviewServer {
+  url: string
+  label: string
+}
+
+export interface PreviewServerSnapshot {
+  status: 'ready' | 'unavailable'
+  servers: PreviewServer[]
+}
+
 export const MAX_PREVIEW_TABS = 12
 const MAX_HISTORY = 30
 
@@ -66,4 +76,27 @@ export function navigatePreviewTab(tab: PreviewTab, url: string): PreviewTab {
 export function reloadPreviewFrame(pane: HTMLElement | null, id: number): void {
   const frame = pane?.querySelector<HTMLIFrameElement>(`iframe[data-preview-frame="${id}"]`)
   if (frame) frame.src = frame.src
+}
+
+export function watchPreviewServers(sessionId: number, changed: (snapshot: PreviewServerSnapshot) => void): () => void {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let previous = ''
+  async function refresh() {
+    let snapshot: PreviewServerSnapshot = { status: 'unavailable', servers: [] }
+    try {
+      const response = await fetch(`/s/${sessionId}/preview-servers`, { cache: 'no-store', signal: controller.signal })
+      if (response.ok) snapshot = await response.json() as PreviewServerSnapshot
+    }
+    catch { /* A closed pane aborts its request. Network failures can recover on the next refresh. */ }
+    if (controller.signal.aborted) return
+    const key = JSON.stringify(snapshot)
+    if (previous !== key) { previous = key; changed(snapshot) }
+    timer = setTimeout(() => void refresh(), 3000)
+  }
+  void refresh()
+  return () => {
+    controller.abort()
+    clearTimeout(timer)
+  }
 }
