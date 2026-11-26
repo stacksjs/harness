@@ -11,7 +11,7 @@
  *                                      runtime floor is ~32MB before a line of
  *                                      harness runs — measured 2026-08-17,
  *                                      server idles at ~81MB)
- *   RSS, 20 sessions open    < 300MB   sessions in the projection (drivers are
+ *   RSS, 20 sessions open    < 350MB   sessions in the projection (drivers are
  *                                      lazy — they spawn on the first turn, so
  *                                      this measures the bookkeeping, which is
  *                                      exactly what a regression would grow)
@@ -36,9 +36,9 @@
  */
 import { spawn } from 'node:child_process'
 import { execSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import process from 'node:process'
 import { decode, encode } from '../packages/contract/src/index'
 import { derivedId } from '../packages/engine/src/index'
@@ -55,6 +55,16 @@ else {
 }
 
 async function orchestrate(): Promise<void> {
+  const root = join(import.meta.dir, '..')
+  const lock = Bun.JSONC.parse(readFileSync(join(root, 'bun.lock'), 'utf8')) as { packages?: Record<string, unknown[]> }
+  const manifestPath = Bun.resolveSync('@stacksjs/stx/package.json', join(root, 'packages/server/src'))
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { version: string }
+  const locked = lock.packages?.['@stacksjs/stx']?.[0]
+  const runtime = `@stacksjs/stx@${manifest.version}`
+  if (runtime !== locked)
+    throw new Error(`Harness SSR resolves ${runtime} at ${manifestPath}, but bun.lock records ${locked}. Check for a stale workspace install and rerun buddy upgrade or use a clean frozen install.`)
+  console.log(`SSR runtime: ${runtime} (${relative(root, manifestPath)})`)
+
   const slack = Number(process.env.HARNESS_BUDGET_SLACK ?? '1')
   const dir = mkdtempSync(join(tmpdir(), 'harness-budgets-'))
   const dbPath = join(dir, 'budgets.sqlite')
@@ -72,7 +82,7 @@ async function orchestrate(): Promise<void> {
   const child = spawn(
     process.execPath,
     ['--config=/dev/null', import.meta.path, '--serve', dbPath, String(port)],
-    { cwd: join(import.meta.dir, '..'), stdio: ['ignore', 'pipe', 'inherit'] },
+    { cwd: root, stdio: ['ignore', 'pipe', 'inherit'] },
   )
 
   const failures: string[] = []
