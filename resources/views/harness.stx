@@ -1960,7 +1960,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     try {
       await sendThreadOrganization({ sessionId: target, action, ...fields })
       if (threadActionsDialog.current?.open) closeThreadActions()
-      if (action === 'auto-settle') {
+      if (action === 'auto-settle' || (target === sessionId && (action === 'settle' || action === 'unsettle'))) {
         threadActionBusy.set(false)
         return
       }

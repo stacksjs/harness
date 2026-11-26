@@ -4818,8 +4818,11 @@ const changeSettlement = async (name: string) => {
   await page.getByRole('dialog', { name: 'Thread actions' }).getByRole('button', { name, exact: true }).click()
 }
 const settlementCard = page.locator('[data-project-settlement-status]')
+await page.evaluate(() => { document.documentElement.dataset.settlementDrive = 'active' })
 await changeSettlement('Settle thread')
 await settlementCard.getByText('Running settlement script…').waitFor()
+check('settling an open thread keeps its page mounted',
+  await page.locator('html').getAttribute('data-settlement-drive') === 'active')
 await settlementCard.getByText('Cleaning the fixture checkout').waitFor()
 await capture('workspace-settlement-script-running')
 writeFileSync(failedCleanupGate, '')
