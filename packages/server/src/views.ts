@@ -10,7 +10,7 @@
 import type { ClaudeAccountCompaction, HostSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { checkpointReviewRepositories, claudeIdleCompaction, isForkableResponse, providerConversation } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, conversationRewindPoint, isForkableResponse, providerConversation } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
@@ -222,6 +222,16 @@ export function viewProps(state: HarnessState, options: {
           lastError: active.state === 'failed' ? active.lastError : undefined,
           pendingRewind: active.pendingRewind?.checkpointId ?? 0,
           rewindNotice: active.rewindNotice ?? '',
+          conversationRewind: active.conversationRewind ? {
+            status: active.conversationRewind.status,
+            turnId: active.conversationRewind.turnId,
+          } : undefined,
+          conversationRewindNotice: active.conversationRewindNotice ?? '',
+          rewoundPrompt: active.rewoundPrompt ? {
+            operation: active.rewoundPrompt.operation,
+            text: active.rewoundPrompt.text,
+            attachments: active.rewoundPrompt.attachments.length,
+          } : undefined,
           worktreeSetup: Boolean(active.worktreeIntent && 'checkouts' in active.worktreeIntent && active.worktreeIntent.layout),
           // Which agent this session runs — shown in the header and preselected
           // in the composer's picker, so switching has a visible ground truth.
@@ -246,7 +256,7 @@ export function viewProps(state: HarnessState, options: {
           // Shown in the header when the session has a checkout of its own, so
           // it is obvious the agent is not editing the workspace directly.
           branch: active.branch,
-          turns: active.turns.map(turn => ({
+          turns: active.turns.map((turn, index) => ({
             id: turn.id,
             prompt: turn.prompt,
             attachments: (turn.attachments ?? []).map(({ id, name, image }) => ({ id, image, nameHtml: escapeTranscriptText(name) })),
@@ -256,6 +266,7 @@ export function viewProps(state: HarnessState, options: {
             ...(turn.automaticCompaction ? { automaticCompaction: true } : {}),
             ...(turn.freshContext ? { freshContext: true } : {}),
             forkable: isForkableResponse(turn),
+            canRewindConversation: Boolean(activeWorkspaceTrusted && conversationRewindPoint(active, index)),
             switchedProvider: turn.switchedProvider,
             modelChange: turn.modelChanged && turn.codexSelection ? codexSelectionLabel(turn.codexSelection) : undefined,
             steerable: turn.steerable === true,

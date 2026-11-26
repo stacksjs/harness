@@ -139,6 +139,11 @@ export const settledTurns = turns.slice(0, Math.max(0, turns.length - 1))
 export const liveTurn = turns.length > 0 ? turns[turns.length - 1] : null
 export const initialHasResponse = Boolean(liveTurn?.response)
 export const initialResponseTurn = liveTurn?.id || 0
+export const initialHasTurns = Boolean(turns.length)
+export const initialConversationRewind = activeSession?.conversationRewind ?? null
+export const initialConversationRewindNotice = activeSession?.conversationRewindNotice || ''
+export const initialRewoundPrompt = activeSession?.rewoundPrompt ?? null
+export const initialRewindableTurns = turns.filter(turn => turn.canRewindConversation).map(turn => turn.id)
 export const initialForkableTurns = turns.filter(turn => turn.forkable).map(turn => turn.id)
 export const initialTurnDiffs = Object.fromEntries(turns.filter(turn => turn.reviewRepositories?.length).map(turn => [turn.id, turn.reviewRepositories]))
 export const initialCompactedTurn = liveTurn?.contextCompacted ? liveTurn.id : 0
@@ -400,6 +405,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
               @endforeach
             </ul>
           @endif
+          @if(turn.canRewindConversation)
+          <div hidden :hidden="!canEditEarlierPrompt({{ turn.id }})" class="mb-3 flex justify-end">
+            <button type="button" data-edit-earlier-prompt @click="editEarlierPrompt({{ turn.id }}, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
+              <span class="size-4 i-hugeicons-pencil-edit-01" aria-hidden="true"></span>Edit from here
+            </button>
+          </div>
+          @endif
           @if(turn.contextCompacted)<p data-context-compacted class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>@endif
           @foreach(turn.steered as message)
             <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
@@ -492,6 +504,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
               @endforeach
             </ul>
           @endif
+          <div hidden :hidden="!canEditEarlierPrompt({{ liveTurn.id }})" class="mb-3 flex justify-end">
+            <button type="button" data-edit-earlier-prompt @click="editEarlierPrompt({{ liveTurn.id }}, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
+              <span class="size-4 i-hugeicons-pencil-edit-01" aria-hidden="true"></span>Edit from here
+            </button>
+          </div>
           <p data-context-compacted @if(!liveTurn.contextCompacted)hidden@endif :hidden="ssrCompactedTurn() !== {{ liveTurn.id }}" class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>
           <div data-steering-history>
             @foreach(liveTurn.steered as message)
@@ -598,6 +615,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
               </li>
             </template>
           </ul>
+          <div hidden :hidden="!canEditEarlierPrompt(turn.id)" class="mb-3 flex justify-end">
+            <button type="button" data-edit-earlier-prompt @click="editEarlierPrompt(turn.id, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
+              <span class="size-4 i-hugeicons-pencil-edit-01" aria-hidden="true"></span>Edit from here
+            </button>
+          </div>
           <p data-context-compacted hidden :hidden="!turn.contextCompacted" class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>
           <div data-steering-history></div>
           <div data-tools>
@@ -665,6 +687,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
     @if(activeSession)
       <p data-rewind-status role="status" @if(!initialRewind && !initialRewindNotice)hidden@endif :hidden="!revertingId() && !rewindNotice()" :text="revertingId() ? 'Restoring files…' : rewindNotice()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300"></p>
+      <div data-conversation-rewind hidden :hidden="!conversationRewind() && !conversationRewindNotice() && !canRestoreEarlierPrompt()" class="flex flex-wrap gap-2 items-center justify-center mb-2 text-neutral-600 text-xs dark:text-neutral-300">
+        <p role="status" :text="conversationRewind()?.status === 'running' ? 'Rewinding conversation…' : conversationRewindNotice()"></p>
+        <button type="button" data-check-conversation-rewind hidden :hidden="conversationRewind()?.status !== 'uncertain'" :disabled="!sessionOnline()" @click="editEarlierPrompt(conversationRewind()?.turnId, $event, true)" class="px-2 min-h-8 font-medium underline underline-offset-2">Check provider history</button>
+        <button type="button" data-restore-earlier-prompt hidden :hidden="!canRestoreEarlierPrompt()" :disabled="startPending() || composerFilesPending()" @click="restoreEarlierPrompt" class="px-2 min-h-8 font-medium underline underline-offset-2">Restore earlier prompt</button>
+      </div>
       <p data-worktree-setup role="status" @if(!initialWorktreeSetup || sessionState !== 'running')hidden@endif :hidden="!worktreeSetup() || !uiBusy()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300">Preparing the project worktree</p>
       <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
     @endif
@@ -704,10 +731,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         @select="rememberPrompt"
         @click="composerCaretMoved"
         rows="2"
+        :rows="Math.min(7, Math.max(2, composerText().split('\n').length + 1))"
         aria-label="Message"
         placeholder="{{ promptPlaceholder }}"
         :placeholder="composerPlaceholder()"
-        class="px-1 py-1 min-h-[46px] min-w-0 text-sm bg-transparent outline-none resize-none"
+        class="px-1 py-1 min-h-[46px] max-h-[30dvh] min-w-0 text-sm bg-transparent outline-none resize-none"
       ></textarea>
       <p data-handoff-hint role="status" hidden :hidden="!pendingProviderSwitch()" :text="handoffHint()" class="text-neutral-600 text-xs dark:text-neutral-300"></p>
       <div data-composer-toolbar>
@@ -727,7 +755,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
           </button>
           <button type="button" data-idle-compaction hidden :hidden="!idleCompactionOffer()" @click="toggleIdleCompaction" :aria-pressed="compactNextPrompt()" :aria-label="idleCompactionLabel()" :title="idleCompactionLabel()" class="px-2 min-h-8 text-[12px] border border-black/10 rounded-full dark:border-white/20" :text="idleCompactionChip()"></button>
-          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || conversationRewind() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
             <span data-send-text :text="sendLabel()">Send</span>
           </button>
@@ -2411,6 +2439,44 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const revertingId = state(initialRewind)
   const rewindNotice = state(initialRewindNotice)
   const rewindCheckpoints = state(initialRewindCheckpoints)
+  const rewindableTurns = state(initialRewindableTurns)
+  const conversationRewind = state(initialConversationRewind)
+  const conversationRewindNotice = state(initialConversationRewindNotice)
+  const requestedRewind = useSessionStorage(`harness.rewind.requested:${sessionId}`, '')
+  const restoredRewind = useLocalStorage(`harness.rewind.restored:${sessionId}`, '')
+  const canRestoreEarlierPrompt = derived(() => Boolean(initialRewoundPrompt
+    && initialRewoundPrompt.operation !== restoredRewind() && initialRewoundPrompt.operation !== composerDraft()?.rewoundOperation
+    && !conversationRewind()))
+
+  function canEditEarlierPrompt(turnId) {
+    return !uiBusy() && !revertingId() && !threadNavigation().archivedAt && !followUps().entries.length
+      && rewindableTurns().includes(turnId)
+  }
+
+  async function editEarlierPrompt(turnId, event, verifyOnly = false) {
+    if (!sessionId || !turnId || !sessionOnline()) return
+    const previous = conversationRewind()
+    if (verifyOnly ? previous?.status !== 'uncertain' : previous || !canEditEarlierPrompt(turnId)) return
+    // WebKit does not focus a button on click, so give the dialog an opener.
+    if (!verifyOnly) event?.currentTarget?.focus({ preventScroll: true })
+    if (!verifyOnly && !await stxConfirm(
+      'Rewind the Codex conversation to before this message. Your prompt and attachments return to the composer.',
+      { title: 'Edit from here?', type: 'warning', defaultFocus: 'cancel', confirmText: 'Revert and keep changes', cancelText: 'Cancel' },
+    )) return
+    if (conversationRewind() !== previous) return
+    const operation = newCommandId()
+    if (!verifyOnly) requestedRewind.set(operation)
+    conversationRewind.set({ turnId, status: 'running' })
+    conversationRewindNotice.set('')
+    try {
+      await sendCommand({ type: 'session.turn.rewind', sessionId, turnId, ...(verifyOnly ? { verifyOnly: true } : {}) }, operation)
+    }
+    catch (error) {
+      if (conversationRewind()?.status === 'running') conversationRewind.set(previous)
+      conversationRewindNotice.set(error.message)
+    }
+  }
+
 
   // A global shortcut, so harness is reachable without finding its window.
   //
@@ -4227,6 +4293,43 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
   }
 
+  async function restoreEarlierPrompt() {
+    const entry = initialRewoundPrompt
+    const box = promptRef.current
+    if (!canRestoreEarlierPrompt() || !composerDraftTools || !box || box.form?.hidden
+      || startPending() || editingFollowUp() || composerFilesPending()) return
+    restorePrompt()
+    const upload = composerDraft()?.upload ?? { scope: uploadScope, draft: composerDraftTools.newComposerDraftId() }
+    startPending.set(true)
+    conversationRewindNotice.set('')
+    try {
+      const snapshot = readStashDraftSnapshot()
+      const restored = entry.attachments ? await composerDraftTools.restoreRewoundAttachments(sessionId, entry.operation, upload) : []
+      if (localStorage.getItem(promptDraftKey) !== snapshot || box.form?.hidden)
+        throw new Error('The draft changed in another tab. Reopen the thread to restore the earlier prompt.')
+      const current = composerFiles()
+      const ids = new Set(current.map(file => file.id))
+      const files = [...current, ...restored.filter(file => !ids.has(file.id))]
+      if (files.length > 100) throw new Error('The composer holds up to 100 attachments. Remove a file before restoring.')
+      const existing = box.value.trimEnd()
+      const text = existing && entry.text ? existing + '\n\n' + entry.text : existing || entry.text
+      const draft = { ...composerDraft(), text, files, ...(files.length ? { upload } : {}),
+        start: text.length, end: text.length, rewoundOperation: entry.operation, discardedDraft: undefined, commandId: undefined }
+      localStorage.setItem(promptDraftKey, JSON.stringify(draft))
+      restoredRewind.set(entry.operation)
+      if (requestedRewind() === entry.operation) requestedRewind.set('')
+      composerDraft.set(draft)
+      composerText.set(text)
+      box.value = text
+      box.setSelectionRange(text.length, text.length)
+      composerRecall?.reset()
+      sidebarDrafts?.update()
+      box.focus({ preventScroll: true })
+    }
+    catch (error) { conversationRewindNotice.set(error.message || 'Could not restore the earlier prompt.') }
+    finally { startPending.set(false) }
+  }
+
   function removeStashedPrompt(entry) {
     if (!promptStash || startPending()) return
     try {
@@ -4349,6 +4452,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (sidebar && discardTemplate) sidebarDrafts = composerDraftTools.watchSidebarDrafts(sidebar, discardTemplate, discardDraft)
     draftDiscardReady.set(true)
     expireUndoNotices()
+    if (initialRewoundPrompt && requestedRewind() === initialRewoundPrompt.operation) await restoreEarlierPrompt()
   }
 
   function discardDraft(key) {
@@ -4510,7 +4614,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
-    if (!hasComposerMessage() || startPending() || composerFilesPending()) return
+    if (!hasComposerMessage() || startPending() || composerFilesPending() || conversationRewind()) return
     const files = editingFollowUp() ? [] : composerFiles()
     if (files.length && ['/clear', '/compact'].includes(text.toLowerCase())) {
       composerFilesError.set('Remove the attachments before running this command.')
@@ -5363,7 +5467,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         // the reply within it.
         if (payload.role === 'user') {
           responseByTurn.set(payload.turnId, '')
-          if (payload.turnId === 1) currentThreadTitle.set(threadDisplayTitle(threadNavigation().title, payload.text))
+          if (!initialHasTurns && !liveTurns().length) currentThreadTitle.set(threadDisplayTitle(threadNavigation().title, payload.text))
+          if (payload.switchedProvider || payload.freshContext) rewindableTurns.set([])
           if (threadNavigation().settledAt || threadNavigation().snoozedUntil)
             threadNavigation.update(previous => ({ ...previous, settledAt: null, snoozedUntil: null }))
           steerableTurn.set(0)
@@ -5448,6 +5553,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           ? `Rewind finished. No earlier checkpoint for ${payload.skipped.join(', ')}.` : 'Rewind finished.')
         if (diffOpen()) refreshWorkspaceDiff()
       }
+      else if (payload.type === 'turn.rewind-requested') {
+        conversationRewind.set({ status: 'running', turnId: payload.turnId })
+        conversationRewindNotice.set('')
+      }
+      else if (payload.type === 'turn.rewind-settled') {
+        if (payload.outcome === 'rewound') refresh()
+        else {
+          conversationRewind.set(payload.outcome === 'uncertain' ? { ...conversationRewind(), status: 'uncertain' } : null)
+          conversationRewindNotice.set(payload.message || '')
+        }
+      }
       else if (payload.type === 'turn.completed' || payload.type === 'turn.interrupted') {
         const usage = payload.type === 'turn.completed' ? payload.contextUsage : undefined
         contextUsage.set(usage ?? null)
@@ -5459,8 +5575,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         })
         if (payload.type === 'turn.completed' && payload.reviewRepositories?.length)
           turnDiffs.update(diffs => ({ ...diffs, [payload.turnId]: payload.reviewRepositories }))
-        if (payload.type === 'turn.completed' && payload.responseForkable)
+        if (payload.type === 'turn.completed' && payload.responseForkable) {
           forkableTurns.update(turns => [...turns, payload.turnId])
+          if (payload.providerTurnId && activeDriverValue().split(':')[0] === 'codex')
+            rewindableTurns.update(turns => [...turns, payload.turnId])
+        }
+        else rewindableTurns.set([])
         if (payload.type === 'turn.completed' && payload.contextCompacted) {
           if (payload.turnId === initialResponseTurn) ssrCompactedTurn.set(payload.turnId)
           else updateClientTurn(payload.turnId, turn => ({ ...turn, contextCompacted: true }))

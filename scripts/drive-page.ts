@@ -13,7 +13,7 @@
  * defaults to playwright's cached build; point PLAYWRIGHT_CHROMIUM elsewhere
  * if yours lives somewhere else.
  */
-import type { Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
+import type { ConversationRewindInput, Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
@@ -307,6 +307,7 @@ const fixtureCodexTurns: StartTurnInput[] = []
 const fixtureCodexCompactions: string[] = []
 const releaseCodexCompaction = Promise.withResolvers<void>()
 const fixtureCodexForks: ForkInput[] = []
+const fixtureCodexRewinds: ConversationRewindInput[] = []
 const releaseCodexFork = Promise.withResolvers<void>()
 let fixtureCodexLaunchModel: string | undefined
 let fixtureCodexLaunchOptions: { effort?: string, serviceTier?: string } | undefined
@@ -334,6 +335,12 @@ const codexDriver: Driver = {
       ...created,
       async *startTurn(input) {
         const sequence = fixtureCodexTurns.push(input)
+        if (input.text.startsWith('Rewind fixture:')) {
+          if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'rewind-fixture-thread' }
+          yield { type: 'assistant-delta', text: 'Reviewed the fixture.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `fixture-turn-${sequence}` }
+          return
+        }
         for await (const event of created.startTurn(input)) {
           if (event.type === 'session-bound' && input.providerSessionId) continue
           if (event.type === 'turn-complete') {
@@ -355,6 +362,12 @@ const codexDriver: Driver = {
         fixtureCodexForks.push(input)
         await releaseCodexFork.promise
         return { providerSessionId: 'ps-drive-fork' }
+      },
+      async rewind(input) {
+        fixtureCodexRewinds.push(input)
+        if (input.providerSessionId !== 'rewind-fixture-thread' || input.verifyOnly)
+          return { outcome: 'uncertain', message: 'Unexpected fixture rewind.' }
+        return { outcome: 'rewound' }
       },
     }
   },
@@ -4102,6 +4115,62 @@ await worktreeMode.selectOption('worktree')
 check('new worktree drafts remember the last repository and base selections for this project',
   await selectedApi.isChecked() && await selectedWeb.isChecked()
   && await worktreeControls.getByRole('textbox', { name: 'Base branch' }).inputValue() === 'review/fixture')
+
+const conversationRewindId = 'conversation-rewind-thread'
+await harness.engine.dispatch({ id: conversationRewindId, at: Date.now(), command: { type: 'session.create', workspaceId: multiRepoWorkspace, driverKind: 'codex' } })
+await page.goto(`${baseUrl}/s/${derivedId(conversationRewindId)}`)
+const rewindPrompt = page.locator('[data-prompt]')
+const rewindMessage = (id: number) => page.locator(`[data-turn="${id}"]`)
+const codexTurnsBeforeRewind = fixtureCodexTurns.length
+for (const [index, text] of ['Keep the first exchange.', 'Edit the review notes.', 'Remove the last exchange.'].entries()) {
+  if (index === 1) await page.locator('[data-composer-file-input]').setInputFiles({ name: 'rewind-notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Keep these notes.') })
+  await rewindPrompt.fill(`Rewind fixture: ${text}`)
+  await page.locator('[data-send]').click()
+  await rewindMessage(index + 1).locator('[data-edit-earlier-prompt]').waitFor()
+}
+await rewindPrompt.fill('Rewind fixture: Keep this draft.')
+const editEarlier = rewindMessage(2).locator('[data-edit-earlier-prompt]')
+const rewindDialog = page.getByRole('alertdialog', { name: 'Edit from here?' })
+const cancelEdit = rewindDialog.getByRole('button', { name: 'Cancel' })
+const confirmEdit = rewindDialog.getByRole('button', { name: 'Revert and keep changes' })
+await editEarlier.click()
+await cancelEdit.waitFor()
+check('conversation rewind confirmation focuses Cancel initially', await cancelEdit.evaluate(el => el === el.ownerDocument.activeElement))
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  const button = await confirmEdit.boundingBox()
+  check(`conversation rewind confirms within the viewport at ${width}×${height}`, Boolean(button
+    && button.x >= 0 && button.x + button.width <= width && button.y + button.height <= height)
+    && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+  await capture(`conversation-rewind-confirm-${width}x${height}`)
+}
+await page.keyboard.press('Escape')
+await rewindDialog.waitFor({ state: 'hidden' })
+check('Escape keeps every turn and returns focus to the selected prompt action', await rewindMessage(3).isVisible()
+  && !fixtureCodexRewinds.length && await editEarlier.evaluate(el => el === el.ownerDocument.activeElement))
+await editEarlier.click()
+const workingFileBeforeConversationRewind = readFileSync(join(apiCheckout, 'shared.txt'), 'utf8')
+await confirmEdit.click()
+const restoredText = 'Rewind fixture: Keep this draft.\n\nRewind fixture: Edit the review notes.'
+await page.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, restoredText)
+check('rewind removes the selected and later turns and retains workspace edits', await rewindMessage(1).isVisible()
+  && await rewindMessage(2).count() === 0 && await rewindMessage(3).count() === 0
+  && readFileSync(join(apiCheckout, 'shared.txt'), 'utf8') === workingFileBeforeConversationRewind)
+await page.getByText('rewind-notes.txt', { exact: true }).waitFor()
+check('the restored multiline draft and its attachment fit the phone composer', await rewindPrompt.evaluate((el: HTMLTextAreaElement) =>
+  el.scrollHeight <= el.clientHeight + 1))
+await capture('conversation-rewind-composer-phone')
+await page.setViewportSize({ width: 1440, height: 900 })
+await capture('conversation-rewind-composer-desktop')
+await page.reload()
+await page.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, restoredText)
+await page.locator('[data-send]').click()
+await rewindMessage(4).locator('[data-edit-earlier-prompt]').waitFor()
+check('rewind runs once, restores the draft once, and sends in the same Codex conversation', fixtureCodexRewinds.length === 1
+  && fixtureCodexRewinds[0]?.beforeTurnId === `fixture-turn-${codexTurnsBeforeRewind + 2}`
+  && fixtureCodexRewinds[0]?.retainedTurnId === `fixture-turn-${codexTurnsBeforeRewind + 1}`
+  && fixtureCodexRewinds[0]?.newestTurnId === `fixture-turn-${codexTurnsBeforeRewind + 3}`
+  && fixtureCodexTurns.at(-1)?.providerSessionId === 'rewind-fixture-thread')
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

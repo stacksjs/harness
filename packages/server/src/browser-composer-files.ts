@@ -144,3 +144,14 @@ export function createComposerFileActions(options: ComposerFileOptions) {
     },
   }
 }
+
+export async function restoreRewoundAttachments(sessionId: number, operation: string, upload: UploadSource): Promise<ComposerDraftFile[]> {
+  const query = new URLSearchParams({ session: String(sessionId), operation, ...upload })
+  const response = await fetch(`/composer-attachments/rewind?${query}`, { method: 'PUT' })
+  if (!response.ok) {
+    const error = await response.json().catch(() => null) as { error?: string } | null
+    throw new Error(error?.error || 'The host could not restore the earlier prompt attachments.')
+  }
+  const files = await response.json() as Array<Pick<ComposerAttachment, 'id' | 'name' | 'size' | 'image'>>
+  return files.map(file => ({ ...file, key: file.id, status: 'ready' }))
+}

@@ -278,9 +278,8 @@ function forgetProviderConversation(session: SessionState): void {
   if (session.providerConversations) delete session.providerConversations[providerConversationKey(session)]
 }
 
-export function conversationRewindPoint(session: SessionState, turnId: number): ConversationRewindPoint | undefined {
+export function conversationRewindPoint(session: SessionState, index: number): ConversationRewindPoint | undefined {
   if (session.driverKind !== 'codex' || !session.providerSessionId || session.handoff?.pending) return undefined
-  const index = session.turns.findIndex(turn => turn.id === turnId)
   const selected = session.turns[index]
   const newest = session.turns.at(-1)
   const belongs = (turn: TurnState | undefined) => {

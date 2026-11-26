@@ -797,7 +797,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         } }]
       }
       if (existing) throw new InvalidCommand('Check the current conversation rewind before starting another one.')
-      const point = conversationRewindPoint(session, command.turnId)
+      const index = session.turns.findIndex(turn => turn.id === command.turnId)
+      const point = conversationRewindPoint(session, index)
       if (!point) throw new InvalidCommand('Choose a completed prompt in the current Codex conversation.')
       return [{ sessionId: session.id, commandId, at, payload: {
         type: 'turn.rewind-requested', turnId: command.turnId, operation: commandId, point,
