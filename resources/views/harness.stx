@@ -818,13 +818,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
       <p data-prompt-stash-error role="alert" :hidden="stashOpen() || !stashError()" :text="stashError()" class="text-red-700 text-sm dark:text-red-300"></p>
     </form>
-    <div data-background-thread hidden :hidden="!startedBackgroundThread()">
+    <div data-background-thread hidden :hidden="!startedBackgroundThread() || Boolean(modelBatchNotice()?.length || pendingModelBatches()?.length)">
       <span role="status">Started in background.</span>
       <a :href="startedBackgroundThread() ? '/s/' + startedBackgroundThread() : null">Open thread</a>
       <button type="button" @click="dismissBackgroundNotice" aria-label="Dismiss background notification" class="harness-icon-button">
         <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
       </button>
     </div>
+    @include('../partials/harness-model-batch')
     @include('../partials/harness-prompt-stash')
     @endif
     @if(!activeSession && draftProjectChoices.length)
@@ -1544,6 +1545,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const uploadScope = promptScope === 'projectless' ? `scratch:${Number(activeProfile) || 0}` : promptScope
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
   const startedBackgroundThread = state(null)
+  const draftModelChoices = useLocalStorage(promptDraftKey + ':models', [], { listenToStorageChanges: false })
+  const pendingModelBatches = useLocalStorage(promptDraftKey + ':model-batches', [], { listenToStorageChanges: false })
+  const activeModelBatches = state([])
+  const modelBatchNotice = state([])
+  const modelBatchBusy = derived(() => activeModelBatches().length > 0)
+  const comparingModels = derived(() => !sessionId && draftModelChoices()?.length > 1)
+  const draftUsesWorktree = derived(() => draftIsolated() || comparingModels())
   const followUps = state(initialFollowUps)
   const steeringMessage = useRef('steeringMessageBox')
   // Host settings, seeded from the render and kept here so a change shows at
@@ -3343,6 +3351,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
   const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
   const draftPickerLabel = derived(() => {
+    if (comparingModels()) return draftModelChoices().map(modelBatchTargetName).join(', ')
     const model = selectedDraftModel()
     const effort = draftEffort()
     const speed = model?.speedTiers.find(tier => tier.id === draftSpeed())?.name
@@ -3435,6 +3444,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function openDraftPicker(event) {
     const dialog = draftPickerDialog.current
     if (!dialog || dialog.open) return
+    if (!sessionId && draftProject?.trusted) void loadDraftWorktreeOptions()
     pickerQuery.set('')
     favoriteError.set('')
     pickerAccount.set(draftProvider())
@@ -3449,6 +3459,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function closeDraftPicker() {
+    if (comparingModels()) draftModelChoices.set(modelChoicesWithOptions())
     draftPickerDialog.current?.close()
     draftPickerOpen.set(false)
     rememberPrompt()
@@ -3520,7 +3531,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const rows = pickerResults()
     if (event.key === 'Enter') {
       event.preventDefault()
-      if (rows[pickerIndex()]) pickDraftModel(rows[pickerIndex()])
+      if (rows[pickerIndex()]) pickDraftModel(rows[pickerIndex()], event)
     }
     if (rows.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
       event.preventDefault()
@@ -3530,7 +3541,69 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
   }
 
-  function pickDraftModel(result) {
+  function matchesDraftModel(selection, result) {
+    return selection.account === result.account && selection.id === result.id
+  }
+
+  function modelBatchTargetName(selection) {
+    if (draftModelChoices().filter(choice => choice.name === selection.name).length < 2) return selection.name
+    const account = composerProviders().find(account => account.value === selection.account)
+    return selection.name + ' · ' + (account?.name || selection.account)
+  }
+
+  function draftModelSelected(result) {
+    return comparingModels()
+      ? draftModelChoices().some(selection => matchesDraftModel(selection, result))
+      : draftProvider() === result.account && draftModel() === result.id
+  }
+
+  function currentDraftChoice() {
+    const account = selectedDraftAccount()
+    const model = selectedDraftModel() || account?.models?.find(model => model.isDefault)
+    if (!model) return null
+    return { account: account.value, id: model.id, name: model.name, effort: draftEffort(), speed: draftSpeed() }
+  }
+
+  function modelChoicesWithOptions() {
+    const current = currentDraftChoice()
+    return draftModelChoices().map(choice => current && matchesDraftModel(choice, current) ? current : choice)
+  }
+
+  function toggleDraftModel(result) {
+    if (sessionId || !draftWorktreeOptions()?.canStartWorktree || !result.id) return
+    const current = currentDraftChoice()
+    const choices = comparingModels() ? modelChoicesWithOptions() : current ? [current] : []
+    const selected = choices.find(choice => matchesDraftModel(choice, result))
+    if (selected && choices.length === 1) return
+    const next = selected
+      ? choices.filter(choice => !matchesDraftModel(choice, result))
+      : [...choices, { account: result.account, id: result.id, name: result.name, effort: '', speed: '' }]
+    draftModelChoices.set(next.length > 1 ? next : [])
+    if (next.length === 1 || !current || !next.some(choice => matchesDraftModel(choice, current))) {
+      const choice = next[0]
+      draftProvider.set(choice.account)
+      draftModel.set(choice.id)
+      draftEffort.set(choice.effort)
+      draftSpeed.set(choice.speed)
+    }
+    void nextTick(positionDraftPicker)
+  }
+
+  function pickDraftModel(result, event) {
+    if (event?.shiftKey && !sessionId && draftWorktreeOptions()?.canStartWorktree) {
+      toggleDraftModel(result)
+      return
+    }
+    if (!sessionId) {
+      const choice = draftModelChoices()?.find(choice => matchesDraftModel(choice, result))
+      draftModelChoices.set([])
+      if (choice && (draftProvider() !== choice.account || draftModel() !== choice.id)) {
+        draftProvider.set(choice.account)
+        draftModel.set(choice.id)
+        draftEffort.set(choice.effort)
+        draftSpeed.set(choice.speed)
+      }
+    }
     if (draftProvider() !== result.account || draftModel() !== result.id) {
       draftProvider.set(result.account)
       draftModel.set(result.id)
@@ -3667,6 +3740,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   requestAnimationFrame(() => {
     annotateDriverPickers()
     restorePrompt()
+    modelBatchNotice.set(pendingModelBatches().flatMap(batch => batch.started || []))
+    const choices = draftModelChoices()
+    if (!sessionId && Array.isArray(choices) && choices.length > 1) {
+      void loadDraftWorktreeOptions()
+      const choice = choices[0]
+      draftProvider.set(choice.account)
+      draftModel.set(choice.id)
+      draftEffort.set(choice.effort)
+      draftSpeed.set(choice.speed)
+    }
   })
 
   function defaultDriver() {
@@ -5222,7 +5305,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   async function loadDraftWorktreeOptions(event) {
-    if (!event.currentTarget.open || !draftProject?.trusted || draftWorktreeOptions() || draftWorktreeLoad() === 'Loading repositories…') return
+    if ((event && !event.currentTarget.open) || !draftProject?.trusted || draftWorktreeOptions() || draftWorktreeLoad() === 'Loading repositories…') return
     draftWorktreeLoad.set('Loading repositories…')
     try {
       const response = await fetch('/workspace-repositories?' + new URLSearchParams({ workspace: String(draftProject.id) }))
@@ -5253,6 +5336,76 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function editDraftBaseBranch(event) {
     draftBaseBranch.set(event.currentTarget.value)
+  }
+
+  function modelLaunchOptions(selection, model) {
+    const choice = agentChoice(selection.account)
+    const effort = model?.reasoningEfforts.includes(selection.effort) ? selection.effort : ''
+    const serviceTier = model?.speedTiers.some(tier => tier.id === selection.speed) ? selection.speed : ''
+    return {
+      ...choice,
+      ...(model ? { model: model.id } : {}),
+      ...(choice.driverKind === 'codex' && (effort || serviceTier)
+        ? { codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } }
+        : {}),
+    }
+  }
+
+  function prepareModelBatch(text, uploads) {
+    if (!draftWorktreeOptions()?.canStartWorktree) throw new Error('Choose a Git project to send to multiple models.')
+    const worktree = draftWorktreeSelection()
+    const selections = modelChoicesWithOptions()
+    const targets = selections.map(selection => {
+      const account = composerProviders().find(account => account.value === selection.account && account.status === 'ready')
+      const model = account?.models?.find(model => model.id === selection.id)
+      if (!model) throw new Error('The selected model ' + selection.name + ' is unavailable.')
+      const id = newCommandId()
+      return {
+        id, sessionId: derivedSessionId(id), name: modelBatchTargetName(selection),
+        create: { type: 'session.create', workspaceId: draftProject.id, ...modelLaunchOptions(selection, model), isolate: true, worktree },
+      }
+    })
+    draftModelChoices.set(selections)
+    worktreePreferences.update(preferences => ({ ...preferences, [draftProject.id]: worktree }))
+    return { id: targets[0].id, text, uploads, targets }
+  }
+
+  async function submitModelBatch(batch) {
+    if (!batch?.targets?.length || activeModelBatches().includes(batch.id)) return
+    activeModelBatches.update(ids => [...ids, batch.id])
+    startedBackgroundThread.set(null)
+    try {
+      const { sendModelBatch } = await import(codecUrl)
+      await sendModelBatch(batch, sendCommand, (target, error) => {
+        pendingModelBatches.update(batches => batches.flatMap(current => {
+          if (current.id !== batch.id) return [current]
+          const targets = error
+            ? current.targets.map(item => item.id === target.id ? { ...item, error } : item)
+            : current.targets.filter(item => item.id !== target.id)
+          const started = error ? current.started : [...(current.started || []), { id: target.sessionId, name: target.name }]
+          return targets.length ? [{ ...current, targets, started }] : []
+        }))
+        if (!error) modelBatchNotice.update(threads => [...threads, { id: target.sessionId, name: target.name }])
+      })
+    }
+    catch (error) { stxAlert(error.message || 'Could not send to the selected models.') }
+    finally { activeModelBatches.update(ids => ids.filter(id => id !== batch.id)) }
+  }
+
+  function dismissModelBatch() {
+    if (modelBatchBusy()) return
+    modelBatchNotice.set([])
+    promptRef.current?.focus()
+  }
+
+  function discardModelBatch(batch) {
+    if (activeModelBatches().includes(batch.id)) return
+    pendingModelBatches.update(batches => batches.filter(item => item.id !== batch.id))
+    promptRef.current?.focus()
+  }
+
+  function draftWorktreeSelection() {
+    return { repositories: draftRepositoryKeys(), baseBranch: draftBaseBranch().trim() }
   }
 
   async function sendPrompt(mode = followUpPreference(), background = false) {
@@ -5379,26 +5532,33 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
     if (!sessionId) {
       if (!draftProject?.trusted && !draftWithoutProject) return
+      if (comparingModels()) {
+        try {
+          const batch = prepareModelBatch(text, uploads)
+          if (!pendingModelBatches().length) modelBatchNotice.set([])
+          pendingModelBatches.update(batches => [...batches, batch])
+          finishSend()
+          void submitModelBatch(batch)
+          box.focus()
+        }
+        catch (error) { stxAlert(error.message) }
+        return
+      }
       startPending.set(true)
       try {
         const account = selectedDraftAccount()
         if (providerCatalog() === 'ready' && account?.status !== 'ready') throw new Error('Choose an available agent to start this session.')
-        const choice = agentChoice(draftProvider())
-        const selected = selectedDraftModel()
-        const effort = selected?.reasoningEfforts.includes(draftEffort()) ? draftEffort() : ''
-        const serviceTier = selected?.speedTiers.some(tier => tier.id === draftSpeed()) ? draftSpeed() : ''
-        const model = selected ? { model: selected.id } : {}
-        const options = choice.driverKind === 'codex' && (effort || serviceTier)
-          ? { codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } }
-          : {}
+        const { providerInstanceId, ...options } = modelLaunchOptions({
+          account: draftProvider(), effort: draftEffort(), speed: draftSpeed(),
+        }, selectedDraftModel())
         if (draftWithoutProject) {
           const profileId = Number(activeProfile) || undefined
-          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text || files[0]?.name, ...model, ...options }, commandId)
+          await sendCommand({ type: 'session.scratch.create', profileId, label: text || files[0]?.name, ...options }, commandId)
         }
         else {
-          const worktree = draftIsolated() ? { repositories: draftRepositoryKeys(), baseBranch: draftBaseBranch().trim() } : undefined
+          const worktree = draftUsesWorktree() ? draftWorktreeSelection() : undefined
           await sendCommand({
-            type: 'session.create', workspaceId: draftProject.id, ...choice, ...model, ...options,
+            type: 'session.create', workspaceId: draftProject.id, ...options, ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
             ...(worktree && { isolate: true, worktree }),
           }, commandId)
           if (worktree) worktreePreferences.update(preferences => ({ ...preferences, [draftProject.id]: worktree }))
@@ -5409,6 +5569,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         await sendCommand({ type: 'session.turn.start', sessionId: nextSession, text, ...attachmentInput }, commandId + '_first')
         finishSend()
         if (background) {
+          modelBatchNotice.set([])
           startedBackgroundThread.set(nextSession)
           startPending.set(false)
           box.focus()
