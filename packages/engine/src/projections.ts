@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 
@@ -172,6 +172,7 @@ export interface ProfileState {
   mcpServers: McpServerState[]
   modelFavorites?: ModelFavorite[]
   claudeCompactionByAccount?: Record<number, ClaudeAccountCompaction>
+  threadUndo?: ThreadUndoRecord
 }
 
 export function modelFavoriteIndex(favorites: readonly ModelFavorite[], favorite: ModelFavorite): number {
@@ -512,7 +513,11 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
     case 'session.navigation-changed': {
       const session = state.sessions.get(event.sessionId)
-      if (session) session.navigation = { ...session.navigation, ...p.changes }
+      if (!session) break
+      session.navigation = { ...session.navigation, ...p.changes }
+      const workspace = state.workspaces.get(session.workspaceId)
+      const profile = workspace && state.profiles.get(workspace.profileId)
+      if (profile && Object.keys(p.changes).some(key => key !== 'title')) profile.threadUndo = p.undo
       break
     }
 

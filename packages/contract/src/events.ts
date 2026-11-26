@@ -10,7 +10,7 @@ import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, CodexTurnSelect
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
-import type { ThreadNavigation } from './thread-navigation'
+import type { ThreadNavigation, ThreadUndoRecord } from './thread-navigation'
 
 export interface EventBase {
   /** Monotonic per session, starting at 1. Assigned inside the command queue. */
@@ -38,7 +38,7 @@ export interface ForkSource {
 export type EventPayload =
   | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, forkFrom?: ForkSource }
   | { type: 'session.stopped' }
-  | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation> }
+  | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation>, undo?: ThreadUndoRecord }
   | { type: 'session.failed', message: string }
   | { type: 'session.provider-bound', providerSessionId: string }
   | { type: 'session.fork-finished', providerSessionId: string, copiedProviderTurnIds?: Record<string, string> }

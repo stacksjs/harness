@@ -974,11 +974,20 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           const result = command.type === 'session.input.respond' && Number.isSafeInteger(command.sessionId) && typeof command.requestId === 'string'
             ? await attachments.serialize(command.sessionId, command.requestId, () => engine.dispatch(envelope))
             : await engine.dispatch(envelope)
+          const last = result.events.at(-1)?.payload
+          const undo = last?.type === 'session.navigation-changed' ? last.undo : undefined
+          const session = undo && engine.current.sessions.get(undo.sessionId)
+          const workspace = session && engine.current.workspaces.get(session.workspaceId)
+          const pendingUndo = workspace && engine.current.profiles.get(workspace.profileId)?.threadUndo
+          const remainingMs = (undo?.expiresAt ?? 0) - Date.now()
           send(socket, {
             t: 'dispatched',
             id: envelope.id,
             replayed: result.replayed,
             seqs: result.events.map(event => event.seq),
+            ...(undo && remainingMs > 0 && undo.sourceCommandId === pendingUndo?.sourceCommandId && {
+              threadUndo: { sourceCommandId: undo.sourceCommandId, sessionId: undo.sessionId, action: undo.action, remainingMs },
+            }),
           })
           // Broadcast after acking, so the dispatcher's own ack cannot arrive
           // after the events it caused.

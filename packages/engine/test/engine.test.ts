@@ -221,6 +221,61 @@ describe('Engine — the M1 exit criterion', () => {
 })
 
 describe('Thread navigation', () => {
+  it('restores a multi-row drop exactly after restart without overwriting a later rename', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const first = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    const second = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    await engine.dispatch(first)
+    await engine.dispatch(second)
+    const firstId = derivedId(first.id)
+    const secondId = derivedId(second.id)
+    const organize = (sessionId: number, action: 'pin' | 'settle' | 'archive') =>
+      envelope({ type: 'session.organize', sessionId, action })
+    const undo = (sessionId: number, sourceCommandId: string) =>
+      envelope({ type: 'session.organize', sessionId, action: 'undo', sourceCommandId })
+    await engine.dispatch(organize(firstId, 'pin'))
+    const drop = envelope({
+      type: 'session.organize', sessionId: firstId, action: 'drop', destination: 'active',
+      anchor: { sessionId: secondId, placement: 'before' },
+    })
+    expect((await engine.dispatch(drop)).events).toHaveLength(2)
+    await engine.dispatch(envelope({ type: 'session.organize', sessionId: firstId, action: 'rename', title: 'Later title' }))
+
+    const restarted = new Engine({ store, reducer: reduce })
+    await restarted.hydrate()
+    await expect(restarted.dispatch(undo(secondId, drop.id))).rejects.toThrow('can no longer be undone')
+    const undoDrop = undo(firstId, drop.id)
+    expect((await restarted.dispatch(undoDrop)).events).toHaveLength(2)
+    expect((await restarted.dispatch(undoDrop)).replayed).toBe(true)
+    expect(restarted.current.sessions.get(firstId)?.navigation).toMatchObject({ title: 'Later title', pinnedOrder: 1, activeOrder: null })
+    expect(restarted.current.sessions.get(secondId)?.navigation?.activeOrder).toBeNull()
+
+    const settle = organize(firstId, 'settle')
+    await restarted.dispatch(settle)
+    const archive = organize(firstId, 'archive')
+    await restarted.dispatch(archive)
+    await expect(restarted.dispatch(undo(firstId, settle.id))).rejects.toThrow('can no longer be undone')
+    const late = undo(firstId, archive.id)
+    await expect(restarted.dispatch({ ...late, at: archive.at + 5000 })).rejects.toThrow('can no longer be undone')
+    await restarted.dispatch(undo(firstId, archive.id))
+    expect(restarted.current.sessions.get(firstId)?.navigation).toMatchObject({ archivedAt: null, settledAt: settle.at })
+  })
+
+  it('rejects Undo once provider activity clears the snooze', async () => {
+    const { engine } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const create = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    await engine.dispatch(create)
+    const sessionId = derivedId(create.id)
+    const snooze = envelope({ type: 'session.organize', sessionId, action: 'snooze', until: clock + 60_000 })
+    await engine.dispatch(snooze)
+    await engine.dispatch(envelope({ type: 'session.turn.start', sessionId, text: 'Wake and continue' }))
+    expect(engine.current.sessions.get(sessionId)?.navigation?.snoozedUntil).toBeNull()
+    await expect(engine.dispatch(envelope({ type: 'session.organize', sessionId, action: 'undo', sourceCommandId: snooze.id })))
+      .rejects.toThrow('can no longer be undone')
+  })
+
   it('moves a thread through shelves and preserves its chosen active position after replay', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)

@@ -6,8 +6,8 @@
  * identical state rather than a similar one.
  */
 
-import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
-import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, validInputAnswers } from '@harness/contract'
+import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadUndoDuration, validInputAnswers } from '@harness/contract'
 import { activeThreadOrder, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
@@ -92,9 +92,61 @@ function turnStarted(session: SessionState, text: string, codexSelection?: Codex
   }
 }
 
-function organizeThread(state: HarnessState, command: Extract<Command, { type: 'session.organize' }>, envelope: CommandEnvelope): AppendableEvent[] {
+type OrganizeThreadCommand = Extract<Command, { type: 'session.organize' }>
+
+const placementKeys = ['pinnedOrder', 'activeOrder', 'settledAt', 'archivedAt', 'snoozedUntil'] as const
+
+function organizeThread(state: HarnessState, command: OrganizeThreadCommand, envelope: CommandEnvelope): AppendableEvent[] {
   const session = state.sessions.get(command.sessionId)
   if (!session) throw new InvalidCommand('This thread no longer exists.')
+  const profileId = state.workspaces.get(session.workspaceId)?.profileId
+
+  if (command.action === 'undo') {
+    const record = profileId === undefined ? undefined : state.profiles.get(profileId)?.threadUndo
+    if (!record || record.sourceCommandId !== command.sourceCommandId || record.sessionId !== session.id
+      || record.expiresAt <= envelope.at || record.entries.some(entry => {
+        const current = state.sessions.get(entry.sessionId)
+        return !current || state.workspaces.get(current.workspaceId)?.profileId !== profileId
+          || placementKeys.some(key => key in entry.after && (current.navigation?.[key] ?? null) !== entry.after[key])
+      })) throw new InvalidCommand('This action can no longer be undone.')
+    return record.entries.map(({ sessionId, before }) => ({
+      sessionId, commandId: envelope.id, at: envelope.at, payload: {
+        type: 'session.navigation-changed', changes: {
+          ...before,
+          ...(before.snoozedUntil != null && before.snoozedUntil <= envelope.at && { snoozedUntil: null }),
+        },
+      },
+    }))
+  }
+
+  const events = organizeThreadEvents(state, session, command, envelope)
+  let action: ThreadUndoRecord['action'] | undefined
+  if (command.action === 'archive') action = 'archived'
+  else if (command.action === 'snooze') action = 'snoozed'
+  else if (command.action === 'settle' || (command.action === 'drop' && command.destination === 'settled')) action = 'settled'
+  else if (command.action === 'unpin' || (command.action === 'drop' && command.destination === 'active'
+    && session.navigation?.pinnedOrder != null)) action = 'unpinned'
+  const last = events.at(-1)?.payload
+  if (action && last?.type === 'session.navigation-changed') {
+    const entries = events.flatMap(({ sessionId, payload }) => {
+      if (payload.type !== 'session.navigation-changed') return []
+      const navigation = state.sessions.get(sessionId)?.navigation
+      const before: Omit<ThreadNavigation, 'title'> = {}
+      const after: Omit<ThreadNavigation, 'title'> = {}
+      for (const key of placementKeys) {
+        if (key in payload.changes) {
+          before[key] = navigation?.[key] ?? null
+          after[key] = payload.changes[key] ?? null
+        }
+      }
+      return [{ sessionId, before, after }]
+    })
+    last.undo = { sourceCommandId: envelope.id, sessionId: session.id, action, expiresAt: envelope.at + threadUndoDuration, entries }
+  }
+  return events
+}
+
+function organizeThreadEvents(state: HarnessState, session: SessionState, command: Exclude<OrganizeThreadCommand, { action: 'undo' }>, envelope: CommandEnvelope): AppendableEvent[] {
   const { archivedAt, settledAt, snoozedUntil, pinnedOrder } = session.navigation ?? {}
   const { id: commandId, at } = envelope
   const change = (changes: Partial<ThreadNavigation>, sessionId = session.id): AppendableEvent => ({
