@@ -205,7 +205,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         <SidebarSection theme="arc" id="project" label="Project" :items="sidebarProjectTemplateItems" />
       </template>
       <template data-live-sidebar-rename>
-        <input data-sidebar-rename type="text" aria-label="Thread title" maxlength="120" autocomplete="off" class="w-full h-full min-w-0 px-2 text-[13px] bg-white dark:bg-neutral-900 rounded-md" />
+        <input data-sidebar-rename type="text" aria-label="Thread title" maxlength="120" autocomplete="off" class="px-2 h-full min-w-0 w-full text-[13px] bg-white dark:bg-neutral-900 rounded-md" />
       </template>
       <Sidebar
         :spaces="spaces"
