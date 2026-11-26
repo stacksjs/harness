@@ -17,11 +17,12 @@ import { ChatGptCredentialStore, driverKinds, resolveDriver as resolveRegistered
 import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
-import type { HarnessState } from '@harness/engine'
+import type { HarnessState, SessionState } from '@harness/engine'
 import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
-import { workspaceDiff, workspaceDiffRevision } from './diff'
+import type { WorkspaceReviewTurn } from './diff'
+import { reviewWorkspaceDiff, workspaceDiff, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
@@ -371,6 +372,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return isLoopbackHost(url.hostname)
       && (origin === null || origin === url.origin)
       && (!access || access.authenticate(request).deviceId === 'local')
+  }
+
+  function reviewTurns(session: SessionState | undefined): WorkspaceReviewTurn[] {
+    if (!session) return []
+    const starts = new Map<number, string>()
+    const ends = new Map<number, string>()
+    for (const point of session.checkpoints) {
+      if (point.kind === 'turn-start' && !starts.has(point.turnId)) starts.set(point.turnId, point.vcsRef)
+      if (point.kind === 'turn-end') ends.set(point.turnId, point.vcsRef)
+    }
+    return session.turns.flatMap((turn, index) => {
+      const before = starts.get(turn.id)
+      const after = ends.get(turn.id)
+      return before && after ? [{ id: turn.id, number: index + 1, before, after }] : []
+    })
   }
 
   const searchWorkspaceFiles = createWorkspaceFileSearch()
@@ -1173,19 +1189,35 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      // Rebuild a visible diff when its comparison changes. A client that
-      // already has this Git revision needs only the cheap HEAD check.
-      if (url.pathname.startsWith('/s/') && url.pathname.endsWith('/diff')) {
-        const id = Number(url.pathname.slice(3, -'/diff'.length)) || 0
+      const diffRoute = /^\/s\/(\d+)\/diff(\/options)?$/u.exec(url.pathname)
+      if (request.method === 'GET' && diffRoute) {
+        if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
+        const id = Number(diffRoute[1])
+        const session = engine.current.sessions.get(id)
         const path = options.workspacePath
           ? options.workspacePath(engine.current, id)
           : defaultWorkspacePath(engine.current, id)
         const headers = { 'cache-control': 'private, no-store' }
-        if (!path) return Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'session has no workspace' }, { headers })
-        // The session's earliest checkpoint is its baseline: taken before the
-        // first turn ran, so diffing against it answers "what did this session
-        // change" rather than "what is uncommitted here".
-        const baseline = engine.current.sessions.get(id)?.checkpoints[0]?.vcsRef
+        const errorDiff = (error: string) => ({ isRepository: false, scope: 'working-tree', files: [], patch: '', error })
+        if (!path) return Response.json(errorDiff('session has no workspace'), { headers })
+        const mode = url.searchParams.get('comparison')
+        const target = url.searchParams.get('target') || undefined
+        if (diffRoute[2] || mode) {
+          const workspace = session && engine.current.workspaces.get(session.workspaceId)
+          if (!workspace?.trusted || workspace.scratch) return Response.json({ error: 'Git review is unavailable for this workspace.' }, { status: 404, headers })
+          const turns = reviewTurns(session)
+          if (diffRoute[2]) return workspaceReviewOptions(path, turns, target)
+            .then(value => Response.json(value, { headers }))
+            .catch(() => Response.json({ error: 'Could not load Git review options.' }, { status: 503, headers }))
+          if (mode !== 'uncommitted' && mode !== 'branch' && mode !== 'commit' && mode !== 'turn')
+            return Response.json({ error: 'Unknown Git comparison.' }, { status: 400, headers })
+          return reviewWorkspaceDiff(path, mode, target, turns, url.searchParams.get('knownRevision') ?? undefined)
+            .then(diff => diff ? Response.json(diff, { headers }) : new Response(null, { status: 204, headers }))
+            .catch(() => Response.json(errorDiff('could not read the workspace'), { headers }))
+        }
+        // Existing clients review all changes since the first checkpoint,
+        // falling back to the uncommitted working tree for older sessions.
+        const baseline = session?.checkpoints[0]?.vcsRef
         return workspaceDiffRevision(path, baseline)
           .then(async (revision) => {
             if (url.searchParams.get('knownRevision') === revision)
@@ -1193,8 +1225,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             const diff = await workspaceDiff(path, baseline)
             return Response.json({ ...diff, revision }, { headers })
           })
-          // A diff that cannot be read must not take the page down with it.
-          .catch(() => Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'could not read the workspace' }, { headers }))
+          .catch(() => Response.json(errorDiff('could not read the workspace'), { headers }))
       }
 
       // Shared page assets. Checked before the page routes because their

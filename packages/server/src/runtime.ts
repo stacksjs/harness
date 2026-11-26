@@ -485,7 +485,15 @@ export class ProviderRuntime {
             // pointer beside a dirty worktree.
             if (compaction && !event.contextCompacted)
               throw new Error('The provider finished without confirming compaction.')
-            if (!compaction) await this.commitIsolatedTurn(sessionId, turnId)
+            if (!compaction) {
+              await this.commitIsolatedTurn(sessionId, turnId)
+              if (running.abandoned || running.interrupted || running.turnId !== turnId) break
+              const checkpoints = this.options.engine.current.sessions.get(sessionId)?.checkpoints ?? []
+              if (checkpoints.some(point => point.turnId === turnId && point.kind === 'turn-start')
+                && !checkpoints.some(point => point.turnId === turnId && point.kind === 'turn-end'))
+                await this.captureCheckpoint(sessionId, turnId, 'turn-end')
+              if (running.abandoned || running.interrupted || running.turnId !== turnId) break
+            }
             await this.emit({
               type: 'thread.turn.complete',
               sessionId,

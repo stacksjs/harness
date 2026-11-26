@@ -24,6 +24,8 @@
  */
 
 import { spawn } from 'node:child_process'
+import { lstat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { snapshotTree } from './checkpoint'
 
 export interface FileChange {
@@ -42,7 +44,8 @@ export interface WorkspaceDiff {
    * against `HEAD`. The difference matters to the reader: one is "what this
    * session did", the other is "what is uncommitted here".
    */
-  scope: 'session' | 'working-tree'
+  scope: 'session' | 'working-tree' | 'branch' | 'commit' | 'turn'
+  comparisonLabel?: string
   files: FileChange[]
   /** Unified diff for tracked changes. Empty when there are none. */
   patch: string
@@ -65,9 +68,9 @@ function git(cwd: string, args: string[]): Promise<{ ok: boolean, out: string }>
     // A repository with a huge diff must not hang the page. The cap is on time,
     // not bytes, because the byte cap belongs with the caller that renders it.
     const timer = setTimeout(() => { child.kill(); resolve({ ok: false, out }) }, 5000)
-    child.stdout?.on('data', (chunk: Buffer) => { out += chunk.toString() })
+    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
     child.on('error', () => { clearTimeout(timer); resolve({ ok: false, out: '' }) })
-    child.on('exit', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
+    child.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
   })
 }
 
@@ -96,9 +99,9 @@ export function parseStatus(raw: string): FileChange[] {
 
     // A rename spends two NUL-separated fields: the new path, then the old one.
     // Skipping the second is what keeps the list aligned.
-    if (code[0] === 'R' || code[1] === 'R') {
+    if (/[RC]/u.test(code)) {
       i++
-      files.push({ path, status: 'renamed', insertions: 0, deletions: 0 })
+      files.push({ path, status: code.includes('R') ? 'renamed' : 'added', insertions: 0, deletions: 0 })
       continue
     }
 
@@ -163,20 +166,18 @@ export function parseNumstat(raw: string): Map<string, { insertions: number, del
  * the working tree the same way the checkpoint did makes the comparison
  * symmetric, and brings untracked files in on both sides for free.
  */
-async function filesAgainst(workspacePath: string, baseline: string, now: string): Promise<FileChange[]> {
-  const named = await git(workspacePath, ['diff', '--name-status', '-z', baseline, now])
-
+function parseNameStatus(raw: string): FileChange[] {
   const files: FileChange[] = []
-  const fields = named.out.split('\0')
+  const fields = raw.split('\0')
   for (let i = 0; i < fields.length; i++) {
     const code = fields[i]
     if (!code) continue
     // `R100\0old\0new` — a rename spends two paths, and the new one is what
     // the reader cares about.
-    if (code.startsWith('R')) {
+    if (/^[RC]/u.test(code)) {
       const to = fields[i + 2]
       i += 2
-      if (to) files.push({ path: to, status: 'renamed', insertions: 0, deletions: 0 })
+      if (to) files.push({ path: to, status: code.startsWith('R') ? 'renamed' : 'added', insertions: 0, deletions: 0 })
       continue
     }
     const path = fields[++i]
@@ -219,29 +220,184 @@ export async function workspaceDiff(workspacePath: string, baseline?: string): P
   const scope = scoped ? 'session' as const : 'working-tree' as const
   const range = scoped ? [baseline!, now!] : ['HEAD']
 
+  return readWorkspaceDiff(workspacePath, scope, range, scoped)
+}
+
+async function readWorkspaceDiff(workspacePath: string, scope: WorkspaceDiff['scope'], range: string[], againstTree: boolean, comparisonLabel?: string): Promise<WorkspaceDiff> {
   const [status, numstat, patch] = await Promise.all([
-    git(workspacePath, ['status', '--porcelain=v1', '-z']),
-    git(workspacePath, ['diff', ...range, '--numstat', '-z']),
+    git(workspacePath, againstTree ? ['diff', '--name-status', '-z', ...range] : ['status', '--porcelain=v1', '-z']),
+    git(workspacePath, ['diff', '--no-ext-diff', '--no-textconv', '--numstat', '-z', ...range]),
     git(workspacePath, ['-c', 'diff.suppressBlankEmpty=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
       '--src-prefix=a/', '--dst-prefix=b/', '--output-indicator-old=-',
       '--output-indicator-new=+', '--output-indicator-context= ', ...range]),
   ])
 
-  if (!status.ok)
-    return { isRepository: true, scope, files: [], patch: '', error: 'git status failed' }
+  if (!status.ok || (againstTree && (!numstat.ok || !patch.ok)))
+    return { isRepository: true, scope, files: [], patch: '', error: 'Could not read this Git comparison.' }
 
   const counts = parseNumstat(numstat.out)
-  const listed = scoped ? await filesAgainst(workspacePath, baseline!, now!) : parseStatus(status.out)
+  const listed = againstTree ? parseNameStatus(status.out) : parseStatus(status.out)
   const files = listed.map(file => ({ ...file, ...(counts.get(file.path) ?? {}) }))
 
   return {
     isRepository: true,
     scope,
+    ...(comparisonLabel ? { comparisonLabel } : {}),
     files,
     patch: patch.out.length > MAX_PATCH_BYTES
-      // Truncated with a note rather than silently: a diff that stops halfway
-      // with no explanation reads as a complete diff.
       ? `${patch.out.slice(0, MAX_PATCH_BYTES)}\n\n… truncated at ${MAX_PATCH_BYTES / 1024}KB\n`
       : patch.out,
   }
+}
+
+export type WorkspaceReviewMode = 'uncommitted' | 'branch' | 'commit' | 'turn'
+
+export interface WorkspaceReviewTurn {
+  id: number
+  number: number
+  before: string
+  after: string
+}
+
+export interface WorkspaceReviewOptions {
+  isRepository: boolean
+  base: string | null
+  branches: Array<{ ref: string, label: string }>
+  commits: Array<{ sha: string, subject: string }>
+  turns: Array<{ id: number, number: number }>
+}
+
+const commitId = /^[\da-f]{40}(?:[\da-f]{24})?$/u
+const branchRef = /^refs\/(?:heads|remotes)\//u
+
+function refLabel(ref: string): string {
+  return ref.replace(branchRef, '')
+}
+
+async function resolveCommit(path: string, ref: string): Promise<string | null> {
+  const result = await git(path, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`])
+  const sha = result.out.trim()
+  return result.ok && commitId.test(sha) ? sha : null
+}
+
+async function isWorkspaceGitRoot(path: string): Promise<boolean> {
+  const prefix = await git(path, ['rev-parse', '--is-inside-work-tree', '--show-prefix'])
+  return prefix.ok && prefix.out.trimEnd() === 'true'
+}
+
+async function reviewWorkingState(path: string): Promise<string | null> {
+  const status = await git(path, ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all'])
+  if (!status.ok) return null
+  const details = await Promise.all(parseStatus(status.out).map(async (file) => {
+    try {
+      const stat = await lstat(join(path, file.path))
+      return [stat.size, stat.mtimeMs, stat.ctimeMs]
+    }
+    catch { return null }
+  }))
+  return Bun.hash(JSON.stringify([status.out, details])).toString(36)
+}
+
+/** Same common-ancestor comparison for the branch picker and the commit list. */
+async function reviewBase(path: string, head: string, choice?: string): Promise<{ ref: string, merge: string } | null> {
+  const origin = choice ? null : await git(path, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'])
+  const candidates = choice ? [choice] : [
+    ...(origin?.ok ? [origin.out.trim()] : []),
+    'refs/heads/main',
+    'refs/heads/master',
+  ]
+  for (const ref of candidates) {
+    if (!branchRef.test(ref) || !(await git(path, ['check-ref-format', ref])).ok) continue
+    const tip = await resolveCommit(path, ref)
+    if (!tip) continue
+    const merge = await git(path, ['merge-base', tip, head])
+    if (merge.ok && commitId.test(merge.out.trim())) return { ref, merge: merge.out.trim() }
+  }
+  return choice ? null : { ref: 'HEAD', merge: head }
+}
+
+export async function workspaceReviewOptions(path: string, turns: WorkspaceReviewTurn[], selectedBase?: string): Promise<WorkspaceReviewOptions> {
+  const isRepository = await isWorkspaceGitRoot(path)
+  const options: WorkspaceReviewOptions = {
+    isRepository,
+    base: null, branches: [], commits: [],
+    turns: turns.map(({ id, number }) => ({ id, number })),
+  }
+  if (!isRepository) return options
+  const head = await resolveCommit(path, 'HEAD')
+  const [refs, base] = await Promise.all([
+    git(path, ['for-each-ref', '--count=250', '--format=%(refname)%00%(symref)', 'refs/heads/', 'refs/remotes/']),
+    head ? reviewBase(path, head, selectedBase) : null,
+  ])
+  options.base = base?.ref ?? null
+  if (refs.ok) options.branches = refs.out.trimEnd().split('\n').flatMap((row) => {
+    const [ref, symbolic] = row.split('\0')
+    return ref && branchRef.test(ref) && !symbolic ? [{ ref, label: refLabel(ref) }] : []
+  })
+  if (head && base) {
+    const log = await git(path, ['log', '-50', '--format=%H%x00%s', `${base.merge}..${head}`, '--'])
+    if (log.ok) options.commits = log.out.trimEnd().split('\n').flatMap((row) => {
+      const [sha, subject = ''] = row.split('\0')
+      return sha && commitId.test(sha) ? [{ sha, subject }] : []
+    })
+  }
+  return options
+}
+
+/** Null means the client already holds the immutable input revision. */
+export async function reviewWorkspaceDiff(
+  path: string,
+  mode: WorkspaceReviewMode,
+  target: string | undefined,
+  turns: WorkspaceReviewTurn[],
+  knownRevision?: string,
+): Promise<(WorkspaceDiff & { revision?: string }) | null> {
+  const scope = mode === 'uncommitted' ? 'working-tree' : mode
+  const unavailable = (error: string): WorkspaceDiff => ({ isRepository: true, scope, files: [], patch: '', error })
+  if (!await isWorkspaceGitRoot(path)) return { isRepository: false, scope, files: [], patch: '' }
+  const head = await resolveCommit(path, 'HEAD')
+  if (!head) return unavailable('Git history is unavailable for this comparison.')
+
+  let base = head
+  let tip: string | undefined
+  let label: string | undefined
+  if (mode === 'branch') {
+    const branch = await reviewBase(path, head, target)
+    if (!branch) return unavailable('This branch base is unavailable or has no common history.')
+    base = branch.merge
+    label = refLabel(branch.ref)
+  }
+  else if (mode === 'commit') {
+    if (!target || !commitId.test(target)
+      || !(await git(path, ['merge-base', '--is-ancestor', target, head])).ok)
+      return unavailable('This commit is unavailable on the current branch.')
+    const parents = await git(path, ['rev-list', '--parents', '-1', target, '--'])
+    if (!parents.ok) return unavailable('Could not read this commit.')
+    const firstParent = parents.out.trim().split(' ')[1]
+    const emptyTree = firstParent ? null : await git(path, ['hash-object', '-t', 'tree', '--stdin'])
+    base = firstParent ?? emptyTree?.out.trim() ?? ''
+    if (!commitId.test(base)) return unavailable('Could not read the parent tree.')
+    tip = target
+    label = target.slice(0, 7)
+  }
+  else if (mode === 'turn') {
+    const turn = target ? turns.find(entry => String(entry.id) === target) : turns.at(-1)
+    if (!turn) return unavailable('This turn has no recorded Git comparison.')
+    const [before, after] = await Promise.all([resolveCommit(path, turn.before), resolveCommit(path, turn.after)])
+    if (!before || !after) return unavailable('The checkpoints for this turn are unavailable.')
+    base = before
+    tip = after
+    label = String(turn.number)
+  }
+
+  const workingState = tip ? '' : await reviewWorkingState(path)
+  if (workingState === null) return unavailable('Could not check the working tree for changes.')
+  const revision = Bun.hash(JSON.stringify([path, mode, label, base, tip ?? head, workingState])).toString(36)
+  if (revision === knownRevision) return null
+  // Branch and uncommitted review both include untracked files. The existing
+  // checkpoint mechanism uses a temporary index and leaves the real one alone.
+  const current = tip ?? await snapshotTree(path)
+  if (!current) return unavailable('Could not read the current working tree.')
+  const diff = await readWorkspaceDiff(path, scope, [base, current], true, label)
+  return diff.error ? diff : { ...diff, revision }
 }

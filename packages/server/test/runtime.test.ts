@@ -1659,6 +1659,12 @@ describe('checkpoint and revert', () => {
     expect(captured.kind).toBe('turn-start')
     expect(captured.vcsRef).toMatch(/^[0-9a-f]{40}$/)
     expect(readFileSync(join(workspace, 'tracked.txt'), 'utf8')).toBe('the agent changed this\n')
+    const completed = harness.engine.current.sessions.get(sessionId)?.checkpoints.find(point => point.kind === 'turn-end')
+    expect(completed).toMatchObject({ turnId: captured.turnId })
+    const review = `http://127.0.0.1:${port}/s/${sessionId}/diff?comparison=turn&target=${captured.turnId}`
+    const recorded = await (await fetch(review)).json()
+    expect(recorded).toMatchObject({ scope: 'turn', comparisonLabel: '1' })
+    expect(recorded.patch).toContain('+the agent changed this')
 
     client.send({
       t: 'dispatch',
@@ -1676,6 +1682,7 @@ describe('checkpoint and revert', () => {
     expect(readFileSync(join(workspace, 'tracked.txt'), 'utf8')).toBe('original\n')
     // And the file the agent created is gone, not left behind.
     expect(existsSync(join(workspace, 'agent-made-this.ts'))).toBe(false)
+    expect((await (await fetch(review)).json()).patch).toBe(recorded.patch)
     client.close()
   }, 15_000)
 
