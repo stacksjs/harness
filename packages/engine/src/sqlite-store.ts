@@ -138,13 +138,16 @@ export class SqliteStore implements EngineStore {
     return rows.map(row => fromColumn(row.session_id))
   }
 
-  async commitCommand(command: CommandIdentity, events: AppendableEvent[]): Promise<HarnessEvent[]> {
+  async commitCommand(command: CommandIdentity, events: AppendableEvent[],
+    saveIntents?: (database: Database, events: readonly HarnessEvent[]) => void,
+  ): Promise<HarnessEvent[]> {
     return this.db.transaction(() => {
       const committed = events.length > 0 ? this.appendEvents(events) : []
       this.db.query(
         `INSERT INTO command_receipts (command_id, seqs, at, created_at, updated_at, uuid)
          VALUES (?, ?, ?, datetime('now'), datetime('now'), lower(hex(randomblob(16))))`,
       ).run(command.commandId, JSON.stringify(committed.map(event => event.seq)), command.at)
+      saveIntents?.(this.db, committed)
       return committed
     }).immediate()
   }

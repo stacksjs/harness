@@ -53,6 +53,8 @@ export interface EngineOptions {
   isClientAllowed?: (type: string) => boolean
   /** Resolve host inputs for a new client command. Retries use their original receipt. */
   prepareClientCommand?: (command: Command, envelope: CommandEnvelope) => Promise<Command>
+  /** Commit host-owned intents together with the events that authorize them. */
+  commitCommand?: (envelope: CommandEnvelope, events: AppendableEvent[]) => Promise<HarnessEvent[]>
 }
 
 export class Engine {
@@ -131,7 +133,9 @@ export class Engine {
 
     const command = prepare ? await prepare(envelope.command, envelope) : envelope.command
     const produced = this.options.reducer(this.state, command, { ...envelope, command })
-    const events = await this.options.store.commitCommand({ commandId: envelope.id, at: envelope.at }, produced)
+    const events = this.options.commitCommand
+      ? await this.options.commitCommand(envelope, produced)
+      : await this.options.store.commitCommand({ commandId: envelope.id, at: envelope.at }, produced)
 
     for (const event of events) apply(this.state, event)
 

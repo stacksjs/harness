@@ -77,6 +77,7 @@ export interface SessionState {
    * checkout behind.
    */
   worktreePath: string
+  settledSeq?: number
   /** The branch its work lands on. Empty until isolated. */
   branch: string
 }
@@ -601,6 +602,8 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.navigation = { ...session.navigation, ...p.changes }
+      if ('settledAt' in p.changes)
+        session.settledSeq = typeof p.changes.settledAt === 'number' ? event.seq : undefined
       const workspace = state.workspaces.get(session.workspaceId)
       const profile = workspace && state.profiles.get(workspace.profileId)
       if (profile) projectThreadUndo(profile, event.sessionId, event.at, p)
@@ -726,6 +729,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         session.navigation.settledAt = null
         session.navigation.snoozedUntil = null
       }
+      session.settledSeq = undefined
       clearTurnRequests(session)
       session.lastTurnId = Math.max(session.lastTurnId ?? 0, p.turnId)
       session.turns.push({
