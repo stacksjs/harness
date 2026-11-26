@@ -130,6 +130,7 @@ export type EventPayload =
   | { type: 'session.worktree-reserved', intent: WorktreeIntent }
   /** This session got its own checkout and branch. */
   | { type: 'session.isolated', worktreePath: string, branch: string, combined?: CombinedWorktreeIntent }
+  | { type: 'session.worktree-restored' }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number, skipped?: string[] }
   | { type: 'checkpoint.restore-failed', checkpointId: number, message: string }
   /** Only the settings that actually changed, for the same reason as below. */

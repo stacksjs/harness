@@ -226,6 +226,15 @@ export class WorkspaceTerminals<Peer> {
     }
   }
 
+  stopProjectJob(scope: SavedTerminalScope): void {
+    for (const terminal of this.terminals.values()) {
+      if (terminal.scope.workspaceId !== scope.workspaceId || terminal.scope.sessionId !== scope.sessionId
+        || terminal.scope.resumeKey !== scope.resumeKey) continue
+      this.finishJob(terminal, null, true)
+      return
+    }
+  }
+
   prune(exists: (scope: TerminalScope) => boolean): void {
     for (const terminal of this.terminals.values()) {
       if (!exists(terminal.scope)) this.remove(terminal)

@@ -125,7 +125,7 @@ async function rollbackCleanLayoutCheckouts(intent: CombinedWorktreeIntent, root
 
 /** Startup only adopts a full layout. Recovery uses the recorded checkout paths. */
 export async function openCombinedWorktree(intent: CombinedWorktreeIntent, mode: WorktreeOpenMode,
-  authorize = () => false, signal?: AbortSignal): Promise<boolean> {
+  authorize = () => false, signal?: AbortSignal, beforeRestore?: () => void): Promise<boolean> {
   const create = mode === true
   const recover = typeof mode === 'string'
   if (create && intent.layout && !authorize())
@@ -149,7 +149,7 @@ export async function openCombinedWorktree(intent: CombinedWorktreeIntent, mode:
     }
     for (const checkout of intent.checkouts) {
       if (await realpath(checkout.repository).catch(() => null) !== checkout.repository) return false
-      if (!(await openReserved(checkout, mode, root, authorize)).path) return false
+      if (!(await openReserved(checkout, mode, root, authorize, beforeRestore)).path) return false
     }
     if ((create || (restorePaths && authorize())) && !await prepareDirectory(root, intent.path)) return false
     if (await realpath(intent.path).catch(() => null) !== intent.path) return false

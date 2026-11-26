@@ -283,9 +283,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     workspacePath: options.workspacePath,
     previewOwner,
     combinedWorktreesDirectory: resolve(databasePath + '.harness-worktrees'),
-    reserveWorktreeSetup(scope) {
+    reserveWorktreeSetup(scope, reason) {
       const script = projectScripts.list(scope.workspaceId).find(script => script.runOnWorktreeCreate)
-      if (script) projectSetup.reserve(scope, script)
+      if (reason === 'restored') {
+        const previous = projectSetup.reserveRestored(scope, script)
+        if (previous?.status === 'running') terminals.stopProjectJob({ ...scope, resumeKey: previous.resumeKey })
+      }
+      else if (script) projectSetup.reserve(scope, script)
     },
     runWorktreeSetup(scope, signal) {
       return projectSetup.run(scope, signal, async (receipt) => {
@@ -1033,12 +1037,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     if (command.type === 'session.turn.rewind') {
-      await runtime.rewindConversation(command.sessionId, command.verifyOnly === true)
+      await runtime.rewindConversation(command.sessionId, command.verifyOnly === true, allowProjectCommands)
       return
     }
 
     if (command.type === 'session.checkpoint.revert') {
-      await runtime.revert(command.sessionId, command.checkpointId, envelope.id)
+      await runtime.revert(command.sessionId, command.checkpointId, envelope.id, allowProjectCommands)
       return
     }
 

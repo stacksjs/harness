@@ -4768,6 +4768,37 @@ await setupStatus.waitFor({ state: 'hidden' })
 check('setup failure can be repaired and retried from the thread', !await setupStatus.isVisible())
 await page.getByRole('button', { name: 'Hide terminal dock' }).click()
 
+const restoredSetupGate = join(driveRoot, 'finish-restored-setup')
+const restoredSetupReplies = page.getByText('The fixture was checked without edits.', { exact: true })
+const responsesBeforeRestore = await restoredSetupReplies.count()
+const checkoutBeforeRestore = harness.engine.current.sessions.get(setupThread)!.worktreePath
+const originalSetup = await (await fetch(`${baseUrl}/s/${setupThread}/project-setup`)).json()
+await page.locator('[data-header-project-scripts]').click()
+await scriptDialog.getByRole('button', { name: 'Edit Prepare checkout' }).click()
+await scriptDialog.getByLabel('Command', { exact: true }).fill(
+  `printf 'Preparing the restored checkout\\n'; while /bin/test ! -f "${restoredSetupGate}"; do sleep 0.1; done`,
+)
+await scriptDialog.getByRole('button', { name: 'Save script' }).click()
+await scriptDialog.getByRole('button', { name: 'Close project scripts' }).click()
+rmSync(checkoutBeforeRestore, { recursive: true })
+await setupPrompt()
+await page.locator('[data-send]').click()
+await setupStatus.getByText('Running worktree setup…').waitFor({ timeout: 12_000 })
+await setupStatus.getByText('Preparing the restored checkout').waitFor()
+const restoredSetup = await (await fetch(`${baseUrl}/s/${setupThread}/project-setup`)).json()
+check('recreating the checkout starts a fresh blocking setup before the provider',
+  restoredSetup.resumeKey !== originalSetup.resumeKey && restoredSetup.blocking
+  && existsSync(join(checkoutBeforeRestore, '.git')) && !harness.engine.current.sessions.get(setupThread)?.turns.at(-1)?.response)
+for (const [width, height] of workspaceViewports) {
+  await page.setViewportSize({ width, height })
+  await capture(`workspace-restored-setup-${width}x${height}`)
+}
+writeFileSync(restoredSetupGate, '')
+await setupStatus.waitFor({ state: 'hidden', timeout: 12_000 })
+await restoredSetupReplies.nth(responsesBeforeRestore).waitFor()
+await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+await page.setViewportSize({ width: 1440, height: 900 })
+
 const failedCleanupGate = join(driveRoot, 'finish-failed-cleanup')
 const successfulCleanupGate = join(driveRoot, 'finish-successful-cleanup')
 const cleanupCommand = (gate: string, code: number) => `printf 'Cleaning the fixture checkout\\n'; while /bin/test ! -f "${gate}"; do sleep 0.1; done; exit ${code}`

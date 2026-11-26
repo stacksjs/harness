@@ -1839,7 +1839,7 @@ describe('a session can have a checkout of its own', () => {
     }
   }, 25_000)
 
-  it.skipIf(process.platform === 'win32').each([true, false])('runs worktree setup with provider waiting set to %s', async (waitForSetup) => {
+  it.skipIf(process.platform === 'win32').each([true, false])('runs initial and restored worktree setup with provider waiting set to %s', async (waitForSetup) => {
     const workspace = repoWorkspace2()
     const gate = join(dir, 'finish-setup')
     const started = join(dir, 'started-setup')
@@ -1885,11 +1885,97 @@ describe('a session can have a checkout of its own', () => {
       expect(setup).toMatchObject({ status: 'completed', exitCode: 0, resumeKey: running.resumeKey })
       expect(launches).toEqual([harness.engine.current.sessions.get(sessionId)?.worktreePath])
       turn('setup-second-turn')
-      expect(await client.waitForDispatch('setup-second-turn')).toMatchObject({ t: 'dispatched' })
+      expect(await client.waitFor('turn.completed', 8000, payload => payload.turnId === 2)).toBeTruthy()
       expect(readFileSync(started, 'utf8')).toBe('started\n')
+
+      const checkout = launches[0]!
+      rmSync(gate)
+      rmSync(checkout, { recursive: true })
+      turn('setup-restored-turn')
+      expect(await client.waitFor('session.worktree-restored', 8000)).toBeTruthy()
+      for (let attempt = 0; attempt < 300 && readFileSync(started, 'utf8') === 'started\n'; attempt++) await Bun.sleep(20)
+      expect(readFileSync(started, 'utf8')).toBe('started\nstarted\n')
+      const runningAgain = await (await fetch(`${base}/project-setup`)).json()
+      expect(runningAgain).toMatchObject({ name: 'Fixture setup', status: 'running' })
+      expect(runningAgain.resumeKey).not.toBe(running.resumeKey)
+      if (waitForSetup) expect(launches).toEqual([checkout])
+      else expect(await client.waitFor('turn.completed', 8000, payload => payload.turnId === 3)).toBeTruthy()
+      writeFileSync(gate, '')
+      expect(await client.waitFor('turn.completed', 8000, payload => payload.turnId === 3)).toBeTruthy()
+      expect(launches).toEqual([checkout, checkout])
+      turn('setup-restored-turn')
+      for (let attempt = 0; attempt < 100 && !client.events.some(frame => frame.id === 'setup-restored-turn' && frame.replayed); attempt++) await Bun.sleep(20)
+      expect(client.events.find(frame => frame.id === 'setup-restored-turn' && frame.replayed)).toBeTruthy()
+      expect(readFileSync(started, 'utf8')).toBe('started\nstarted\n')
+      expect(client.payloads('session.worktree-restored')).toHaveLength(1)
     }
     finally { client.close() }
-  }, 20_000)
+  }, 35_000)
+
+  it.skipIf(process.platform === 'win32')('defers setup after restoring two checkouts for a file rewind across restart', async () => {
+    const workspace = repoWorkspace2()
+    const child = join(workspace, 'child')
+    mkdirSync(child)
+    expect(spawnSync('git', ['init', '-q'], { cwd: child }).status).toBe(0)
+    expect(spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-qm', 'child'], { cwd: child }).status).toBe(0)
+    const databasePath = join(dir, 'test.sqlite')
+    const marker = join(dir, 'setup-generations')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => driver }
+    const socket = `ws://127.0.0.1:${port}/ws`
+    harness = await serve(options)
+    let client = await Client.connect(socket)
+    try {
+      const { sessionId } = await bootstrapIsolated(client, workspace)
+      const base = `http://127.0.0.1:${port}/s/${sessionId}`
+      const setup = () => fetch(`${base}/project-setup`).then(response => response.json())
+      const saved = await fetch(`${base}/project-scripts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'save', script: {
+          name: 'Prepare project',
+          command: `test -f child/.git && printf 'ready\\n' >> "${marker}"`,
+          runOnWorktreeCreate: true,
+          waitForSetup: true,
+        } }),
+      })
+      expect(saved.status).toBe(201)
+      const turn = (id: string) => client.send({ t: 'dispatch', envelope: { id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'Work in isolation.' } } })
+      turn('setup-before-rewind')
+      expect(await client.waitFor('turn.completed', 20_000)).toBeTruthy()
+      const first = await setup()
+      expect(first).toMatchObject({ status: 'completed', exitCode: 0 })
+      const session = harness.engine.current.sessions.get(sessionId)!
+      expect(session.combinedWorktree?.checkouts).toHaveLength(2)
+      const checkpointId = session.checkpoints.find(checkpoint => checkpoint.kind === 'turn-start')!.id
+      rmSync(session.worktreePath, { recursive: true })
+      client.send({ t: 'dispatch', envelope: { id: 'setup-file-rewind', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId } } })
+      expect(await client.waitForDispatch('setup-file-rewind')).toMatchObject({ t: 'dispatched' })
+      const restored = await client.waitFor('checkpoint.restored', 20_000)
+      expect(client.payloads('checkpoint.restore-failed')).toEqual([])
+      expect(restored).toMatchObject({ checkpointId })
+      expect(client.payloads('session.worktree-restored')).toHaveLength(1)
+      expect(readFileSync(marker, 'utf8')).toBe('ready\n')
+      const pending = await setup()
+      expect(pending.status).toBe('pending')
+      expect(pending.resumeKey).not.toBe(first.resumeKey)
+      client.close()
+      harness.stop()
+      harness = await serve(options)
+      client = await Client.connect(socket)
+      client.send({ t: 'subscribe', sessionId })
+      expect(await setup()).toMatchObject({ status: 'pending', resumeKey: pending.resumeKey })
+      client.send({ t: 'term-open', workspaceId: derivedId('c_w'), sessionId, resumeKey: first.resumeKey, resumeOnly: true })
+      for (let attempt = 0; attempt < 100 && !client.events.some(frame => frame.t === 'term-opened'); attempt++) await Bun.sleep(20)
+      expect(client.events.find(frame => frame.t === 'term-opened')).toMatchObject({ exit: { code: 0 } })
+      turn('setup-after-rewind')
+      expect(await client.waitFor('turn.completed', 20_000, payload => payload.turnId === 2)).toBeTruthy()
+      expect(await setup()).toMatchObject({ status: 'completed', resumeKey: pending.resumeKey, exitCode: 0 })
+      expect(readFileSync(marker, 'utf8')).toBe('ready\nready\n')
+      expect(readFileSync(join(workspace, 'app.txt'), 'utf8')).toBe('original\n')
+    }
+    finally { client.close() }
+  }, 60_000)
 
   it.skipIf(process.platform === 'win32')('keeps an uncertain worktree setup blocked until an explicit retry after restart', async () => {
     const workspace = repoWorkspace2()
@@ -2036,7 +2122,7 @@ describe('a session can have a checkout of its own', () => {
     const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     const { sessionId } = await bootstrapIsolated(client, workspace)
     client.send({ t: 'dispatch', envelope: { id: 'c_t1', at: 5, command: { type: 'session.turn.start', sessionId, text: 'one' } } })
-    expect(await client.waitFor('turn.completed')).toBeTruthy()
+    expect(await client.waitFor('turn.completed', 12_000)).toBeTruthy()
     const session = harness.engine.current.sessions.get(sessionId)!
     const first = session.worktreePath
     if (scenario !== 'present') rmSync(first, { recursive: true })

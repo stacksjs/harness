@@ -734,6 +734,12 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'thread.worktree.restored': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session?.worktreePath || !state.workspaces.get(session.workspaceId)?.trusted || session.navigation?.archivedAt) return []
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'session.worktree-restored' } }]
+    }
+
     case 'thread.checkpoint.restored': {
       if (!state.sessions.has(command.sessionId))
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
