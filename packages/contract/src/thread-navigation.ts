@@ -1,9 +1,15 @@
 export interface ThreadNavigation {
   title?: string
   pinnedOrder?: number | null
+  activeOrder?: number | null
   settledAt?: number | null
   archivedAt?: number | null
   snoozedUntil?: number | null
+}
+
+export type ThreadDrop = {
+  destination: 'pinned' | 'active' | 'settled'
+  anchor?: { sessionId: number, placement: 'before' | 'after' }
 }
 
 export type ThreadOrganizationAction =
@@ -11,6 +17,7 @@ export type ThreadOrganizationAction =
   | { action: 'snooze', until: number }
   | { action: 'move-pin', direction: 'up' | 'down' }
   | { action: 'reorder-pin', targetSessionId: number, placement: 'before' | 'after' }
+  | ({ action: 'drop' } & ThreadDrop)
   | { action: 'pin' | 'unpin' | 'settle' | 'unsettle' | 'archive' | 'restore' | 'wake' }
 
 export const maximumThreadSnooze = 366 * 24 * 60 * 60 * 1000

@@ -30,6 +30,7 @@ import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfPro
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
 import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
+import { threadSidebarLayout } from './thread-sidebar'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
 import { TerminalHistoryStore } from './terminal-history'
@@ -93,7 +94,7 @@ interface SocketData {
    * rather than re-sending a session's whole log.
    */
   cursors: Map<number, number>
-  pinProfileId?: number
+  sidebarWatch?: { profileId: number, pinsOnly: boolean }
 }
 
 type HarnessSocket = ServerWebSocket<SocketData>
@@ -104,6 +105,7 @@ type ClientFrame =
   | { t: 'subscribe', sessionId: number, sinceSeq?: number }
   | { t: 'unsubscribe', sessionId: number }
   | { t: 'watch-pins', profileId: number }
+  | { t: 'watch-sidebar', profileId: number }
   | { t: 'ping' }
   | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number }
   | { t: 'term-input', termId: number, data: string }
@@ -479,8 +481,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const renderCache = new Map<string, string>()
   const RENDER_CACHE_CAP = 16
 
-  function pinSnapshot(profileId: number) {
-    return { t: 'pin-order', profileId, sessionIds: profilePinnedThreads(engine.current, profileId).filter(isVisiblePin).map(session => session.id) }
+  function sidebarSnapshot(profileId: number, pinsOnly: boolean) {
+    if (pinsOnly)
+      return { t: 'pin-order', profileId, sessionIds: profilePinnedThreads(engine.current, profileId).filter(isVisiblePin).map(session => session.id) }
+    const profile = engine.current.profiles.get(profileId)
+    const workspaces = (profile?.workspaceIds ?? []).flatMap((id) => {
+      const workspace = engine.current.workspaces.get(id)
+      return workspace ? [workspace] : []
+    })
+    const workspaceIds = new Set(workspaces.map(workspace => workspace.id))
+    const sessions = [...engine.current.sessions.values()].filter(session => workspaceIds.has(session.workspaceId))
+    return { t: 'sidebar-order', profileId, sections: threadSidebarLayout(profileId, workspaces, sessions) }
   }
 
   /**
@@ -491,7 +502,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    */
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
     if (events.length > 0) stateRev++
-    const pinProfiles = new Set<number>()
+    const changedProfiles = new Set<number>()
     for (const event of events) {
       if (event.payload.type === 'profile.deleted')
         terminals.prune(terminalScopeExists)
@@ -516,11 +527,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (event.payload.type === 'session.navigation-changed') {
         const changes = event.payload.changes
         if ('snoozedUntil' in changes) scheduleThreadWake()
-        if ('pinnedOrder' in changes || 'archivedAt' in changes || 'snoozedUntil' in changes) {
-          const session = engine.current.sessions.get(event.sessionId)
-          const profile = session && engine.current.workspaces.get(session.workspaceId)?.profileId
-          if (profile !== undefined) pinProfiles.add(profile)
-        }
+      }
+      if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'turn.started'
+        || event.payload.type === 'turn.completed' || event.payload.type === 'turn.interrupted'
+        || event.payload.type === 'session.failed' || event.payload.type === 'session.stopped'
+        || event.payload.type === 'approval.requested' || event.payload.type === 'approval.resolved'
+        || event.payload.type === 'input.requested' || event.payload.type === 'input.resolved') {
+        const session = engine.current.sessions.get(event.sessionId)
+        const profile = session && engine.current.workspaces.get(session.workspaceId)?.profileId
+        if (profile !== undefined) changedProfiles.add(profile)
       }
 
       for (const socket of sockets) {
@@ -536,11 +551,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         socket.data.cursors.set(event.sessionId, event.seq)
       }
     }
-    for (const profileId of pinProfiles) {
-      const watchers = [...sockets].filter(socket => socket.data.pinProfileId === profileId)
-      if (!watchers.length) continue
-      const snapshot = pinSnapshot(profileId)
-      for (const socket of watchers) send(socket, snapshot)
+    for (const profileId of changedProfiles) {
+      let pins: ReturnType<typeof sidebarSnapshot> | undefined
+      let sidebar: ReturnType<typeof sidebarSnapshot> | undefined
+      for (const socket of sockets) {
+        const watch = socket.data.sidebarWatch
+        if (watch?.profileId !== profileId) continue
+        send(socket, watch.pinsOnly ? pins ??= sidebarSnapshot(profileId, true) : sidebar ??= sidebarSnapshot(profileId, false))
+      }
     }
   }
 
@@ -788,9 +806,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return
 
       case 'watch-pins':
-        socket.data.pinProfileId = engine.current.profiles.has(frame.profileId) ? frame.profileId : undefined
-        if (socket.data.pinProfileId !== undefined) send(socket, pinSnapshot(socket.data.pinProfileId))
+      case 'watch-sidebar': {
+        const pinsOnly = frame.t === 'watch-pins'
+        socket.data.sidebarWatch = engine.current.profiles.has(frame.profileId) ? { profileId: frame.profileId, pinsOnly } : undefined
+        if (socket.data.sidebarWatch) send(socket, sidebarSnapshot(frame.profileId, pinsOnly))
         return
+      }
 
       case 'term-open': {
         // A terminal is arbitrary execution with no approval step in front of

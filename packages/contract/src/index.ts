@@ -38,4 +38,4 @@ export { claudeCompactionReturnAt } from './idle-compaction'
 export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, HostSettings, TerminalShell } from './settings'
 
 export { maximumThreadSnooze, pinOrder, threadDisplayTitle } from './thread-navigation'
-export type { ThreadNavigation, ThreadOrganizationAction } from './thread-navigation'
+export type { ThreadDrop, ThreadNavigation, ThreadOrganizationAction } from './thread-navigation'

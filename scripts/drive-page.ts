@@ -1908,6 +1908,51 @@ try {
   await pinObserver.reload()
   await observerPins.first().getByText('Parity release review', { exact: true }).waitFor()
   check('the dragged pin order survives a reload', true)
+
+  const reviewRoute = `/s/${steerSessionId}`
+  const reviewRow = page.locator(`[data-sidebar-item][href="${reviewRoute}"]`)
+  const observerRow = pinObserver.locator(`[data-sidebar-item][href="${reviewRoute}"]`)
+  const activeSection = `[data-section-id="project-${workspaceId}"]`
+  const settledSection = '[data-section-id^="settled-"]'
+  const pinnedSection = '[data-section-id^="pinned-"]'
+  const moveReview = async (target: typeof reviewRow, action: string, name?: string) => {
+    const row = await reviewRow.boundingBox()
+    if (!row) throw new Error('The thread to move is hidden')
+    await page.mouse.move(row.x + 60, row.y + row.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(row.x + 70, row.y + row.height / 2)
+    await target.waitFor({ state: 'visible' })
+    const bounds = await target.boundingBox()
+    if (!bounds) throw new Error('The thread destination is hidden')
+    await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + 5, { steps: 10 })
+    await page.locator(`[data-shelf-action="${action}"]`).waitFor()
+    if (name) await capture(name)
+    await page.mouse.up()
+  }
+  const observeReviewIn = (shelf: string) => observerRow.and(pinObserver.locator(`${shelf} [data-sidebar-item]`)).waitFor()
+  const pickShelfHeader = (shelf: string) => page.locator(`${shelf} [data-sidebar-section-header]`).first()
+  await observerRow.focus()
+  await moveReview(pickShelfHeader(activeSection), 'Unpin', 'thread-shelf-unpin')
+  await observeReviewIn(activeSection)
+  check('unpinning by drag moves a focused link to its project on both clients', await observerRow.evaluate(row => row === document.activeElement))
+  cmd('d_shelf_snooze', { type: 'session.organize', sessionId: steerSessionId, action: 'snooze', until: Date.now() + 3_600_000 })
+  const snoozedShelf = '[data-section-id^="snoozed-"]'
+  await reviewRow.and(page.locator(`${snoozedShelf} [data-sidebar-item]`)).waitFor()
+  await observeReviewIn(snoozedShelf)
+  await moveReview(pickShelfHeader(activeSection), 'Wake', 'thread-shelf-wake')
+  await observeReviewIn(activeSection)
+  check('dragging out of Snoozed wakes the thread on both clients before its timer', harness.engine.current.sessions.get(steerSessionId)?.navigation?.snoozedUntil === null)
+  await moveReview(pickShelfHeader(settledSection), 'Settle', 'thread-shelf-settle')
+  await observeReviewIn(settledSection)
+  await moveReview(pickShelfHeader(activeSection), 'Un-settle')
+  await observeReviewIn(activeSection)
+  await moveReview(otherPin, 'Pin')
+  await observeReviewIn(pinnedSection)
+  await pinObserver.reload()
+  await observeReviewIn(pinnedSection)
+  check('settle, un-settle and pin drops save their actions without changing the active thread', new URL(page.url()).pathname === `/s/${sessionId}`
+    && await observerPins.first().getAttribute('href') === reviewRoute)
+  await capture('thread-shelves-restored')
 }
 finally { await pinObserver.close() }
 

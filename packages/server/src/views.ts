@@ -17,6 +17,7 @@ import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from '.
 import { settingsSections } from './settings-location'
 import type { SettingsSection } from './settings-location'
 import { threadTitle } from './thread-search'
+import { threadSidebarLayout } from './thread-sidebar'
 import { escapeTranscriptText } from './transcript-markdown'
 
 interface ProjectSummary {
@@ -33,6 +34,7 @@ export interface ViewProps {
     tint?: string
     workspaces: ProjectSummary[]
     sessions: Array<{ id: number, workspaceId: number, title: string, state: string, navigation?: ThreadNavigation }>
+    sidebar: ReturnType<typeof threadSidebarLayout>
   }>
   activeProfile: string
   providerProfileId: number | null
@@ -121,8 +123,8 @@ export function viewProps(state: HarnessState, options: {
       .filter((w): w is NonNullable<typeof w> => Boolean(w))
 
     const workspaceIds = new Set(workspaces.map(w => w.id))
-    const sessions = [...state.sessions.values()]
-      .filter(session => workspaceIds.has(session.workspaceId))
+    const profileSessions = [...state.sessions.values()].filter(session => workspaceIds.has(session.workspaceId))
+    const sessions = profileSessions
       .map(session => ({
         id: session.id,
         workspaceId: session.workspaceId,
@@ -148,6 +150,7 @@ export function viewProps(state: HarnessState, options: {
         trusted: w.trusted,
       })),
       sessions,
+      sidebar: threadSidebarLayout(profile.id, workspaces, profileSessions),
     }
   })
 

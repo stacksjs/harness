@@ -1,7 +1,7 @@
 import type { CommandEnvelope, Command } from '@harness/contract'
 import { beforeEach, describe, expect, it } from 'bun:test'
 import { CommandRejected, Engine } from '../src/engine'
-import { emptyState, replay } from '../src/projections'
+import { activeThreadOrder, emptyState, replay, threadShelf } from '../src/projections'
 import { derivedId, InvalidCommand, reduce } from '../src/reducer'
 import { MemoryStore } from '../src/store'
 
@@ -221,6 +221,42 @@ describe('Engine — the M1 exit criterion', () => {
 })
 
 describe('Thread navigation', () => {
+  it('moves a thread through shelves and preserves its chosen active position after replay', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const other = await withWorkspace(engine)
+    async function create(workspace: number): Promise<number> {
+      const command = envelope({ type: 'session.create', workspaceId: workspace, driverKind: 'claude' })
+      await engine.dispatch(command)
+      return derivedId(command.id)
+    }
+    const first = await create(workspaceId)
+    const second = await create(workspaceId)
+    const foreign = await create(other.workspaceId)
+    const drop = (sessionId: number, destination: 'active' | 'pinned' | 'settled', before?: number) => envelope({
+      type: 'session.organize', sessionId, action: 'drop', destination,
+      ...(before === undefined ? {} : { anchor: { sessionId: before, placement: 'before' } }),
+    })
+    await expect(engine.dispatch(drop(first, 'active', foreign))).rejects.toThrow('destination thread in this section')
+    await engine.dispatch(drop(first, 'active', second))
+    await engine.dispatch(drop(first, 'pinned'))
+    await engine.dispatch(envelope({ type: 'session.organize', sessionId: second, action: 'snooze', until: clock + 60_000 }))
+    await engine.dispatch(drop(second, 'pinned', first))
+    expect(engine.current.sessions.get(second)?.navigation).toMatchObject({ pinnedOrder: 1, activeOrder: 2, snoozedUntil: null })
+    expect(engine.current.sessions.get(first)?.navigation).toMatchObject({ pinnedOrder: 2, activeOrder: 1 })
+    await engine.dispatch(drop(first, 'settled'))
+    expect(engine.current.sessions.get(first)?.navigation).toMatchObject({ pinnedOrder: null, activeOrder: null })
+    await engine.dispatch(drop(second, 'active'))
+    const resume = drop(first, 'active', second)
+    await engine.dispatch(resume)
+    expect((await engine.dispatch(resume)).replayed).toBe(true)
+    const newest = await create(workspaceId)
+    const restarted = new Engine({ store, reducer: reduce })
+    await restarted.hydrate()
+    expect([...restarted.current.sessions.values()].filter(session => session.workspaceId === workspaceId && threadShelf(session) === 'active')
+      .reverse().sort(activeThreadOrder).map(session => session.id)).toEqual([newest, first, second])
+  })
+
   it('moves a pinned thread past multiple rows and preserves the saved order after replay', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)

@@ -30,7 +30,7 @@ export { updateTranscriptMarkdown } from './packages/server/src/transcript-markd
 export { sendBrowserCommand } from './packages/server/src/browser-command'
 export { createFollowUpActions } from './packages/server/src/browser-follow-ups'
 export { createSessionSocket } from './packages/server/src/browser-session-socket'
-export { createPinnedSidebar } from './packages/server/src/browser-pinned-sidebar'
+export { createThreadSidebar } from './packages/server/src/browser-thread-sidebar'
 export { watchWorkspaceChanges } from './packages/server/src/browser-workspace-changes'
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
 export { chosenSnoozeTime, threadSnoozeChoices } from './packages/server/src/browser-thread-snooze'

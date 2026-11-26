@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation } from '@harness/contract'
 import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, validInputAnswers } from '@harness/contract'
-import { forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation } from './projections'
+import { activeThreadOrder, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -104,6 +104,53 @@ function organizeThread(state: HarnessState, command: Extract<Command, { type: '
   if (archivedAt && command.action !== 'restore')
     throw new InvalidCommand('Restore this thread before changing it.')
   switch (command.action) {
+    case 'drop': {
+      const { destination, anchor } = command
+      if (destination !== 'pinned' && destination !== 'active' && destination !== 'settled')
+        throw new InvalidCommand('Choose a thread destination.')
+      if (anchor !== undefined && (!anchor || !Number.isSafeInteger(anchor.sessionId)
+        || (anchor.placement !== 'before' && anchor.placement !== 'after') || destination === 'settled'))
+        throw new InvalidCommand('Choose a valid place for this thread.')
+      if (threadShelf(session) === 'working') throw new InvalidCommand('Wait for the thread to leave Working before moving it.')
+      if (destination === 'settled') {
+        if (isTurnActive(session.state)) throw new InvalidCommand('Wait for the turn to finish before settling.')
+        if (threadShelf(session) === 'settled') return []
+        return [change({ settledAt: at, activeOrder: null, pinnedOrder: null, snoozedUntil: null })]
+      }
+      if (session.state === 'stopped' || (destination === 'active' && session.state === 'running'))
+        throw new InvalidCommand('This thread cannot move to that section in its current state.')
+      const workspace = state.workspaces.get(session.workspaceId)
+      if (!workspace) throw new InvalidCommand('This thread has no project on the host.')
+      const sameActiveGroup = (candidate: SessionState): boolean => {
+        const other = state.workspaces.get(candidate.workspaceId)
+        return other?.profileId === workspace.profileId && (workspace.scratch ? other.scratch === true : other.id === workspace.id)
+      }
+
+      const pinned = destination === 'pinned' ? profilePinnedThreads(state, workspace.profileId) : []
+      const group = destination === 'pinned' ? pinned.filter(isVisiblePin)
+        : [...state.sessions.values()].reverse().filter(candidate => sameActiveGroup(candidate)
+          && candidate.state !== 'stopped' && !candidate.navigation?.settledAt).sort(activeThreadOrder)
+      const target = anchor ? group.find(candidate => candidate.id === anchor.sessionId && threadShelf(candidate) === destination)
+        : group.find(candidate => candidate !== session && threadShelf(candidate) === destination)
+      if (anchor && !target) throw new InvalidCommand('Choose a destination thread in this section.')
+      if (target === session) return []
+      const ordered = group.filter(candidate => candidate !== session)
+      ordered.splice(target ? ordered.indexOf(target) + (anchor?.placement === 'after' ? 1 : 0) : 0, 0, session)
+
+      const ranks = group.map(candidate => candidate.navigation?.pinnedOrder ?? 0)
+      if (destination === 'pinned' && ordered.length > group.length) ranks.push((pinned.at(-1)?.navigation?.pinnedOrder ?? 0) + 1)
+      return ordered.flatMap((candidate, index) => {
+        const fields: Partial<ThreadNavigation> = destination === 'pinned'
+          ? { pinnedOrder: ranks[index] } : { activeOrder: index + 1 }
+        if (candidate === session) {
+          if (snoozedUntil) fields.snoozedUntil = null
+          if (settledAt) fields.settledAt = null
+          if (destination === 'active' && pinnedOrder != null) fields.pinnedOrder = null
+        }
+        return Object.entries(fields).every(([key, value]) => candidate.navigation?.[key as keyof ThreadNavigation] === value)
+          ? [] : [change(fields, candidate.id)]
+      })
+    }
     case 'rename': {
       const title = typeof command.title === 'string' ? command.title.trim() : ''
       if (!title || title.length > 120) throw new InvalidCommand('Enter a title of 1 to 120 characters.')
@@ -144,7 +191,7 @@ function organizeThread(state: HarnessState, command: Extract<Command, { type: '
       return pinnedOrder == null ? [] : [change({ pinnedOrder: null })]
     case 'settle':
       if (isTurnActive(session.state)) throw new InvalidCommand('Wait for the turn to finish before settling.')
-      return settledAt ? [] : [change({ settledAt: at, pinnedOrder: null, snoozedUntil: null })]
+      return settledAt ? [] : [change({ settledAt: at, ...(session.navigation?.activeOrder != null && { activeOrder: null }), pinnedOrder: null, snoozedUntil: null })]
     case 'unsettle':
       return settledAt ? [change({ settledAt: null })] : []
     case 'archive':

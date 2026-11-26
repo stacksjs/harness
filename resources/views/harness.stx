@@ -69,43 +69,19 @@ export const spaces = profiles.map((profile, index) => ({
 }))
 
 function threadSections(profile) {
-  const recent = (profile.sessions || []).filter(session => !session.navigation?.archivedAt).reverse()
-  const collect = (id, label, rows) => ({ id: id + '-' + profile.id, label, items: rows.map(toItem) })
-  const snoozed = recent.filter(session => session.navigation?.snoozedUntil)
-  const visible = recent.filter(session => !session.navigation?.snoozedUntil)
-  const pinned = visible.filter(session => session.navigation?.pinnedOrder != null)
-    .sort((a, b) => a.navigation.pinnedOrder - b.navigation.pinnedOrder)
-  const unpinned = visible.filter(session => session.navigation?.pinnedOrder == null)
-  const active = unpinned.filter(session => !session.navigation?.settledAt && session.state !== 'stopped')
-  const settled = unpinned.filter(session => session.navigation?.settledAt || session.state === 'stopped')
-    .sort((a, b) => (b.navigation?.settledAt ?? 0) - (a.navigation?.settledAt ?? 0))
-  const projectThreads = new Map((profile.workspaces || []).map(workspace => [workspace.id, []]))
-  const withoutProject = []
-  const working = []
-  for (const session of active) {
-    if (session.state === 'running') {
-      working.push(session)
-      continue
+  const sessionsById = new Map((profile.sessions || []).map(session => [session.id, session]))
+  const projectsById = new Map((profile.workspaces || []).map(workspace => [workspace.id, workspace]))
+  return (profile.sidebar || []).map(section => {
+    const rows = section.rows.map(row => toItem(sessionsById.get(row.id)))
+    const project = projectsById.get(section.workspaceId)
+    return {
+      id: section.id,
+      label: project?.name || section.label,
+      items: project
+        ? [{ id: 'compose-' + project.id, label: 'New thread', icon: 'i-hugeicons-pencil-edit-02', href: `/?workspace=${project.id}` }, ...rows]
+        : rows,
     }
-    const threads = projectThreads.get(session.workspaceId) || withoutProject
-    threads.push(toItem(session))
-  }
-  const projects = (profile.workspaces || []).map(workspace => ({
-    id: 'project-' + workspace.id,
-    label: workspace.name,
-    items: [
-      { id: 'compose-' + workspace.id, label: 'New thread', icon: 'i-hugeicons-pencil-edit-02', href: `/?workspace=${workspace.id}` },
-      ...projectThreads.get(workspace.id),
-    ],
-  }))
-  return [
-    collect('pinned', 'Pinned', pinned),
-    collect('working', 'Working', working),
-    ...projects,
-    { id: 'projectless-' + profile.id, label: 'Without a project', items: withoutProject },
-    collect('snoozed', 'Snoozed', snoozed.sort((a, b) => a.navigation.snoozedUntil - b.navigation.snoozedUntil)),
-    collect('settled', `Settled (${settled.length})`, settled),
-  ].filter(section => section.items.length)
+  })
 }
 
 function toItem(session) {
@@ -230,7 +206,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <span>Settings</span>
       </button>
     </div>
-    <p role="status" :text="pinOrderStatus()" class="sr-only"></p>
+    <p role="status" :text="threadOrderStatus()" class="sr-only"></p>
   </aside>
   <button type="button" data-sidebar-scrim hidden :hidden="!sidebarOpen()" @click="closeSidebar" aria-label="Close navigation"></button>
   <div
@@ -2053,8 +2029,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // Set by the transcript's socket once it opens, so a sidebar command reuses
   // it rather than opening a second connection to the same server.
   let liveSocket = null
-  let watchSidebarPins = () => {}
-  const pinOrderStatus = state('')
+  let watchSidebarOrder = () => {}
+  const threadOrderStatus = state('')
   let disconnectLiveSession = () => {}
   let reconnectLiveSession = () => {}
   onUnmounted(() => disconnectLiveSession())
@@ -2588,7 +2564,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     addTerminalTab()
     const tab = activeTerminalTab()
     // The controller holds this input for the selected pane until its PTY binds.
-    if (tab) terminalController()?.input(tab, `${command}`)
+    if (tab) terminalController()?.input(tab, `${command}
+`)
   }
 
   requestAnimationFrame(() => {
@@ -2919,7 +2896,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const id = event.detail?.id
     if (!id) return
     visibleProfile.set(id)
-    watchSidebarPins()
+    watchSidebarOrder()
     // Repaint first: a swipe should feel like the window changed colour with
     // it, not after a round trip.
     paintWindow(id)
@@ -3725,36 +3702,36 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createPinnedSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
     const sidebar = sidebarRef.current
-    const pins = sidebar && createPinnedSidebar({
+    const threadSidebar = sidebar && createThreadSidebar({
       root: sidebar,
-      async reorder(sessionId, targetSessionId, placement) {
-        pinOrderStatus.set('')
+      async save(sessionId, intent) {
+        threadOrderStatus.set('')
         try {
-          await sendCommand({ type: 'session.organize', sessionId, action: 'reorder-pin', targetSessionId, placement })
-          pinOrderStatus.set('Pinned thread order saved.')
+          await sendCommand({ type: 'session.organize', sessionId, action: 'drop', ...intent })
+          threadOrderStatus.set('Thread position saved.')
         }
         catch (error) { stxAlert(error.message) }
       },
     })
-    const watchPins = (connection) => {
-      watchSidebarPins = () => {
+    const watchOrder = (connection) => {
+      watchSidebarOrder = () => {
         const profileId = Number(visibleProfile())
-        if (profileId) connection.send({ t: 'watch-pins', profileId })
+        if (profileId) connection.send({ t: 'watch-sidebar', profileId })
       }
     }
     if (!sessionId) {
       const connection = createSessionSocket({
         url: serverUrl, sessionId: null, cursor: () => 0,
         onSocket: socket => { liveSocket = socket },
-        onFrame: frame => pins?.receive(frame),
-        onOnline: online => { if (online) watchSidebarPins() },
+        onFrame: frame => threadSidebar?.receive(frame),
+        onOnline: online => { if (online) watchSidebarOrder() },
       })
-      watchPins(connection)
+      watchOrder(connection)
       reconnectLiveSession = connection.open
       disconnectLiveSession = () => {
-        pins?.dispose()
+        threadSidebar?.dispose()
         connection.dispose()
       }
       connection.open()
@@ -3832,7 +3809,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     terminalController.set(terminal)
 
     function onMessage(frame) {
-      if (pins?.receive(frame)) return
+      if (threadSidebar?.receive(frame)) return
       if (frame && terminal.receive(frame)) return
       if (frame?.t !== 'event') return
       if (frame.event.sessionId === 0 && frame.event.payload.type === 'profile.claude-compaction.updated') {
@@ -4054,18 +4031,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         sessionOnline.set(online)
         sessionConnecting.set(false)
         if (online) {
-          watchSidebarPins()
+          watchSidebarOrder()
           void followUpActions()?.flush()
           if (termOpen()) requestAnimationFrame(showTerminalProcess)
         }
         else terminal.onOffline()
       },
     })
-    watchPins(connection)
+    watchOrder(connection)
     sendFrame = connection.send
     reconnectLiveSession = connection.open
     disconnectLiveSession = () => {
-      pins?.dispose()
+      threadSidebar?.dispose()
       followUpActions()?.dispose()
       terminal.dispose()
       connection.dispose()

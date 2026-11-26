@@ -218,6 +218,19 @@ export function isVisiblePin(session: SessionState): boolean {
   return !session.navigation?.archivedAt && !session.navigation?.snoozedUntil
 }
 
+export function threadShelf(session: SessionState) {
+  const navigation = session.navigation
+  if (navigation?.archivedAt) return 'archived'
+  if (navigation?.snoozedUntil) return 'snoozed'
+  if (navigation?.pinnedOrder != null) return 'pinned'
+  if (navigation?.settledAt || session.state === 'stopped') return 'settled'
+  return session.state === 'running' ? 'working' : 'active'
+}
+
+export function activeThreadOrder(first: SessionState, second: SessionState): number {
+  return (first.navigation?.activeOrder ?? 0) - (second.navigation?.activeOrder ?? 0)
+}
+
 export function emptyState(): HarnessState {
   return { sessions: new Map(), profiles: new Map(), workspaces: new Map(), devices: new Map(), settings: hostSettings() }
 }
