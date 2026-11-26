@@ -1469,14 +1469,22 @@ if (screenshotDir) {
     await capture(`settings-general-${width}x${height}`)
   }
   const settingsSearch = settingsDialog.getByRole('searchbox', { name: 'Search settings sections' })
+  const settingsButtons = settingsNavigation.getByRole('button')
+  const initialSettingsSections = await settingsButtons.allTextContents()
+  // The restore check below compares against this snapshot, so it would pass a
+  // rail that never offered a section at all. Hold the rail to the source of
+  // truth once, here, rather than to a count that a new section would break.
+  check('the rail offers every settings section the host defines',
+    JSON.stringify(initialSettingsSections.map(label => label.trim()))
+    === JSON.stringify(settingsSections.map(section => section.label)))
   await settingsSearch.fill('not present')
   await settingsNavigation.getByText('No sections found').waitFor()
   await settingsSearch.fill('key')
-  check('settings search filters the available sections', await settingsNavigation.getByRole('button').count() === 1)
+  check('settings search filters the available sections', await settingsButtons.count() === 1)
   await settingsSearch.press('Enter')
   await page.waitForURL(url => url.pathname === '/settings/keybindings')
   check('Enter opens the matching settings section and clears search', await settingsSearch.inputValue() === ''
-    && await settingsNavigation.getByRole('button').count() === settingsSections.length)
+    && JSON.stringify(await settingsButtons.allTextContents()) === JSON.stringify(initialSettingsSections))
   // The Keyboard section at a desktop and the narrowest width: its rows carry
   // a chord and two controls, which is the densest line in the whole sheet.
   for (const [width, height] of [[1280, 800], [360, 800]] as const) {
@@ -1515,7 +1523,8 @@ await page.keyboard.press('Escape')
 await searchDialog.waitFor({ state: 'hidden', timeout: 4000 })
 
 await page.setViewportSize({ width: 390, height: 844 })
-const searchButton = page.getByRole('button', { name: 'Search threads' })
+const searchButton = page.locator('[data-nav-search]')
+if (!await searchButton.isVisible()) await page.locator('[data-sidebar-toggle]').click()
 await searchButton.click()
 await threadSearch.press('Escape')
 await searchDialog.waitFor({ state: 'hidden', timeout: 4000 })
