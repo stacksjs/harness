@@ -3,8 +3,31 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { parseWorkspacePatch, workspaceDiffRows } from '../src/browser-diff'
+import { parseWorkspacePatch, workspaceDiffLink, workspaceDiffLinkedRows, workspaceDiffLocation, workspaceDiffRows } from '../src/browser-diff'
 import { MAX_PATCH_BYTES, parseNumstat, parseStatus, workspaceDiff } from '../src/diff'
+
+describe('linking to a diff line', () => {
+  it('resolves the same path, comparison, and original side without copying unrelated query parameters', () => {
+    const location = { path: 'src/notes #2 [é].txt', side: 'before', line: 426, mode: 'turn', target: '481' } as const
+    const link = new URL(workspaceDiffLink('http://localhost:3973/s/42?file=prior&line=2&profile=7&token=fixture#turn-3', location))
+    expect(link.pathname).toBe('/s/42')
+    expect(link.search).toBe('?profile=7')
+    expect(workspaceDiffLocation(link.hash)).toEqual(location)
+    expect(workspaceDiffLocation('#diff?file=notes.txt&side=before&line=1e3&mode=session')).toBeNull()
+    expect(workspaceDiffLocation('#diff?file=notes.txt&side=after&line=1&mode=commit&target=HEAD~1')).toBeNull()
+  })
+
+  it('opens a bounded window around a later line and preserves row identity in split view', () => {
+    const lines = Array.from({ length: 600 }, (_, index) => `+Line ${index + 1}`).join('\n')
+    const path = 'long.txt'
+    const hunks = parseWorkspacePatch(`diff --git a/${path} b/${path}\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,600 @@\n${lines}\n`).get(path)!
+    const all = workspaceDiffRows(hunks, true, 1000).rows
+    const linked = workspaceDiffLinkedRows(hunks, true, 200, { path, side: 'after', line: 345 })
+    expect(linked.rows).toEqual(all.slice(321, 521))
+    expect(linked.earlier).toBe(true)
+    expect(linked.more).toBe(true)
+  })
+})
 
 /**
  * The parsers get their own tests because their inputs are the awkward cases —

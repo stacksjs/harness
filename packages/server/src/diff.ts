@@ -46,6 +46,7 @@ export interface WorkspaceDiff {
    */
   scope: 'session' | 'working-tree' | 'branch' | 'commit' | 'turn'
   comparisonLabel?: string
+  comparisonTarget?: string
   files: FileChange[]
   /** Unified diff for tracked changes. Empty when there are none. */
   patch: string
@@ -361,11 +362,13 @@ export async function reviewWorkspaceDiff(
   let base = head
   let tip: string | undefined
   let label: string | undefined
+  let comparisonTarget: string | undefined
   if (mode === 'branch') {
     const branch = await reviewBase(path, head, target)
     if (!branch) return unavailable('This branch base is unavailable or has no common history.')
     base = branch.merge
     label = refLabel(branch.ref)
+    if (branch.ref !== 'HEAD') comparisonTarget = branch.ref
   }
   else if (mode === 'commit') {
     if (!target || !commitId.test(target)
@@ -379,6 +382,7 @@ export async function reviewWorkspaceDiff(
     if (!commitId.test(base)) return unavailable('Could not read the parent tree.')
     tip = target
     label = target.slice(0, 7)
+    comparisonTarget = target
   }
   else if (mode === 'turn') {
     const turn = target ? turns.find(entry => String(entry.id) === target) : turns.at(-1)
@@ -388,16 +392,17 @@ export async function reviewWorkspaceDiff(
     base = before
     tip = after
     label = String(turn.number)
+    comparisonTarget = String(turn.id)
   }
 
   const workingState = tip ? '' : await reviewWorkingState(path)
   if (workingState === null) return unavailable('Could not check the working tree for changes.')
-  const revision = Bun.hash(JSON.stringify([path, mode, label, base, tip ?? head, workingState])).toString(36)
+  const revision = Bun.hash(JSON.stringify([path, mode, label, comparisonTarget, base, tip ?? head, workingState])).toString(36)
   if (revision === knownRevision) return null
   // Branch and uncommitted review both include untracked files. The existing
   // checkpoint mechanism uses a temporary index and leaves the real one alone.
   const current = tip ?? await snapshotTree(path)
   if (!current) return unavailable('Could not read the current working tree.')
   const diff = await readWorkspaceDiff(path, scope, [base, current], true, label)
-  return diff.error ? diff : { ...diff, revision }
+  return diff.error ? diff : { ...diff, revision, ...(comparisonTarget && { comparisonTarget }) }
 }
