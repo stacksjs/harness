@@ -335,6 +335,15 @@ export async function release(workspacePath: string, path: string, excluded?: st
   return { removed: true, committed }
 }
 
+export async function isCleanForLayoutRemoval(path: string, excluded: string[]): Promise<boolean> {
+  const status = await git(path, ['status', '--porcelain', '--ignored', '-z', '--', '.', ...excluded.map(key => `:(exclude,literal)${key}`)])
+  return status.ok && !status.out
+}
+
+export async function includesCheckoutBase(checkout: CheckoutIntent): Promise<boolean> {
+  return (await git(checkout.path, ['merge-base', '--is-ancestor', checkout.base, 'HEAD'])).ok
+}
+
 /** Whether a path is a live worktree of this repository. */
 export async function exists(workspacePath: string, path: string): Promise<boolean> {
   return (await gitWorktrees(workspacePath))?.some(entry => entry.path === normalize(path)) ?? false

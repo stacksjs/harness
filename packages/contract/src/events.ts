@@ -41,6 +41,8 @@ export interface CombinedWorktreeIntent {
   branch: string
   checkouts: Array<CheckoutIntent & { key: string, label: string }>
   links: Array<{ source: string, path: string }>
+  /** Fingerprint of the host project configuration. Command text stays on disk. */
+  layout?: { fingerprint: string, baseBranch?: string }
 }
 
 export type WorktreeIntent = CheckoutIntent | CombinedWorktreeIntent

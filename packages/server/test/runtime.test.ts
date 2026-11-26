@@ -1605,6 +1605,193 @@ describe('a session can have a checkout of its own', () => {
     client.close()
   }, 30_000)
 
+  it('runs project layout commands only for the trusted host and cleans up through the configured command', async () => {
+    const workspace = repoWorkspace2()
+    const log = join(workspace, 'layout-fixture.log')
+    writeFileSync(join(workspace, 't3.json'), JSON.stringify({
+      worktreeLayout: {
+        create: [
+          'test "$PWD" = "$T3_PROJECT_ROOT"',
+          'test -z "$T3_WORKTREE_REPOSITORIES"',
+          'git worktree add -b "$T3_WORKTREE_BRANCH" "$T3_WORKTREE_PROJECT_PATH" HEAD',
+          'printf "created\\n" >> "$T3_PROJECT_ROOT/layout-fixture.log"',
+          'touch "$T3_WORKTREE_ROOT/setup-marker"',
+        ].join(' && '),
+        remove: 'rm "$T3_WORKTREE_ROOT/setup-marker" && printf "removed\\n" >> "$T3_PROJECT_ROOT/layout-fixture.log"',
+      },
+    }))
+    const databasePath = join(dir, 'test.sqlite')
+    const opened: string[] = []
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    harness = await serve({
+      port, databasePath, remote: true, localTokenPath: join(dir, 'host-token'),
+      resolveDriver: () => ({
+        ...driver,
+        async create(config: DriverConfig) {
+          opened.push(config.workspacePath)
+          return driver.create(config)
+        },
+      }),
+    })
+    const access = harness.access!
+    const paired = await access.redeem(access.openPairing().code, 'Fixture remote')
+    if (!paired.ok) throw new Error('Fixture pairing failed.')
+    const url = `ws://127.0.0.1:${port}/ws`
+    const host = await Client.connect(url, access.localToken)
+    const device = await Client.connect(url, paired.token)
+    try {
+      const { sessionId } = await bootstrap(host, workspace, true)
+      const requestOptions = async (token: string) => {
+        const response = await fetch(`http://127.0.0.1:${port}/workspace-repositories?workspace=${derivedId('c_w')}`, {
+          headers: { authorization: `Bearer ${token}` },
+        })
+        return response.json()
+      }
+      expect(await requestOptions(paired.token)).toMatchObject({ requiresProjectCommand: true, canStartWorktree: false })
+      expect(await requestOptions(access.localToken)).toMatchObject({ requiresProjectCommand: true, canStartWorktree: true })
+      device.send({ t: 'subscribe', sessionId })
+      const turn = (client: Client, id: string) => client.send({ t: 'dispatch', envelope: {
+        id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'Fixture turn' },
+      } })
+      turn(device, 'layout-device')
+      expect(await device.waitFor('session.failed', 6000)).toMatchObject({ message: expect.stringContaining('trusted Harness host') })
+      expect(existsSync(log)).toBe(false)
+      expect(opened).toEqual([])
+      turn(host, 'layout-host')
+      expect(await host.waitFor('turn.completed', 8000)).toBeTruthy()
+      const ready = harness.engine.current.sessions.get(sessionId)?.combinedWorktree
+      expect(ready?.checkouts).toHaveLength(1)
+      expect(opened).toEqual([ready?.path])
+      expect(readFileSync(log, 'utf8')).toBe('created\n')
+      {
+        using db = new Database(databasePath, { readonly: true })
+        const events = db.query("SELECT payload FROM events WHERE type IN ('session.worktree-reserved', 'session.isolated')").all()
+        expect(JSON.stringify(events)).not.toContain('layout-fixture.log')
+      }
+      turn(device, 'layout-device-resume')
+      expect(await device.waitFor('turn.completed', 8000, event => event.turnId === 3)).toBeTruthy()
+      expect(readFileSync(log, 'utf8')).toBe('created\n')
+      host.send({ t: 'dispatch', envelope: { id: 'layout-delete', at: 8, command: { type: 'profile.delete', profileId: derivedId('c_p') } } })
+      expect(await host.waitForDispatch('layout-delete')).toMatchObject({ t: 'dispatched' })
+      for (let i = 0; i < 300 && existsSync(ready!.path); i++) await Bun.sleep(20)
+      expect(readFileSync(log, 'utf8')).toBe('created\nremoved\n')
+      expect(existsSync(ready!.path)).toBe(false)
+    }
+    finally {
+      host.close()
+      device.close()
+    }
+  }, 30_000)
+
+  it('stops a running project layout through the thread interruption command', async () => {
+    const workspace = repoWorkspace2()
+    writeFileSync(join(workspace, 't3.json'), JSON.stringify({
+      worktreeLayout: {
+        create: 'touch "$T3_PROJECT_ROOT/setup-started" && sleep 60 && touch "$T3_PROJECT_ROOT/setup-fell-through"',
+      },
+    }))
+    const { driver } = fakeDriver([])
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    try {
+      const { sessionId } = await bootstrap(client, workspace, true)
+      client.send({ t: 'dispatch', envelope: {
+        id: 'start-layout-to-stop', at: 5, command: { type: 'session.turn.start', sessionId, text: 'Run the fixture setup' },
+      } })
+      for (let i = 0; i < 300 && !existsSync(join(workspace, 'setup-started')); i++) await Bun.sleep(10)
+      expect(existsSync(join(workspace, 'setup-started'))).toBe(true)
+      client.send({ t: 'dispatch', envelope: {
+        id: 'stop-layout', at: 6, command: { type: 'session.turn.interrupt', sessionId },
+      } })
+      expect(await client.waitFor('turn.interrupted')).toBeTruthy()
+      const intent = harness.engine.current.sessions.get(sessionId)?.worktreeIntent
+      if (!intent) throw new Error('The layout was not reserved.')
+      const result = join(intent.path, '..', '.harness-layout-create-failed')
+      for (let i = 0; i < 300 && !existsSync(result); i++) await Bun.sleep(10)
+      expect(existsSync(result)).toBe(true)
+      expect(existsSync(join(workspace, 'setup-fell-through'))).toBe(false)
+      expect(client.payloads('session.failed')).toHaveLength(0)
+    }
+    finally { client.close() }
+  }, 30_000)
+
+  it('recovers a completed layout after a failed isolation write without running its command twice', async () => {
+    const workspace = repoWorkspace2()
+    const attempts = join(workspace, 'layout-attempts')
+    writeFileSync(join(workspace, 't3.json'), JSON.stringify({
+      worktreeLayout: {
+        create: 'printf "ran\\n" >> "$T3_PROJECT_ROOT/layout-attempts" && git worktree add -b "$T3_WORKTREE_BRANCH" "$T3_WORKTREE_PROJECT_PATH" HEAD',
+      },
+    }))
+    const databasePath = join(dir, 'test.sqlite')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 0, tokensOut: 0, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => driver }
+    harness = await serve(options)
+    const url = `ws://127.0.0.1:${port}/ws`
+    let client = await Client.connect(url)
+    try {
+      const { sessionId } = await bootstrap(client, workspace, true)
+      {
+        using db = new Database(databasePath)
+        db.exec("CREATE TRIGGER reject_layout_result BEFORE INSERT ON events WHEN NEW.type = 'session.isolated' BEGIN SELECT RAISE(ABORT, 'fixture refused isolation'); END")
+      }
+      const start = (id: string) => client.send({ t: 'dispatch', envelope: {
+        id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'Use the custom layout' },
+      } })
+      start('layout-initial')
+      expect(await client.waitFor('session.failed', 8000)).toMatchObject({ message: expect.stringContaining('record the checkout') })
+      const path = harness.engine.current.sessions.get(sessionId)?.worktreeIntent?.path
+      expect(path && existsSync(path)).toBe(true)
+      client.close()
+      harness.stop()
+      {
+        using db = new Database(databasePath)
+        db.exec('DROP TRIGGER reject_layout_result')
+      }
+      harness = await serve(options)
+      client = await Client.connect(url)
+      expect(harness.engine.current.sessions.get(sessionId)?.worktreePath).toBe(path)
+      client.send({ t: 'subscribe', sessionId })
+      start('layout-recovered')
+      expect(await client.waitFor('turn.completed', 8000)).toBeTruthy()
+      expect(readFileSync(attempts, 'utf8')).toBe('ran\n')
+    }
+    finally { client.close() }
+  }, 30_000)
+
+  it('does not launch the provider after a known layout failure and rolls back its clean checkout', async () => {
+    const workspace = repoWorkspace2()
+    const git = (...args: string[]) => spawnSync('git', args, { cwd: workspace, encoding: 'utf8' }).stdout.trim()
+    writeFileSync(join(workspace, 't3.json'), JSON.stringify({
+      worktreeLayout: { create: 'git worktree add -b "$T3_WORKTREE_BRANCH" "$T3_WORKTREE_PROJECT_PATH" HEAD && exit 7' },
+    }))
+    const { driver } = fakeDriver([])
+    let launched = false
+    harness = await serve({
+      port, databasePath: join(dir, 'test.sqlite'),
+      resolveDriver: () => ({ ...driver, async create(config: DriverConfig) { launched = true
+        return driver.create(config) } }),
+    })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    try {
+      const { sessionId } = await bootstrap(client, workspace, true)
+      const turn = (id: string) => client.send({ t: 'dispatch', envelope: {
+        id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'Fixture turn' },
+      } })
+      turn('layout-failure')
+      expect(await client.waitFor('session.failed', 6000)).toMatchObject({ message: expect.stringContaining('exit status 7') })
+      expect(launched).toBe(false)
+      expect(git('worktree', 'list', '--porcelain').match(/^worktree /gmu)).toHaveLength(1)
+      const intent = harness.engine.current.sessions.get(sessionId)?.worktreeIntent
+      expect(intent && existsSync(intent.path)).toBe(false)
+      expect(git('branch', '--list', `harness/session-${sessionId}`)).toContain(`harness/session-${sessionId}`)
+      turn('layout-failure-retry')
+      expect(await client.waitFor('session.failed', 6000, event => String(event.message).includes('failed previously'))).toBeTruthy()
+      expect(launched).toBe(false)
+    }
+    finally { client.close() }
+  }, 30_000)
+
   it('resumes a partially created combined checkout and preserves other Git worktrees', async () => {
     const workspace = join(dir, 'multi-repo')
     const api = join(workspace, 'api')

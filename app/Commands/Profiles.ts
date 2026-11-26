@@ -138,7 +138,7 @@ export default function (cli: CLI) {
       // same event, and doing it here as well would have this command report a
       // removal that the other process had already performed.
       if (outcome.via === 'log') {
-        for (const released of await releaseWorktrees(doomed)) {
+        for (const released of await releaseWorktrees(doomed, true)) {
           if (released.committed)
             console.log(`  committed what session ${released.sessionId} left behind as ${released.committed.slice(0, 8)}`)
           console.log(`  ${released.removed ? 'released' : 'retained'} ${released.path} (its branch is kept)`)

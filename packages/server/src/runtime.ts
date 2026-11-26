@@ -80,7 +80,7 @@ function commandId(prefix: string): string {
 
 export class ProviderRuntime {
   private sessions = new Map<number, Running>()
-  private worktreeCreations = new Map<number, Promise<boolean>>()
+  private worktreeCreations = new Map<number, { result: Promise<boolean>, cancel: AbortController }>()
 
   constructor(private options: RuntimeOptions) {}
 
@@ -109,7 +109,7 @@ export class ProviderRuntime {
     }
   }
 
-  private async instanceFor(sessionId: number, driverKind: DriverKind): Promise<Running | null> {
+  private async instanceFor(sessionId: number, driverKind: DriverKind, allowProjectCommands: boolean): Promise<Running | null> {
     const session = this.options.engine.current.sessions.get(sessionId)
     const workspace = session ? this.options.engine.current.workspaces.get(session.workspaceId) : undefined
     const savedId = session?.providerInstanceId
@@ -140,7 +140,7 @@ export class ProviderRuntime {
       ? effectiveClaudeCompaction(this.options.engine.current, session).autoCompactAfter
       : undefined
     const existing = this.sessions.get(sessionId)
-    if (existing && session?.combinedWorktree && !await this.ensureWorktree(sessionId)) return null
+    if (existing && session?.combinedWorktree && !await this.ensureWorktree(sessionId, allowProjectCommands)) return null
     if (existing) {
       if (existing.savedLaunch?.binaryPath !== savedLaunch?.binaryPath
         || existing.savedLaunch?.home !== savedLaunch?.home
@@ -165,7 +165,7 @@ export class ProviderRuntime {
 
     // Made now rather than at session creation, so a session nobody runs does
     // not leave a checkout behind.
-    if (!await this.ensureWorktree(sessionId)) return null
+    if (!await this.ensureWorktree(sessionId, allowProjectCommands)) return null
 
     const state = this.options.engine.current
     const workspacePath = state.sessions.get(sessionId)?.worktreePath || (this.options.workspacePath
@@ -279,7 +279,7 @@ export class ProviderRuntime {
    * Returns when the provider's stream ends. Callers that must not block on an
    * agent — the socket handler, notably — should not await this.
    */
-  async runTurn(sessionId: number, turnId: number, text: string): Promise<void> {
+  async runTurn(sessionId: number, turnId: number, text: string, allowProjectCommands = false): Promise<void> {
     const session = this.options.engine.current.sessions.get(sessionId)
     const turn = session?.turns.at(-1)
     if (!session || turn?.id !== turnId || turn.status !== 'running') return
@@ -331,7 +331,7 @@ export class ProviderRuntime {
     }
 
     if (session.turns.at(-1)?.id !== turnId || session.turns.at(-1)?.status !== 'running') return
-    const running = await this.instanceFor(sessionId, session.driverKind)
+    const running = await this.instanceFor(sessionId, session.driverKind, allowProjectCommands)
     if (!running) return
 
     if (session.turns.at(-1)?.id !== turnId || session.turns.at(-1)?.status !== 'running') return
@@ -565,7 +565,7 @@ export class ProviderRuntime {
     catch {}
   }
 
-  async forkSession(sessionId: number): Promise<void> {
+  async forkSession(sessionId: number, allowProjectCommands = false): Promise<void> {
     const session = this.options.engine.current.sessions.get(sessionId)
     const fork = session?.fork
     const turn = session?.turns.at(-1)
@@ -573,7 +573,7 @@ export class ProviderRuntime {
     try {
       if (!this.options.engine.current.workspaces.get(session.workspaceId)?.trusted)
         throw new Error('Trust the workspace before creating this fork.')
-      const running = await this.instanceFor(sessionId, session.driverKind)
+      const running = await this.instanceFor(sessionId, session.driverKind, allowProjectCommands)
       if (!running?.instance.fork)
         throw new Error('Start the fork again from the source response once its provider account is available.')
       const current = this.options.engine.current.sessions.get(sessionId)
@@ -635,7 +635,7 @@ export class ProviderRuntime {
     }))
   }
 
-  private async ensureWorktree(sessionId: number): Promise<boolean> {
+  private async ensureWorktree(sessionId: number, allowProjectCommands: boolean): Promise<boolean> {
     const session = this.options.engine.current.sessions.get(sessionId)
     if (session?.combinedWorktree) {
       if (await openCombinedWorktree(session.combinedWorktree, false)) return true
@@ -644,14 +644,15 @@ export class ProviderRuntime {
     }
     if (!session?.isolate || session.worktreePath) return true
     const pending = this.worktreeCreations.get(sessionId)
-    if (pending) return pending
-    const creation = this.createWorktree(sessionId)
-    this.worktreeCreations.set(sessionId, creation)
-    try { return await creation }
+    if (pending) return pending.result
+    const cancel = new AbortController()
+    const result = this.createWorktree(sessionId, allowProjectCommands, cancel.signal)
+    this.worktreeCreations.set(sessionId, { result, cancel })
+    try { return await result }
     finally { this.worktreeCreations.delete(sessionId) }
   }
 
-  private async createWorktree(sessionId: number): Promise<boolean> {
+  private async createWorktree(sessionId: number, allowProjectCommands: boolean, signal: AbortSignal): Promise<boolean> {
     const engine = this.options.engine
     const repository = this.worktreeSource(sessionId)
     const scoped = () => {
@@ -684,16 +685,18 @@ export class ProviderRuntime {
       }
       if (!scoped() || !intent || !repository || await realpath(repository).catch(() => null) !== intent.repository)
         throw new Error('The reserved worktree is outside the current trusted checkout. Restore access and retry.')
-      const complete = 'checkouts' in intent ? await openCombinedWorktree(intent, true)
+      const complete = 'checkouts' in intent ? await openCombinedWorktree(intent, true, () => allowProjectCommands && Boolean(scoped()), signal)
         : Boolean((await worktree.openReserved(intent, true)).path)
       if (!complete)
         throw new Error('Could not open the reserved worktree. Check its Git branch and checkout, then retry.')
+      if (signal.aborted) return false
       await this.record({ type: 'thread.worktree.set', sessionId, worktreePath: intent.path, branch: intent.branch }).catch(() => {
         throw new Error('Could not record the checkout. Retry the turn to recover it.')
       })
       return true
     }
     catch (error) {
+      if (signal.aborted) return false
       await this.emit({
         type: 'thread.error',
         sessionId,
@@ -815,6 +818,7 @@ export class ProviderRuntime {
   }
 
   async interrupt(sessionId: number): Promise<void> {
+    this.worktreeCreations.get(sessionId)?.cancel.abort()
     const running = this.sessions.get(sessionId)
     if (!running) return
     // Marked before asking the provider: the abort can surface as an error on
@@ -863,12 +867,15 @@ export class ProviderRuntime {
   }
 
   async stopRemovedSession(sessionId: number): Promise<void> {
-    await this.worktreeCreations.get(sessionId)?.catch(() => {})
+    const creation = this.worktreeCreations.get(sessionId)
+    creation?.cancel.abort()
+    await creation?.result.catch(() => {})
     await this.stopSession(sessionId).catch(() => {})
   }
 
   /** Tear every provider down. Called when the server shuts down. */
   async stopAll(): Promise<void> {
+    for (const creation of this.worktreeCreations.values()) creation.cancel.abort()
     await Promise.all([...this.sessions.keys()].map(id => this.stopSession(id)))
   }
 }
@@ -904,10 +911,11 @@ export function worktreesOfProfile(state: HarnessState, profileId: number): Doom
 /** Hand those worktrees back, keeping whatever work they hold. */
 export async function releaseWorktrees(
   doomed: DoomedWorktree[],
+  allowProjectCommands = false,
 ): Promise<Array<{ sessionId: number, path: string, committed: string | null, removed: boolean }>> {
   const released = []
   for (const entry of doomed) {
-    const result = entry.combined ? await releaseCombinedWorktree(entry.combined) : await worktree.release(entry.repository, entry.path)
+    const result = entry.combined ? await releaseCombinedWorktree(entry.combined, allowProjectCommands) : await worktree.release(entry.repository, entry.path)
     released.push({ sessionId: entry.sessionId, path: entry.path, committed: result.committed, removed: result.removed })
   }
   return released

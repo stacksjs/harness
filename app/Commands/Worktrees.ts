@@ -35,6 +35,7 @@ export default function (cli: CLI) {
           const { branch, checkouts } = entry.combined
           const status = current.sessions.get(entry.sessionId)?.combinedWorktree ? 'ready' : 'reserved'
           console.log(`  session ${entry.sessionId} ${branch} · ${checkouts.length} repositories · ${status}`)
+          console.log(`    ${entry.path}`)
           found++
         }
       }
@@ -80,7 +81,7 @@ export default function (cli: CLI) {
       const combined = profileId === undefined ? undefined
         : worktreesOfProfile(current, profileId).find(entry => entry.sessionId === id && entry.combined)
       if (combined) {
-        const [result] = await releaseWorktrees([combined])
+        const [result] = await releaseWorktrees([combined], true)
         if (!result?.removed) {
           console.error(`Could not fully remove ${combined.path}. Inspect the remaining checkout files.`)
           process.exit(1)

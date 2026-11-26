@@ -46,6 +46,17 @@ function stringMember(value: unknown, key: string): string {
   return typeof field === 'string' && !field.includes('\0') ? field.trim() : ''
 }
 
+export async function projectWorktreeLayout(root: string) {
+  const config = await readConfig(join(root, 't3.json'))
+  const layout = config && typeof config === 'object' && 'worktreeLayout' in config ? config.worktreeLayout : undefined
+  if (layout === undefined) return null
+  const create = stringMember(layout, 'create')
+  const remove = stringMember(layout, 'remove')
+  if (!create) throw new Error('Set a nonempty worktreeLayout.create command in the project’s t3.json.')
+  const fingerprint = new Bun.CryptoHasher('sha256').update(JSON.stringify([create, remove])).digest('hex')
+  return { create, remove, fingerprint }
+}
+
 function listMember(value: unknown, key: string): unknown[] {
   if (!value || typeof value !== 'object' || !(key in value)) return []
   const field = (value as Record<string, unknown>)[key]

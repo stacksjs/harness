@@ -28,7 +28,7 @@ import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
-import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
+import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -742,7 +742,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     compactTimers.set(sessionId, timer)
   }
 
-  function startAcceptedTurn(events: HarnessEvent[]): void {
+  function startAcceptedTurn(events: HarnessEvent[], allowProjectCommands = false): void {
     const event = events.find(item => item.payload.type === 'turn.started')
     const payload = event?.payload
     if (!event || payload?.type !== 'turn.started' || closing) return
@@ -754,7 +754,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (closing) return
       const turn = engine.current.sessions.get(sessionId)?.turns.at(-1)
       if (turn?.id !== payload.turnId || turn.status !== 'running') return
-      await runtime.runTurn(sessionId, payload.turnId, payload.text ?? '')
+      await runtime.runTurn(sessionId, payload.turnId, payload.text ?? '', allowProjectCommands)
     }).catch(async () => {
       if (closing) return
       const result = await engine.dispatchInternal({
@@ -799,7 +799,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   async function react(
     envelope: CommandEnvelope,
     result: Awaited<ReturnType<Engine['dispatch']>>,
-    doomed: DoomedWorktree[] = [],
+    doomed: DoomedWorktree[] | undefined,
+    allowProjectCommands: boolean,
   ): Promise<void> {
     const command = envelope.command
 
@@ -815,7 +816,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         await Promise.all(removedSessions.map(id => runtime.stopRemovedSession(id)))
         for (const id of removedSessions) pruneQuestionAttachments(id)
       }
-      const released = await releaseWorktrees(doomed)
+      const released = await releaseWorktrees(doomed ?? [], allowProjectCommands)
       for (const entry of released) {
         console.warn(
           `[worktree] ${entry.removed ? 'released' : 'retained'} ${entry.path}`
@@ -827,11 +828,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
     if (command.type === 'session.fork') {
       const created = result.events.find(event => event.payload.type === 'session.created')
-      if (created) void runtime.forkSession(created.sessionId)
+      if (created) void runtime.forkSession(created.sessionId, allowProjectCommands)
       return
     }
     if (command.type === 'session.turn.start' || command.type === 'session.handoff' || command.type === 'session.queue.send') {
-      startAcceptedTurn(result.events)
+      startAcceptedTurn(result.events, allowProjectCommands)
       return
     }
     if (command.type === 'session.turn.steer') {
@@ -1104,7 +1105,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           broadcast(result.events)
           // Then act on it. A retry (`replayed`) must not start a second agent
           // run — the receipt already accounted for the first.
-          if (!result.replayed) await react(envelope, result, deletionWorktrees.get(envelope))
+          if (!result.replayed) await react(envelope, result, deletionWorktrees.get(envelope), socket.data.canUseHostPrivileges)
         }
         catch (error) {
           send(socket, {
@@ -1292,8 +1293,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const headers = { 'cache-control': 'private, no-store' }
         const root = workspaceFileRoot(url.searchParams)
         if (!root) return Response.json({ error: 'Project repositories are unavailable.' }, { status: 404, headers })
-        return Promise.all([isWorkspaceGitRoot(root), scanProjectRepositories(root)])
-          .then(([hasProjectRepository, repositories]) => Response.json({ hasProjectRepository, repositories }, { headers }))
+        return Promise.all([isWorkspaceGitRoot(root), scanProjectRepositories(root), projectWorktreeLayout(root)])
+          .then(([hasProjectRepository, repositories, layout]) => Response.json({
+            hasProjectRepository, repositories, requiresProjectCommand: Boolean(layout),
+            canStartWorktree: layout ? canUseHostPrivileges(request, url) : hasProjectRepository || repositories.length > 0,
+          }, { headers }))
           .catch(() => Response.json({ error: 'Could not read project repositories.' }, { status: 503, headers }))
       }
 
