@@ -15,7 +15,7 @@
  */
 import type { Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -75,6 +75,8 @@ const connectorGate = Promise.withResolvers<void>()
 const connectorWithdrawal = Promise.withResolvers<void>()
 const followUpGate = Promise.withResolvers<void>()
 const followUpDelivery: string[] = []
+const referenceLink = '[parity-notes (draft).md](fixture%20context/parity-notes%20%28draft%29.md)'
+let fixtureMentionContents: string | undefined
 const fixtureHandoffs: StartTurnInput[] = []
 let releaseSteering: (() => void) | undefined
 const steeringCalls: string[] = []
@@ -268,7 +270,19 @@ const driver: Driver = {
   async probe() { return { status: 'ready' } },
   async create(config) {
     if (config.workspacePath.startsWith(`${scratchDirectory}/`)) writeFileSync(join(config.workspacePath, 'kept.txt'), 'scratch fixture')
-    return instance
+    return {
+      ...instance,
+      async *startTurn(input) {
+        if (input.text !== `Read ${referenceLink}`) {
+          yield* instance.startTurn(input)
+          return
+        }
+        const encodedPath = referenceLink.slice(referenceLink.lastIndexOf('](') + 2, -1)
+        fixtureMentionContents = readFileSync(join(config.workspacePath, decodeURIComponent(encodedPath)), 'utf8')
+        yield { type: 'assistant-delta', text: 'Referenced fixture read.' }
+        yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      },
+    }
   },
 }
 let fixtureCodexReady = false
@@ -1578,6 +1592,48 @@ await longPaste.getByRole('button', { name: 'Remove pasted-text.txt' }).click()
 const projectAttachmentDraft = await browserContext.newPage()
 await projectAttachmentDraft.goto(`${baseUrl}/?workspace=${workspaceId}`)
 await projectAttachmentDraft.waitForFunction(() => !document.querySelector<HTMLButtonElement>('[data-attach-composer]')?.disabled)
+const mentionDirectory = join(dir, 'fixture context')
+mkdirSync(mentionDirectory)
+writeFileSync(join(mentionDirectory, 'parity-notes (draft).md'), 'Synthetic workspace context\n')
+writeFileSync(join(mentionDirectory, 'parity-notes-extra.md'), 'Another workspace file\n')
+const mentionEditor = projectAttachmentDraft.getByRole('textbox', { name: 'Message', exact: true })
+const workspaceFiles = projectAttachmentDraft.getByRole('listbox', { name: 'Workspace files' })
+const mentionOption = workspaceFiles.getByRole('option', { name: /parity-notes \(draft\)\.md/ })
+await mentionEditor.fill('Review @parity-notes')
+await mentionOption.waitFor()
+check('the project draft lists matching workspace files and their folders', await workspaceFiles.getByRole('option').count() === 2
+  && await mentionOption.getByText('fixture context').isVisible())
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await projectAttachmentDraft.setViewportSize({ width, height })
+    check(`the composer file menu fits at ${width}×${height}`, await workspaceFiles.evaluate(list => {
+      const box = list.getBoundingClientRect()
+      return box.top >= 0 && box.left >= 0 && box.right <= innerWidth
+    }))
+    await capture(`composer-file-menu-${width}`, projectAttachmentDraft)
+  }
+  await projectAttachmentDraft.setViewportSize({ width: 390, height: 844 })
+}
+const initialFile = await mentionEditor.getAttribute('aria-activedescendant')
+await mentionEditor.press('ArrowDown')
+check('arrow keys move the active file while focus stays in the editor', initialFile !== await mentionEditor.getAttribute('aria-activedescendant')
+  && await mentionEditor.evaluate(input => input === document.activeElement))
+await mentionEditor.press('Escape')
+await workspaceFiles.waitFor({ state: 'hidden' })
+check('Escape keeps the typed mention without sending a prompt', await mentionEditor.inputValue() === 'Review @parity-notes')
+await mentionEditor.fill('Review @parity-notes before changing it')
+await mentionEditor.evaluate((input: HTMLTextAreaElement) => {
+  const pos = 'Review @parity-notes'.length
+  input.setSelectionRange(pos, pos)
+  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowLeft', bubbles: true }))
+})
+await mentionOption.click()
+check('choosing a workspace file preserves surrounding text and encodes spaces and parentheses',
+  await mentionEditor.inputValue() === `Review ${referenceLink} before changing it`)
+await projectAttachmentDraft.reload()
+await projectAttachmentDraft.waitForFunction(expected => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === expected,
+  `Review ${referenceLink} before changing it`)
+await mentionEditor.fill('')
 await projectAttachmentDraft.locator('[data-composer-file-input]').setInputFiles(fileFixture)
 await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').waitFor()
 await projectAttachmentDraft.locator('[data-send]').click()
@@ -1771,6 +1827,22 @@ check('reloading lets a conflicting stash restore append to the newer draft with
   await recallEditor.inputValue() === 'Keep the newer draft during stash restore\n\nRestore an expired file'
   && await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').count() === 1)
 
+await projectAttachmentDraft.locator('[data-composer-file]').getByRole('button', { name: 'Remove notes _draft_.txt' }).click()
+await mentionEditor.fill('Read @parity-notes')
+await mentionOption.waitFor()
+await capture('composer-file-menu-active-thread', projectAttachmentDraft)
+if (await mentionOption.getAttribute('aria-selected') !== 'true') await mentionEditor.press('ArrowDown')
+await mentionEditor.press('Enter')
+check('Enter inserts the highlighted file instead of sending the prompt', await mentionEditor.inputValue() === `Read ${referenceLink} `)
+const filePromptThread = Number(new URL(projectAttachmentDraft.url()).pathname.split('/').at(-1))
+await projectAttachmentDraft.locator('[data-send]').click()
+await projectAttachmentDraft.waitForFunction(expected => Array.from(document.querySelectorAll('[data-user-prompt]')).some(row => row.textContent?.includes(expected)),
+  `Read ${referenceLink}`)
+await projectAttachmentDraft.getByText('Referenced fixture read.', { exact: true }).waitFor()
+check('the provider receives the relative link and can open the original workspace file',
+  harness.engine.current.sessions.get(filePromptThread)?.turns.at(-1)?.prompt === `Read ${referenceLink}`
+  && fixtureMentionContents === 'Synthetic workspace context\n')
+rmSync(mentionDirectory, { recursive: true })
 await projectAttachmentDraft.close()
 
 await page.addInitScript(() => {

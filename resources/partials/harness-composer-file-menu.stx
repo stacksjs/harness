@@ -1,0 +1,12 @@
+<div data-composer-file-menu ref="composerFilePopup" hidden :hidden="!composerFileMenu()">
+  <div id="composer-file-options" role="listbox" aria-label="Workspace files" :aria-busy="composerFileMenu()?.status === 'loading' ? 'true' : 'false'">
+    <template :for="(path, index) in composerFileMenu()?.paths || []" :key="path">
+      <button type="button" role="option" tabindex="-1" :id="'composer-file-option-' + index" :aria-selected="index === composerFileMenu()?.selected ? 'true' : 'false'" :title="path" @pointerdown="$event.preventDefault()" @click="pickComposerFile(path)" class="harness-composer-file-option">
+        <span class="size-4 i-hugeicons-file-02" aria-hidden="true"></span>
+        <span :text="path.slice(path.lastIndexOf('/') + 1)" class="font-medium truncate"></span>
+        <span :text="path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''" class="text-neutral-600 text-xs truncate dark:text-neutral-400"></span>
+      </button>
+    </template>
+  </div>
+  <p role="status" :hidden="Boolean(composerFileMenu()?.paths.length)" :text="composerFileMenu()?.status === 'loading' ? 'Searching workspace files…' : composerFileMenu()?.status === 'error' ? 'Workspace files are unavailable.' : 'No matching files.'" class="px-2 py-1 text-neutral-600 text-xs dark:text-neutral-400"></p>
+</div>

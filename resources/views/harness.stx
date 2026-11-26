@@ -637,6 +637,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <span class="text-neutral-600 dark:text-neutral-300">Start a fresh session</span>
         </button>
       </div>
+      @include('../partials/harness-composer-file-menu')
       @include('../partials/harness-composer-attachments')
       <textarea
         data-prompt
@@ -644,10 +645,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         ref="promptBox"
         @keydown="promptKeydown"
         @input="promptEdited"
+        @compositionstart="closeComposerFiles"
+        @compositionend="updateComposerFiles"
+        @blur="closeComposerFiles"
+        aria-controls="composer-file-options"
+        aria-autocomplete="list"
+        :aria-activedescendant="(composerFileMenu()?.selected ?? -1) >= 0 ? 'composer-file-option-' + composerFileMenu().selected : null"
         :readonly="stashBusy()"
-        @keyup="rememberPrompt"
+        @keyup="composerKeyup"
         @select="rememberPrompt"
-        @click="rememberPrompt"
+        @click="composerCaretMoved"
         rows="2"
         aria-label="Message"
         placeholder="{{ promptPlaceholder }}"
@@ -1297,6 +1304,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const sentImageStatus = state('loading')
   let sentImageTrigger = null
 
+  const composerFilePopup = useRef('composerFilePopup')
+  const composerFileMenu = state(null)
+  let fileMentionPicker
+  onDestroy(() => fileMentionPicker?.close())
   const promptStashDialog = useRef('promptStashDialog')
   const promptStashButton = useRef('promptStashButton')
   const stashEntries = state([])
@@ -3574,9 +3585,24 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     sidebarDrafts?.update()
   }
 
-  function promptEdited() {
+  function updateComposerFiles() { fileMentionPicker?.update() }
+  function closeComposerFiles() { fileMentionPicker?.close() }
+  function pickComposerFile(path) { fileMentionPicker?.pick(path) }
+
+  function composerCaretMoved() {
+    rememberPrompt()
+    updateComposerFiles()
+  }
+
+  function composerKeyup(event) {
+    rememberPrompt()
+    if (!event.isComposing && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateComposerFiles()
+  }
+
+  function promptEdited(event) {
     composerRecall?.reset()
     rememberPrompt()
+    if (!event?.isComposing) updateComposerFiles()
   }
 
   function rememberPrompt() {
@@ -3617,6 +3643,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   async function connectComposerDrafts() {
     composerDraftTools = await import(codecUrl)
+    const projectId = Number(activeWorkspaceId || draftProject?.id) || 0
+    if (projectId && !activeScratchSession) {
+      fileMentionPicker = composerDraftTools.createFileMentionPicker({
+        editor: () => promptRef.current,
+        popup: () => composerFilePopup.current,
+        scope: sessionId ? { session: String(sessionId) } : { workspace: String(projectId) },
+        updateMenu: menu => composerFileMenu.set(menu),
+        inserted: promptEdited,
+      })
+    }
     try {
       promptStash = composerDraftTools.createPromptStash(localStorage)
       refreshPromptStash()
@@ -3924,6 +3960,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function promptKeydown(event) {
     if (event.isComposing || event.keyCode === 229) return
+    if (fileMentionPicker?.keydown(event)) return
     if (event.key === 'ArrowDown' && offerClearCommand()) {
       event.preventDefault()
       clearCommandBox.current?.focus()
