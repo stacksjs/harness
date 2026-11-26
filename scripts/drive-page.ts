@@ -1891,12 +1891,19 @@ check('the copied link preserves the workspace path and selected line',
 const fileLinkPage = await browserContext.newPage()
 await fileLinkPage.goto(copiedFileLink.href)
 await fileLinkPage.waitForFunction(() => document.querySelector('[data-workspace-source]')?.getAttribute('data-view-line') === '125')
+const fileDownloadLink = fileLinkPage.getByRole('link', { name: 'Download file' })
+check('the download link supplies the exact workspace filename', await fileDownloadLink.getAttribute('download') === previewFile)
 const [downloaded] = await Promise.all([
   fileLinkPage.waitForEvent('download'),
-  fileLinkPage.getByRole('link', { name: 'Download file' }).click(),
+  fileDownloadLink.click(),
 ])
-check(`a shared file downloads with its exact name (received ${JSON.stringify(downloaded.suggestedFilename())})`,
-  downloaded.suggestedFilename() === previewFile)
+const downloadedName = downloaded.suggestedFilename()
+// Bundled libsoup can substitute underscores for spaces on Linux WebKit.
+// https://github.com/microsoft/playwright/issues/44130
+const normalizedWebKitName = process.platform === 'linux' && browserName === 'webkit'
+  && downloadedName === previewFile.replaceAll(' ', '_')
+check(`the browser suggests the workspace filename (received ${JSON.stringify(downloadedName)})`,
+  downloadedName === previewFile || normalizedWebKitName)
 check('a fresh page opens the shared line and downloads the original bytes',
   readFileSync((await downloaded.path())!, 'utf8') === previewText)
 await fileLinkPage.close()
