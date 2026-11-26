@@ -850,7 +850,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         </div>
         <div class="flex items-center shrink-0">
           <span data-terminal-activity role="status" hidden :hidden="!terminalStatus()" :text="terminalStatus()" class="px-2 text-xs"></span>
-          <button type="button" data-terminal-restart hidden :hidden="!terminalExited() && !terminalError()" :disabled="terminalBusy() || !sessionOnline()" @click="restartTerminal" class="px-2 h-8 text-xs rounded-md">Restart terminal</button>
+          <button type="button" data-terminal-restart hidden :hidden="!canRestartTerminal()" :disabled="terminalBusy() || !sessionOnline()" @click="restartTerminal" aria-label="Restart terminal" title="Restart terminal" class="px-2 h-8 text-xs rounded-md">
+            <span data-terminal-restart-icon class="size-4 i-hugeicons-refresh" aria-hidden="true"></span>
+            <span data-terminal-restart-label>Restart terminal</span>
+          </button>
           <button type="button" aria-label="New terminal" :title="terminalShortcutTitle('terminal.new')" :aria-keyshortcuts="shortcutKeys('terminal.new')" :disabled="terminalBusy() || !sessionOnline()" @click="addTerminalTab()" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-add-01" aria-hidden="true"></span>
           </button>
@@ -5417,6 +5420,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const terminalBusy = derived(() => Boolean(activeTerminalStatus()?.busy))
   const terminalExited = derived(() => Boolean(activeTerminalStatus()?.exited))
   const terminalError = derived(() => activeTerminalStatus()?.error || '')
+  const canRestartTerminal = derived(() => terminalExited() || Boolean(terminalError()))
   const terminalStatus = derived(() => activeTerminalStatus()?.reconnecting ? 'Reconnecting…' : activeTerminalStatus()?.activity || '')
   const canSplitTerminal = derived(() => sessionOnline() && !terminalBusy() && visibleTerminalTabs().length > 0 && visibleTerminalTabs().length < 4)
   let terminalTrigger = null
@@ -5470,9 +5474,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     terminalTrigger = null
   }
 
-  function focusActiveTerminalTab() {
+  function revealActiveTerminalTab() {
     const active = terminalTabStrip.current?.querySelector('[aria-selected="true"]')
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
+
+  effect(() => {
+    if (termOpen() && canRestartTerminal()) void nextTick(revealActiveTerminalTab)
+  })
+
+  function focusActiveTerminalTab() {
+    revealActiveTerminalTab()
     terminalController()?.focus(terminalTabs().activeKey)
   }
 

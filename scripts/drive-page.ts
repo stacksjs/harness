@@ -4742,6 +4742,14 @@ await openCleanupTerminal.click()
 const cleanupTab = page.getByRole('tab', { name: 'Clean checkout', exact: true })
 await cleanupTab.waitFor()
 await page.locator('[data-terminal-screen]').getByText('Cleaning the fixture checkout', { exact: false }).waitFor()
+await page.waitForFunction(() => {
+  const tab = document.querySelector('[data-terminal-tabs] [aria-selected="true"]')
+  if (!(tab instanceof HTMLElement)) return false
+  const bounds = tab.getBoundingClientRect()
+  const strip = tab.parentElement!.getBoundingClientRect()
+  return bounds.left >= strip.left - 1 && bounds.right <= strip.right + 1
+})
+check('the active cleanup tab fits beside the phone terminal controls', await cleanupTab.getAttribute('aria-selected') === 'true')
 await capture('workspace-settlement-script-terminal-mobile')
 await page.setViewportSize({ width: 1440, height: 900 })
 await page.locator('[data-header-project-scripts]').click()
