@@ -5163,18 +5163,21 @@ for (const [width, height] of workspaceViewports) {
   await backgroundPage.setViewportSize({ width, height })
   await capture(`workspace-background-thread-${width}x${height}`, backgroundPage)
 }
+async function waitForWorktreeStatusReads(pathname: string | null): Promise<void> {
+  const responses = await Promise.all([
+    backgroundPage.waitForResponse(response => {
+      const url = new URL(response.url())
+      return url.pathname === '/drivers' && !url.searchParams.has('models') && response.ok()
+    }),
+    ...['project-setup', 'project-settlement'].map(endpoint =>
+      backgroundPage.waitForResponse(response => new URL(response.url()).pathname === `${pathname}/${endpoint}` && response.ok())),
+  ])
+  await Promise.all(responses.map(response => response.finished()))
+}
+
 const openedBackgroundPath = await backgroundLink.getAttribute('href')
-const backgroundReads = Promise.all([
-  backgroundPage.waitForResponse(response => {
-    const url = new URL(response.url())
-    return url.pathname === '/drivers' && !url.searchParams.has('models') && response.ok()
-  }),
-  ...['project-setup', 'project-settlement'].map(endpoint =>
-    backgroundPage.waitForResponse(response => new URL(response.url()).pathname === `${openedBackgroundPath}/${endpoint}` && response.ok())),
-])
-await backgroundLink.click()
+await Promise.all([waitForWorktreeStatusReads(openedBackgroundPath), backgroundLink.click()])
 await backgroundPage.getByText('Background turn finished.', { exact: true }).waitFor()
-await Promise.all((await backgroundReads).map(response => response.finished()))
 check('the background notification opens the correct conversation',
   harness.engine.current.sessions.get(Number(new URL(backgroundPage.url()).pathname.split('/').at(-1)))?.turns[0]?.prompt === secondBackgroundText)
 
@@ -5187,7 +5190,7 @@ await backgroundPage.goto(backgroundDraftUrl)
 await backgroundMessage.fill(savedProjectText)
 await backgroundPage.waitForFunction(text => Object.entries(localStorage)
   .some(([key, value]) => key.startsWith('harness.composer.v1:') && value.includes(text)), savedProjectText)
-await backgroundPage.goto(sourceThreadUrl)
+await Promise.all([waitForWorktreeStatusReads(new URL(sourceThreadUrl).pathname), backgroundPage.goto(sourceThreadUrl)])
 await backgroundPage.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
 await backgroundMessage.fill('Background fixture: keep source busy')
 await backgroundPage.locator('[data-send]:enabled').waitFor()
@@ -5221,7 +5224,7 @@ await backgroundPage.goto(backgroundDraftUrl)
 await backgroundPage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value === text, savedProjectText)
 check('a fresh draft survives reload and preserves the project draft', true)
 
-await backgroundPage.goto(sourceThreadUrl)
+await Promise.all([waitForWorktreeStatusReads(new URL(sourceThreadUrl).pathname), backgroundPage.goto(sourceThreadUrl)])
 await backgroundPage.getByText('Holding the source turn.', { exact: true }).waitFor()
 const queuedBackgroundText = 'Background fixture: wait behind the source'
 await backgroundMessage.fill(queuedBackgroundText)
