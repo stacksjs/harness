@@ -7,7 +7,7 @@
       <span>Run in</span>
       <select aria-label="Run in" :value="draftIsolated() ? 'worktree' : 'project'" @change="changeDraftWorktreeMode" class="px-2 min-h-9 dark:bg-neutral-900 border border-black/15 rounded-md dark:border-white/20">
         <option value="project">Current folder</option>
-        <template :if="draftWorktreeOptions()?.hasProjectRepository || draftWorktreeOptions()?.repositories.length">
+        <template :if="draftWorktreeOptions()?.canStartWorktree">
           <option value="worktree">New worktree</option>
         </template>
       </select>

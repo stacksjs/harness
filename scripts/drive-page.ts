@@ -3790,6 +3790,13 @@ if (screenshotDir) {
     await capture(`changes-after-terminal-commit-${width}`)
   }
 }
+await page.evaluate(() => globalThis.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })))
+const readsWhileCached = ledgerReads
+await page.waitForTimeout(2200)
+check('a cached page pauses its Changes poll', ledgerReads === readsWhileCached)
+const resumedLedger = page.waitForResponse(response => new URL(response.url()).pathname === `${ledgerPath}/diff`)
+await page.evaluate(() => globalThis.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })))
+check('restoring a cached page reloads its Changes poll', (await resumedLedger).ok())
 await page.getByRole('button', { name: 'Close changes' }).click()
 const readsAfterClose = ledgerReads
 await page.waitForTimeout(2300)
@@ -3942,6 +3949,19 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
   await capture(`project-repositories-linked-${width}x${height}`)
 }
 
+if (process.platform !== 'win32') {
+  writeFileSync(join(multiRepoProject, 't3.json'), JSON.stringify({
+    worktreeLayout: {
+      create: [
+        'while [ ! -f "$T3_PROJECT_ROOT/finish-setup" ]; do sleep 0.05; done',
+        'mkdir -p "$T3_WORKTREE_PROJECT_PATH/packages"',
+        'git -C "$T3_PROJECT_ROOT/api" worktree add -b "$T3_WORKTREE_BRANCH" "$T3_WORKTREE_PROJECT_PATH/api" "$T3_WORKTREE_BASE"',
+        'git -C "$T3_PROJECT_ROOT/packages/web" worktree add -b "$T3_WORKTREE_BRANCH" "$T3_WORKTREE_PROJECT_PATH/packages/web" "$T3_WORKTREE_BASE"',
+        'touch "$T3_WORKTREE_ROOT/setup-complete"',
+      ].join(' && '),
+    },
+  }))
+}
 const worktreeDraft = new URL(`/?workspace=${multiRepoWorkspace}`, baseUrl)
 await page.goto(worktreeDraft.href)
 const worktreeControls = page.locator('[data-draft-worktree]')
@@ -3964,6 +3984,13 @@ await isolatedPrompt.fill('Open the combined worktree fixture.')
 await isolatedPrompt.press('Enter')
 await page.waitForURL(url => url.pathname.startsWith('/s/'))
 const combinedId = Number(new URL(page.url()).pathname.split('/').at(-1))
+if (process.platform !== 'win32') {
+  try {
+    await page.getByRole('status').filter({ hasText: 'Preparing the project worktree' }).waitFor({ timeout: 4000 })
+    await capture('project-layout-running')
+  }
+  finally { writeFileSync(join(multiRepoProject, 'finish-setup'), '') }
+}
 await page.locator('[data-workspace-branch]').filter({ hasText: `harness/session-${combinedId}` }).waitFor()
 const combined = harness.engine.current.sessions.get(combinedId)?.combinedWorktree
 check('the first browser turn uses the selected repositories on one isolated branch',

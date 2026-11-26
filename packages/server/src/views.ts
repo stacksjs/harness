@@ -213,6 +213,7 @@ export function viewProps(state: HarnessState, options: {
           } : undefined,
           state: active.state,
           lastError: active.state === 'failed' ? active.lastError : undefined,
+          worktreeSetup: Boolean(active.worktreeIntent && 'checkouts' in active.worktreeIntent && active.worktreeIntent.layout),
           // Which agent this session runs — shown in the header and preselected
           // in the composer's picker, so switching has a visible ground truth.
           driverKind: active.driverKind,

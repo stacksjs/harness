@@ -104,6 +104,7 @@ export const turns = activeSession ? activeSession.turns : []
 export const sessionTitle = activeSession ? (activeSession.title || `Session ${activeSession.id}`) : (draftProject || draftWithoutProject ? 'New thread' : 'Harness')
 export const sessionState = activeSession ? activeSession.state : 'idle'
 export const initialSessionError = activeSession?.lastError || ''
+export const initialWorktreeSetup = activeSession?.worktreeSetup === true
 // Empty unless this session runs in a worktree of its own.
 export const sessionBranch = activeSession ? (activeSession.branch || '') : ''
 export const sessionDriver = activeSession ? (activeSession.driverKind || '') : ''
@@ -636,6 +637,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(activeSession)
+      <p data-worktree-setup role="status" @if(!initialWorktreeSetup || sessionState !== 'running')hidden@endif :hidden="!worktreeSetup() || !uiBusy()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300">Preparing the project worktree</p>
       <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
     @endif
 
@@ -1325,6 +1327,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   const sessionId = Number(activeSessionId) || 0
   const workspaceBranch = state(sessionBranch)
+  const worktreeSetup = state(initialWorktreeSetup)
   const forkingResponseId = state(0)
   const forkableTurns = state(initialForkableTurns)
   const forkStatus = state(initialFork?.state || 'ready')
@@ -4454,7 +4457,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         draftWorktreeOptions.set(options)
         draftRepositoryKeys.set(Array.isArray(saved?.repositories) ? keys.filter(key => saved.repositories.includes(key)) : keys.length <= 8 ? keys : [])
         draftBaseBranch.set(typeof saved?.baseBranch === 'string' ? saved.baseBranch : '')
-        draftWorktreeLoad.set(options.hasProjectRepository || keys.length ? '' : 'No Git repositories were found in this project.')
+        draftWorktreeLoad.set(options.canStartWorktree ? '' : options.requiresProjectCommand
+          ? 'Start this project’s worktree from the Harness host.'
+          : 'No Git repositories were found in this project.')
       })
     }
     catch (error) { draftWorktreeLoad.set(error.message) }
@@ -5282,7 +5287,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         threadNavigation.update(previous => ({ ...previous, ...payload.changes }))
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
       }
+      if (payload.type === 'session.worktree-reserved') worktreeSetup.set(Boolean(payload.intent?.layout))
       if (payload.type === 'session.isolated') {
+        worktreeSetup.set(false)
         workspaceBranch.set(payload.branch)
         if (diffOpen()) refreshWorkspaceDiff()
       }
