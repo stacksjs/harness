@@ -365,8 +365,11 @@ export class ProviderRuntime {
         throw new Error('Trust this workspace before sending a message.')
       const nativeHistory = running.instance.acceptsHistoricalContext ? history : undefined
       const providerSessionId = running.providerSessionId ?? (session.providerSessionId || undefined)
-      const claudeFork = session.driverKind === 'claude' && Boolean(session.fork?.providerSessionId && providerSessionId)
+      const claudeFork = session.driverKind === 'claude' && Boolean(providerSessionId && session.fork?.nativeSessionId === providerSessionId)
       const forkResume = claudeFork && session.worktreePath ? { forkAcrossWorktrees: true as const } : undefined
+      const claudeConversation = session.driverKind === 'claude' ? returning ?? providerConversation(session) : undefined
+      const resumeSessionAt = providerSessionId && claudeConversation?.providerSessionId === providerSessionId ? claudeConversation.resumeSessionAt : undefined
+      const claudeResume = resumeSessionAt ? { ...forkResume, resumeSessionAt } : forkResume
       const attachments = session.turns.at(-1)?.attachments
       const nativeImages: string[] = []
       const fileReferences: string[] = []
@@ -378,7 +381,7 @@ export class ProviderRuntime {
       }
       const prompt = nativeHistory ? text : history?.inlinePrompt ?? text
       const attachmentNote = fileReferences.length ? `Attached files (host paths):\n${fileReferences.map(path => '- ' + path).join('\n')}` : ''
-      const events = compaction ? running.instance.compact?.(session.providerSessionId, forkResume) : running.instance.startTurn({
+      const events = compaction ? running.instance.compact?.(session.providerSessionId, claudeResume) : running.instance.startTurn({
         text: [prompt, attachmentNote].filter(Boolean).join('\n\n'),
         ...(nativeImages.length ? { localImages: nativeImages } : {}),
         ...(nativeHistory ? { historicalContext: nativeHistory } : {}),
@@ -387,8 +390,8 @@ export class ProviderRuntime {
         // undefined, so an empty string must not be passed through as a resume
         // target.
         providerSessionId,
-        ...(returning || claudeFork ? { requireResume: true } : {}),
-        ...forkResume,
+        ...(returning || claudeFork || resumeSessionAt ? { requireResume: true } : {}),
+        ...claudeResume,
       })
       if (!events) throw new Error('This provider does not support manual compaction in Harness.')
       for await (const event of events) {
@@ -841,7 +844,9 @@ export class ProviderRuntime {
       if (!running?.instance.rewind || !allowed()) return false
       resultState.outcome = 'uncertain'
       try {
-        const result = await running.instance.rewind({ ...pending.point, verifyOnly })
+        const activeResumeSessionAt = session.driverKind === 'claude' ? providerConversation(session)?.resumeSessionAt : undefined
+        const result = await running.instance.rewind({ ...pending.point, verifyOnly, ...(activeResumeSessionAt && { activeResumeSessionAt }) })
+        if (result.outcome === 'rewound' && session.driverKind === 'claude') await this.stopSession(sessionId)
         resultState.outcome = result.outcome
         message = result.outcome === 'rewound' ? undefined : result.message
         return result.outcome === 'rewound'

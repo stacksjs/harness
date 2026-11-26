@@ -2271,6 +2271,85 @@ describe('conversation rewind', () => {
   })
 })
 
+describe('Claude conversation rewind', () => {
+  it.each(['resume', 'restart-first-prompt'] as const)('retains the native boundary across SQLite replay for %s', async (mode) => {
+    const inputs: StartTurnInput[] = []
+    const rewinds: Parameters<NonNullable<ProviderInstance['rewind']>>[0][] = []
+    const driver: Driver = {
+      kind: 'claude',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn(input) {
+            const id = inputs.push(input)
+            if (input.text === 'Failed after rewind') {
+              yield { type: 'error', message: 'Fixture failure after checking resume.' }
+              return
+            }
+            if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: `native-claude-session-${id}` }
+            yield { type: 'assistant-delta', text: 'Finished the fixture.' }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `assistant-${id}` }
+          },
+          async rewind(input) { rewinds.push(input); return { outcome: 'rewound' } },
+          async interrupt() {}, async respondApproval() {}, async stop() {},
+        }
+      },
+    }
+    const start = () => serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    harness = await start()
+    const url = `ws://127.0.0.1:${port}/ws`
+    let client = await Client.connect(url)
+    const { sessionId } = await bootstrap(client)
+    const send = (id: string, command: Command) => {
+      client.events = client.events.filter(frame => frame.id !== id)
+      client.send({ t: 'dispatch', envelope: { id, at: Date.now(), command } })
+      return client.waitForDispatch(id)
+    }
+    const selected = mode === 'resume' ? 2 : 1
+    try {
+      for (const turnId of [1, 2, 3]) {
+        expect(await send(`claude-turn-${turnId}`, { type: 'session.turn.start', sessionId, text: `Prompt ${turnId}` })).toMatchObject({ t: 'dispatched' })
+        expect(await client.waitFor('turn.completed', 3000, point => point.turnId === turnId)).toBeTruthy()
+      }
+      const command = { type: 'session.turn.rewind', sessionId, turnId: selected } as const
+      expect(await send('claude-rewind', command)).toMatchObject({ t: 'dispatched', replayed: false })
+      expect(await client.waitFor('turn.rewind-settled')).toMatchObject({ outcome: 'rewound' })
+      expect(rewinds).toEqual([{ providerSessionId: 'native-claude-session-1', beforeTurnId: `assistant-${selected}`, newestTurnId: 'assistant-3',
+        ...(selected === 2 && { retainedTurnId: 'assistant-1' }), verifyOnly: false,
+      }])
+      client.close()
+      harness.stop()
+      harness = await start()
+      client = await Client.connect(url)
+      client.send({ t: 'subscribe', sessionId })
+      expect(await send('claude-rewind', command)).toMatchObject({ t: 'dispatched', replayed: true })
+      const session = harness.engine.current.sessions.get(sessionId)!
+      expect(session.turns.map(turn => turn.id)).toEqual(selected === 2 ? [1] : [])
+      expect(session.rewoundPrompt?.text).toBe(`Prompt ${selected}`)
+      expect(session.providerSessionId).toBe(selected === 2 ? 'native-claude-session-1' : '')
+      if (selected === 2) {
+        expect(await send('failed-retry', { type: 'session.turn.start', sessionId, text: 'Failed after rewind' })).toMatchObject({ t: 'dispatched' })
+        expect(await client.waitFor('session.failed')).toMatchObject({ message: 'Fixture failure after checking resume.' })
+        expect(inputs[3]).toMatchObject({ providerSessionId: 'native-claude-session-1', requireResume: true, resumeSessionAt: 'assistant-1' })
+        client.close()
+        harness.stop()
+        harness = await start()
+        client = await Client.connect(url)
+        client.send({ t: 'subscribe', sessionId })
+      }
+      const continuedId = selected === 2 ? 5 : 4
+      expect(await send('edited-claude-prompt', { type: 'session.turn.start', sessionId, text: 'Edited prompt' })).toMatchObject({ t: 'dispatched' })
+      expect(await client.waitFor('turn.completed', 3000, point => point.turnId === continuedId)).toBeTruthy()
+      if (selected === 2)
+        expect(inputs.at(-1)).toMatchObject({ providerSessionId: 'native-claude-session-1', requireResume: true, resumeSessionAt: 'assistant-1' })
+      else expect(inputs.at(-1)?.providerSessionId).toBeUndefined()
+      expect(harness.engine.current.sessions.get(sessionId)?.providerSessionId).toBe(selected === 2 ? 'native-claude-session-1' : 'native-claude-session-4')
+      expect(rewinds).toHaveLength(1)
+    }
+    finally { client.close() }
+  })
+})
+
 describe('conversation and file rewind', () => {
   it.each(['single', 'repositories', 'locked-index', 'new-edit', 'provider-refuses', 'shared', 'verify-after-crash', 'confirmed-before-crash'] as const)(
     'coordinates %s without replaying file changes', async (scenario) => {

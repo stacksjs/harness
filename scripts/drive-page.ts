@@ -98,7 +98,15 @@ const releaseFreshClaudeTurn = Promise.withResolvers<void>()
 let freshClaudeConversation = 0
 const claudeForks: ForkInput[] = []
 const claudeForkTurns: StartTurnInput[] = []
+const claudeRewindTurns: StartTurnInput[] = []
+const claudeRewinds: ConversationRewindInput[] = []
 const instance: ProviderInstance = {
+  async rewind(input) {
+    claudeRewinds.push(input)
+    if (!input.providerSessionId.startsWith('fixture-claude-rewind-'))
+      return { outcome: 'unchanged', message: 'The Claude fixture session does not own this cursor.' }
+    return { outcome: 'rewound' }
+  },
   async fork(input) {
     claudeForks.push(input)
     return { providerSessionId: `fixture-claude-fork-${claudeForks.length}`, copiedProviderTurnIds: { [input.providerTurnId!]: `copy-${claudeForks.length}` } }
@@ -108,6 +116,13 @@ const instance: ProviderInstance = {
     yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
   },
   async *startTurn(input) {
+    if (input.text.startsWith('Claude rewind fixture: ')) {
+      const sequence = claudeRewindTurns.push(input)
+      if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: `fixture-claude-rewind-${sequence}` }
+      yield { type: 'assistant-delta', text: 'Claude reviewed the notes.' }
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `claude-assistant-${sequence}` }
+      return
+    }
     if (input.text.startsWith('Claude fork fixture: ')) {
       claudeForkTurns.push(input)
       if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'fixture-claude-parent' }
@@ -4229,6 +4244,50 @@ check('one combined rewind restores both worktrees and staging, trims the transc
   && await rewindMessage(1).isVisible() && await rewindMessage(2).count() === 0 && await rewindMessage(3).count() === 0
   && fixtureCodexRewinds.length === 2 && fixtureCodexRewinds.at(-1)?.providerSessionId === 'rewind-worktree-fixture-thread')
 await capture('combined-conversation-rewind-restored-phone')
+
+const claudeRewindId = 'claude-rewind-thread'
+const claudeRewindSession = derivedId(claudeRewindId)
+await harness.engine.dispatch({ id: claudeRewindId, at: Date.now(), command: {
+  type: 'session.create', workspaceId: multiRepoWorkspace, driverKind: 'claude',
+} })
+await page.goto(`${baseUrl}/s/${claudeRewindSession}`)
+for (const [index, draft] of ['Keep this response.', 'Revise this explanation.', 'Discard this follow-up.'].entries()) {
+  await rewindPrompt.fill(`Claude rewind fixture: ${draft}`)
+  await page.locator('[data-send]').click()
+  await rewindMessage(index + 1).locator('[data-edit-earlier-prompt]').waitFor()
+}
+await rewindPrompt.fill('Claude rewind fixture: Keep these notes.')
+await editEarlier.click()
+await confirmEdit.waitFor()
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  const bounds = await rewindDialog.boundingBox()
+  check(`the Claude rewind confirmation fits at ${width}×${height}`, Boolean(bounds
+    && bounds.x >= 0 && bounds.x + bounds.width <= width + 1 && bounds.y >= 0 && bounds.y + bounds.height <= height + 1))
+  await capture(`claude-rewind-confirm-${width}x${height}`)
+}
+await confirmEdit.click()
+const pinnedDraft = 'Claude rewind fixture: Keep these notes.\n\nClaude rewind fixture: Revise this explanation.'
+await page.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pinnedDraft)
+check('Claude rewind returns the selected prompt and keeps only the earlier exchange', await rewindMessage(1).isVisible()
+  && await rewindMessage(2).count() === 0 && await rewindMessage(3).count() === 0)
+await capture('claude-rewind-restored-phone')
+await page.reload()
+await page.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pinnedDraft)
+await page.locator('[data-send]').click()
+await rewindMessage(4).locator('[data-edit-earlier-prompt]').waitFor()
+check('Claude sends the edited prompt with the retained native assistant cursor', claudeRewinds.length === 1
+  && claudeRewinds[0]?.retainedTurnId === 'claude-assistant-1'
+  && claudeRewindTurns.at(-1)?.providerSessionId === 'fixture-claude-rewind-1'
+  && claudeRewindTurns.at(-1)?.resumeSessionAt === 'claude-assistant-1')
+await rewindMessage(1).locator('[data-edit-earlier-prompt]').click()
+await confirmEdit.click()
+await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Claude rewind fixture: Keep this response.')
+await page.locator('[data-send]').click()
+await rewindMessage(5).locator('[data-edit-earlier-prompt]').waitFor()
+check('rewinding the first Claude prompt starts fresh within the same Harness thread', claudeRewinds.length === 2
+  && claudeRewindTurns.at(-1)?.providerSessionId === undefined
+  && harness.engine.current.sessions.get(claudeRewindSession)?.providerSessionId === 'fixture-claude-rewind-5')
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

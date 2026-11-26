@@ -795,7 +795,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (existing) throw new InvalidCommand('Check the current conversation rewind before starting another one.')
       const index = session.turns.findIndex(turn => turn.id === command.turnId)
       const point = conversationRewindPoint(session, index)
-      if (!point) throw new InvalidCommand('Choose a completed prompt in the current Codex conversation.')
+      if (!point) throw new InvalidCommand('Choose a completed prompt in the current provider conversation.')
       const checkpoint = command.restoreFiles === true
         ? session.checkpoints.find(point => point.kind === 'turn-start' && point.turnId === command.turnId)
         : undefined

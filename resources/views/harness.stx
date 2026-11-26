@@ -5610,7 +5610,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           turnDiffs.update(diffs => ({ ...diffs, [payload.turnId]: payload.reviewRepositories }))
         if (payload.type === 'turn.completed' && payload.responseForkable) {
           forkableTurns.update(turns => [...turns, payload.turnId])
-          if (payload.providerTurnId && activeDriverValue().split(':')[0] === 'codex')
+          if (payload.providerTurnId && ['codex', 'claude'].includes(activeDriverValue().split(':')[0]))
             rewindableTurns.update(turns => [...turns, payload.turnId])
         }
         else rewindableTurns.set([])

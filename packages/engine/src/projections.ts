@@ -23,6 +23,7 @@ export interface InputRequestState {
 interface ProviderConversation {
   providerSessionId: string
   throughTurnId: number
+  resumeSessionAt?: string
   context?: { usage: ProviderContextUsage, reportedAt: number, model: string, serviceTier?: string }
 }
 
@@ -38,7 +39,7 @@ export interface SessionState {
   /** Last confirmed native conversation and coverage for each provider account. */
   providerConversations?: Record<string, ProviderConversation>
   handoff?: { afterTurnId: number, pending: boolean }
-  fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', error?: string }
+  fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', nativeSessionId?: string, error?: string }
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
   lastSeq: number
@@ -278,6 +279,12 @@ function forgetProviderConversation(session: SessionState): void {
   if (session.providerConversations) delete session.providerConversations[providerConversationKey(session)]
 }
 
+function forgetUnconfirmedProviderTurn(session: SessionState): void {
+  const conversation = providerConversation(session)
+  if (conversation?.resumeSessionAt && conversation.providerSessionId === session.providerSessionId) return
+  forgetProviderConversation(session)
+}
+
 export function sharesCheckout(state: HarnessState, first: SessionState, second: SessionState): boolean {
   if (first.id === second.id) return true
   const path = (session: SessionState) => {
@@ -302,19 +309,26 @@ export function isolatedRewindScope(state: HarnessState, session: SessionState):
 }
 
 export function conversationRewindPoint(session: SessionState, index: number): ConversationRewindPoint | undefined {
-  if (session.driverKind !== 'codex' || !session.providerSessionId || session.handoff?.pending) return undefined
+  const claude = session.driverKind === 'claude'
+  if ((!claude && session.driverKind !== 'codex') || !session.providerSessionId || session.handoff?.pending) return undefined
   const selected = session.turns[index]
   const newest = session.turns.at(-1)
+  const conversation = claude ? providerConversation(session) : undefined
+  const pinned = conversation?.providerSessionId === session.providerSessionId ? conversation.resumeSessionAt : undefined
   const belongs = (turn: TurnState | undefined) => {
     const native = turn?.nativeFork
     return native && native.providerSessionId === session.providerSessionId && native.driverKind === session.driverKind
       && native.providerInstanceId === session.providerInstanceId
   }
-  if (selected?.role !== 'user' || !selected.providerTurnId || !newest?.providerTurnId
-    || selected.compaction || !belongs(selected) || !belongs(newest)) return undefined
-  const earlier = session.turns[index - 1]
+  if (selected?.role !== 'user' || !selected.providerTurnId || selected.compaction || !belongs(selected)) return undefined
+  const newestTurnId = pinned || (belongs(newest) ? newest?.providerTurnId : undefined)
+  if (!newestTurnId) return undefined
+  let preceding = index - 1
+  // A completed Claude compaction records no assistant cursor of its own.
+  while (claude && session.turns[preceding]?.contextCompacted) preceding--
+  const earlier = session.turns[preceding]
   if (earlier && !selected.freshContext && (!earlier.providerTurnId || !belongs(earlier))) return undefined
-  return { providerSessionId: session.providerSessionId, beforeTurnId: selected.providerTurnId, newestTurnId: newest.providerTurnId,
+  return { providerSessionId: session.providerSessionId, beforeTurnId: selected.providerTurnId, newestTurnId,
     ...(earlier?.providerTurnId && !selected.freshContext && { retainedTurnId: earlier.providerTurnId }),
   }
 }
@@ -539,6 +553,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (session?.fork?.state === 'pending') {
         session.providerSessionId = p.providerSessionId
+        session.fork.nativeSessionId = p.providerSessionId
         session.providerConversations = {
           [providerConversationKey(session)]: {
             providerSessionId: p.providerSessionId,
@@ -615,7 +630,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const active = session.turns.at(-1)
       if (active?.status === 'running') {
         active.status = 'failed'
-        if (session.providerSessionId) forgetProviderConversation(session)
+        if (session.providerSessionId) forgetUnconfirmedProviderTurn(session)
       }
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'failed'
@@ -675,9 +690,16 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
           if (conversation.throughTurnId >= selected.id) delete session.providerConversations[key]
         }
       }
-      session.providerConversations ??= {}
-      session.providerConversations[providerConversationKey(session)] = {
-        providerSessionId: pending.point.providerSessionId, throughTurnId: retained?.id ?? 0,
+      if (session.driverKind === 'claude' && !pending.point.retainedTurnId) {
+        session.providerSessionId = ''
+        forgetProviderConversation(session)
+      }
+      else {
+        session.providerConversations ??= {}
+        session.providerConversations[providerConversationKey(session)] = {
+          providerSessionId: pending.point.providerSessionId, throughTurnId: retained?.id ?? 0,
+          ...(session.driverKind === 'claude' && { resumeSessionAt: pending.point.retainedTurnId }),
+        }
       }
       session.state = 'idle'
       delete session.lastError
@@ -872,7 +894,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'interrupted'
-        if (session.providerSessionId) forgetProviderConversation(session)
+        if (session.providerSessionId) forgetUnconfirmedProviderTurn(session)
       }
       session.state = 'idle'
       // Nothing is waiting on a decision once the turn is gone.
@@ -886,7 +908,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const t = turn(session, p.turnId)
       if (t) {
         t.status = 'failed'
-        if (session.providerSessionId) forgetProviderConversation(session)
+        if (session.providerSessionId) forgetUnconfirmedProviderTurn(session)
       }
       session.state = 'idle'
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
