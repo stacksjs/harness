@@ -104,6 +104,7 @@ type ClientFrame =
   | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number }
   | { t: 'term-input', termId: number, data: string }
   | { t: 'term-resize', termId: number, cols: number, rows: number }
+  | { t: 'term-detach', termId: number }
   | { t: 'term-close', termId: number }
 
 export interface HarnessServer {
@@ -828,6 +829,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
       case 'term-close':
         terminals.close(socket, frame.termId)
+        return
+
+      case 'term-detach':
+        terminals.detach(socket, frame.termId)
         return
 
       case 'subscribe': {

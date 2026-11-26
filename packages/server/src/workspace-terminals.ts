@@ -96,6 +96,11 @@ export class WorkspaceTerminals<Peer> {
     if (terminal?.peers.has(peer)) this.remove(terminal)
   }
 
+  detach(peer: Peer, id: number): void {
+    const terminal = this.terminals.get(id)
+    if (terminal?.scope.resumeKey) terminal.peers.delete(peer)
+  }
+
   disconnect(peer: Peer): void {
     for (const terminal of this.terminals.values()) {
       if (terminal.peers.delete(peer) && !terminal.scope.resumeKey) this.remove(terminal)
