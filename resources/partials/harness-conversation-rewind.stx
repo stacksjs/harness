@@ -1,0 +1,16 @@
+<dialog data-conversation-rewind-dialog ref="rewindDialogBox" role="alertdialog" aria-labelledby="rewind-dialog-title" aria-describedby="rewind-dialog-copy" @cancel.prevent="closeRewindDialog" @click.self="closeRewindDialog" @close="finishRewindDialog" class="overflow-auto mb-0 mt-auto mx-auto p-0 sm:m-auto max-h-[90dvh] max-w-full w-full sm:max-w-[32rem] text-neutral-900 dark:text-neutral-100 bg-white backdrop:bg-black/45 dark:bg-neutral-900 border border-black/15 rounded-t-2xl sm:rounded-2xl dark:border-white/20 shadow-xl">
+  <div>
+    <div class="pb-4 pt-5 px-5 sm:px-6">
+      <h2 id="rewind-dialog-title" class="font-semibold text-lg">Edit from here?</h2>
+      <p id="rewind-dialog-copy" class="mt-1.5 text-neutral-600 text-sm dark:text-neutral-300">
+        Rewind the conversation to before this message. Your prompt and attachments return to the composer.
+      </p>
+      <p :hidden="!rewindDialogScope()" class="mt-2 text-neutral-600 text-sm dark:text-neutral-300" :text="rewindDialogScope() === 'repositories' ? 'Revert repositories too restores this thread’s repository worktrees, including your own edits there.' : 'Revert files too also undoes your edits in this worktree.'"></p>
+    </div>
+    <div class="grid sm:flex gap-2 sm:justify-end pb-[max(0.875rem,env(safe-area-inset-bottom))] pt-3 px-5 sm:px-6 border-black/10 border-t dark:border-white/10">
+      <button type="button" ref="rewindDialogCancel" autofocus @click="closeRewindDialog" class="order-3 sm:order-1 px-3 min-h-10 text-sm hover:bg-black/5 dark:hover:bg-white/10 border border-black/15 rounded-lg dark:border-white/20">Cancel</button>
+      <button type="button" data-rewind-with-files @click="confirmConversationRewind(true)" :disabled="!rewindDialogScope() || !sessionOnline()" :text="rewindDialogScope() === 'repositories' ? 'Revert repositories too' : 'Revert files too'" class="order-2 px-3 min-h-10 text-red-700 text-sm dark:text-red-300 hover:bg-red-700/5 border border-red-700/25 rounded-lg dark:border-red-300/25 disabled:opacity-45">Revert files too</button>
+      <button type="button" data-rewind-keep-changes @click="confirmConversationRewind(false)" :disabled="!sessionOnline()" class="order-1 sm:order-3 px-3 min-h-10 font-medium text-sm text-white dark:text-neutral-900 bg-neutral-900 dark:bg-neutral-100 hover:bg-neutral-700 dark:hover:bg-white rounded-lg">Revert and keep changes</button>
+    </div>
+  </div>
+</dialog>

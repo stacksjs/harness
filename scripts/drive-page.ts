@@ -331,10 +331,22 @@ const codexDriver: Driver = {
     fixtureCodexLaunchModel = config.model
     fixtureCodexLaunchOptions = config.codexTurnOptions
     const created = await driver.create(config)
+    let worktreeRewindTurns = 0
     return {
       ...created,
       async *startTurn(input) {
         const sequence = fixtureCodexTurns.push(input)
+        if (input.text.startsWith('Rewind worktree fixture:')) {
+          if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'rewind-worktree-fixture-thread' }
+          worktreeRewindTurns++
+          for (const key of ['api', 'packages/web']) {
+            writeFileSync(join(config.workspacePath, key, 'shared.txt'), `Worktree fixture turn ${worktreeRewindTurns}\n`)
+            if (worktreeRewindTurns === 2) writeFileSync(join(config.workspacePath, key, 'new-note.txt'), 'From the selected turn.\n')
+          }
+          yield { type: 'assistant-delta', text: 'Reviewed the checkout.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `fixture-turn-${sequence}` }
+          return
+        }
         if (input.text.startsWith('Rewind fixture:')) {
           if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: 'rewind-fixture-thread' }
           yield { type: 'assistant-delta', text: 'Reviewed the fixture.' }
@@ -365,7 +377,7 @@ const codexDriver: Driver = {
       },
       async rewind(input) {
         fixtureCodexRewinds.push(input)
-        if (input.providerSessionId !== 'rewind-fixture-thread' || input.verifyOnly)
+        if (!['rewind-fixture-thread', 'rewind-worktree-fixture-thread'].includes(input.providerSessionId) || input.verifyOnly)
           return { outcome: 'uncertain', message: 'Unexpected fixture rewind.' }
         return { outcome: 'rewound' }
       },
@@ -4133,8 +4145,10 @@ const editEarlier = rewindMessage(2).locator('[data-edit-earlier-prompt]')
 const rewindDialog = page.getByRole('alertdialog', { name: 'Edit from here?' })
 const cancelEdit = rewindDialog.getByRole('button', { name: 'Cancel' })
 const confirmEdit = rewindDialog.getByRole('button', { name: 'Revert and keep changes' })
+const revertConversationFiles = rewindDialog.locator('[data-rewind-with-files]')
 await editEarlier.click()
 await cancelEdit.waitFor()
+check('project-folder conversations cannot restore files from this dialog', await revertConversationFiles.isDisabled())
 check('conversation rewind confirmation focuses Cancel initially', await cancelEdit.evaluate(el => el === el.ownerDocument.activeElement))
 for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
   await page.setViewportSize({ width, height })
@@ -4171,6 +4185,50 @@ check('rewind runs once, restores the draft once, and sends in the same Codex co
   && fixtureCodexRewinds[0]?.retainedTurnId === `fixture-turn-${codexTurnsBeforeRewind + 1}`
   && fixtureCodexRewinds[0]?.newestTurnId === `fixture-turn-${codexTurnsBeforeRewind + 3}`
   && fixtureCodexTurns.at(-1)?.providerSessionId === 'rewind-fixture-thread')
+
+const worktreeRewindId = 'conversation-and-files-rewind-thread'
+const worktreeRewindSession = derivedId(worktreeRewindId)
+await harness.engine.dispatch({ id: worktreeRewindId, at: Date.now(), command: {
+  type: 'session.create', workspaceId: multiRepoWorkspace, driverKind: 'codex', isolate: true,
+  worktree: { repositories: ['api', 'packages/web'], baseBranch: 'main' },
+} })
+await page.goto(`${baseUrl}/s/${worktreeRewindSession}`)
+for (const [index, text] of ['Keep this worktree change.', 'Rewrite these notes.', 'Discard this exchange.'].entries()) {
+  await rewindPrompt.fill(`Rewind worktree fixture: ${text}`)
+  await page.locator('[data-send]').click()
+  await rewindMessage(index + 1).locator('[data-edit-earlier-prompt]').waitFor()
+}
+const worktrees = harness.engine.current.sessions.get(worktreeRewindSession)?.combinedWorktree?.checkouts ?? []
+const sourceContents = worktrees.map(checkout => readFileSync(join(checkout.repository, 'shared.txt'), 'utf8'))
+for (const checkout of worktrees) {
+  const file = join(checkout.path, 'shared.txt')
+  writeFileSync(file, 'Staged local worktree edit.\n')
+  execFileSync('git', ['add', 'shared.txt'], { cwd: checkout.path })
+  writeFileSync(file, 'Unstaged local worktree edit.\n')
+}
+await editEarlier.click()
+await revertConversationFiles.waitFor()
+check('an isolated multi-repository thread offers its repository worktrees', await revertConversationFiles.isEnabled()
+  && await revertConversationFiles.textContent() === 'Revert repositories too')
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  const bounds = await rewindDialog.boundingBox()
+  check(`the combined rewind confirmation stays onscreen at ${width}×${height}`, Boolean(bounds
+    && bounds.x >= 0 && bounds.x + bounds.width <= width + 1 && bounds.y >= 0 && bounds.y + bounds.height <= height + 1
+    && (width >= 640 || Math.abs(bounds.y + bounds.height - height) <= 1))
+    && await rewindDialog.evaluate(el => el.matches(':modal')))
+  await capture(`combined-conversation-rewind-confirm-${width}x${height}`)
+}
+await revertConversationFiles.click()
+await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Rewind worktree fixture: Rewrite these notes.')
+check('one combined rewind restores both worktrees and staging, trims the transcript, and keeps source files', worktrees.length === 2
+  && worktrees.every((checkout, i) => readFileSync(join(checkout.path, 'shared.txt'), 'utf8') === 'Worktree fixture turn 1\n'
+    && !existsSync(join(checkout.path, 'new-note.txt'))
+    && !execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: checkout.path, encoding: 'utf8' })
+    && readFileSync(join(checkout.repository, 'shared.txt'), 'utf8') === sourceContents[i])
+  && await rewindMessage(1).isVisible() && await rewindMessage(2).count() === 0 && await rewindMessage(3).count() === 0
+  && fixtureCodexRewinds.length === 2 && fixtureCodexRewinds.at(-1)?.providerSessionId === 'rewind-worktree-fixture-thread')
+await capture('combined-conversation-rewind-restored-phone')
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

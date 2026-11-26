@@ -141,6 +141,7 @@ export const initialHasResponse = Boolean(liveTurn?.response)
 export const initialResponseTurn = liveTurn?.id || 0
 export const initialHasTurns = Boolean(turns.length)
 export const initialConversationRewind = activeSession?.conversationRewind ?? null
+export const initialIsolatedRewindScope = activeSession?.isolatedRewindScope || ''
 export const initialConversationRewindNotice = activeSession?.conversationRewindNotice || ''
 export const initialRewoundPrompt = activeSession?.rewoundPrompt ?? null
 export const initialRewindableTurns = turns.filter(turn => turn.canRewindConversation).map(turn => turn.id)
@@ -407,7 +408,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @endif
           @if(turn.canRewindConversation)
           <div hidden :hidden="!canEditEarlierPrompt({{ turn.id }})" class="mb-3 flex justify-end">
-            <button type="button" data-edit-earlier-prompt @click="editEarlierPrompt({{ turn.id }}, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
+            <button type="button" data-edit-earlier-prompt @click="openRewindDialog({{ turn.id }}, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
               <span class="size-4 i-hugeicons-pencil-edit-01" aria-hidden="true"></span>Edit from here
             </button>
           </div>
@@ -505,7 +506,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             </ul>
           @endif
           <div hidden :hidden="!canEditEarlierPrompt({{ liveTurn.id }})" class="mb-3 flex justify-end">
-            <button type="button" data-edit-earlier-prompt @click="editEarlierPrompt({{ liveTurn.id }}, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
+            <button type="button" data-edit-earlier-prompt @click="openRewindDialog({{ liveTurn.id }}, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
               <span class="size-4 i-hugeicons-pencil-edit-01" aria-hidden="true"></span>Edit from here
             </button>
           </div>
@@ -616,7 +617,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             </template>
           </ul>
           <div hidden :hidden="!canEditEarlierPrompt(turn.id)" class="mb-3 flex justify-end">
-            <button type="button" data-edit-earlier-prompt @click="editEarlierPrompt(turn.id, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
+            <button type="button" data-edit-earlier-prompt @click="openRewindDialog(turn.id, $event)" :disabled="Boolean(conversationRewind()) || !sessionOnline()" class="flex gap-1.5 items-center px-2 min-h-8 text-neutral-600 text-xs hover:bg-black/5 rounded-md dark:text-neutral-300 dark:hover:bg-white/10">
               <span class="size-4 i-hugeicons-pencil-edit-01" aria-hidden="true"></span>Edit from here
             </button>
           </div>
@@ -687,9 +688,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
     @if(activeSession)
       <p data-rewind-status role="status" @if(!initialRewind && !initialRewindNotice)hidden@endif :hidden="!revertingId() && !rewindNotice()" :text="revertingId() ? 'Restoring files…' : rewindNotice()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300"></p>
-      <div data-conversation-rewind hidden :hidden="!conversationRewind() && !conversationRewindNotice() && !canRestoreEarlierPrompt()" class="flex flex-wrap gap-2 items-center justify-center mb-2 text-neutral-600 text-xs dark:text-neutral-300">
-        <p role="status" :text="conversationRewind()?.status === 'running' ? 'Rewinding conversation…' : conversationRewindNotice()"></p>
-        <button type="button" data-check-conversation-rewind hidden :hidden="conversationRewind()?.status !== 'uncertain'" :disabled="!sessionOnline()" @click="editEarlierPrompt(conversationRewind()?.turnId, $event, true)" class="px-2 min-h-8 font-medium underline underline-offset-2">Check provider history</button>
+      <div data-conversation-rewind hidden :hidden="!conversationRewind() && !conversationRewindNotice() && !restoredPromptError() && !canRestoreEarlierPrompt()" class="flex flex-wrap gap-2 items-center justify-center mb-2 text-neutral-600 text-xs dark:text-neutral-300">
+        <p role="status" :text="conversationRewind()?.status === 'running' ? 'Rewinding conversation…' : conversationRewind()?.status === 'restoring-files' ? 'Restoring worktree files…' : conversationRewindNotice()"></p>
+        <p role="alert" hidden :hidden="!restoredPromptError()" :text="restoredPromptError()"></p>
+        <button type="button" data-check-conversation-rewind hidden :hidden="conversationRewind()?.status !== 'uncertain'" :disabled="!sessionOnline()" @click="submitConversationRewind(conversationRewind()?.turnId, false, true)" class="px-2 min-h-8 font-medium underline underline-offset-2">Check provider history</button>
         <button type="button" data-restore-earlier-prompt hidden :hidden="!canRestoreEarlierPrompt()" :disabled="startPending() || composerFilesPending()" @click="restoreEarlierPrompt" class="px-2 min-h-8 font-medium underline underline-offset-2">Restore earlier prompt</button>
       </div>
       <p data-worktree-setup role="status" @if(!initialWorktreeSetup || sessionState !== 'running')hidden@endif :hidden="!worktreeSetup() || !uiBusy()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300">Preparing the project worktree</p>
@@ -913,6 +915,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   @if(activeSession)
     @include('../partials/harness-thread-actions')
     @include('../partials/harness-thread-arrangement')
+    @include('../partials/harness-conversation-rewind')
   @endif
 
   @if(activeSessionId)
@@ -2442,6 +2445,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const rewindableTurns = state(initialRewindableTurns)
   const conversationRewind = state(initialConversationRewind)
   const conversationRewindNotice = state(initialConversationRewindNotice)
+  const restoredPromptError = state('')
+  const isolatedRewind = state(initialIsolatedRewindScope)
+  const rewindDialog = useRef('rewindDialogBox')
+  const rewindDialogCancel = useRef('rewindDialogCancel')
+  const rewindDialogTurn = state(0)
+  const rewindDialogScope = derived(() => rewindCheckpoints()[rewindDialogTurn()] ? isolatedRewind() : '')
+  let rewindDialogTrigger = null
   const requestedRewind = useSessionStorage(`harness.rewind.requested:${sessionId}`, '')
   const restoredRewind = useLocalStorage(`harness.rewind.restored:${sessionId}`, '')
   const canRestoreEarlierPrompt = derived(() => Boolean(initialRewoundPrompt
@@ -2453,30 +2463,49 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       && rewindableTurns().includes(turnId)
   }
 
-  async function editEarlierPrompt(turnId, event, verifyOnly = false) {
+  function openRewindDialog(turnId, event) {
+    const dialog = rewindDialog.current
+    if (!dialog || dialog.open || rewindDialogTurn() || conversationRewind() || !sessionOnline() || !canEditEarlierPrompt(turnId)) return
+    rewindDialogTrigger = event?.currentTarget ?? null
+    rewindDialogTurn.set(turnId)
+    dialog.showModal()
+    rewindDialogCancel.current?.focus({ preventScroll: true })
+  }
+
+  function closeRewindDialog() {
+    rewindDialog.current?.close()
+  }
+
+  function finishRewindDialog() {
+    rewindDialogTurn.set(0)
+    if (rewindDialogTrigger?.isConnected) rewindDialogTrigger.focus({ preventScroll: true })
+    rewindDialogTrigger = null
+  }
+
+  function confirmConversationRewind(restoreFiles) {
+    const turnId = rewindDialogTurn()
+    if (!turnId || (restoreFiles && !rewindDialogScope())) return
+    closeRewindDialog()
+    void submitConversationRewind(turnId, restoreFiles)
+  }
+
+  async function submitConversationRewind(turnId, restoreFiles, verifyOnly = false) {
     if (!sessionId || !turnId || !sessionOnline()) return
     const previous = conversationRewind()
     if (verifyOnly ? previous?.status !== 'uncertain' : previous || !canEditEarlierPrompt(turnId)) return
-    // WebKit does not focus a button on click, so give the dialog an opener.
-    if (!verifyOnly) event?.currentTarget?.focus({ preventScroll: true })
-    if (!verifyOnly && !await stxConfirm(
-      'Rewind the Codex conversation to before this message. Your prompt and attachments return to the composer.',
-      { title: 'Edit from here?', type: 'warning', defaultFocus: 'cancel', confirmText: 'Revert and keep changes', cancelText: 'Cancel' },
-    )) return
-    if (conversationRewind() !== previous) return
     const operation = newCommandId()
     if (!verifyOnly) requestedRewind.set(operation)
     conversationRewind.set({ turnId, status: 'running' })
     conversationRewindNotice.set('')
     try {
-      await sendCommand({ type: 'session.turn.rewind', sessionId, turnId, ...(verifyOnly ? { verifyOnly: true } : {}) }, operation)
+      await sendCommand({ type: 'session.turn.rewind', sessionId, turnId,
+        ...(restoreFiles ? { restoreFiles: true } : {}), ...(verifyOnly ? { verifyOnly: true } : {}) }, operation)
     }
     catch (error) {
       if (conversationRewind()?.status === 'running') conversationRewind.set(previous)
       conversationRewindNotice.set(error.message)
     }
   }
-
 
   // A global shortcut, so harness is reachable without finding its window.
   //
@@ -4301,7 +4330,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     restorePrompt()
     const upload = composerDraft()?.upload ?? { scope: uploadScope, draft: composerDraftTools.newComposerDraftId() }
     startPending.set(true)
-    conversationRewindNotice.set('')
+    restoredPromptError.set('')
     try {
       const snapshot = readStashDraftSnapshot()
       const restored = entry.attachments ? await composerDraftTools.restoreRewoundAttachments(sessionId, entry.operation, upload) : []
@@ -4326,7 +4355,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       sidebarDrafts?.update()
       box.focus({ preventScroll: true })
     }
-    catch (error) { conversationRewindNotice.set(error.message || 'Could not restore the earlier prompt.') }
+    catch (error) { restoredPromptError.set(error.message || 'Could not restore the earlier prompt.') }
     finally { startPending.set(false) }
   }
 
@@ -5423,6 +5452,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (payload.type === 'session.isolated') {
         worktreeSetup.set(false)
         workspaceBranch.set(payload.branch)
+        isolatedRewind.set(payload.combined && !payload.combined.checkouts.some(checkout => !checkout.key) ? 'repositories' : 'files')
         if (diffOpen()) refreshWorkspaceDiff()
       }
       if (payload.type === 'session.fork-finished' || payload.type === 'session.fork-portable') forkStatus.set('ready')
@@ -5556,6 +5586,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       else if (payload.type === 'turn.rewind-requested') {
         conversationRewind.set({ status: 'running', turnId: payload.turnId })
         conversationRewindNotice.set('')
+      }
+      else if (payload.type === 'turn.rewind-provider-confirmed') {
+        conversationRewind.set({ ...conversationRewind(), status: 'restoring-files' })
       }
       else if (payload.type === 'turn.rewind-settled') {
         if (payload.outcome === 'rewound') refresh()

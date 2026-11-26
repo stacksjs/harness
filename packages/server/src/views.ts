@@ -10,7 +10,7 @@
 import type { ClaudeAccountCompaction, HostSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { checkpointReviewRepositories, claudeIdleCompaction, conversationRewindPoint, isForkableResponse, providerConversation } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, conversationRewindPoint, isForkableResponse, isolatedRewindScope, providerConversation } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
@@ -227,6 +227,7 @@ export function viewProps(state: HarnessState, options: {
             turnId: active.conversationRewind.turnId,
           } : undefined,
           conversationRewindNotice: active.conversationRewindNotice ?? '',
+          isolatedRewindScope: isolatedRewindScope(state, active) ?? '',
           rewoundPrompt: active.rewoundPrompt ? {
             operation: active.rewoundPrompt.operation,
             text: active.rewoundPrompt.text,
