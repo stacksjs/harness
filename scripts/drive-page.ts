@@ -5015,10 +5015,7 @@ const automaticallySettled = page.locator('[data-thread-settled-note]')
 await automaticallySettled.getByText('Settled after inactivity', { exact: true }).waitFor()
 check('only a thread following the host policy settles after inactivity', !harness.engine.current.sessions.get(retainedThread)?.navigation?.settledAt)
 await capture('workspace-settled-after-inactivity')
-await Promise.all([
-  page.waitForEvent('load'),
-  automaticallySettled.getByRole('button', { name: 'Un-settle', exact: true }).click(),
-])
+await automaticallySettled.getByRole('button', { name: 'Un-settle', exact: true }).click()
 await automaticallySettled.waitFor({ state: 'hidden' })
 await page.reload()
 check('manually reopened inactive work stays active through reload', !await automaticallySettled.isVisible())
