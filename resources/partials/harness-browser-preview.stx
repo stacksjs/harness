@@ -28,7 +28,7 @@
     <button type="button" class="harness-icon-button" aria-label="Reload preview" title="Reload" :disabled="!activePreviewUrl()" @click="reloadBrowserPreview">
       <span class="size-4 i-hugeicons-refresh" aria-hidden="true"></span>
     </button>
-    <input type="text" inputmode="url" ref="browserPreviewAddressBox" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Preview address" placeholder="Enter a URL" :value="previewAddressDraft()" @input="previewAddressDraft.set($event.currentTarget.value)" @keydown="guardPreviewComposition" class="flex-1 px-2 min-w-0 rounded-md">
+    <input type="text" inputmode="url" ref="browserPreviewAddressBox" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Preview address" placeholder="Enter a URL" :disabled="!activePreviewTab()" :value="previewAddressDraft()" @input="previewAddressDraft.set($event.currentTarget.value)" @keydown="guardPreviewComposition" class="flex-1 px-2 min-w-0 rounded-md">
     <button type="submit" class="harness-icon-button" aria-label="Open preview address" title="Go" :disabled="!browserPreviewTools() || !previewAddressDraft().trim()">
       <span class="size-4 i-hugeicons-arrow-right-02" aria-hidden="true"></span>
     </button>

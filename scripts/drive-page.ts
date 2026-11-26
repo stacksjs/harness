@@ -3765,6 +3765,7 @@ try {
   await capture('workspace-browser-empty')
   await visitPreview(loopback)
   await activeFrame.getByRole('heading', { name: 'Local development preview' }).waitFor()
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') !== 'Preview address')
   await activeFrame.getByRole('button', { name: 'Update' }).click()
   await activeFrame.getByRole('button', { name: 'Updated' }).waitFor()
   check('a live local app can run its own frontend modules in the Browser pane', true)
