@@ -69,6 +69,7 @@
           <input type="datetime-local" ref="threadWakeTimeBox" aria-label="Wake date and time" :hidden="threadSnoozeMode() !== 'date'" :disabled="threadSnoozeMode() !== 'date'" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
           <input type="number" min="1" step="1" ref="threadWakeDurationBox" aria-label="Wake duration" :hidden="threadSnoozeMode() === 'date'" :disabled="threadSnoozeMode() === 'date'" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
           <button type="submit" :disabled="threadActionBusy()" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Set wake time</button>
+          <button type="button" data-thread-action @click="editSnoozeSettings">Edit snooze options</button>
           <button type="button" data-thread-action @click="openThreadActionForm('snooze')">Back to wake choices</button>
         </form>
       </div>

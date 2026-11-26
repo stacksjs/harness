@@ -1169,6 +1169,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         </div>
         <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">The host settles idle threads even when the app is closed. Pinned and snoozed threads stay put. Choose Never in a thread’s actions to opt out.</p>
         <p role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
+        @include('../partials/harness-snooze-settings')
       </section>
       <section :hidden="settingsSelection() !== 'providers'" data-settings-pane>
       <h3 data-settings-section="providers" tabindex="-1">Providers</h3>
@@ -1539,6 +1540,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // a new thread starts with, and the browser store cannot give them that.
   const settings = state({ ...hostSettings })
   const settingsSaveError = state('')
+  const snoozeEditor = state(null)
+  const snoozeRows = state([])
+  const snoozeSaveError = state('')
+  const snoozePreviewTime = state(new Date())
+  const snoozePreviewTimer = useInterval(() => snoozePreviewTime.set(new Date()), 30_000)
+  snoozePreviewTimer.pause()
+  const snoozeRowPreviews = derived(() => snoozeEditor()?.previews(snoozeRows(), snoozePreviewTime()) ?? {})
   const accountCompaction = state(initialAccountCompaction)
   const accountCompactionError = state(null)
   const canEditProviderAccounts = state(false)
@@ -1812,7 +1820,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (form === 'snooze' && codecUrl) {
       void import(codecUrl).then(({ threadSnoozeChoices }) => {
         if (threadActionForm() !== 'snooze') return
-        threadSnoozePresets.set(threadSnoozeChoices(new Date()))
+        threadSnoozePresets.set(threadSnoozeChoices(new Date(), settings().snoozePresets))
         void nextTick(positionThreadSnooze)
       }).catch(() => {})
     }
@@ -2034,6 +2042,35 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     void updateSettings({ autoSettleAfterDays: Number(input.value) })
   }
 
+  function addSnoozeOption() {
+    snoozeEditor()?.add()
+    void nextTick(() => settingsPanel.current?.querySelector('[data-snooze-row]:last-of-type select')?.focus())
+  }
+
+  function removeSnoozeOption(id, event) {
+    const row = event.currentTarget.closest('[data-snooze-row]')
+    const adjacent = row?.nextElementSibling?.matches('[data-snooze-row]') ? row.nextElementSibling : row?.previousElementSibling
+    const target = adjacent?.querySelector('[data-snooze-remove]') ?? settingsPanel.current?.querySelector('[data-snooze-add]')
+    snoozeEditor()?.remove(id)
+    void nextTick(() => target?.focus())
+  }
+
+  function arrangeSnoozeOptions(event) {
+    const list = event.currentTarget
+    if (list.contains(event.relatedTarget)) return
+    void nextTick(() => {
+      if (!list.matches(':focus-within')) snoozeEditor()?.arrange()
+    })
+  }
+
+  function commitSnoozeAmount(event) {
+    if (event.key !== 'Enter' || event.isComposing) return
+    event.preventDefault()
+    const input = event.currentTarget
+    input.blur()
+    input.focus()
+  }
+
   async function updateSettings(changes) {
     const previous = settings()
     if (Object.entries(changes).every(([key, value]) => previous[key] === value)) return
@@ -2043,7 +2080,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       await sendCommand({ type: 'settings.update', changes })
     }
     catch (error) {
-      settings.set(previous)
+      settings.update(current => ({
+        ...current,
+        ...Object.fromEntries(Object.entries(changes).filter(([key, value]) => current[key] === value).map(([key]) => [key, previous[key]])),
+      }))
       settingsSaveError.set(error.message || 'Could not save that setting.')
     }
   }
@@ -2266,7 +2306,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const settingsQuery = state('')
   const settingsResults = derived(() => {
     const query = settingsQuery().trim().toLowerCase()
-    return settingsSections.filter(section => section.label.toLowerCase().includes(query) || section.id.includes(query))
+    return settingsSections.filter(section => section.label.toLowerCase().includes(query) || section.id.includes(query)
+      || (section.id === 'threads' && ['snooze options', 'auto-settle inactive threads'].some(label => label.includes(query))))
   })
   const settingsSelectionLabel = derived(() => settingsSections.find(section => section.id === settingsSelection())?.label || 'General')
 
@@ -3604,6 +3645,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function focusSettingsHeading() {
+    if (settingsSelection() === 'threads') {
+      snoozePreviewTime.set(new Date())
+      snoozePreviewTimer.resume()
+    }
+    else snoozePreviewTimer.pause()
     void nextTick(() => {
       if (settingsPanel.current) settingsPanel.current.scrollTop = 0
       const heading = settingsDialogRef.current?.querySelector(`[data-settings-section="${settingsSelection()}"]`)
@@ -3624,6 +3670,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const box = settingsDriverRef.current
     if (box) box.value = defaultDriver()
     focusSettingsHeading()
+  }
+
+  function editSnoozeSettings() {
+    closeThreadActions()
+    openSettings(null, 'threads')
+    settingsTrigger = threadActionsTrigger.current
+    void nextTick(() => {
+      const panel = settingsPanel.current
+      const heading = panel?.querySelector('#settings-snooze-heading')
+      if (!panel || !heading) return
+      panel.scrollTop += heading.getBoundingClientRect().top - panel.getBoundingClientRect().top - 12
+      heading.focus({ preventScroll: true })
+    })
   }
 
   function settingsMatches(section) {
@@ -3655,6 +3714,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     // into a rebind nobody asked for.
     recordingKeybinding.set('')
     keybindingStatus.set('')
+    snoozePreviewTimer.pause()
     settingsQuery.set('')
     settingsDialogRef.current?.close()
     settingsTrigger?.focus()
@@ -5838,6 +5898,29 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function connectLiveSession() {
     const codec = await import(codecUrl)
     const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions } = codec
+    snoozeEditor.set({
+      ...codec.createSnoozeEditor({
+        initial: settings().snoozePresets ?? [],
+        render(rows) {
+          snoozePreviewTime.set(new Date())
+          snoozeRows.set(rows)
+        },
+        error: message => snoozeSaveError.set(message),
+        async save(presets) {
+          await sendCommand({ type: 'settings.update', changes: { snoozePresets: presets } })
+        },
+      }),
+      maxRows: codec.maxSnoozePresets,
+    })
+    function receiveHostSettings(frame) {
+      const changes = frame?.t === 'host-settings' ? frame.settings
+        : frame?.t === 'event' && frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated'
+          ? frame.event.payload.changes : null
+      if (!changes) return false
+      settings.update(previous => ({ ...previous, ...changes }))
+      if (changes.snoozePresets) snoozeEditor()?.receive(changes.snoozePresets)
+      return true
+    }
     const sidebar = sidebarRef.current
     const threadSidebar = sidebar && createThreadSidebar({
       root: sidebar,
@@ -5875,8 +5958,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const connection = createSessionSocket({
         url: serverUrl, sessionId: null, cursor: () => 0,
         onSocket: socket => { liveSocket = socket },
-        onFrame: frame => threadSidebar?.receive(frame),
-        onOnline: online => { if (online) watchSidebarOrder() },
+        onFrame: frame => receiveHostSettings(frame) || threadSidebar?.receive(frame),
+        onOnline: (online) => {
+          if (!online) return
+          watchSidebarOrder()
+          connection.send({ t: 'read-settings' })
+        },
       })
       watchOrder(connection)
       reconnectLiveSession = connection.open
@@ -5963,16 +6050,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     terminalController.set(terminal)
 
     function onMessage(frame) {
+      if (receiveHostSettings(frame)) return
       if (threadSidebar?.receive(frame)) return
       if (frame && terminal.receive(frame)) return
       if (frame?.t !== 'event') return
       if (frame.event.sessionId === 0 && frame.event.payload.type === 'profile.claude-compaction.updated') {
         const { profileId, providerInstanceId, changes } = frame.event.payload
         if (profileId === providerProfileId) applyAccountCompaction(providerInstanceId, changes)
-        return
-      }
-      if (frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated') {
-        settings.update(previous => ({ ...previous, ...frame.event.payload.changes }))
         return
       }
       if (frame.event.sessionId !== sessionId || frame.event.seq <= cursor) return
@@ -6240,6 +6324,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         sessionConnecting.set(false)
         if (online) {
           watchSidebarOrder()
+          connection.send({ t: 'read-settings' })
           void followUpActions()?.flush()
           void refreshProjectSetup()
           void refreshProjectSettlement()
@@ -6272,5 +6357,6 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     projectSettlementPoll?.stop()
   })
   if (codecUrl) void connectComposerDrafts().catch(() => {})
-  if ((sessionId || activeProfile) && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
+  if ((sessionId || activeProfile || initialSettingsSection) && serverUrl && codecUrl)
+    void connectLiveSession().catch(() => sessionConnecting.set(false))
 </script>
