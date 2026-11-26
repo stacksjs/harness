@@ -167,7 +167,8 @@ export type InternalCommand =
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
-  | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number }
+  | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number, skipped?: string[] }
+  | { type: 'thread.checkpoint.restore-failed', sessionId: number, checkpointId: number, message: string }
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string, tree?: string, repositories?: RepositoryCheckpoint[] }
   | { type: 'thread.session.set', sessionId: number, providerSessionId: string }
   | { type: 'thread.handoff.claim', sessionId: number, turnId: number, providerSessionId: string }

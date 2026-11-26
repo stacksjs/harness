@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { capture, restore } from '../src/checkpoint'
+import { capture, restore, restoreRepositories } from '../src/checkpoint'
 
 /**
  * Reverting destroys work by design, so these tests are mostly about what a
@@ -261,6 +261,31 @@ describe('restoring a checkpoint', () => {
       expect(read(dir, 'tracked.txt')).toBe('original\n')
       // And the workspace is genuinely clean against the checkpoint.
       expect(g(dir, 'status', '--porcelain')).toBe('')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('resets staging in scope and preserves a nested path with Git pathspec characters', async () => {
+    const dir = repo()
+    try {
+      const excluded = 'nested[scope]'
+      mkdirSync(join(dir, excluded))
+      writeFileSync(join(dir, excluded, 'held.txt'), 'baseline')
+      g(dir, '--literal-pathspecs', 'add', `${excluded}/held.txt`)
+      g(dir, 'commit', '-qm', 'nested baseline')
+      const { ref } = await capture(dir, 'baseline', [excluded])
+      writeFileSync(join(dir, 'tracked.txt'), 'staged in scope')
+      writeFileSync(join(dir, excluded, 'held.txt'), 'staging outside scope')
+      g(dir, '--literal-pathspecs', 'add', 'tracked.txt', `${excluded}/held.txt`)
+      writeFileSync(join(dir, excluded, 'held.txt'), 'current working file outside scope')
+
+      const result = await restoreRepositories([{ path: dir, label: 'Root', ref: ref!, excluded: [excluded] }], 'nested-stage-fixture', () => true)
+      expect(result.ok).toBe(true)
+      await result.cleanup?.()
+      expect(read(dir, 'tracked.txt')).toBe('original\n')
+      expect(g(dir, 'show', ':tracked.txt')).toBe('original')
+      expect(read(dir, `${excluded}/held.txt`)).toBe('current working file outside scope')
+      expect(g(dir, 'show', `:${excluded}/held.txt`)).toBe('staging outside scope')
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   })

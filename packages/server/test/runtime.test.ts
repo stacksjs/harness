@@ -2102,7 +2102,66 @@ describe('checkpoint and revert', () => {
       const root = await (await fetch(`${endpoint}/options`)).json()
       expect(root.turns).toEqual([])
       expect(root.hasProjectRepository).toBe(false)
-    }, 25_000)
+
+      const session = harness.engine.current.sessions.get(sessionId)!
+      const checkpointId = session.checkpoints.find(point => point.kind === 'turn-start')!.id
+      const checkouts = keys.map(key => session.combinedWorktree?.checkouts.find(checkout => checkout.key === key)?.path ?? join(project, key))
+      const indexes = checkouts.map(path => git(path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim())
+      const previous = indexes.map(path => readFileSync(path))
+      const rewind = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      rewind.send({ t: 'subscribe', sessionId })
+      expect(await rewind.waitFor('turn.completed')).toBeTruthy()
+
+      // Git can read a locked index, but publishing the prepared index must fail.
+      // This forces recovery after both working trees and the first index changed.
+      const lock = indexes[1] + '.lock'
+      writeFileSync(lock, 'another process owns this lock', { flag: 'wx' })
+      const command = { type: 'session.checkpoint.revert', sessionId, checkpointId } as const
+      rewind.send({ t: 'dispatch', envelope: { id: 'rewind_locked', at: 6, command } })
+      expect(await rewind.waitFor('checkpoint.reverted', 3000)).toMatchObject({ checkpointId, coordinated: true })
+      rewind.send({ t: 'dispatch', envelope: { id: 'rewind_concurrent_turn', at: 7, command: { type: 'session.turn.start', sessionId, text: 'do not run' } } })
+      expect(await rewind.waitForRejection('rewind_concurrent_turn')).toBeTruthy()
+      expect(await rewind.waitFor('checkpoint.restore-failed', 10_000)).toMatchObject({ checkpointId, message: expect.stringContaining('web') })
+      expect(readFileSync(lock, 'utf8')).toBe('another process owns this lock')
+      rmSync(lock)
+      for (const [i, path] of checkouts.entries()) {
+        expect(readFileSync(indexes[i]!)).toEqual(previous[i])
+        expect(readFileSync(join(path, 'shared.txt'), 'utf8')).toBe(`Changed in ${keys[i]}\nUnstaged line\n`)
+        expect(readFileSync(join(path, 'binary.dat'))).toEqual(Buffer.from([0, 1, 2]))
+      }
+
+      if (!isolated) {
+        const late = join(project, 'late[repo]')
+        mkdirSync(late)
+        git(late, 'init', '-qb', 'main')
+        writeFileSync(join(late, 'remaining.txt'), 'no baseline')
+      }
+      rewind.send({ t: 'dispatch', envelope: { id: 'rewind_retry', at: 8, command } })
+      const restored = await rewind.waitFor('checkpoint.restored', 10_000)
+      expect(restored).toMatchObject({ checkpointId })
+      if (!isolated) {
+        expect(restored.skipped).toEqual(['late[repo]'])
+        expect(readFileSync(join(project, 'late[repo]', 'remaining.txt'), 'utf8')).toBe('no baseline')
+      }
+      for (const path of checkouts) {
+        expect(readFileSync(join(path, 'shared.txt'), 'utf8')).toBe('Original file\n')
+        expect(existsSync(join(path, 'binary.dat'))).toBe(false)
+        expect(readFileSync(join(path, 'private[1].txt'), 'utf8')).toBe('ignored fixture')
+        expect(git(path, 'diff', '--cached', '--name-only')).toBe('')
+        const end = Date.now() + 3000
+        while (git(path, 'for-each-ref', 'refs/harness/rewind') && Date.now() < end) await Bun.sleep(30)
+        expect(git(path, 'for-each-ref', 'refs/harness/rewind')).toBe('')
+      }
+      rewind.close()
+      const contents = checkouts.map(path => readFileSync(join(path, 'shared.txt'), 'utf8'))
+      await harness.engine.dispatch({ id: 'rewind_interrupted', at: 9, command })
+      harness.stop()
+      harness = await serve({ port, databasePath, resolveDriver: () => driver })
+      const state = harness.engine.current.sessions.get(sessionId)!
+      expect(state.pendingRewind).toBeUndefined()
+      expect(state.rewindNotice).toContain('The host restarted during rewind.')
+      expect(checkouts.map(path => readFileSync(join(path, 'shared.txt'), 'utf8'))).toEqual(contents)
+    }, 45_000)
   }
 
   it('runs a turn in a workspace that is not a repository', async () => {

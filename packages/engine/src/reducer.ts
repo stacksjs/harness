@@ -94,6 +94,19 @@ function turnStarted(session: SessionState, text: string, codexSelection?: Codex
   }
 }
 
+function sharesCheckout(state: HarnessState, first: SessionState, second: SessionState): boolean {
+  if (first.id === second.id) return true
+  const path = (session: SessionState) => (session.worktreePath ?? state.workspaces.get(session.workspaceId)?.path)
+    ?.replaceAll('\\', '/').replace(/\/+$/u, '')
+  const a = path(first)
+  const b = path(second)
+  return a !== undefined && b !== undefined && (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`))
+}
+
+function checkoutRewindPending(state: HarnessState, session: SessionState): boolean {
+  return [...state.sessions.values()].some(other => other.pendingRewind && sharesCheckout(state, session, other))
+}
+
 type OrganizeThreadCommand = Extract<Command, { type: 'session.organize' }>
 
 function organizeThread(state: HarnessState, command: OrganizeThreadCommand, envelope: CommandEnvelope): AppendableEvent[] {
@@ -392,6 +405,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // them was the profile.
       const workspaceIds = [...profile.workspaceIds]
       const owned = new Set(workspaceIds)
+      if ([...state.sessions.values()].some(session => session.pendingRewind && owned.has(session.workspaceId)))
+        throw new InvalidCommand('Wait for the current rewind to finish before deleting this profile.')
       const sessionIds = [...state.sessions.values()]
         .filter(session => owned.has(session.workspaceId))
         .map(session => session.id)
@@ -730,8 +745,17 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           checkpointId: command.checkpointId,
           restored: command.restored,
           removed: command.removed,
+          ...(command.skipped?.length && { skipped: command.skipped }),
         },
       }]
+    }
+
+    case 'thread.checkpoint.restore-failed': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session?.checkpoints.some(point => point.id === command.checkpointId)) return []
+      return [{ sessionId: command.sessionId, commandId, at, payload: {
+        type: 'checkpoint.restore-failed', checkpointId: command.checkpointId, message: command.message,
+      } }]
     }
 
     case 'thread.checkpoint.capture': {
@@ -763,20 +787,17 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const checkpoint = session.checkpoints.find(c => c.id === command.checkpointId)
       if (!checkpoint)
         throw new InvalidCommand(`no such checkpoint: ${command.checkpointId}`)
-      if (checkpoint.repositories)
-        throw new InvalidCommand('Reverting project repositories together is unavailable.')
-
-      // Refused while a turn is running. Restoring files underneath a working
-      // agent would have it editing a tree that changed for reasons it cannot
-      // see, and the resulting diff would belong to nobody.
-      if (isTurnActive(session.state))
-        throw new InvalidCommand('cannot revert while a turn is running')
+      if (!state.workspaces.get(session.workspaceId)?.trusted)
+        throw new InvalidCommand('Trust this workspace before rewinding its files.')
+      if (checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
+      if ([...state.sessions.values()].some(other => isTurnActive(other.state) && sharesCheckout(state, session, other)))
+        throw new InvalidCommand('Finish the active turn in this checkout before rewinding its files.')
 
       return [{
         sessionId: command.sessionId,
         commandId,
         at,
-        payload: { type: 'checkpoint.reverted', checkpointId: command.checkpointId },
+        payload: { type: 'checkpoint.reverted', checkpointId: command.checkpointId, coordinated: true },
       }]
     }
 
@@ -796,6 +817,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('This thread is unavailable for a provider switch.')
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before switching providers.')
+      if (checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if (isTurnActive(session.state) || session.followUps.entries.length)
         throw new InvalidCommand('Finish the current turn and queued messages before switching providers.')
       if (command.afterTurnId !== (session.turns.at(-1)?.id ?? 0))
@@ -830,6 +852,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      if (checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if (session.fork && session.fork.state !== 'ready')
         throw new InvalidCommand('This fork must finish before it can accept messages.')
       if (session.navigation?.archivedAt)
@@ -864,6 +887,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session || effectiveClaudeCompaction(state, session).idleCompaction !== 'beforeCacheExpires'
         || !state.workspaces.get(session.workspaceId)?.trusted) return []
+      if (checkoutRewindPending(state, session)) return []
       const eligible = claudeIdleCompaction(session, at)
       if (!eligible || eligible.afterTurnId !== command.afterTurnId || eligible.startsAt === undefined
         || at < eligible.startsAt || eligible.expiresAt === undefined || at >= eligible.expiresAt) return []
@@ -985,6 +1009,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const automatic = command.type === 'thread.queue.advance'
       const session = state.sessions.get(command.sessionId)
       if (automatic && (!session || session.followUps.held || !session.followUps.entries.length)) return []
+      if (session && checkoutRewindPending(state, session)) {
+        if (automatic) return []
+        throw new InvalidCommand('Wait for the current rewind to finish.')
+      }
       if (session?.fork && session.fork.state !== 'ready') {
         if (automatic) return []
         throw new InvalidCommand('This fork must finish before it can accept messages.')

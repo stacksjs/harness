@@ -323,6 +323,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // what happened.
   for (const session of engine.current.sessions.values()) {
     if (session.worktreeIntent) await runtime.recoverWorktree(session.id)
+    if (session.pendingRewind) await runtime.recoverRewind(session.id)
     if (session.fork?.state === 'pending') {
       await engine.dispatchInternal({
         id: `boot_fork_${session.id}`,
@@ -853,7 +854,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     if (command.type === 'session.checkpoint.revert') {
-      await runtime.revert(command.sessionId, command.checkpointId)
+      await runtime.revert(command.sessionId, command.checkpointId, envelope.id)
       return
     }
 

@@ -47,6 +47,8 @@ export interface SessionState {
   followUps: FollowUpQueue
   /** Oldest first, so the newest revert target is the last one. */
   checkpoints: CheckpointState[]
+  pendingRewind?: { checkpointId: number, operation: string }
+  rewindNotice?: string
   /**
    * Outstanding tool decisions in arrival order.
    *
@@ -691,7 +693,25 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
     case 'checkpoint.reverted': {
       const session = state.sessions.get(event.sessionId)
       const checkpoint = session?.checkpoints.find(c => c.id === p.checkpointId)
-      if (checkpoint) checkpoint.reverted = true
+      if (session && checkpoint && p.coordinated) {
+        session.pendingRewind = { checkpointId: p.checkpointId, operation: event.commandId }
+        delete session.rewindNotice
+      }
+      else if (checkpoint) checkpoint.reverted = true
+      break
+    }
+
+    case 'checkpoint.restored':
+    case 'checkpoint.restore-failed': {
+      const session = state.sessions.get(event.sessionId)
+      if (session?.pendingRewind?.checkpointId !== p.checkpointId) break
+      delete session.pendingRewind
+      const checkpoint = session.checkpoints.find(point => point.id === p.checkpointId)
+      if (p.type === 'checkpoint.restore-failed') session.rewindNotice = p.message
+      else {
+        if (checkpoint) checkpoint.reverted = true
+        if (p.skipped?.length) session.rewindNotice = `Rewind finished. No earlier checkpoint for ${p.skipped.join(', ')}.`
+      }
       break
     }
 

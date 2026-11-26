@@ -13,14 +13,16 @@
 
 import type { ApprovalChoice, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, RepositoryCheckpoint, SteeringOutcome } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
-import type { Engine, HarnessState } from '@harness/engine'
+import type { Engine, HarnessState, SessionState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
+import { sep } from 'node:path'
 import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
 import { effectiveClaudeCompaction, providerConversation } from '@harness/engine'
 import { nestedWorktrees, openCombinedRepository, openCombinedWorktree, planCombinedWorktree, releaseCombinedWorktree } from './combined-worktree'
-import { capture, restore } from './checkpoint'
+import type { RepositoryRestoreTarget } from './checkpoint'
+import { capture, restore, restoreRepositories, rewindReference } from './checkpoint'
 import { estimateNativeContext, HandoffCapacityError, historicalContext } from './handoff'
 import { missingReferences, resolveForDriver } from './mcp'
 import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
@@ -757,18 +759,7 @@ export class ProviderRuntime {
       return
     }
 
-    const scopes = combined
-      ? combined.checkouts.map(checkout => ({
-          key: checkout.key,
-          open: () => openCombinedRepository(combined, checkout),
-          excluded: nestedWorktrees(combined, checkout),
-        }))
-      : [{ key: '' }, ...children].map(({ key }) => ({
-          key,
-          open: () => key ? resolveProjectRepository(workspacePath, key) : Promise.resolve(workspacePath),
-          excluded: children.filter(child => !key || child.key.startsWith(`${key}/`))
-            .map(child => child.key.slice(key ? key.length + 1 : 0)),
-        }))
+    const scopes = await this.checkpointScopes(session, workspacePath, children)
     const repositories: RepositoryCheckpoint[] = []
     for (let offset = 0; offset < scopes.length; offset += 4) {
       const batch = await Promise.all(scopes.slice(offset, offset + 4).map(async ({ key, open, excluded }) => {
@@ -783,50 +774,96 @@ export class ProviderRuntime {
     if (primary) await this.emit({ type: 'thread.checkpoint.capture', sessionId, turnId, kind, vcsRef: primary.vcsRef, repositories })
   }
 
-  /**
-   * Put the workspace back to a checkpoint.
-   *
-   * The reducer has already accepted the revert and written `checkpoint.reverted`
-   * — the same shape as `turn.started`, where the log records the intent and
-   * then the outcome. A restore that fails reports through `thread.error`, so
-   * the log never implies a revert that did not reach the disk.
-   */
-  async revert(sessionId: number, checkpointId: number): Promise<void> {
+  private async checkpointScopes(session: SessionState, workspacePath: string,
+    discovered?: Awaited<ReturnType<typeof scanProjectRepositories>>) {
+    const combined = session.combinedWorktree
+    if (combined) return combined.checkouts.map(checkout => ({
+      key: checkout.key,
+      label: checkout.label,
+      open: () => openCombinedRepository(combined, checkout),
+      excluded: nestedWorktrees(combined, checkout).map(path => path.split(sep).join('/')),
+    }))
+    const children = discovered ?? (session.worktreePath ? [] : await scanProjectRepositories(workspacePath))
+    return [{ key: '', label: 'Project root' }, ...children].map(({ key, label }) => ({
+      key,
+      label,
+      open: () => key ? resolveProjectRepository(workspacePath, key) : Promise.resolve(workspacePath),
+      excluded: children.filter(child => !key || child.key.startsWith(`${key}/`))
+        .map(child => child.key.slice(key ? key.length + 1 : 0)),
+    }))
+  }
+
+  /** Report an interrupted rewind without changing files that may have been edited since the crash. */
+  async recoverRewind(sessionId: number): Promise<void> {
+    const pending = this.options.engine.current.sessions.get(sessionId)?.pendingRewind
+    if (!pending) return
+    await this.options.engine.dispatchInternal(this.envelope({
+      type: 'thread.checkpoint.restore-failed', sessionId, checkpointId: pending.checkpointId,
+      message: `The host restarted during rewind. Inspect the working trees. Any retained backups are under ${rewindReference(pending.operation)}.`,
+    }))
+  }
+
+  async revert(sessionId: number, checkpointId: number, operation: string): Promise<void> {
     const state = this.options.engine.current
     const session = state.sessions.get(sessionId)
     const checkpoint = session?.checkpoints.find(c => c.id === checkpointId)
-    if (!checkpoint) return
-
-    const workspacePath = this.options.workspacePath
+    if (!session || !checkpoint || session.pendingRewind?.operation !== operation) return
+    const allowed = () => {
+      const state = this.options.engine.current
+      return state.sessions.get(sessionId)?.pendingRewind?.operation === operation
+        && state.workspaces.get(session.workspaceId)?.trusted === true
+    }
+    const fail = (message: string) => this.record({ type: 'thread.checkpoint.restore-failed', sessionId, checkpointId, message })
+    const workspacePath = session.worktreePath || (this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
-      : defaultWorkspacePath(state, sessionId)
-
-    if (!workspacePath || !existsSync(workspacePath)) {
-      await this.emit({ type: 'thread.error', sessionId, message: 'workspace is not available to revert' })
+      : defaultWorkspacePath(state, sessionId))
+    if (!allowed() || !workspacePath || !existsSync(workspacePath)) {
+      await fail('The workspace is unavailable for rewind.')
       return
     }
 
-    const result = await restore(workspacePath, checkpoint.vcsRef)
-    if (result.ok) {
-      // Only now is the tree actually back. Clients wait for this rather than
-      // for the acceptance event, which lands before any file has moved.
-      await this.emit({
-        type: 'thread.checkpoint.restored',
-        sessionId,
-        checkpointId,
-        restored: result.restored,
-        removed: result.removed,
-      })
+    const skipped: string[] = []
+    let result: Awaited<ReturnType<typeof restore>>
+    try {
+      if (checkpoint.repositories) {
+        const scopes = await this.checkpointScopes(session, workspacePath)
+        const points = new Map(checkpoint.repositories.map(point => [point.key, point.vcsRef]))
+        const targets: RepositoryRestoreTarget[] = []
+        for (const scope of scopes) {
+          const ref = points.get(scope.key)
+          if (!ref) {
+            if (scope.key) skipped.push(scope.label)
+            continue
+          }
+          const path = await scope.open()
+          if (!path) {
+            await fail(`The recorded repository ${scope.label} is unavailable.`)
+            return
+          }
+          targets.push({ path, label: scope.label, ref, excluded: scope.excluded })
+          points.delete(scope.key)
+        }
+        if (points.size || !targets.length) {
+          await fail(`Recorded repositories are unavailable: ${[...points.keys()].map(key => key || 'Project root').join(', ') || 'no available checkout'}.`)
+          return
+        }
+        result = await restoreRepositories(targets, operation, allowed)
+      }
+      else result = await restore(workspacePath, checkpoint.vcsRef)
+    }
+    catch {
+      await fail('Could not prepare the workspace for rewind.')
       return
     }
-
-    await this.emit({
-      type: 'thread.error',
-      sessionId,
-      // The ref is a dangling commit, so "unknown checkpoint" usually means
-      // `git gc` collected it rather than that anything is broken.
-      message: `could not revert: ${result.reason ?? 'unknown reason'}`,
+    if (!result.ok) {
+      await fail(result.reason || 'Could not rewind the workspace.')
+      return
+    }
+    // Keep the recovery refs until the outcome is durably recorded.
+    await this.record({ type: 'thread.checkpoint.restored', sessionId, checkpointId,
+      restored: result.restored, removed: result.removed, ...(skipped.length && { skipped }),
     })
+    await result.cleanup?.()
   }
 
   async steer(sessionId: number, requested: Extract<HarnessEvent['payload'], { type: 'turn.steer.requested' }>): Promise<void> {

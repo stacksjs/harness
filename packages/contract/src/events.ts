@@ -102,10 +102,10 @@ export type EventPayload =
   /**
    * A revert was accepted, in the same sense `turn.started` means a turn was
    * accepted: the checkpoint exists and the runtime has been told to put the
-   * workspace back. A restore that then fails emits `thread.error` after this,
+   * workspace back. A failed restore emits `checkpoint.restore-failed`,
    * so the log carries both the intent and the outcome.
    */
-  | { type: 'checkpoint.reverted', checkpointId: number }
+  | { type: 'checkpoint.reverted', checkpointId: number, coordinated?: true }
   /**
    * The workspace is actually back.
    *
@@ -118,7 +118,8 @@ export type EventPayload =
   | { type: 'session.worktree-reserved', intent: WorktreeIntent }
   /** This session got its own checkout and branch. */
   | { type: 'session.isolated', worktreePath: string, branch: string, combined?: CombinedWorktreeIntent }
-  | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number }
+  | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number, skipped?: string[] }
+  | { type: 'checkpoint.restore-failed', checkpointId: number, message: string }
   /** Only the settings that actually changed, for the same reason as below. */
   | { type: 'settings.updated', changes: Partial<HostSettings> }
   | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
