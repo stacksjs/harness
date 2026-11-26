@@ -362,6 +362,60 @@ for await (const line of createInterface({ input: process.stdin })) {
   })
 })
 
+describe('codex conversation rewind', () => {
+  it.each(['reverted', 'reverted-with-error', 'empty', 'changed', 'legacy', 'list-unavailable', 'ambiguous'] as const)('settles %s native history', async (mode) => {
+    const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-rewind-'))
+    const binaryPath = join(workspacePath, 'codex-fixture')
+    try {
+      writeFileSync(binaryPath, `#!${process.execPath}
+import { appendFileSync } from 'node:fs'
+import { createInterface } from 'node:readline'
+const mode = ${JSON.stringify(mode)}
+let history = ['tail', 'selected', ...(mode === 'empty' ? [] : ['retained'])]
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined) continue
+  appendFileSync('requests.log', JSON.stringify({ method, params }) + '\\n')
+  const respond = payload => console.log(JSON.stringify({ id, ...payload }))
+  if (method === 'thread/read') respond({ result: { thread: { id: 'native-thread', historyMode: mode === 'legacy' ? 'inline' : 'paginated', status: { type: 'notLoaded' } } } })
+  else if (method === 'thread/turns/list') {
+    if (mode === 'list-unavailable') { respond({ error: { code: -32000 } }); continue }
+    const ids = mode === 'changed' ? ['outside', ...history] : history
+    const data = params.cursor ? ids.slice(1) : ids.slice(0, 1)
+    respond({ result: { data: data.map(id => ({ id, status: 'completed', items: [] })), nextCursor: !params.cursor && ids.length > 1 ? 'older' : null } })
+  }
+  else if (method === 'thread/resume') respond({ result: { thread: { id: 'native-thread' } } })
+  else if (method === 'thread/revert') {
+    history = mode === 'ambiguous' ? ['unexpected'] : history.slice(history.indexOf(params.beforeTurnId) + 1)
+    respond(mode === 'reverted-with-error' ? { error: { code: -32000 } } : { result: {} })
+  }
+  else respond({ result: {} })
+}
+`, { mode: 0o755 })
+      const instance = await CodexDriver.create({ binaryPath, workspacePath })
+      const point = { providerSessionId: 'native-thread', beforeTurnId: 'selected', newestTurnId: 'tail',
+        ...(mode === 'empty' ? {} : { retainedTurnId: 'retained' }),
+      }
+      try {
+        const expected = mode === 'legacy' || mode === 'changed' || mode === 'list-unavailable' ? 'unchanged' : mode === 'ambiguous' ? 'uncertain' : 'rewound'
+        expect((await instance.rewind!({ ...point, verifyOnly: false })).outcome).toBe(expected)
+        expect((await instance.rewind!({ ...point, verifyOnly: true })).outcome).toBe(expected === 'unchanged' ? 'uncertain' : expected)
+        const requests = readFileSync(join(workspacePath, 'requests.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+        expect(requests.filter(request => request.method === 'thread/revert')).toEqual(expected === 'unchanged' ? [] : [
+          { method: 'thread/revert', params: { threadId: 'native-thread', beforeTurnId: 'selected' } },
+        ])
+        expect(requests.filter(request => request.method === 'thread/resume')).toHaveLength(expected === 'unchanged' ? 0 : 1)
+      }
+      finally {
+        await instance.stop()
+      }
+    }
+    finally {
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('codex account detection', () => {
   it('probes app-server from the same account directory used to run Codex', async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), 'harness-codex-account-'))

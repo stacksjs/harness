@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -44,6 +44,10 @@ export interface SessionState {
   lastSeq: number
   navigation?: ThreadNavigation
   turns: TurnState[]
+  lastTurnId?: number
+  conversationRewind?: { operation: string, turnId: number, point: ConversationRewindPoint, status: 'running' | 'uncertain' }
+  rewoundPrompt?: { operation: string, text: string, attachments: ComposerAttachment[] }
+  conversationRewindNotice?: string
   followUps: FollowUpQueue
   /** Oldest first, so the newest revert target is the last one. */
   checkpoints: CheckpointState[]
@@ -272,6 +276,25 @@ export function providerConversation(session: SessionState) {
 
 function forgetProviderConversation(session: SessionState): void {
   if (session.providerConversations) delete session.providerConversations[providerConversationKey(session)]
+}
+
+export function conversationRewindPoint(session: SessionState, turnId: number): ConversationRewindPoint | undefined {
+  if (session.driverKind !== 'codex' || !session.providerSessionId || session.handoff?.pending) return undefined
+  const index = session.turns.findIndex(turn => turn.id === turnId)
+  const selected = session.turns[index]
+  const newest = session.turns.at(-1)
+  const belongs = (turn: TurnState | undefined) => {
+    const native = turn?.nativeFork
+    return native && native.providerSessionId === session.providerSessionId && native.driverKind === session.driverKind
+      && native.providerInstanceId === session.providerInstanceId
+  }
+  if (selected?.role !== 'user' || !selected.providerTurnId || !newest?.providerTurnId
+    || selected.compaction || !belongs(selected) || !belongs(newest)) return undefined
+  const earlier = session.turns[index - 1]
+  if (earlier && !selected.freshContext && (!earlier.providerTurnId || !belongs(earlier))) return undefined
+  return { providerSessionId: session.providerSessionId, beforeTurnId: selected.providerTurnId, newestTurnId: newest.providerTurnId,
+    ...(earlier?.providerTurnId && !selected.freshContext && { retainedTurnId: earlier.providerTurnId }),
+  }
 }
 
 export function isForkableResponse(turn: TurnState): boolean {
@@ -593,6 +616,47 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       break
     }
 
+    case 'turn.rewind-requested': {
+      const session = state.sessions.get(event.sessionId)
+      if (session) {
+        session.conversationRewind = { operation: p.operation, point: p.point, turnId: p.turnId, status: 'running' }
+        delete session.conversationRewindNotice
+      }
+      break
+    }
+
+    case 'turn.rewind-settled': {
+      const session = state.sessions.get(event.sessionId)
+      const pending = session?.conversationRewind
+      if (!session || !pending || pending.operation !== p.operation) break
+      session.conversationRewindNotice = p.message
+      if (p.outcome === 'uncertain') {
+        pending.status = 'uncertain'
+        break
+      }
+      delete session.conversationRewind
+      if (p.outcome !== 'rewound') break
+      const selected = turn(session, pending.turnId)
+      if (!selected) break
+      session.rewoundPrompt = { operation: p.operation, text: selected.prompt, attachments: selected.attachments ?? [] }
+      session.turns = session.turns.filter(point => point.id < selected.id)
+      session.checkpoints = session.checkpoints.filter(point => point.turnId < selected.id)
+      const retained = session.turns.find(point => point.providerTurnId === pending.point.retainedTurnId && point.providerTurnId !== undefined)
+      if (session.providerConversations) {
+        for (const [key, conversation] of Object.entries(session.providerConversations)) {
+          if (conversation.throughTurnId >= selected.id) delete session.providerConversations[key]
+        }
+      }
+      session.providerConversations ??= {}
+      session.providerConversations[providerConversationKey(session)] = {
+        providerSessionId: pending.point.providerSessionId, throughTurnId: retained?.id ?? 0,
+      }
+      session.state = 'idle'
+      delete session.lastError
+      clearTurnRequests(session)
+      break
+    }
+
     case 'turn.started': {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
@@ -613,6 +677,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         session.navigation.snoozedUntil = null
       }
       clearTurnRequests(session)
+      session.lastTurnId = Math.max(session.lastTurnId ?? 0, p.turnId)
       session.turns.push({
         id: p.turnId,
         role: p.role,

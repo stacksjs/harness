@@ -84,6 +84,7 @@ export type ClientCommand =
   | ({ type: 'session.turn.steer', sessionId: number, turnId: number } & ({ id: string } | { text: string }))
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
   | ({ type: 'session.input.respond', sessionId: number, requestId: string } & InputResponse)
+  | { type: 'session.turn.rewind', sessionId: number, turnId: number, verifyOnly?: true }
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
   | { type: 'session.stop', sessionId: number }
   | ({ type: 'session.organize', sessionId: number, undoScope?: string, undoBatch?: string } & ThreadOrganizationAction)
@@ -167,6 +168,7 @@ export type InternalCommand =
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
+  | { type: 'thread.turn.rewind-result', sessionId: number, operation: string, outcome: 'rewound' | 'unchanged' | 'uncertain', message?: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number, skipped?: string[] }
   | { type: 'thread.checkpoint.restore-failed', sessionId: number, checkpointId: number, message: string }
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string, tree?: string, repositories?: RepositoryCheckpoint[] }
@@ -203,6 +205,7 @@ const CLIENT_COMMAND_TYPES: ReadonlySet<string> = new Set<ClientCommand['type']>
   'session.approval.respond',
   'session.input.respond',
   'session.checkpoint.revert',
+  'session.turn.rewind',
   'mcp.add',
   'mcp.remove',
   'mcp.setEnabled',

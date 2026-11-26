@@ -96,6 +96,18 @@ export interface ForkResult {
   copiedProviderTurnIds?: Record<string, string>
 }
 
+export interface ConversationRewindInput {
+  providerSessionId: string
+  beforeTurnId: string
+  newestTurnId: string
+  retainedTurnId?: string
+  verifyOnly?: boolean
+}
+
+export type ConversationRewindResult =
+  | { outcome: 'rewound' }
+  | { outcome: 'unchanged' | 'uncertain', message: string }
+
 export interface ProviderInstance {
   /** Accepts structured history and can fall back to the attributed prompt. */
   acceptsHistoricalContext?: boolean
@@ -105,6 +117,8 @@ export interface ProviderInstance {
   compact?: (providerSessionId: string, resume?: Pick<StartTurnInput, 'forkAcrossWorktrees'>) => AsyncIterable<ProviderEvent>
   /** Create a separate conversation through the selected response. Null means the saved boundary is unavailable. */
   fork?: (input: ForkInput) => Promise<ForkResult | null>
+  /** Restore the existing native conversation to just before a recorded provider turn. */
+  rewind?: (input: ConversationRewindInput) => Promise<ConversationRewindResult>
   /** Stop the running turn. Safe to call when nothing is running. */
   interrupt: () => Promise<void>
   /** Send a follow-up to the currently streaming provider turn. */

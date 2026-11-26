@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
-import { activeThreadOrder, checkpointReviewRepositories, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
+import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -84,7 +84,7 @@ function turnStarted(session: SessionState, text: string, codexSelection?: Codex
   const modelChanged = selection && session.turns.length > 0 && (selection.model !== session.model
     || selection.effort !== session.codexTurnOptions?.effort || selection.serviceTier !== session.codexTurnOptions?.serviceTier)
   return {
-    type: 'turn.started', turnId: session.turns.length + 1, role: 'user', text,
+    type: 'turn.started', turnId: (session.lastTurnId ?? session.turns.at(-1)?.id ?? 0) + 1, role: 'user', text,
     ...(attachments?.length ? { attachments } : {}),
     ...(queuedId ? { queuedId } : {}),
     ...(freshContext ? { freshContext: true } : {}),
@@ -274,7 +274,8 @@ function organizeThreadEvents(state: HarnessState, session: SessionState, comman
     case 'unsettle':
       return settledAt ? [change({ settledAt: null })] : []
     case 'archive':
-      if (isTurnActive(session.state)) throw new InvalidCommand('Wait for the turn to finish before archiving.')
+      if (isTurnActive(session.state) || session.conversationRewind)
+        throw new InvalidCommand('Wait for the turn or conversation rewind to finish before archiving.')
       return [change({ archivedAt: at })]
     case 'restore':
       return archivedAt ? [change({ archivedAt: null })] : []
@@ -405,7 +406,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // them was the profile.
       const workspaceIds = [...profile.workspaceIds]
       const owned = new Set(workspaceIds)
-      if ([...state.sessions.values()].some(session => session.pendingRewind && owned.has(session.workspaceId)))
+      if ([...state.sessions.values()].some(session => (session.pendingRewind || session.conversationRewind) && owned.has(session.workspaceId)))
         throw new InvalidCommand('Wait for the current rewind to finish before deleting this profile.')
       const sessionIds = [...state.sessions.values()]
         .filter(session => owned.has(session.workspaceId))
@@ -655,7 +656,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
     case 'session.fork': {
       const source = state.sessions.get(command.sessionId)
       const turn = forkResponsePoint(source, command.turnId)
-      if (!source || !turn)
+      if (!source || !turn || source.conversationRewind)
         throw new InvalidCommand('Choose a completed response in an available conversation.')
       if (!state.workspaces.get(source.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before forking a conversation.')
@@ -779,6 +780,39 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }]
     }
 
+    case 'session.turn.rewind': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session || session.state === 'stopped' || session.navigation?.archivedAt || (session.fork && session.fork.state !== 'ready'))
+        throw new InvalidCommand('This thread is unavailable for conversation rewind.')
+      if (!state.workspaces.get(session.workspaceId)?.trusted)
+        throw new InvalidCommand('Trust this workspace before rewinding the conversation.')
+      if (isTurnActive(session.state) || session.followUps.entries.length || checkoutRewindPending(state, session))
+        throw new InvalidCommand('Finish the active turn, queued messages, and file rewind before editing an earlier prompt.')
+      const existing = session.conversationRewind
+      if (command.verifyOnly === true) {
+        if (existing?.status !== 'uncertain' || existing.turnId !== command.turnId)
+          throw new InvalidCommand('There is no interrupted conversation rewind to check.')
+        return [{ sessionId: session.id, commandId, at, payload: {
+          type: 'turn.rewind-requested', turnId: existing.turnId, operation: existing.operation, point: existing.point,
+        } }]
+      }
+      if (existing) throw new InvalidCommand('Check the current conversation rewind before starting another one.')
+      const point = conversationRewindPoint(session, command.turnId)
+      if (!point) throw new InvalidCommand('Choose a completed prompt in the current Codex conversation.')
+      return [{ sessionId: session.id, commandId, at, payload: {
+        type: 'turn.rewind-requested', turnId: command.turnId, operation: commandId, point,
+      } }]
+    }
+
+    case 'thread.turn.rewind-result': {
+      const session = state.sessions.get(command.sessionId)
+      if (session?.conversationRewind?.operation !== command.operation) return []
+      return [{ sessionId: session.id, commandId, at, payload: {
+        type: 'turn.rewind-settled', operation: command.operation, outcome: command.outcome,
+        ...(command.message && { message: command.message }),
+      } }]
+    }
+
     case 'session.checkpoint.revert': {
       const session = state.sessions.get(command.sessionId)
       if (!session)
@@ -789,7 +823,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand(`no such checkpoint: ${command.checkpointId}`)
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before rewinding its files.')
-      if (checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
+      if (session.conversationRewind || checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if ([...state.sessions.values()].some(other => isTurnActive(other.state) && sharesCheckout(state, session, other)))
         throw new InvalidCommand('Finish the active turn in this checkout before rewinding its files.')
 
@@ -817,7 +851,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('This thread is unavailable for a provider switch.')
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before switching providers.')
-      if (checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
+      if (session.conversationRewind || checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if (isTurnActive(session.state) || session.followUps.entries.length)
         throw new InvalidCommand('Finish the current turn and queued messages before switching providers.')
       if (command.afterTurnId !== (session.turns.at(-1)?.id ?? 0))
@@ -852,7 +886,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
-      if (checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
+      if (session.conversationRewind || checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if (session.fork && session.fork.state !== 'ready')
         throw new InvalidCommand('This fork must finish before it can accept messages.')
       if (session.navigation?.archivedAt)
@@ -887,7 +921,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session || effectiveClaudeCompaction(state, session).idleCompaction !== 'beforeCacheExpires'
         || !state.workspaces.get(session.workspaceId)?.trusted) return []
-      if (checkoutRewindPending(state, session)) return []
+      if (session.conversationRewind || checkoutRewindPending(state, session)) return []
       const eligible = claudeIdleCompaction(session, at)
       if (!eligible || eligible.afterTurnId !== command.afterTurnId || eligible.startsAt === undefined
         || at < eligible.startsAt || eligible.expiresAt === undefined || at >= eligible.expiresAt) return []
@@ -1009,7 +1043,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const automatic = command.type === 'thread.queue.advance'
       const session = state.sessions.get(command.sessionId)
       if (automatic && (!session || session.followUps.held || !session.followUps.entries.length)) return []
-      if (session && checkoutRewindPending(state, session)) {
+      if (session && (session.conversationRewind || checkoutRewindPending(state, session))) {
         if (automatic) return []
         throw new InvalidCommand('Wait for the current rewind to finish.')
       }
@@ -1079,6 +1113,9 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         payload: { type: 'session.stopped' },
       }
       if (session.fork?.state !== 'pending') return [stopped]
+      if (state.sessions.get(command.sessionId)?.conversationRewind)
+        throw new InvalidCommand('Wait for the current conversation rewind to finish.')
+
       return [stopped, {
         sessionId: session.id, commandId, at,
         payload: { type: 'session.fork-failed', message: 'The fork was stopped. Return to the source response to try again.' },

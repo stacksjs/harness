@@ -16,7 +16,7 @@
  * from, which is how a harness session survives a server restart.
  */
 
-import type { Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
+import type { ConversationRewindInput, ConversationRewindResult, Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
 import type { ApprovalChoice, InputAnswer, ProviderContextUsage, SteeringOutcome } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
@@ -718,17 +718,17 @@ class CodexInstance implements ProviderInstance {
   }
 
   /** Return newest first. Older servers return the full history from thread/read. */
-  private async forkHistory(threadId: string, stopAt?: string): Promise<CodexHistoryTurn[]> {
+  private async forkHistory(threadId: string, stopAt?: string, mode: 'compatible' | 'paginated' = 'compatible'): Promise<CodexHistoryTurn[]> {
     const turns: CodexHistoryTurn[] = []
     const cursors = new Set<string>()
     let cursor: string | undefined
     do {
       const page = await this.request('thread/turns/list', {
-        threadId, limit: 100, sortDirection: 'desc', itemsView: stopAt ? 'notLoaded' : 'full',
+        threadId, limit: 100, sortDirection: 'desc', itemsView: stopAt || mode === 'paginated' ? 'notLoaded' : 'full',
         ...(cursor ? { cursor } : {}),
       }, 10_000)
       if (page.error || !historyTurns(page.result?.data)) {
-        if (cursor) throw new Error('Codex could not read the complete conversation history.')
+        if (cursor || mode === 'paginated') throw new Error('Codex could not read the complete conversation history.')
         const read = await this.request('thread/read', { threadId, includeTurns: true }, 15_000)
         if (read.error || read.result?.thread?.id !== threadId || !historyTurns(read.result.thread.turns))
           throw new Error('Codex could not read this conversation history. Check the selected account and retry.')
@@ -741,6 +741,58 @@ class CodexInstance implements ProviderInstance {
       if (cursor) cursors.add(cursor)
     } while (cursor)
     return turns
+  }
+
+  async rewind(input: ConversationRewindInput): Promise<ConversationRewindResult> {
+    const threadId = input.providerSessionId
+    const uncertain = { outcome: 'uncertain' as const, message: 'Codex could not confirm the conversation boundary. Check the rewind before sending another message.' }
+    if (this.turnId && !this.queue?.closed)
+      return input.verifyOnly ? uncertain : { outcome: 'unchanged', message: 'Wait for Codex to finish the active turn.' }
+    if (this.threadId && this.threadId !== threadId)
+      return input.verifyOnly ? uncertain : { outcome: 'unchanged', message: 'Open the selected Codex conversation before rewinding.' }
+    let mutating = false
+    try {
+      await this.ensureProcess()
+      const result = await this.request('thread/read', { threadId, includeTurns: false }, 15_000)
+      const thread = result.result?.thread
+      if (result.error || thread?.id !== threadId || thread.historyMode !== 'paginated') {
+        return input.verifyOnly ? uncertain : {
+          outcome: 'unchanged', message: 'This Codex conversation needs paginated history to rewind. Update Codex or start a new thread.',
+        }
+      }
+      const before = await this.forkHistory(threadId, undefined, 'paginated')
+      const retained = input.retainedTurnId
+      const head = before[0]?.id
+      if (input.verifyOnly) {
+        if (head === retained && !before.some(turn => turn.id === input.beforeTurnId)) return { outcome: 'rewound' }
+        return head === input.newestTurnId && before.some(turn => turn.id === input.beforeTurnId)
+          ? { outcome: 'unchanged', message: 'Codex still has the original conversation. You can retry the edit.' }
+          : uncertain
+      }
+      const index = before.findIndex(turn => turn.id === input.beforeTurnId)
+      if (head !== input.newestTurnId || index < 0 || before[index + 1]?.id !== retained)
+        return { outcome: 'unchanged', message: 'Codex history changed. Reopen this thread and choose its current edit point.' }
+      if (!this.threadId || thread.status?.type === 'notLoaded') {
+        const resumed = await this.request('thread/resume', { threadId, excludeTurns: true }, 15_000)
+        if (resumed.error || resumed.result?.thread?.id !== threadId)
+          return { outcome: 'unchanged', message: 'Codex could not open the selected conversation.' }
+      }
+      this.threadId = threadId
+      mutating = true
+      const reverted = await this.request('thread/revert', { threadId, beforeTurnId: input.beforeTurnId }, 20_000)
+      // The acknowledgement may be lost after Codex has already rewound. Only
+      // a fresh history read settles the operation, including a missing reply.
+      const after = await this.forkHistory(threadId, undefined, 'paginated')
+      if (after[0]?.id === retained && !after.some(turn => turn.id === input.beforeTurnId)) return { outcome: 'rewound' }
+      if (!reverted.transportError && after[0]?.id === input.newestTurnId && after.some(turn => turn.id === input.beforeTurnId))
+        return { outcome: 'unchanged', message: 'Codex did not rewind this conversation. Try again.' }
+      return uncertain
+    }
+    catch {
+      return mutating || input.verifyOnly ? uncertain : {
+        outcome: 'unchanged', message: 'Codex could not read the selected conversation. Check its connection and retry.',
+      }
+    }
   }
 
   async fork(input: ForkInput): Promise<ForkResult> {

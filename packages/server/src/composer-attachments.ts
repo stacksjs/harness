@@ -82,7 +82,8 @@ export class ComposerAttachments {
   async respond(request: Request, url: URL, owner: string): Promise<Response | undefined> {
     const route = attachmentRoute.exec(url.pathname)
     const stashId = composerStashRoute.exec(url.pathname)?.[1]
-    if (!route && !stashId) return
+    const rewinding = url.pathname === '/composer-attachments/rewind'
+    if (!route && !stashId && !rewinding) return
     const id = route?.[1]
     const headers = { 'Cache-Control': 'private, no-store' }
     const state = this.state()
@@ -125,6 +126,19 @@ export class ComposerAttachments {
         return new Response(null, { status: 204, headers })
       }
       if (!draftPattern.test(draft) || !uploadScope(scope)) return new Response(null, { status: 400, headers })
+      if (rewinding) {
+        if (request.method !== 'PUT') return new Response(null, { status: 405, headers })
+        const selection = session?.rewoundPrompt
+        const target = uploadScope(scope)
+        if (!session || target?.kind !== 'session' || !scopeAvailable(state, target, session)
+          || !selection || selection.operation !== url.searchParams.get('operation'))
+          throw new AttachmentError('The rewound prompt is unavailable for this draft.', 409)
+        const files = await this.files.linkDrafts(0, bucket, owner, selection.attachments.map(file => ({
+          file: { id: file.id, name: file.name, size: file.size, image: file.image, questionId: 'composer' },
+          path: this.path(file),
+        })))
+        return Response.json(files.map(({ id, name, size, image }) => ({ id, name, size, image })), { headers })
+      }
       if (stashId) {
         if (!scopeAvailable(this.state(), uploadScope(scope)))
           throw new AttachmentError('This draft is unavailable for stashed attachments.', 409)
@@ -158,7 +172,8 @@ export class ComposerAttachments {
         return await this.files.serialize(0, bucket, async () => {
           const used = (file: ComposerAttachment) => file.id === id && file.draft === draft && file.scope === scope
           for (const session of this.state().sessions.values()) {
-            if (session.turns.some(turn => turn.attachments?.some(used))
+            if (session.rewoundPrompt?.attachments.some(used)
+              || session.turns.some(turn => turn.attachments?.some(used))
               || session.followUps.entries.some(entry => entry.attachments?.some(used)))
               return new Response(null, { status: 409, headers })
           }

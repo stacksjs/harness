@@ -803,6 +803,38 @@ export class ProviderRuntime {
     }))
   }
 
+  async recoverConversationRewind(sessionId: number): Promise<void> {
+    const pending = this.options.engine.current.sessions.get(sessionId)?.conversationRewind
+    if (pending?.status !== 'running') return
+    await this.options.engine.dispatchInternal(this.envelope({
+      type: 'thread.turn.rewind-result', sessionId, operation: pending.operation, outcome: 'uncertain',
+      message: 'The host restarted during conversation rewind. Check the provider history before sending.',
+    }))
+  }
+
+  async rewindConversation(sessionId: number, verifyOnly: boolean): Promise<void> {
+    const state = this.options.engine.current
+    const session = state.sessions.get(sessionId)
+    const pending = session?.conversationRewind
+    if (!session || pending?.status !== 'running') return
+    const trusted = () => this.options.engine.current.workspaces.get(session.workspaceId)?.trusted === true
+    let outcome: 'rewound' | 'unchanged' | 'uncertain' = verifyOnly ? 'uncertain' : 'unchanged'
+    let message: string | undefined = 'The provider account or workspace is unavailable for conversation rewind.'
+    try {
+      const running = trusted() ? await this.instanceFor(sessionId, session.driverKind, false) : null
+      if (running?.instance.rewind && trusted()) {
+        outcome = 'uncertain'
+        const result = await running.instance.rewind({ ...pending.point, verifyOnly })
+        outcome = result.outcome
+        message = result.outcome === 'rewound' ? undefined : result.message
+      }
+    }
+    catch {
+      message = 'Could not confirm conversation rewind with the provider. Check provider history before retrying.'
+    }
+    await this.record({ type: 'thread.turn.rewind-result', sessionId, operation: pending.operation, outcome, message })
+  }
+
   async revert(sessionId: number, checkpointId: number, operation: string): Promise<void> {
     const state = this.options.engine.current
     const session = state.sessions.get(sessionId)

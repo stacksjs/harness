@@ -142,7 +142,7 @@ class Client {
   close(): void { this.socket.close() }
 }
 
-async function bootstrap(client: Client, workspace: string = dir, isolate = false, worktree?: WorktreeSelection): Promise<{ sessionId: number }> {
+async function bootstrap(client: Client, workspace: string = dir, isolate = false, worktree?: WorktreeSelection, driverKind: Driver['kind'] = 'claude'): Promise<{ sessionId: number }> {
   client.send({ t: 'dispatch', envelope: { id: 'c_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
   const profileId = derivedId('c_p')
   client.send({
@@ -156,7 +156,7 @@ async function bootstrap(client: Client, workspace: string = dir, isolate = fals
   })
   client.send({
     t: 'dispatch',
-    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate, ...(worktree && { worktree }) } },
+    envelope: { id: 'c_s', at: 4, command: { type: 'session.create', workspaceId, driverKind, isolate, ...(worktree && { worktree }) } },
   })
   return { sessionId: await client.subscribeCreatedSession('c_s') }
 }
@@ -2176,6 +2176,98 @@ describe('checkpoint and revert', () => {
     expect(await client.waitFor('turn.completed')).toBeTruthy()
     expect(client.payloads('checkpoint.captured')).toEqual([])
     client.close()
+  })
+})
+
+describe('conversation rewind', () => {
+  it('reconciles a crash by reading native history, restores files to the draft, and continues the same thread', async () => {
+    const started: StartTurnInput[] = []
+    const checks: boolean[] = []
+    const driver: Driver = {
+      kind: 'codex',
+      async probe() { return { status: 'ready' } },
+      async create() {
+        return {
+          async *startTurn(input) {
+            started.push(input)
+            yield { type: 'session-bound', providerSessionId: 'native-thread' }
+            yield { type: 'assistant-delta', text: 'A complete response' }
+            yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `native-${started.length}` }
+          },
+          async rewind(input) {
+            checks.push(input.verifyOnly)
+            expect(input).toMatchObject({ providerSessionId: 'native-thread', beforeTurnId: 'native-2', newestTurnId: 'native-3', retainedTurnId: 'native-1' })
+            return { outcome: 'rewound' }
+          },
+          async interrupt() {},
+          async respondApproval() {},
+          async stop() {},
+        }
+      },
+    }
+    const start = () => serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    harness = await start()
+    const wsUrl = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(wsUrl)
+    const { sessionId } = await bootstrap(first, dir, false, undefined, 'codex')
+    const root = `http://127.0.0.1:${port}/composer-attachments`
+    const scope = `session:${sessionId}`
+    const draft = 'a'.repeat(32)
+    const send = (client: Client, id: string, command: Command) => {
+      client.send({ t: 'dispatch', envelope: { id, at: Date.now(), command } })
+      return client.waitForDispatch(id)
+    }
+    const original = new URLSearchParams({ scope, draft, name: 'notes.txt' })
+    const response = await fetch(`${root}?${original}`, { method: 'POST', body: 'Retained attachment' })
+    expect(response.status).toBe(201)
+    const file = await response.json() as { id: string }
+    for (const [offset, text] of ['Keep this prompt', 'Edit this prompt', 'Remove this prompt'].entries()) {
+      const turnId = offset + 1
+      const uploads = turnId === 2 ? { scope, draft, ids: [file.id] } : undefined
+      expect(await send(first, `turn-${turnId}`, { type: 'session.turn.start', sessionId, text, uploads })).toMatchObject({ t: 'dispatched' })
+      expect(await first.waitFor('turn.completed', 3000, event => event.turnId === turnId)).toBeTruthy()
+    }
+    const command = { type: 'session.turn.rewind', sessionId, turnId: 2 } as const
+    await harness.engine.dispatch({ id: 'edit-earlier', at: Date.now(), command })
+    first.close()
+    harness.stop()
+    harness = await start()
+    const restored = await Client.connect(wsUrl)
+    try {
+      restored.send({ t: 'subscribe', sessionId })
+      expect(await restored.waitFor('turn.rewind-settled')).toMatchObject({ outcome: 'uncertain' })
+      expect(await send(restored, 'unsafe-send', { type: 'session.turn.start', sessionId, text: 'Keep it pending' })).toMatchObject({ t: 'rejected' })
+      expect(await send(restored, 'edit-earlier', command)).toMatchObject({ t: 'dispatched', replayed: true })
+      expect(checks).toEqual([])
+      expect(await send(restored, 'check-edit', { ...command, verifyOnly: true })).toMatchObject({ t: 'dispatched' })
+      expect(await restored.waitFor('turn.rewind-settled', 3000, event => event.outcome === 'rewound')).toBeTruthy()
+      expect(checks).toEqual([true])
+      const session = harness.engine.current.sessions.get(sessionId)
+      expect(session?.turns.map(turn => turn.prompt)).toEqual(['Keep this prompt'])
+      expect(session?.rewoundPrompt).toMatchObject({ text: 'Edit this prompt', attachments: [{ id: file.id }] })
+      expect((await fetch(`${root}/${file.id}?${original}`, { method: 'DELETE' })).status).toBe(409)
+      const destination = 'b'.repeat(32)
+      const query = new URLSearchParams({ scope, draft: destination, session: String(sessionId), operation: 'edit-earlier' })
+      const forbidden = new URLSearchParams(query)
+      forbidden.set('scope', `project:${derivedId('c_w')}`)
+      expect((await fetch(`${root}/rewind?${forbidden}`, { method: 'PUT' })).status).toBe(409)
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const transfer = await fetch(`${root}/rewind?${query}`, { method: 'PUT' })
+        expect(transfer.status).toBe(200)
+        expect(await transfer.json()).toMatchObject([{ id: file.id, name: 'notes.txt' }])
+      }
+      expect(await send(restored, 'edit-and-send', { type: 'session.turn.start', sessionId, text: 'Edited prompt',
+        uploads: { scope, draft: destination, ids: [file.id] },
+      })).toMatchObject({ t: 'dispatched' })
+      expect(await restored.waitFor('turn.completed', 3000, event => event.turnId === 4)).toBeTruthy()
+      expect(started.at(-1)?.providerSessionId).toBe('native-thread')
+      expect(session?.turns.map(turn => turn.id)).toEqual([1, 4])
+      const download = await fetch(`${root}/${file.id}?session=${sessionId}`)
+      expect(await download.text()).toBe('Retained attachment')
+    }
+    finally {
+      restored.close()
+    }
   })
 })
 
