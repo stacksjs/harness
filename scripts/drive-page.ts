@@ -823,6 +823,7 @@ for (const number of [4, 3, 2]) {
   await paneHost(number).focus()
   await endTerminal.click()
   await terminalCloseDialog.getByRole('button', { name: 'End terminal', exact: true }).click()
+  await terminalCloseDialog.waitFor({ state: 'hidden' })
   await paneHost(number).waitFor({ state: 'detached' })
 }
 await waitForPaneLine(1, 'left-42')
