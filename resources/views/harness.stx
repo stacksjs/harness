@@ -20,7 +20,7 @@ export const settingsSections = $props.settingsSections || []
 // The keyboard registry, with both platform spellings of every default chord.
 export const keybindings = $props.keybindings || []
 // Settings this host owns, shared by every client connected to it.
-export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null }
+export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -711,7 +711,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       @includeWhen(activeSession, '../partials/harness-follow-ups')
       @if(activeSession)
         <div data-thread-settled-note @if(!initialNavigation.settledAt || initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().settledAt || !!threadNavigation().archivedAt" class="flex flex-wrap gap-x-3 items-center mb-3 text-neutral-600 text-sm dark:text-neutral-300">
-          <span class="flex gap-1.5 items-center"><span class="size-4 i-hugeicons-checkmark-circle-02" aria-hidden="true"></span>Settled</span>
+          <span class="flex gap-1.5 items-center"><span class="size-4 i-hugeicons-checkmark-circle-02" aria-hidden="true"></span><span :text="threadNavigation().settledAutomatically ? 'Settled after inactivity' : 'Settled'">{{ initialNavigation.settledAutomatically ? 'Settled after inactivity' : 'Settled' }}</span></span>
           <button type="button" :disabled="threadActionBusy() || !sessionOnline()" @click="organizeThread('unsettle')" class="min-h-11 font-medium underline underline-offset-2">Un-settle</button>
         </div>
       @endif
@@ -1157,6 +1157,21 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">New terminals use the selected shell. Den must be installed on this host.</p>
       <p data-host-settings-note class="mt-3 mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">These apply to every client of this host. Appearance and keyboard shortcuts stay with this browser.</p>
       <p data-settings-error role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
+      </section>
+      <section :hidden="settingsSelection() !== 'threads'" data-settings-pane>
+        <h3 data-settings-section="threads" tabindex="-1">Threads</h3>
+        <div data-settings-fields>
+          <label data-settings-field for="settings-auto-settle" class="min-h-11 cursor-pointer">
+            <span>Auto-settle inactive threads</span>
+            <input id="settings-auto-settle" type="checkbox" :checked="settings().autoSettleAfterDays != null" @change="toggleAutoSettle">
+          </label>
+          <div data-settings-field :hidden="settings().autoSettleAfterDays == null">
+            <label for="settings-auto-settle-days">Days before auto-settle</label>
+            <input id="settings-auto-settle-days" type="number" min="1" max="90" step="any" required :value="settings().autoSettleAfterDays ?? 7" @change="changeAutoSettleDays" class="px-2 min-h-11 w-24 text-[13px] bg-transparent border border-black/10 rounded-md dark:border-white/15">
+          </div>
+        </div>
+        <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">The host settles idle threads even when the app is closed. Pinned and snoozed threads stay put. Choose Never in a thread’s actions to opt out.</p>
+        <p role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
       </section>
       <section :hidden="settingsSelection() !== 'providers'" data-settings-pane>
       <h3 data-settings-section="providers" tabindex="-1">Providers</h3>
@@ -1870,6 +1885,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     try {
       await sendThreadOrganization({ sessionId: target, action, ...fields })
       if (threadActionsDialog.current?.open) closeThreadActions()
+      if (action === 'auto-settle') {
+        threadActionBusy.set(false)
+        return
+      }
       if (action === 'archive' && target === sessionId) {
         if (activeScratchSession) startWithoutProject()
         else navigate(`/?workspace=${activeWorkspaceId}`)
@@ -1986,6 +2005,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
     settingsSaveError.set('')
     void updateSettings({ claudeAutoCompactAfter: input.value === '' ? null : Number(input.value) })
+  }
+
+  function toggleAutoSettle(event) {
+    void updateSettings({ autoSettleAfterDays: event.currentTarget.checked ? 7 : null })
+  }
+
+  function changeAutoSettleDays(event) {
+    const input = event.currentTarget
+    if (!input.validity.valid) {
+      settingsSaveError.set('Enter a number from 1 to 90 days.')
+      return
+    }
+    void updateSettings({ autoSettleAfterDays: Number(input.value) })
   }
 
   async function updateSettings(changes) {
@@ -5934,7 +5966,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         paintTranscript(updateTranscriptMarkdown)
       }
       if (payload.type === 'session.navigation-changed') {
-        threadNavigation.update(previous => ({ ...previous, ...payload.changes }))
+        threadNavigation.update(previous => ({
+          ...previous, ...payload.changes,
+          ...('settledAt' in payload.changes && { settledAutomatically: payload.changes.settledAutomatically === true }),
+        }))
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
         if (typeof payload.changes.settledAt === 'number') void refreshProjectSettlement()
       }
@@ -5996,7 +6031,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           if (!initialHasTurns && !liveTurns().length) currentThreadTitle.set(threadDisplayTitle(threadNavigation().title, payload.text))
           if (payload.switchedProvider || payload.freshContext) rewindableTurns.set([])
           if (threadNavigation().settledAt || threadNavigation().snoozedUntil)
-            threadNavigation.update(previous => ({ ...previous, settledAt: null, snoozedUntil: null }))
+            threadNavigation.update(previous => ({ ...previous, settledAt: null, snoozedUntil: null, settledAutomatically: false }))
           steerableTurn.set(0)
           runningTurnId.set(payload.turnId)
           liveTurns.update(turns => [...turns, {
