@@ -1468,14 +1468,16 @@ if (screenshotDir) {
     await capture(`settings-general-${width}x${height}`)
   }
   const settingsSearch = settingsDialog.getByRole('searchbox', { name: 'Search settings sections' })
+  const settingsButtons = settingsNavigation.getByRole('button')
+  const initialSettingsSections = await settingsButtons.allTextContents()
   await settingsSearch.fill('not present')
   await settingsNavigation.getByText('No sections found').waitFor()
   await settingsSearch.fill('key')
-  check('settings search filters the available sections', await settingsNavigation.getByRole('button').count() === 1)
+  check('settings search filters the available sections', await settingsButtons.count() === 1)
   await settingsSearch.press('Enter')
   await page.waitForURL(url => url.pathname === '/settings/keybindings')
   check('Enter opens the matching settings section and clears search', await settingsSearch.inputValue() === ''
-    && await settingsNavigation.getByRole('button').count() === 6)
+    && JSON.stringify(await settingsButtons.allTextContents()) === JSON.stringify(initialSettingsSections))
   // The Keyboard section at a desktop and the narrowest width: its rows carry
   // a chord and two controls, which is the densest line in the whole sheet.
   for (const [width, height] of [[1280, 800], [360, 800]] as const) {
