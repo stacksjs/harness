@@ -7,6 +7,7 @@ export { probeBinary, providerConfigPath, runQuiet } from './cli-driver'
 export { approvalLabel, CodexDriver, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from './codex'
 export { formatConformance, runConformance } from './conformance'
 export type { ConformanceCase, ConformanceReport } from './conformance'
+export { PREVIEW_THREAD_ENV } from './preview-owner'
 export { driverKinds, registry, resolveDriver } from './registry'
 export type {
   Driver,

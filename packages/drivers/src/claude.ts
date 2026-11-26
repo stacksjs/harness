@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type { ClaudeHistoryRequest, ClaudeHistoryResult } from './claude-history-worker'
 import { claudeEnvironment } from './account-environment'
+import { PREVIEW_THREAD_ENV } from './preview-owner'
 import { EventQueue } from './event-queue'
 import { toolInputQuestions } from './input-questions'
 import { prepareMcpConsent } from './mcp-consent'
@@ -206,7 +207,10 @@ export class ClaudeInstance implements ProviderInstance {
     // `resume` continues the provider's own conversation. Without it every turn
     // starts a fresh Claude Code session and the agent forgets the last one.
     if (providerSessionId) options.resume = providerSessionId
-    options.env = claudeEnvironment(this.config)
+    options.env = {
+      ...claudeEnvironment(this.config),
+      ...(this.config.previewOwner ? { [PREVIEW_THREAD_ENV]: this.config.previewOwner } : {}),
+    }
     const threshold = this.config.claudeAutoCompactAfter
     if (threshold !== undefined) {
       options.settings = {

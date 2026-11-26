@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { approvalLabel, CodexDriver, createLineReader, readableError, threadStartParams, translateNotification, usageOf } from '../src/codex'
+import { PREVIEW_THREAD_ENV } from '../src/preview-owner'
 
 describe('codex thread resume', () => {
   it.each(['ready', 'archived', 'moved-with-error', 'missing', 'different'] as const)('preserves the original conversation when an account reports %s', async (outcome) => {
@@ -34,7 +35,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   else respond({ error: { message: 'unexpected request' } })
 }
 `, { mode: 0o755 })
-      const instance = await CodexDriver.create({ binaryPath, workspacePath, autoApprove: true })
+      const previewOwner = 'a'.repeat(64)
+      const instance = await CodexDriver.create({ binaryPath, workspacePath, autoApprove: true, previewOwner })
       try {
         const events = instance.startTurn({
           text: 'Continue the original conversation', providerSessionId: 'native-thread',
@@ -55,6 +57,8 @@ for await (const line of createInterface({ input: process.stdin })) {
         if (shouldResume) methods.push('turn/start')
         expect(requests.map(request => request.method)).toEqual(methods)
         expect(requests.slice(1).every(request => request.params.threadId === 'native-thread')).toBe(true)
+        expect(requests.filter(request => request.method === 'thread/resume').map(request => request.params.config))
+          .toEqual(Array.from({ length: wasArchived ? 2 : 1 }, () => ({ [`shell_environment_policy.set.${PREVIEW_THREAD_ENV}`]: previewOwner })))
         if (shouldResume) expect(requests.at(-1)?.params).toMatchObject({ model: 'second-model', effort: 'high', serviceTier: null })
       }
       finally {
@@ -325,7 +329,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   else result({})
 }
 `, { mode: 0o755 })
-      const instance = await CodexDriver.create({ binaryPath, workspacePath })
+      const previewOwner = 'b'.repeat(64)
+      const instance = await CodexDriver.create({ binaryPath, workspacePath, previewOwner })
       try {
         const fork = instance.fork!({
           providerSessionId: 'native-source',
@@ -341,7 +346,10 @@ for await (const line of createInterface({ input: process.stdin })) {
         }
         const requests = readFileSync(join(workspacePath, 'requests.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
         expect(requests.find(request => request.method === 'thread/fork')?.params)
-          .toMatchObject({ threadId: 'native-source', lastTurnId: 'selected-turn', excludeTurns: true })
+          .toMatchObject({
+            threadId: 'native-source', lastTurnId: 'selected-turn', excludeTurns: true,
+            config: { [`shell_environment_policy.set.${PREVIEW_THREAD_ENV}`]: previewOwner },
+          })
         const rollback = requests.find(request => request.method === 'thread/rollback')
         if (mode === 'rollback' || mode === 'legacy') expect(rollback?.params).toEqual({ threadId: 'native-fork', numTurns: 1 })
         else expect(rollback).toBeUndefined()
