@@ -5650,20 +5650,30 @@ check('previous stays at the first visible item', savedDraftPage.url() === topBe
 // The bridge fixture activates desktop defaults. The actual Craft input drive
 // verifies the same route changes without a bridge fixture.
 await savedDraftPage.addInitScript(() => {
-  Object.assign(window, { craft: { menu: { set: () => {} } } })
+  Object.assign(window, { craft: { menu: { set: () => { document.documentElement.dataset.fixtureDesktopMenu = 'ready' } } } })
 })
 await savedDraftPage.waitForLoadState('networkidle')
 await savedDraftPage.goto(backgroundDraftUrl)
 await savedDraftPage.bringToFront()
-await savedDraftPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
+await savedDraftPage.waitForFunction(() => {
+  const { harnessKeyboard, fixtureDesktopMenu } = document.documentElement.dataset
+  return harnessKeyboard === 'ready' && fixtureDesktopMenu === 'ready'
+})
 await savedLink('Saved draft two').waitFor()
 const primaryModifier = await savedDraftPage.evaluate(() =>
   /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent) ? 'Meta' : 'Control')
+// Screenshots exercise the held hint through the same events after the simulated
+// menu is ready. Shortcut navigation below still uses Playwright keyboard input.
+const setFixtureModifier = (down: boolean) => savedDraftPage.evaluate(({ down, key }) => {
+  window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', {
+    key, code: key + 'Left', metaKey: down && key === 'Meta', ctrlKey: down && key === 'Control',
+  }))
+}, { down, key: primaryModifier })
 for (const [width, height] of workspaceViewports) {
   await savedDraftPage.setViewportSize({ width, height })
   const toggle = savedDraftPage.locator('[data-sidebar-toggle]')
   if (await toggle.isVisible() && !await savedList.isVisible()) await toggle.click()
-  await savedDraftPage.keyboard.down(primaryModifier)
+  await setFixtureModifier(true)
   await savedLink('Saved scratch draft').locator('xpath=self::*[@data-sidebar-jump]').waitFor()
   check(`numbered sidebar hints fit at ${width}×${height}`, await savedList.evaluate(list => {
     const bounds = list.getBoundingClientRect()
@@ -5674,7 +5684,7 @@ for (const [width, height] of workspaceViewports) {
     return gutter > discardSpace && bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
   }))
   await capture(`workspace-sidebar-jump-${width}x${height}`, savedDraftPage)
-  await savedDraftPage.keyboard.up(primaryModifier)
+  await setFixtureModifier(false)
   await savedDraftPage.locator('[data-sidebar-jump]').first().waitFor({ state: 'detached' })
   const close = savedDraftPage.locator('[data-sidebar-close]')
   if (width <= 600 && await close.isVisible()) await close.click()
