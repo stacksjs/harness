@@ -29,11 +29,18 @@ const g = (dir: string, ...args: string[]) => spawnSync('git', args, { cwd: dir,
 const read = (dir: string, name: string) => readFileSync(join(dir, name), 'utf8')
 
 describe('capturing a checkpoint', () => {
-  it('returns a commit for a clean repository', async () => {
+  it('captures an unsigned checkpoint with its own identity', async () => {
     const dir = repo()
     try {
+      g(dir, 'config', 'commit.gpgSign', 'true')
+      g(dir, 'config', 'gpg.program', '/nonexistent-gpg-program')
       const result = await capture(dir)
       expect(result.ref).toMatch(/^[0-9a-f]{40}$/)
+      expect(g(dir, 'show', '-s', '--format=%an <%ae>%n%cn <%ce>', result.ref!))
+        .toBe('Harness <checkpoint@harness.invalid>\nHarness <checkpoint@harness.invalid>')
+      expect(g(dir, 'cat-file', 'commit', result.ref!)).not.toContain('\ngpgsig ')
+      expect(g(dir, 'config', 'user.name')).toBe('Test')
+      expect(g(dir, 'config', 'commit.gpgSign')).toBe('true')
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   })

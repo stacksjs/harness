@@ -136,7 +136,15 @@ export async function capture(workspacePath: string, message = 'harness checkpoi
     const tree = await git(workspacePath, ['write-tree'], env)
     if (!tree.ok) return { ref: null, reason: 'git-failed' as const }
 
-    const commit = await git(workspacePath, ['commit-tree', tree.out.trim(), '-p', head.out.trim(), '-m', message], env)
+    // Checkpoints are internal Git objects. Capture must work before the
+    // user configures an identity or a signing key for their own commits.
+    const commit = await git(workspacePath, ['commit-tree', '--no-gpg-sign', tree.out.trim(), '-p', head.out.trim(), '-m', message], {
+      ...env,
+      GIT_AUTHOR_NAME: 'Harness',
+      GIT_AUTHOR_EMAIL: 'checkpoint@harness.invalid',
+      GIT_COMMITTER_NAME: 'Harness',
+      GIT_COMMITTER_EMAIL: 'checkpoint@harness.invalid',
+    })
     if (!commit.ok) return { ref: null, reason: 'git-failed' as const }
 
     return { ref: commit.out.trim() }
