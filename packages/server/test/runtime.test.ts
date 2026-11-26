@@ -1603,6 +1603,76 @@ describe('a session can have a checkout of its own', () => {
     return path
   }
 
+  it.skipIf(process.platform === 'win32')('settles by stored activity after restart and runs the authorized worktree cleanup once', async () => {
+    const workspace = repoWorkspace2()
+    const databasePath = join(dir, 'test.sqlite')
+    const marker = join(dir, 'automatic-cleanup')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => driver }
+    const socket = `ws://127.0.0.1:${port}/ws`
+    harness = await serve(options)
+    let client = await Client.connect(socket)
+    try {
+      const { sessionId } = await bootstrapIsolated(client, workspace)
+      const workspaceId = derivedId('c_w')
+      const dispatch = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 5, command } })
+      dispatch('automatic-cleanup-prepare', { type: 'session.turn.start', sessionId, text: 'Prepare checkout.' })
+      expect(await client.waitFor('turn.completed', 5000)).toBeTruthy()
+      const http = `http://127.0.0.1:${port}`
+      const saved = await fetch(`${http}/s/${sessionId}/project-scripts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'save', script: { name: 'Clean checkout', command: `printf 'cleaned\\n' >> "${marker}"`, runOnSettle: true } }),
+      })
+      expect(saved.status).toBe(201)
+      dispatch('idle-policy-off', { type: 'settings.update', changes: { autoSettleAfterDays: null } })
+      expect(await client.waitForDispatch('idle-policy-off')).toMatchObject({ t: 'dispatched' })
+      const create = async (id: string) => {
+        dispatch(id, { type: 'session.create', workspaceId, driverKind: 'claude' })
+        return client.subscribeCreatedSession(id)
+      }
+      const empty = await create('idle-empty')
+      const never = await create('idle-never')
+      const recent = await create('idle-recent')
+      dispatch('idle-protect', { type: 'session.organize', sessionId: never, action: 'auto-settle', mode: 'never' })
+      expect(await client.waitForDispatch('idle-protect')).toMatchObject({ t: 'dispatched' })
+      client.close()
+      harness.stop()
+      {
+        using db = new Database(databasePath)
+        db.query("UPDATE events SET created_at = datetime('now', '-8 days') WHERE session_id IN (?, ?, ?)").run(sessionId, empty, never)
+      }
+      harness = await serve(options)
+      client = await Client.connect(socket)
+      expect(harness.engine.current.sessions.get(sessionId)?.navigation?.settledAt).toBeFalsy()
+      dispatch('idle-policy-on', { type: 'settings.update', changes: { autoSettleAfterDays: 7 } })
+      expect(await client.waitForDispatch('idle-policy-on')).toMatchObject({ t: 'dispatched' })
+      for (let attempt = 0; attempt < 100 && !existsSync(marker); attempt++) await Bun.sleep(50)
+      expect(readFileSync(marker, 'utf8')).toBe('cleaned\n')
+      const sessions = harness.engine.current.sessions
+      expect(sessions.get(empty)?.navigation?.settledAutomatically).toBe(true)
+      expect(sessions.get(sessionId)?.navigation?.settledAutomatically).toBe(true)
+      expect(sessions.get(never)?.navigation?.settledAt).toBeFalsy()
+      expect(sessions.get(recent)?.navigation?.settledAt).toBeFalsy()
+      expect(sessions.get(recent)!.lastActivityAt).toBeGreaterThan(Date.now() - 60_000)
+      dispatch('forged-idle', { type: 'thread.settle.inactive', sessionId: recent })
+      expect(await client.waitForRejection('forged-idle')).toBeTruthy()
+      dispatch('idle-restore', { type: 'session.organize', sessionId, action: 'unsettle' })
+      expect(await client.waitForDispatch('idle-restore')).toMatchObject({ t: 'dispatched' })
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const result = await fetch(`${http}/s/${sessionId}/project-settlement`)
+        if ((await result.json())?.status === 'completed') break
+        await Bun.sleep(25)
+      }
+      client.close()
+      harness.stop()
+      harness = await serve(options)
+      expect(harness.engine.current.sessions.get(sessionId)?.keepActiveUntilTurn).toBe(true)
+      expect(harness.engine.current.sessions.get(sessionId)?.navigation?.settledAt).toBeFalsy()
+      expect(readFileSync(marker, 'utf8')).toBe('cleaned\n')
+    }
+    finally { client.close() }
+  }, 25_000)
+
   it.skipIf(process.platform === 'win32')('commits and runs one settlement script per isolated checkout transition', async () => {
     const workspace = repoWorkspace2()
     const databasePath = join(dir, 'test.sqlite')
@@ -3163,7 +3233,7 @@ describe('host settings belong to the host', () => {
     const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' } } } })
     expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
 
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
@@ -3190,7 +3260,7 @@ describe('host settings belong to the host', () => {
     // The setting is in the log, so a fresh process over the same database
     // still has it.
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
     harness.stop()
 
     // A different host, which is a different log: independent by construction
@@ -3198,7 +3268,7 @@ describe('host settings belong to the host', () => {
     const otherDatabase = join(dir, 'other.sqlite')
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {

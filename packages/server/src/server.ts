@@ -19,7 +19,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
@@ -202,7 +202,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     reducer: reduce,
     commitCommand(envelope, events) {
       const identity = { commandId: envelope.id, at: envelope.at }
-      if (!hostSettlements.has(envelope)) return store.commitCommand(identity, events)
+      if (!hostSettlements.has(envelope) && envelope.command.type !== 'thread.settle.inactive')
+        return store.commitCommand(identity, events)
       return store.commitCommand(identity, events, (writer, committed) => {
         for (const event of committed) {
           if (event.payload.type !== 'session.navigation-changed' || typeof event.payload.changes.settledAt !== 'number') continue
@@ -357,6 +358,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         settlementRetry = undefined
         runPendingSettlements()
       }, 1000)
+    }
+  }
+
+  function runSettlementEffects(events: readonly HarnessEvent[]): void {
+    for (const event of events) {
+      if (event.payload.type !== 'session.navigation-changed' || typeof event.payload.changes.settledAt !== 'number') continue
+      terminals.stopScriptJobs(event.sessionId)
+      runPendingSettlements(event.sessionId)
     }
   }
 
@@ -731,6 +740,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
     if (events.length > 0) stateRev++
     const changedProfiles = new Set<number>()
+    let reschedule = false
     for (const event of events) {
       if (event.payload.type === 'profile.deleted') {
         terminals.prune(terminalScopeExists)
@@ -754,9 +764,32 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }
       }
 
-      if (event.payload.type === 'session.navigation-changed') {
-        const changes = event.payload.changes
-        if ('snoozedUntil' in changes) scheduleThreadWake()
+      switch (event.payload.type) {
+        case 'settings.updated':
+          if ('autoSettleAfterDays' in event.payload.changes) reschedule = true
+          break
+        case 'profile.deleted':
+        case 'session.navigation-changed':
+        case 'session.created':
+        case 'session.fork-finished':
+        case 'session.fork-portable':
+        case 'session.fork-failed':
+        case 'session.failed':
+        case 'session.stopped':
+        case 'turn.started':
+        case 'turn.completed':
+        case 'turn.failed':
+        case 'turn.interrupted':
+        case 'turn.rewind-requested':
+        case 'turn.rewind-settled':
+        case 'checkpoint.reverted':
+        case 'checkpoint.restored':
+        case 'checkpoint.restore-failed':
+        case 'queue.added':
+        case 'queue.removed':
+        case 'input.resolved':
+        case 'approval.resolved':
+          reschedule = true
       }
       if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'session.created' || event.payload.type === 'turn.started'
         || event.payload.type === 'turn.completed' || event.payload.type === 'turn.interrupted' || event.payload.type === 'turn.rewind-settled'
@@ -781,6 +814,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         socket.data.cursors.set(event.sessionId, event.seq)
       }
     }
+    if (reschedule) scheduleThreadMaintenance()
     for (const profileId of changedProfiles) {
       let pins: ReturnType<typeof sidebarSnapshot> | undefined
       let sidebar: ReturnType<typeof sidebarSnapshot> | undefined
@@ -794,42 +828,57 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
   let closing = false
   let settlementRetry: ReturnType<typeof setTimeout> | undefined
-  let wakeTimer: ReturnType<typeof setTimeout> | undefined
-  let wakingThreads = false
+  let maintenanceTimer: ReturnType<typeof setTimeout> | undefined
+  let maintainingThreads = false
 
-  function scheduleThreadWake(minimumDelay = 0): void {
-    if (wakingThreads || closing) return
-    clearTimeout(wakeTimer)
+  function scheduleThreadMaintenance(minimumDelay = 0): void {
+    if (maintainingThreads || closing) return
+    clearTimeout(maintenanceTimer)
     let earliest = Infinity
-    for (const session of engine.current.sessions.values())
-      earliest = Math.min(earliest, session.navigation?.snoozedUntil ?? Infinity)
+    const { sessions, settings, workspaces } = engine.current
+    for (const session of sessions.values())
+      earliest = Math.min(earliest, session.navigation?.snoozedUntil ?? Infinity,
+        workspaces.has(session.workspaceId) ? inactivityDeadline(session, settings) ?? Infinity : Infinity)
     if (!Number.isFinite(earliest)) return
-    wakeTimer = setTimeout(() => void wakeThreads(), Math.max(minimumDelay, Math.min(2_147_483_647, earliest - Date.now())))
+    maintenanceTimer = setTimeout(() => void maintainThreads(), Math.max(minimumDelay, Math.min(2_147_483_647, earliest - Date.now())))
+    maintenanceTimer.unref()
   }
 
-  async function wakeThreads(): Promise<void> {
+  async function maintainThreads(): Promise<void> {
     if (closing) return
-    wakingThreads = true
+    maintainingThreads = true
     let retryDelay = 0
     try {
       const at = Date.now()
       for (const session of engine.current.sessions.values()) {
         const until = session.navigation?.snoozedUntil
-        if (until == null || until > at || closing) continue
+        if (closing) break
+        if (until != null && until <= at) {
+          const result = await engine.dispatchInternal({
+            id: `thread-wake_${crypto.randomUUID()}`, at,
+            command: { type: 'thread.snooze.elapsed', sessionId: session.id, until },
+          })
+          if (!closing) broadcast(result.events)
+        }
+        const deadline = inactivityDeadline(session, engine.current.settings)
+        if (deadline === undefined || deadline > at || closing) continue
         const result = await engine.dispatchInternal({
-          id: `thread-wake_${crypto.randomUUID()}`, at,
-          command: { type: 'thread.snooze.elapsed', sessionId: session.id, until },
+          id: `thread-auto-settle_${crypto.randomUUID()}`, at,
+          command: { type: 'thread.settle.inactive', sessionId: session.id },
         })
-        if (!closing) broadcast(result.events)
+        if (!closing && !result.replayed) {
+          broadcast(result.events)
+          runSettlementEffects(result.events)
+        }
       }
     }
     catch (error) {
-      if (!closing) console.warn('[thread wake] Could not wake a snoozed thread.', error)
+      if (!closing) console.warn('[thread maintenance] Could not update scheduled threads.', error)
       retryDelay = 1000
     }
     finally {
-      wakingThreads = false
-      scheduleThreadWake(retryDelay)
+      maintainingThreads = false
+      scheduleThreadMaintenance(retryDelay)
     }
   }
 
@@ -938,11 +987,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const command = envelope.command
 
     if (command.type === 'session.organize' && (command.action === 'settle' || command.action === 'drop')) {
-      for (const event of result.events) {
-        if (event.payload.type !== 'session.navigation-changed' || typeof event.payload.changes.settledAt !== 'number') continue
-        terminals.stopScriptJobs(event.sessionId)
-        runPendingSettlements(event.sessionId)
-      }
+      runSettlementEffects(result.events)
       return
     }
 
@@ -1758,7 +1803,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   reapComposerStashes()
   const composerStashTimer = setInterval(reapComposerStashes, 60 * 60 * 1000)
   composerStashTimer.unref()
-  scheduleThreadWake()
+  scheduleThreadMaintenance()
   runPendingSettlements()
   return {
     server,
@@ -1770,7 +1815,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     stop: () => {
       if (closing) return
       closing = true
-      clearTimeout(wakeTimer)
+      clearTimeout(maintenanceTimer)
       clearTimeout(settlementRetry)
       clearInterval(composerStashTimer)
       for (const timer of compactTimers.values()) clearTimeout(timer)
