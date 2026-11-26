@@ -749,6 +749,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (event.payload.type === 'profile.deleted') {
         terminals.prune(terminalScopeExists)
         projectSetup.prune(terminalScopeExists)
+        changedProfiles.add(event.payload.profileId)
+      }
+      if (event.payload.type === 'workspace.added' && !event.payload.scratch) changedProfiles.add(event.payload.profileId)
+      if (event.payload.type === 'workspace.promoted') {
+        const profile = engine.current.workspaces.get(event.payload.workspaceId)?.profileId
+        if (profile !== undefined) changedProfiles.add(profile)
       }
       // A revoke has to reach the connection, not just the next handshake.
       // Closed before the event is delivered, so the socket being cut off does
@@ -796,7 +802,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           reschedule = true
       }
       if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'session.created' || event.payload.type === 'turn.started'
-        || event.payload.type === 'turn.completed' || event.payload.type === 'turn.interrupted' || event.payload.type === 'turn.rewind-settled'
+        || event.payload.type === 'turn.completed' || event.payload.type === 'turn.failed' || event.payload.type === 'turn.interrupted'
+        || event.payload.type === 'turn.rewind-requested' || event.payload.type === 'turn.rewind-settled'
+        || event.payload.type === 'session.fork-finished' || event.payload.type === 'session.fork-portable' || event.payload.type === 'session.fork-failed'
         || event.payload.type === 'session.failed' || event.payload.type === 'session.stopped'
         || event.payload.type === 'approval.requested' || event.payload.type === 'approval.resolved'
         || event.payload.type === 'input.requested' || event.payload.type === 'input.resolved') {
