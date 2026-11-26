@@ -5619,7 +5619,11 @@ for (const [width, height] of workspaceViewports) {
   await savedLink('Saved scratch draft').locator('xpath=self::*[@data-sidebar-jump]').waitFor()
   check(`numbered sidebar hints fit at ${width}×${height}`, await savedList.evaluate(list => {
     const bounds = list.getBoundingClientRect()
-    return bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
+    const link = list.querySelector('[data-sidebar-jump]')
+    const discard = link?.parentElement?.querySelector('[data-draft-discard-row]')
+    const gutter = link ? Number.parseFloat(getComputedStyle(link).paddingInlineEnd) : 0
+    const discardSpace = discard && link ? link.getBoundingClientRect().right - discard.getBoundingClientRect().left : Infinity
+    return gutter > discardSpace && bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
   }))
   await capture(`workspace-sidebar-jump-${width}x${height}`, savedDraftPage)
   await savedDraftPage.keyboard.up(primaryModifier)

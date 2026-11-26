@@ -152,7 +152,7 @@ const RESPONSIVE_SHELL = `
 [data-navigation-content] [data-sidebar-item] { min-height: 29px; }
 [data-navigation-content] [data-sidebar-item][hidden] { display: none; }
 [data-saved-drafts] { padding: 3px 6px 6px; margin-block-end: 4px; border-block-end: 1px solid var(--workspace-line); }
-[data-navigation-content] [data-saved-draft-link] { grid-template-columns: minmax(0, 1fr); padding-inline-end: 40px; background: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }
+[data-navigation-content] [data-saved-draft-link] { grid-template-columns: minmax(0, 1fr); padding-inline: 8px 40px; background: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }
 [data-saved-draft-link]:hover, [data-saved-draft-link][aria-current="page"] { background: color-mix(in srgb, var(--workspace-accent) 16%, transparent); }
 [data-saved-draft-link]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
 [data-sidebar-jump]::after, [data-model-jump] {
