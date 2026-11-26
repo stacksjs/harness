@@ -1,10 +1,6 @@
+import type { NativeClipboard } from './browser-clipboard'
+import { writeClipboardText } from './browser-clipboard'
 import { setTranscriptCodeWrap } from './transcript-markdown'
-
-interface NativeClipboard {
-  writeText?: (text: string) => Promise<void>
-  write?: (text: string) => Promise<void>
-  writeHTML?: (html: string) => Promise<void>
-}
 
 function tableCell(node: Node, markdown: boolean): string {
   if (node.nodeType === Node.TEXT_NODE) {
@@ -52,16 +48,6 @@ function tableCsv(table: HTMLTableElement): string {
   }).join(',')).join('\n')
 }
 
-async function writeText(target: Element, native: NativeClipboard | undefined, text: string): Promise<void> {
-  if (native?.writeText) await native.writeText(text)
-  else if (native?.write) await native.write(text)
-  else {
-    const clipboard = target.ownerDocument.defaultView?.navigator.clipboard
-    if (!clipboard) throw new Error('Clipboard unavailable')
-    await clipboard.writeText(text)
-  }
-}
-
 async function writeHtml(target: Element, native: NativeClipboard | undefined, html: string): Promise<void> {
   const richHtml = '<meta charset="utf-8">' + html
   if (native?.writeHTML) {
@@ -90,7 +76,7 @@ export async function useTranscriptControl(target: EventTarget | null, native?: 
   if (!format) {
     const code = copy.closest('.transcript-code')?.querySelector('code')?.textContent
     if (code != null) {
-      await writeText(copy, native, code)
+      await writeClipboardText(copy, code, native)
       return 'Code copied to clipboard.'
     }
     return
@@ -98,7 +84,7 @@ export async function useTranscriptControl(target: EventTarget | null, native?: 
   const table = copy.closest('.transcript-table')?.querySelector('table')
   if (!table) return
   if (format === 'html') await writeHtml(copy, native, table.outerHTML)
-  else await writeText(copy, native, format === 'csv' ? tableCsv(table) : tableMarkdown(table))
+  else await writeClipboardText(copy, format === 'csv' ? tableCsv(table) : tableMarkdown(table), native)
   const details = copy.closest('details')
   if (details) {
     details.open = false

@@ -1,4 +1,6 @@
+import type { NativeClipboard } from './browser-clipboard'
 import type { WorkspaceFileEntry, WorkspaceFilePreview } from './workspace-files'
+import { writeClipboardText } from './browser-clipboard'
 
 type Scope = { session: string } | { workspace: string }
 type Folder = { entries: WorkspaceFileEntry[], next: number | null, truncated: boolean }
@@ -176,16 +178,14 @@ export function workspaceFileLocation(element: Element | null | undefined): { pa
   return path ? { path, line: Number(params.get('line')) || 0 } : null
 }
 
-export async function copyWorkspaceFileLink(element: Element, path: string, line: number, native?: { writeText?: (text: string) => unknown, write?: (text: string) => unknown }): Promise<void> {
+export function copyWorkspaceFileLink(element: Element, path: string, line: number, native?: NativeClipboard): Promise<void> {
   const location = element.ownerDocument.location
   const url = new URL(location.href)
   url.searchParams.set('file', path)
   if (line > 0) url.searchParams.set('line', String(line))
   else url.searchParams.delete('line')
   url.hash = ''
-  if (native?.writeText) await native.writeText(url.href)
-  else if (native?.write) await native.write(url.href)
-  else await element.ownerDocument.defaultView!.navigator.clipboard.writeText(url.href)
+  return writeClipboardText(element, url.href, native)
 }
 
 export function scrollWorkspaceFileLine(element: HTMLElement | undefined, line: number): void {
