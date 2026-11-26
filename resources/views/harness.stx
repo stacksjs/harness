@@ -20,7 +20,7 @@ export const settingsSections = $props.settingsSections || []
 // The keyboard registry, with both platform spellings of every default chord.
 export const keybindings = $props.keybindings || []
 // Settings this host owns, shared by every client connected to it.
-export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null }
+export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 }
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const serverUrl = $props.serverUrl || ''
@@ -704,8 +704,24 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <button type="button" :disabled="!sessionOnline()" @click="openProjectScripts" class="min-h-8 font-medium underline underline-offset-2">Setup details</button>
           </div>
         </section>
+        <section data-project-settlement-status hidden :hidden="!projectSettlementStatus()" aria-label="Settlement script" class="grid mb-4 p-3 text-neutral-700 text-sm dark:text-neutral-200 border border-black/10 rounded-md dark:border-white/15">
+          <div class="flex flex-wrap gap-x-3 items-baseline justify-between min-w-0">
+            <p class="break-words font-medium" :text="projectSettlement()?.name"></p>
+            <p role="status" class="text-neutral-600 text-xs dark:text-neutral-300" :text="projectSettlementStatus()"></p>
+          </div>
+          <pre :hidden="!projectSettlement()?.output" :text="projectSettlement()?.output" class="overflow-hidden mt-2 p-2 break-words font-mono text-xs whitespace-pre-wrap bg-black/5 dark:bg-white/5 rounded"></pre>
+          <div :hidden="!projectSettlementTerminalAvailable()" class="flex items-center text-xs">
+            <button type="button" :disabled="!sessionOnline()" @click="viewProjectJobTerminal(projectSettlement())" class="min-h-11 font-medium underline underline-offset-2">Open settlement terminal</button>
+          </div>
+        </section>
       @endif
       @includeWhen(activeSession, '../partials/harness-follow-ups')
+      @if(activeSession)
+        <div data-thread-settled-note @if(!initialNavigation.settledAt || initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().settledAt || !!threadNavigation().archivedAt" class="flex flex-wrap gap-x-3 items-center mb-3 text-neutral-600 text-sm dark:text-neutral-300">
+          <span class="flex gap-1.5 items-center"><span class="size-4 i-hugeicons-checkmark-circle-02" aria-hidden="true"></span><span :text="threadNavigation().settledAutomatically ? 'Settled after inactivity' : 'Settled'">{{ initialNavigation.settledAutomatically ? 'Settled after inactivity' : 'Settled' }}</span></span>
+          <button type="button" :disabled="threadActionBusy() || !sessionOnline()" @click="organizeThread('unsettle')" class="min-h-11 font-medium underline underline-offset-2">Un-settle</button>
+        </div>
+      @endif
     </div>
     @if(activeSession)
       @include('../partials/harness-transcript-find')
@@ -841,7 +857,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         </div>
         <div class="flex items-center shrink-0">
           <span data-terminal-activity role="status" hidden :hidden="!terminalStatus()" :text="terminalStatus()" class="px-2 text-xs"></span>
-          <button type="button" data-terminal-restart hidden :hidden="!terminalExited() && !terminalError()" :disabled="terminalBusy() || !sessionOnline()" @click="restartTerminal" class="px-2 h-8 text-xs rounded-md">Restart terminal</button>
+          <button type="button" data-terminal-restart hidden :hidden="!canRestartTerminal()" :disabled="terminalBusy() || !sessionOnline()" @click="restartTerminal" aria-label="Restart terminal" title="Restart terminal" class="px-2 h-8 text-xs rounded-md">
+            <span data-terminal-restart-icon class="size-4 i-hugeicons-refresh" aria-hidden="true"></span>
+            <span data-terminal-restart-label>Restart terminal</span>
+          </button>
           <button type="button" aria-label="New terminal" :title="terminalShortcutTitle('terminal.new')" :aria-keyshortcuts="shortcutKeys('terminal.new')" :disabled="terminalBusy() || !sessionOnline()" @click="addTerminalTab()" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-add-01" aria-hidden="true"></span>
           </button>
@@ -1164,6 +1183,21 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </ul>
       <p data-repository-status role="status" :hidden="!projectRepositoryStatus()" :text="projectRepositoryStatus()" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-300"></p>
       <p data-repository-layout :hidden="!projectRepositoryLayout()" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">This project lays its own worktrees out with the command in its t3.json, so a thread here starts from the Harness host.</p>
+      </section>
+      <section :hidden="settingsSelection() !== 'threads'" data-settings-pane>
+        <h3 data-settings-section="threads" tabindex="-1">Threads</h3>
+        <div data-settings-fields>
+          <label data-settings-field for="settings-auto-settle" class="min-h-11 cursor-pointer">
+            <span>Auto-settle inactive threads</span>
+            <input id="settings-auto-settle" type="checkbox" :checked="settings().autoSettleAfterDays != null" @change="toggleAutoSettle">
+          </label>
+          <div data-settings-field :hidden="settings().autoSettleAfterDays == null">
+            <label for="settings-auto-settle-days">Days before auto-settle</label>
+            <input id="settings-auto-settle-days" type="number" min="1" max="90" step="any" required :value="settings().autoSettleAfterDays ?? 7" @change="changeAutoSettleDays" class="px-2 min-h-11 w-24 text-[13px] bg-transparent border border-black/10 rounded-md dark:border-white/15">
+          </div>
+        </div>
+        <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">The host settles idle threads even when the app is closed. Pinned and snoozed threads stay put. Choose Never in a thread’s actions to opt out.</p>
+        <p role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
       </section>
       <section :hidden="settingsSelection() !== 'providers'" data-settings-pane>
       <h3 data-settings-section="providers" tabindex="-1">Providers</h3>
@@ -1877,6 +1911,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     try {
       await sendThreadOrganization({ sessionId: target, action, ...fields })
       if (threadActionsDialog.current?.open) closeThreadActions()
+      if (action === 'auto-settle') {
+        threadActionBusy.set(false)
+        return
+      }
       if (action === 'archive' && target === sessionId) {
         if (activeScratchSession) startWithoutProject()
         else navigate(`/?workspace=${activeWorkspaceId}`)
@@ -1995,6 +2033,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     void updateSettings({ claudeAutoCompactAfter: input.value === '' ? null : Number(input.value) })
   }
 
+  function toggleAutoSettle(event) {
+    void updateSettings({ autoSettleAfterDays: event.currentTarget.checked ? 7 : null })
+  }
+
+  function changeAutoSettleDays(event) {
+    const input = event.currentTarget
+    if (!input.validity.valid) {
+      settingsSaveError.set('Enter a number from 1 to 90 days.')
+      return
+    }
+    void updateSettings({ autoSettleAfterDays: Number(input.value) })
+  }
+
   async function updateSettings(changes) {
     const previous = settings()
     if (Object.entries(changes).every(([key, value]) => previous[key] === value)) return
@@ -2056,8 +2107,22 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const waitingForProjectSetup = derived(() => projectSetup()?.blocking && ['pending', 'running'].includes(projectSetup()?.status))
   const projectSetupOwnsError = derived(() => projectSetupNeedsAttention() && sessionError().startsWith(projectSetupStatus()))
   let projectSetupPoll
-  let projectSetupRead = 0
+  let projectSetupRequest
   let projectSetupPreview = false
+  const projectSettlement = state(null)
+  const projectSettlementStatus = derived(() => {
+    const job = projectSettlement()
+    if (!job) return ''
+    if (job.status === 'pending') return 'Waiting to start settlement script…'
+    if (job.status === 'running') return 'Running settlement script…'
+    if (job.status === 'failed') return `Settlement script exited with code ${job.exitCode}.`
+    if (job.status === 'interrupted') return 'Settlement script was interrupted.'
+    if (job.status === 'skipped') return 'Settlement script skipped. The worktree or saved script changed.'
+    return ''
+  })
+  const projectSettlementTerminalAvailable = derived(() => ['running', 'failed', 'interrupted'].includes(projectSettlement()?.status))
+  let projectSettlementPoll
+  let projectSettlementRequest
   let projectScriptsTrigger = null
   let projectScriptsRead = 0
   const terminalTabs = derived(() => {
@@ -2670,14 +2735,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   async function refreshProjectSetup() {
-    if (!sessionId || !workspaceEditorAllowed) return
+    if (!sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
     projectSetupPoll?.stop()
-    const read = ++projectSetupRead
+    projectSetupRequest?.abort()
+    const request = new AbortController()
+    projectSetupRequest = request
     try {
-      const response = await fetch(`/s/${sessionId}/project-setup`)
-      if (!response.ok || read !== projectSetupRead) return
+      const response = await fetch(`/s/${sessionId}/project-setup`, { mode: 'same-origin', signal: request.signal })
+      if (!response.ok || request.signal.aborted) return
       const setup = await response.json()
-      if (read !== projectSetupRead) return
+      if (request.signal.aborted) return
       projectSetup.set(setup)
       if (projectSetupPreview && setup?.status === 'running' && setup.previewUrl && !projectScriptsDialog.current?.open) {
         projectSetupPreview = false
@@ -2688,8 +2755,37 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       else projectSetupPreview = false
     }
     catch {
-      if (read === projectSetupRead && sessionOnline() && (uiBusy() || projectSetup()?.status === 'running'))
+      if (!request.signal.aborted && sessionOnline() && (uiBusy() || projectSetup()?.status === 'running'))
         projectSetupPoll = useTimeout(refreshProjectSetup, 1500)
+    }
+  }
+
+  async function refreshProjectSettlement() {
+    if (!sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
+    projectSettlementPoll?.stop()
+    projectSettlementRequest?.abort()
+    const request = new AbortController()
+    projectSettlementRequest = request
+    try {
+      const response = await fetch(`/s/${sessionId}/project-settlement`, { mode: 'same-origin', signal: request.signal })
+      if (!response.ok || request.signal.aborted) return
+      const job = await response.json()
+      if (request.signal.aborted) return
+      const changed = job?.status !== projectSettlement()?.status || job?.output !== projectSettlement()?.output
+      projectSettlement.set(job)
+      if (changed && job) {
+        void nextTick(() => {
+          const transcript = transcriptRef.current
+          if (transcript && followingTranscript()) transcript.scrollTop = transcript.scrollHeight
+        })
+      }
+      if (job?.status === 'completed') finishTerminalClose(job.resumeKey, 'end')
+      if (job?.status === 'pending' || job?.status === 'running')
+        projectSettlementPoll = useTimeout(refreshProjectSettlement, 750)
+    }
+    catch {
+      if (!request.signal.aborted && sessionOnline() && projectSettlement()?.status === 'running')
+        projectSettlementPoll = useTimeout(refreshProjectSettlement, 1500)
     }
   }
 
@@ -2703,6 +2799,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     dialog.showModal()
     void refreshProjectScripts()
     void refreshProjectSetup()
+    void refreshProjectSettlement()
   }
 
   function closeProjectScripts(restore = true) {
@@ -2775,10 +2872,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function viewProjectSetupTerminal() {
-    const setup = projectSetup()
-    if (!setup || setup.status === 'pending' || !sessionOnline() || !terminalController()) return
+    viewProjectJobTerminal(projectSetup())
+  }
+
+  function viewProjectJobTerminal(job) {
+    if (!job || job.status === 'pending' || !sessionOnline() || !terminalController()) return
     const { tabs, directions } = terminalTabs()
-    const tab = { key: setup.resumeKey, number: (tabs.at(-1)?.number ?? 0) + 1, name: setup.name, started: true }
+    const tab = { key: job.resumeKey, number: (tabs.at(-1)?.number ?? 0) + 1, name: job.name, started: true }
     revealProjectTerminal(tabs.some(item => item.key === tab.key) ? tabs : [...tabs, tab], tab.key, directions)
   }
 
@@ -5435,6 +5535,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const terminalBusy = derived(() => Boolean(activeTerminalStatus()?.busy))
   const terminalExited = derived(() => Boolean(activeTerminalStatus()?.exited))
   const terminalError = derived(() => activeTerminalStatus()?.error || '')
+  const canRestartTerminal = derived(() => terminalExited() || Boolean(terminalError()))
   const terminalStatus = derived(() => activeTerminalStatus()?.reconnecting ? 'Reconnecting…' : activeTerminalStatus()?.activity || '')
   const canSplitTerminal = derived(() => sessionOnline() && !terminalBusy() && visibleTerminalTabs().length > 0 && visibleTerminalTabs().length < 4)
   let terminalTrigger = null
@@ -5488,9 +5589,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     terminalTrigger = null
   }
 
-  function focusActiveTerminalTab() {
+  function revealActiveTerminalTab() {
     const active = terminalTabStrip.current?.querySelector('[aria-selected="true"]')
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
+
+  effect(() => {
+    if (termOpen() && canRestartTerminal()) void nextTick(revealActiveTerminalTab)
+  })
+
+  function focusActiveTerminalTab() {
+    revealActiveTerminalTab()
     terminalController()?.focus(terminalTabs().activeKey)
   }
 
@@ -5940,8 +6049,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         paintTranscript(updateTranscriptMarkdown)
       }
       if (payload.type === 'session.navigation-changed') {
-        threadNavigation.update(previous => ({ ...previous, ...payload.changes }))
+        threadNavigation.update(previous => ({
+          ...previous, ...payload.changes,
+          ...('settledAt' in payload.changes && { settledAutomatically: payload.changes.settledAutomatically === true }),
+        }))
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
+        if (typeof payload.changes.settledAt === 'number') void refreshProjectSettlement()
       }
       if (payload.type === 'session.worktree-reserved') worktreeSetup.set(Boolean(payload.intent?.layout))
       if (payload.type === 'session.isolated') {
@@ -6001,7 +6114,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           if (!initialHasTurns && !liveTurns().length) currentThreadTitle.set(threadDisplayTitle(threadNavigation().title, payload.text))
           if (payload.switchedProvider || payload.freshContext) rewindableTurns.set([])
           if (threadNavigation().settledAt || threadNavigation().snoozedUntil)
-            threadNavigation.update(previous => ({ ...previous, settledAt: null, snoozedUntil: null }))
+            threadNavigation.update(previous => ({ ...previous, settledAt: null, snoozedUntil: null, settledAutomatically: false }))
           steerableTurn.set(0)
           runningTurnId.set(payload.turnId)
           liveTurns.update(turns => [...turns, {
@@ -6190,6 +6303,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           watchSidebarOrder()
           void followUpActions()?.flush()
           void refreshProjectSetup()
+          void refreshProjectSettlement()
           if (termOpen()) requestAnimationFrame(showTerminalProcess)
         }
         else {
@@ -6213,8 +6327,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   onUnmounted(() => sidebarDrafts?.dispose())
   onUnmounted(() => {
-    projectSetupRead++
+    projectSetupRequest?.abort()
     projectSetupPoll?.stop()
+    projectSettlementRequest?.abort()
+    projectSettlementPoll?.stop()
   })
   if (codecUrl) void connectComposerDrafts().catch(() => {})
   if ((sessionId || activeProfile) && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))

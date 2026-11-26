@@ -1603,6 +1603,242 @@ describe('a session can have a checkout of its own', () => {
     return path
   }
 
+  it.skipIf(process.platform === 'win32')('settles by stored activity after restart and runs the authorized worktree cleanup once', async () => {
+    const workspace = repoWorkspace2()
+    const databasePath = join(dir, 'test.sqlite')
+    const marker = join(dir, 'automatic-cleanup')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => driver }
+    const socket = `ws://127.0.0.1:${port}/ws`
+    harness = await serve(options)
+    let client = await Client.connect(socket)
+    try {
+      const { sessionId } = await bootstrapIsolated(client, workspace)
+      const workspaceId = derivedId('c_w')
+      const dispatch = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 5, command } })
+      dispatch('automatic-cleanup-prepare', { type: 'session.turn.start', sessionId, text: 'Prepare checkout.' })
+      expect(await client.waitFor('turn.completed', 5000)).toBeTruthy()
+      const http = `http://127.0.0.1:${port}`
+      const saved = await fetch(`${http}/s/${sessionId}/project-scripts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'save', script: { name: 'Clean checkout', command: `printf 'cleaned\\n' >> "${marker}"`, runOnSettle: true } }),
+      })
+      expect(saved.status).toBe(201)
+      dispatch('idle-policy-off', { type: 'settings.update', changes: { autoSettleAfterDays: null } })
+      expect(await client.waitForDispatch('idle-policy-off')).toMatchObject({ t: 'dispatched' })
+      const create = async (id: string) => {
+        dispatch(id, { type: 'session.create', workspaceId, driverKind: 'claude' })
+        return client.subscribeCreatedSession(id)
+      }
+      const empty = await create('idle-empty')
+      const never = await create('idle-never')
+      const recent = await create('idle-recent')
+      dispatch('idle-protect', { type: 'session.organize', sessionId: never, action: 'auto-settle', mode: 'never' })
+      expect(await client.waitForDispatch('idle-protect')).toMatchObject({ t: 'dispatched' })
+      client.close()
+      harness.stop()
+      {
+        using db = new Database(databasePath)
+        db.query("UPDATE events SET created_at = datetime('now', '-8 days') WHERE session_id IN (?, ?, ?)").run(sessionId, empty, never)
+      }
+      harness = await serve(options)
+      client = await Client.connect(socket)
+      expect(harness.engine.current.sessions.get(sessionId)?.navigation?.settledAt).toBeFalsy()
+      dispatch('idle-policy-on', { type: 'settings.update', changes: { autoSettleAfterDays: 7 } })
+      expect(await client.waitForDispatch('idle-policy-on')).toMatchObject({ t: 'dispatched' })
+      for (let attempt = 0; attempt < 100 && !existsSync(marker); attempt++) await Bun.sleep(50)
+      expect(readFileSync(marker, 'utf8')).toBe('cleaned\n')
+      const sessions = harness.engine.current.sessions
+      expect(sessions.get(empty)?.navigation?.settledAutomatically).toBe(true)
+      expect(sessions.get(sessionId)?.navigation?.settledAutomatically).toBe(true)
+      expect(sessions.get(never)?.navigation?.settledAt).toBeFalsy()
+      expect(sessions.get(recent)?.navigation?.settledAt).toBeFalsy()
+      expect(sessions.get(recent)!.lastActivityAt).toBeGreaterThan(Date.now() - 60_000)
+      dispatch('forged-idle', { type: 'thread.settle.inactive', sessionId: recent })
+      expect(await client.waitForRejection('forged-idle')).toBeTruthy()
+      dispatch('idle-restore', { type: 'session.organize', sessionId, action: 'unsettle' })
+      expect(await client.waitForDispatch('idle-restore')).toMatchObject({ t: 'dispatched' })
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const result = await fetch(`${http}/s/${sessionId}/project-settlement`)
+        if ((await result.json())?.status === 'completed') break
+        await Bun.sleep(25)
+      }
+      client.close()
+      harness.stop()
+      harness = await serve(options)
+      expect(harness.engine.current.sessions.get(sessionId)?.keepActiveUntilTurn).toBe(true)
+      expect(harness.engine.current.sessions.get(sessionId)?.navigation?.settledAt).toBeFalsy()
+      expect(readFileSync(marker, 'utf8')).toBe('cleaned\n')
+    }
+    finally { client.close() }
+  }, 25_000)
+
+  it.skipIf(process.platform === 'win32')('commits and runs one settlement script per isolated checkout transition', async () => {
+    const workspace = repoWorkspace2()
+    const databasePath = join(dir, 'test.sqlite')
+    const gate = join(dir, 'settlement-gate')
+    const succeed = join(dir, 'settlement-succeed')
+    const marker = join(dir, 'settlement-launches')
+    const command = `printf '%s\\n' "$T3CODE_WORKTREE_PATH" >> "${marker}"\nprintf 'Fixture cleanup\\n'\nwhile /bin/test ! -f "${gate}"; do sleep 0.1; done\n/bin/test -f "${succeed}" || exit 7`
+    writeFileSync(join(workspace, 't3.json'), JSON.stringify({ scripts: [{ name: 'Clean checkout', command, runOnSettle: true }] }))
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => driver }
+    const socket = `ws://127.0.0.1:${port}/ws`
+    harness = await serve(options)
+    let client = await Client.connect(socket)
+    try {
+      const { sessionId } = await bootstrapIsolated(client, workspace)
+      const base = `http://127.0.0.1:${port}/s/${sessionId}`
+      const post = (operation: unknown) => fetch(`${base}/project-scripts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation),
+      })
+      const { imports } = await (await fetch(`${base}/project-scripts`)).json()
+      expect(imports[0]).toMatchObject({ runOnSettle: true })
+      const imported = await post({ action: 'import', key: imports[0].key })
+      expect(imported.status).toBe(201)
+      const { script } = await imported.json()
+      expect((await post({ action: 'save', script: { name: 'Another cleanup', command: 'exit 9', runOnSettle: true } })).status).toBe(201)
+      const { scripts } = await (await fetch(`${base}/project-scripts`)).json()
+      expect(scripts.map((entry: { name: string, runOnSettle: boolean }) => [entry.name, entry.runOnSettle]))
+        .toEqual([['Clean checkout', false], ['Another cleanup', true]])
+      expect((await post({ action: 'save', id: script.id, script })).status).toBe(200)
+      expect(existsSync(marker)).toBe(false)
+      const dispatch = (id: string, command: Command) => client.send({ t: 'dispatch', envelope: { id, at: 5, command } })
+      dispatch('before-settlement', { type: 'session.turn.start', sessionId, text: 'Prepare an isolated checkout.' })
+      expect(await client.waitFor('turn.completed', 5000)).toBeTruthy()
+      const checkout = harness.engine.current.sessions.get(sessionId)!.worktreePath
+      expect(checkout).not.toBe(workspace)
+      const settle = { type: 'session.organize', sessionId, action: 'settle' } as const
+      {
+        using db = new Database(databasePath)
+        db.exec(`CREATE TRIGGER fail_settlement_intent BEFORE INSERT ON harness_project_settlements
+          BEGIN SELECT RAISE(ABORT, 'fixture refused settlement intent'); END`)
+      }
+      dispatch('rolled-back-settlement', settle)
+      expect(await client.waitForRejection('rolled-back-settlement')).toBeTruthy()
+      expect(harness.engine.current.sessions.get(sessionId)?.navigation?.settledAt).toBeFalsy()
+      expect(existsSync(marker)).toBe(false)
+      {
+        using db = new Database(databasePath)
+        expect(db.query('SELECT command_id FROM command_receipts WHERE command_id = ?').get('rolled-back-settlement')).toBeNull()
+        db.exec('DROP TRIGGER fail_settlement_intent')
+      }
+      const getJob = async (status: string) => {
+        const deadline = Date.now() + 5000
+        while (Date.now() < deadline) {
+          const job = await (await fetch(`${base}/project-settlement`)).json()
+          if (job?.status === status) return job
+          await Bun.sleep(20)
+        }
+        throw new Error(`Expected settlement state ${status}`)
+      }
+      dispatch('first-settlement', settle)
+      expect(await client.waitForDispatch('first-settlement')).toMatchObject({ t: 'dispatched', replayed: false })
+      expect(await getJob('running')).toMatchObject({ name: 'Clean checkout' })
+      writeFileSync(gate, '')
+      const failed = await getJob('failed')
+      expect(failed).toMatchObject({ exitCode: 7, output: 'Fixture cleanup' })
+      expect(failed).not.toHaveProperty('command')
+      client.close()
+      harness.stop()
+      harness = await serve(options)
+      client = await Client.connect(socket)
+      expect(await getJob('failed')).toMatchObject({ resumeKey: failed.resumeKey, exitCode: 7 })
+      client.send({ t: 'term-open', workspaceId: derivedId('c_w'), sessionId, resumeKey: failed.resumeKey, resumeOnly: true })
+      for (let attempt = 0; attempt < 100 && !client.events.some(frame => frame.t === 'term-opened'); attempt++) await Bun.sleep(20)
+      const terminal = client.events.find(frame => frame.t === 'term-opened')
+      expect(terminal).toMatchObject({ exit: { code: 7 } })
+      expect(JSON.stringify(terminal.checkpoint)).toContain('Fixture cleanup')
+      dispatch('first-settlement', settle)
+      expect(await client.waitForDispatch('first-settlement')).toMatchObject({ replayed: true })
+      expect(readFileSync(marker, 'utf8')).toBe(checkout + '\n')
+      dispatch('reopen-before-drop', { ...settle, action: 'unsettle' })
+      expect(await client.waitForDispatch('reopen-before-drop')).toMatchObject({ t: 'dispatched' })
+      writeFileSync(succeed, '')
+      dispatch('drop-settlement', { ...settle, action: 'drop', destination: 'settled' })
+      expect(await client.waitForDispatch('drop-settlement')).toMatchObject({ t: 'dispatched' })
+      const completed = await getJob('completed')
+      expect(completed).toMatchObject({ exitCode: 0, output: '' })
+      expect(completed.resumeKey).not.toBe(failed.resumeKey)
+      expect(readFileSync(marker, 'utf8')).toBe((checkout + '\n').repeat(2))
+      using db = new Database(databasePath)
+      expect(db.query('SELECT resume_key FROM harness_terminal_history WHERE resume_key = ?').get(completed.resumeKey)).toBeNull()
+    }
+    finally { client.close() }
+  }, 25_000)
+
+  it.skipIf(process.platform === 'win32')('recovers a pending host settlement after restart without launching from a paired or shared checkout', async () => {
+    const workspace = repoWorkspace2()
+    const databasePath = join(dir, 'test.sqlite')
+    const marker = join(dir, 'authorized-cleanup')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, localTokenPath: join(dir, 'host-token'), remote: true, resolveDriver: () => driver }
+    const socket = `ws://127.0.0.1:${port}/ws`
+    harness = await serve(options)
+    const paired = await harness.access!.redeem(harness.access!.openPairing().code, 'Fixture remote')
+    if (!paired.ok) throw new Error('Fixture pairing failed.')
+    const device = await Client.connect(socket, paired.token)
+    let host = await Client.connect(socket, harness.access!.localToken)
+    try {
+      const { sessionId } = await bootstrapIsolated(host, workspace)
+      const base = `http://127.0.0.1:${port}/s/${sessionId}`
+      const auth = (token = harness.access!.localToken) => ({ authorization: `Bearer ${token}` })
+      const settlementUrl = `${base}/project-settlement`
+      const status = async () => (await fetch(settlementUrl, { headers: auth() })).json()
+      const save = await fetch(`${base}/project-scripts`, {
+        method: 'POST',
+        headers: { ...auth(), 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'save', script: { name: 'Clean checkout', command: `printf 'cleaned\\n' >> "${marker}"`, runOnSettle: true } }),
+      })
+      expect(save.status).toBe(201)
+      const dispatch = (id: string, command: Command, socket = host) => socket.send({ t: 'dispatch', envelope: { id, at: 5, command } })
+      const settle = { type: 'session.organize', sessionId, action: 'settle' } as const
+      dispatch('authorized-prepare', { type: 'session.turn.start', sessionId, text: 'Prepare an isolated checkout.' })
+      expect(await host.waitFor('turn.completed', 5000)).toBeTruthy()
+      dispatch('shared-thread', { type: 'session.create', workspaceId: derivedId('c_w'), driverKind: 'claude' })
+      const shared = await host.subscribeCreatedSession('shared-thread')
+      dispatch('shared-settle', { ...settle, sessionId: shared })
+      expect(await host.waitForDispatch('shared-settle')).toMatchObject({ t: 'dispatched' })
+      expect(await (await fetch(`http://127.0.0.1:${port}/s/${shared}/project-settlement`, { headers: auth() })).json()).toBeNull()
+      dispatch('paired-settle', settle, device)
+      expect(await device.waitForDispatch('paired-settle')).toMatchObject({ t: 'dispatched' })
+      expect((await fetch(settlementUrl, { headers: auth(paired.token) })).status).toBe(403)
+      expect(await status()).toBeNull()
+      expect(existsSync(marker)).toBe(false)
+      dispatch('unsettle-before-host', { ...settle, action: 'unsettle' })
+      expect(await host.waitForDispatch('unsettle-before-host')).toMatchObject({ t: 'dispatched' })
+      {
+        using db = new Database(databasePath)
+        db.exec(`CREATE TRIGGER defer_settlement_claim BEFORE UPDATE ON harness_project_settlements
+          WHEN NEW.status = 'running' BEGIN SELECT RAISE(ABORT, 'fixture host stopped before launch'); END`)
+      }
+      dispatch('host-settle-after-pairing', settle)
+      expect(await host.waitForDispatch('host-settle-after-pairing')).toMatchObject({ t: 'dispatched' })
+      const pending = await status()
+      expect(pending).toMatchObject({ status: 'pending' })
+      expect(existsSync(marker)).toBe(false)
+      host.close()
+      harness.stop()
+      {
+        using db = new Database(databasePath)
+        db.exec('DROP TRIGGER defer_settlement_claim')
+      }
+      harness = await serve(options)
+      host = await Client.connect(socket, harness.access!.localToken)
+      let job = await status()
+      for (let attempt = 0; attempt < 100 && job?.status !== 'completed'; attempt++) {
+        await Bun.sleep(25)
+        job = await status()
+      }
+      expect(job).toMatchObject({ status: 'completed', resumeKey: pending.resumeKey, exitCode: 0 })
+      expect(readFileSync(marker, 'utf8')).toBe('cleaned\n')
+    }
+    finally {
+      device.close()
+      host.close()
+    }
+  }, 25_000)
+
   it.skipIf(process.platform === 'win32').each([true, false])('runs worktree setup with provider waiting set to %s', async (waitForSetup) => {
     const workspace = repoWorkspace2()
     const gate = join(dir, 'finish-setup')
@@ -2997,7 +3233,7 @@ describe('host settings belong to the host', () => {
     const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' } } } })
     expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
 
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
@@ -3024,7 +3260,7 @@ describe('host settings belong to the host', () => {
     // The setting is in the log, so a fresh process over the same database
     // still has it.
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
     harness.stop()
 
     // A different host, which is a different log: independent by construction
@@ -3032,7 +3268,7 @@ describe('host settings belong to the host', () => {
     const otherDatabase = join(dir, 'other.sqlite')
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {

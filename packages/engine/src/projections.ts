@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -43,6 +43,8 @@ export interface SessionState {
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
   lastSeq: number
+  lastActivityAt?: number
+  keepActiveUntilTurn?: boolean
   navigation?: ThreadNavigation
   turns: TurnState[]
   lastTurnId?: number
@@ -77,6 +79,7 @@ export interface SessionState {
    * checkout behind.
    */
   worktreePath: string
+  settledSeq?: number
   /** The branch its work lands on. Empty until isolated. */
   branch: string
 }
@@ -347,6 +350,24 @@ export function isTurnActive(state: SessionState['state']): boolean {
   return state === 'running' || state === 'awaiting-approval' || state === 'awaiting-input'
 }
 
+export function inactivityDeadline(session: SessionState, settings: HostSettings): number | undefined {
+  const navigation = session.navigation
+  if (settings.autoSettleAfterDays == null || session.lastActivityAt === undefined
+    || session.keepActiveUntilTurn || session.state === 'stopped' || isTurnActive(session.state)
+    || navigation?.archivedAt || navigation?.settledAt || navigation?.pinnedOrder != null
+    || navigation?.snoozedUntil != null || navigation?.autoSettle === 'never'
+    || session.pendingApprovals.length || session.pendingInputs.length || session.followUps.entries.length
+    || session.pendingRewind || session.conversationRewind || session.fork?.state === 'pending') return
+  return session.lastActivityAt + Math.round(settings.autoSettleAfterDays * 86_400_000)
+}
+
+export function recordsThreadActivity(payload: EventPayload): boolean {
+  return payload.type === 'session.created' || payload.type === 'turn.started' || payload.type === 'turn.completed'
+    || payload.type === 'turn.interrupted' || payload.type === 'turn.failed' || payload.type === 'session.failed'
+    || payload.type === 'session.fork-finished' || payload.type === 'session.fork-failed'
+    || (payload.type === 'session.navigation-changed' && payload.changes.snoozedUntil === null)
+}
+
 function syncTurnWaitingState(session: SessionState): void {
   session.state = session.pendingApprovals.length ? 'awaiting-approval'
     : session.pendingInputs.length ? 'awaiting-input' : 'running'
@@ -371,6 +392,8 @@ function turn(session: SessionState, turnId: number): TurnState | undefined {
  */
 export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
   const p = event.payload
+  const observedAt = event.recordedAt === undefined ? event.at : event.recordedAt
+  const beforeNavigation = p.type === 'session.navigation-changed' ? state.sessions.get(event.sessionId)?.navigation : undefined
 
   switch (p.type) {
     case 'settings.updated': {
@@ -601,6 +624,12 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.navigation = { ...session.navigation, ...p.changes }
+      if ('settledAt' in p.changes) {
+        session.settledSeq = typeof p.changes.settledAt === 'number' ? event.seq : undefined
+        if (p.changes.settledAutomatically === undefined) delete session.navigation.settledAutomatically
+        if (beforeNavigation?.settledAt && p.changes.settledAt === null && p.changes.snoozedUntil === undefined)
+          session.keepActiveUntilTurn = true
+      }
       const workspace = state.workspaces.get(session.workspaceId)
       const profile = workspace && state.profiles.get(workspace.profileId)
       if (profile) projectThreadUndo(profile, event.sessionId, event.at, p)
@@ -725,7 +754,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (session.navigation?.settledAt || session.navigation?.snoozedUntil) {
         session.navigation.settledAt = null
         session.navigation.snoozedUntil = null
+        delete session.navigation.settledAutomatically
       }
+      if (!p.automaticCompaction) delete session.keepActiveUntilTurn
+      session.settledSeq = undefined
       clearTurnRequests(session)
       session.lastTurnId = Math.max(session.lastTurnId ?? 0, p.turnId)
       session.turns.push({
@@ -974,6 +1006,14 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
   if (session) {
     session.lastSeq = Math.max(session.lastSeq, event.seq)
     session.followUps = applyFollowUpEvent(session.followUps, p)
+    if (observedAt != null && observedAt > 0 && Number.isFinite(observedAt) && recordsThreadActivity(p)) {
+      const endedTurn = 'turnId' in p && turn(session, p.turnId)
+      const woke = p.type === 'session.navigation-changed' ? beforeNavigation?.snoozedUntil : undefined
+      if ((p.type !== 'session.navigation-changed' || woke != null) && (!endedTurn || !endedTurn.automaticCompaction)) {
+        const activityAt = woke != null ? Math.min(observedAt, woke) : observedAt
+        session.lastActivityAt = Math.max(session.lastActivityAt ?? activityAt, activityAt)
+      }
+    }
   }
 
   return state

@@ -25,6 +25,7 @@ interface WorkspaceTerminal<Peer> {
   exit?: { code: number | null }
   stopOnSettle?: boolean
   settleJob?: (code: number | null) => void
+  closeOnSuccess?: boolean
 }
 
 function savedTerminalScope(scope: TerminalScope): SavedTerminalScope | undefined {
@@ -88,10 +89,13 @@ export class WorkspaceTerminals<Peer> {
     this.attach(peer, terminal, saved !== undefined, script?.autoOpenPreview ? script.previewUrl : undefined)
   }
 
-  runProjectJob(scope: SavedTerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, script: ProjectScript, signal: AbortSignal): Promise<number | null> {
+  runProjectJob(scope: SavedTerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, script: ProjectScript, signal: AbortSignal,
+    closeOnSuccess = false,
+  ): Promise<number | null> {
     if (signal.aborted) return Promise.resolve(null)
     return new Promise((resolve) => {
       const terminal = this.create(scope, shell, options, undefined, script)
+      terminal.closeOnSuccess = closeOnSuccess
       const cancel = () => this.finishJob(terminal, null, true)
       terminal.settleJob = (code) => {
         signal.removeEventListener('abort', cancel)
@@ -150,6 +154,14 @@ export class WorkspaceTerminals<Peer> {
     terminal.settleJob?.(code)
     terminal.settleJob = undefined
     this.broadcast(terminal, { t: 'term-exit', termId: terminal.id, code })
+    if (code === 0 && terminal.closeOnSuccess) {
+      try {
+        if (terminal.savedScope) this.history.remove(terminal.savedScope)
+      }
+      catch { this.warnHistory() }
+      this.remove(terminal)
+      return
+    }
     if (!terminal.scope.resumeKey) this.terminals.delete(terminal.id)
   }
 

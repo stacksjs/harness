@@ -30,6 +30,17 @@
       <button type="button" data-thread-action :hidden="!threadNavigation().settledAt" @click="organizeThread('unsettle')" :disabled="threadActionBusy()">
         <span class="i-hugeicons-undo-02" aria-hidden="true"></span>Un-settle thread
       </button>
+      <button type="button" data-thread-action :aria-expanded="threadActionForm() === 'auto-settle'" aria-controls="thread-auto-settle" @click="openThreadActionForm('auto-settle')" :disabled="threadActionBusy()">
+        <span class="i-hugeicons-timer-02" aria-hidden="true"></span>Auto-settle behavior
+      </button>
+      <div id="thread-auto-settle" role="group" aria-label="Auto-settle behavior" :hidden="threadActionForm() !== 'auto-settle'" class="ps-4">
+        <button type="button" data-thread-action :aria-pressed="threadNavigation().autoSettle !== 'never'" @click="organizeThread('auto-settle', { mode: 'follow-settings' })" :disabled="threadActionBusy()">
+          <span class="i-hugeicons-checkmark-circle-02" :style="{ visibility: threadNavigation().autoSettle !== 'never' ? 'visible' : 'hidden' }" aria-hidden="true"></span>Follow settings
+        </button>
+        <button type="button" data-thread-action :aria-pressed="threadNavigation().autoSettle === 'never'" @click="organizeThread('auto-settle', { mode: 'never' })" :disabled="threadActionBusy()">
+          <span class="i-hugeicons-checkmark-circle-02" :style="{ visibility: threadNavigation().autoSettle === 'never' ? 'visible' : 'hidden' }" aria-hidden="true"></span>Never
+        </button>
+      </div>
       <button type="button" data-thread-action :hidden="!threadNavigation().snoozedUntil" @click="organizeThread('wake')" :disabled="threadActionBusy()">
         <span class="i-hugeicons-alarm-clock" aria-hidden="true"></span>Wake thread
       </button>

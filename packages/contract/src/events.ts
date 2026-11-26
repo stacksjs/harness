@@ -20,6 +20,8 @@ export interface EventBase {
   /** The command this event came from, for idempotency and for tracing. */
   commandId: string
   at: number
+  /** Host storage clock for activity events. Older stores can omit it. */
+  recordedAt?: number | null
 }
 
 export interface CheckoutIntent {

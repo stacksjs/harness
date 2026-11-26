@@ -146,6 +146,7 @@ export type ClientCommand =
  */
 export type InternalCommand =
   | { type: 'thread.snooze.elapsed', sessionId: number, until: number }
+  | { type: 'thread.settle.inactive', sessionId: number }
   | { type: 'thread.steer.ready', sessionId: number, turnId: number }
   | { type: 'thread.steer.settle', sessionId: number, id: string, requestId: string, outcome: SteeringOutcome }
   | { type: 'thread.queue.advance', sessionId: number }

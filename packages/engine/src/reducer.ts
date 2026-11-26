@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
-import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, isTurnActive, isolatedRewindScope, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, sharesCheckout, threadShelf } from './projections'
+import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, inactivityDeadline, isTurnActive, isolatedRewindScope, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, sharesCheckout, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -266,6 +266,12 @@ function organizeThreadEvents(state: HarnessState, session: SessionState, comman
     case 'settle':
       if (isTurnActive(session.state)) throw new InvalidCommand('Wait for the turn to finish before settling.')
       return settledAt ? [] : [change({ settledAt: at, ...(session.navigation?.activeOrder != null && { activeOrder: null }), pinnedOrder: null, snoozedUntil: null })]
+    case 'auto-settle': {
+      if (command.mode !== 'never' && command.mode !== 'follow-settings')
+        throw new InvalidCommand('Choose whether this thread follows auto-settle settings.')
+      const autoSettle = command.mode === 'never' ? 'never' : null
+      return autoSettle === (session.navigation?.autoSettle ?? null) ? [] : [change({ autoSettle })]
+    }
     case 'unsettle':
       return settledAt ? [change({ settledAt: null })] : []
     case 'archive':
@@ -853,6 +859,17 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session?.navigation?.snoozedUntil || session.navigation.snoozedUntil !== command.until || command.until > at) return []
       return [{ sessionId: session.id, commandId, at, payload: { type: 'session.navigation-changed', changes: { snoozedUntil: null, settledAt: null } } }]
+    }
+
+    case 'thread.settle.inactive': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session || !state.workspaces.has(session.workspaceId)) return []
+      const deadline = inactivityDeadline(session, state.settings)
+      if (deadline === undefined || deadline > at) return []
+      return [{ sessionId: session.id, commandId, at, payload: {
+        type: 'session.navigation-changed',
+        changes: { settledAt: session.lastActivityAt, settledAutomatically: true, activeOrder: null },
+      } }]
     }
 
     case 'session.handoff': {

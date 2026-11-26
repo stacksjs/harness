@@ -3,6 +3,8 @@ export interface ThreadNavigation {
   pinnedOrder?: number | null
   activeOrder?: number | null
   settledAt?: number | null
+  settledAutomatically?: boolean
+  autoSettle?: 'never' | null
   archivedAt?: number | null
   snoozedUntil?: number | null
 }
@@ -15,13 +17,14 @@ export type ThreadDrop = {
 export type ThreadOrganizationAction =
   | { action: 'rename', title: string }
   | { action: 'snooze', until: number }
+  | { action: 'auto-settle', mode: 'never' | 'follow-settings' }
   | { action: 'move-pin', direction: 'up' | 'down' }
   | { action: 'reorder-pin', targetSessionId: number, placement: 'before' | 'after' }
   | ({ action: 'drop' } & ThreadDrop)
   | { action: 'undo', sourceCommandId: string }
   | { action: 'pin' | 'unpin' | 'settle' | 'unsettle' | 'archive' | 'restore' | 'wake' }
 
-export type ThreadPlacement = Omit<ThreadNavigation, 'title'>
+export type ThreadPlacement = Pick<ThreadNavigation, typeof threadPlacementKeys[number]>
 
 export const threadPlacementKeys = ['pinnedOrder', 'activeOrder', 'settledAt', 'archivedAt', 'snoozedUntil'] as const
 

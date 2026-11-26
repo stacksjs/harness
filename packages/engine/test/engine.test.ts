@@ -640,10 +640,10 @@ describe('Engine — the client/internal boundary', () => {
 describe('Host settings', () => {
   it('records only what changed and replays to the same state', async () => {
     const { engine, store } = await bootedEngine()
-    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
 
     await engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'queue' } }))
-    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
 
     // `followUpBehavior` was already queue, so the log records the one field
     // that moved. Restating the rest would make the log unable to answer what
@@ -677,7 +677,50 @@ describe('Host settings', () => {
       at: clock,
       payload: { type: 'settings.updated', changes: { defaultDriver: 'retired-agent', followUpBehavior: 'steer' } as never },
     }], emptyState())
-    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null })
+    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+  })
+})
+
+describe('Inactivity settlement', () => {
+  it('uses the host setting and rechecks opt-outs, active work, and a timer wake', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const create = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+    await engine.dispatch(create)
+    const sessionId = derivedId(create.id)
+    const day = 86_400_000
+    const settle = () => engine.dispatchInternal(envelope({ type: 'thread.settle.inactive', sessionId }))
+    const organize = (action: Extract<Command, { type: 'session.organize' }>) => engine.dispatch(envelope(action))
+    clock = create.at + 7 * day - 10
+    expect((await settle()).events).toHaveLength(0)
+    await organize({ type: 'session.organize', sessionId, action: 'auto-settle', mode: 'never' })
+    clock += 3 * day
+    expect((await settle()).events).toHaveLength(0)
+    await organize({ type: 'session.organize', sessionId, action: 'auto-settle', mode: 'follow-settings' })
+    await organize({ type: 'session.organize', sessionId, action: 'pin' })
+    expect((await settle()).events).toHaveLength(0)
+    await organize({ type: 'session.organize', sessionId, action: 'unpin' })
+    const until = clock + day
+    await organize({ type: 'session.organize', sessionId, action: 'snooze', until })
+    expect((await settle()).events).toHaveLength(0)
+    clock = until + 100
+    await engine.dispatchInternal(envelope({ type: 'thread.snooze.elapsed', sessionId, until }))
+    expect(engine.current.sessions.get(sessionId)?.lastActivityAt).toBe(until)
+    expect((await settle()).events).toHaveLength(0)
+    await engine.dispatch(envelope({ type: 'settings.update', changes: { autoSettleAfterDays: null } }))
+    clock += 8 * day
+    expect((await settle()).events).toHaveLength(0)
+    await engine.dispatch(envelope({ type: 'settings.update', changes: { autoSettleAfterDays: 7 } }))
+    const settled = await settle()
+    expect(settled.events[0]?.payload).toMatchObject({ changes: { settledAt: until, settledAutomatically: true } })
+    await organize({ type: 'session.organize', sessionId, action: 'unsettle' })
+    expect((await settle()).events).toHaveLength(0)
+    await engine.dispatch(envelope({ type: 'session.turn.start', sessionId, text: 'Resume work.' }))
+    clock += 8 * day
+    expect((await settle()).events).toHaveLength(0)
+    await engine.dispatchInternal(envelope({ type: 'thread.turn.complete', sessionId, turnId: 1, tokensIn: 0, tokensOut: 0, cost: 0 }))
+    expect((await settle()).events).toHaveLength(0)
+    expect(replay(await store.readAll()).sessions.get(sessionId)).toEqual(engine.current.sessions.get(sessionId))
   })
 })
 

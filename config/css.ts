@@ -872,6 +872,7 @@ const TERMINAL_PANEL = `
 [data-terminal-pane-picker] button:focus-visible,
 .terminal-host:focus-visible { outline: 1px solid #8db1ee; outline-offset: -2px; }
 [data-terminal-toolbar] button:disabled { opacity: .46; cursor: default; }
+[data-terminal-restart-icon] { display: none; }
 [data-terminal-activity] { white-space: nowrap; }
 [data-terminal-output] {
   display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden;
@@ -905,6 +906,10 @@ const TERMINAL_PANEL = `
   [data-terminal-output] [data-terminal-pane]:not([data-active="true"]) { display: none; }
   [data-terminal-pane-picker] button { min-height: 36px; padding-inline: 10px; }
   [data-terminal-toolbar] .harness-icon-button { width: 34px; height: 36px; flex-basis: 34px; }
+  [data-terminal-restart] { width: 34px; height: 36px; padding: 0; }
+  [data-terminal-restart-icon] { display: inline-block; vertical-align: middle; }
+  [data-terminal-restart-label] { display: none; }
+  [data-terminal-tabs] [role="tab"] { max-inline-size: 100%; overflow: hidden; text-overflow: ellipsis; }
 }
 .terminal-toggle {
   display: grid; place-items: center; flex: 0 0 32px; height: 32px;
