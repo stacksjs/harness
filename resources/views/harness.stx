@@ -1277,6 +1277,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const diffWrap = useLocalStorage('harness.diffWrap', true)
   const diffRefresh = state(0)
   const diffReviewMode = state('session')
+  const diffRepository = state('')
+  const diffRepositories = state([])
+  const diffProjectRoot = state(false)
   const diffBaseRef = state('')
   const diffCommit = state('')
   const diffTurn = state('')
@@ -3418,7 +3421,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const controller = new AbortController()
     const active = () => !controller.signal.aborted && diffTools.workspaceDiffContextKey(diffHunks().get(path)) === key
     const promise = diffTools.loadWorkspaceDiffContext(sessionId, path, hunks[0].beforeObject, {
-      mode: diffReviewMode(), target: diffComparisonTarget,
+      mode: diffReviewMode(), target: diffComparisonTarget, repository: diffRepository(),
     }, controller.signal).then(lines => {
       if (!active()) return
       const value = { lines, revealed: new Map() }
@@ -3458,6 +3461,22 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       diffLineReveal.set(null)
       diffContexts.set(new Map())
     })
+  }
+
+  function selectDiffRepository(repository) {
+    clearDiffComparison()
+    batch(() => {
+      diffReviewOptions.set(null)
+      diffRepository.set(repository)
+      diffReviewMode.set(repository ? 'uncommitted' : 'session')
+      diffBaseRef.set('')
+      diffCommit.set('')
+      diffTurn.set('')
+    })
+  }
+
+  function changeDiffRepository(event) {
+    selectDiffRepository(event.currentTarget.value)
   }
 
   function changeDiffReviewMode(event) {
@@ -3529,7 +3548,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (!line) return
     try {
       await diffTools.copyWorkspaceDiffLink(event.currentTarget, {
-        ...line, mode: diffReviewMode(), target: diffComparisonTarget,
+        ...line, mode: diffReviewMode(), target: diffComparisonTarget, repository: diffRepository(),
       }, desktop()?.clipboard)
       diffLineNotice.set('Line link copied.')
     }
@@ -3542,6 +3561,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     clearDiffComparison()
     pendingDiffLineLink = link
     batch(() => {
+      diffRepository.set(link.repository || '')
       diffReviewMode.set(link.mode)
       diffBaseRef.set(link.mode === 'branch' ? link.target || '' : '')
       diffCommit.set(link.mode === 'commit' ? link.target : '')
@@ -3629,15 +3649,25 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   effect(() => {
     const load = reviewOptionsLoader()
     const base = diffBaseRef()
+    const repository = diffRepository()
     diffRefresh()
     if (!sessionId || !load || !diffOpen() || changesVisibility() !== 'visible') return
     const controller = new AbortController()
     const { signal } = controller
     diffReviewError.set('')
-    void load(sessionId, base, signal).then(options => {
-      if (!signal.aborted) diffReviewOptions.set({ ...options, requestedBase: base })
-    }).catch(() => {
-      if (!signal.aborted) diffReviewError.set('Could not load Git review options.')
+    void load(sessionId, base, repository, signal).then(options => {
+      if (signal.aborted) return
+      batch(() => {
+        diffRepositories.set(options.repositories)
+        diffProjectRoot.set(options.hasProjectRepository)
+        if (!repository && !options.hasProjectRepository && options.repositories.length) {
+          selectDiffRepository(options.repositories[0].key)
+          return
+        }
+        diffReviewOptions.set({ ...options, requestedBase: base })
+      })
+    }).catch(error => {
+      if (!signal.aborted) diffReviewError.set(error.message)
     })
     return () => controller.abort()
   })
@@ -3647,6 +3677,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     diffRefresh()
     if (!sessionId || !watchChanges || !diffOpen() || changesVisibility() !== 'visible') return
     const mode = diffReviewMode()
+    const repository = diffRepository()
     let target
     if (mode === 'branch') target = diffBaseRef()
     if (mode === 'commit') {
@@ -3667,8 +3698,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       }
       target = diffTurn()
     }
-    const comparison = mode === 'session' ? undefined : { mode, target }
-    return watchChanges(sessionId, showWorkspaceChanges, () => diffStatus.set('Could not refresh changes.'), comparison)
+    const comparison = mode === 'session' ? undefined : { mode, target, repository }
+    return watchChanges(sessionId, showWorkspaceChanges, error => diffStatus.set(error || 'Could not refresh changes.'), comparison)
   })
 
   let diffTrigger = null
@@ -3777,10 +3808,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return diffLineSelection()?.side === 'after' && ['session', 'uncommitted', 'branch'].includes(diffReviewMode())
   }
 
+  function diffWorkingFile(path) {
+    return diffRepository() ? `${diffRepository()}/${path}` : path
+  }
+
   function chooseDiffEditor(event) {
     if (!canOpenDiffLineInEditor()) return
     const { path, line } = diffLineSelection()
-    void chooseWorkspaceEditor(event, path, line)
+    void chooseWorkspaceEditor(event, diffWorkingFile(path), line)
   }
 
   async function loadWorkspaceFiles() {

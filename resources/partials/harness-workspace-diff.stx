@@ -13,15 +13,30 @@
       <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
     </button>
   </header>
-  <div data-diff-comparison hidden :hidden="!diffReviewOptions()?.isRepository">
-    <label>
+  <div data-diff-comparison hidden :hidden="!diffReviewOptions()?.isRepository && !diffRepositories().length">
+    <label hidden :hidden="!diffRepositories().length">
+      <span>Repository</span>
+      <select aria-label="Git repository" :value="diffRepository()" @change="changeDiffRepository">
+        <template :if="diffProjectRoot()">
+          <option value="">Project root</option>
+        </template>
+        <template :for="repo in diffRepositories()" :key="repo.key">
+          <option :value="repo.key" :text="repo.label"></option>
+        </template>
+      </select>
+    </label>
+    <label hidden :hidden="!diffReviewOptions()?.isRepository">
       <span>Compare</span>
       <select aria-label="Git comparison" :value="diffReviewMode()" @change="changeDiffReviewMode">
-        <option value="session">Session changes</option>
+        <template :if="!diffRepository()">
+          <option value="session">Session changes</option>
+        </template>
         <option value="uncommitted">Uncommitted</option>
         <option value="branch">Branch changes</option>
         <option value="commit">Commit</option>
-        <option value="turn">Turn</option>
+        <template :if="!diffRepository()">
+          <option value="turn">Turn</option>
+        </template>
       </select>
     </label>
     <label hidden :hidden="diffReviewMode() !== 'branch'">
@@ -74,7 +89,7 @@
               <span class="shrink-0 ml-auto font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
             </button>
             @if(workspaceEditorAllowed)
-              <button type="button" data-diff-file-editor :hidden="file.status === 'deleted'" class="harness-icon-button" :aria-label="'Open ' + file.path + ' in editor'" title="Open working file in editor" aria-haspopup="dialog" @click="chooseWorkspaceEditor($event, file.path)">
+              <button type="button" data-diff-file-editor :hidden="file.status === 'deleted'" class="harness-icon-button" :aria-label="'Open ' + file.path + ' in editor'" title="Open working file in editor" aria-haspopup="dialog" @click="chooseWorkspaceEditor($event, diffWorkingFile(file.path))">
                 <span class="size-4 i-hugeicons-source-code" aria-hidden="true"></span>
               </button>
             @endif

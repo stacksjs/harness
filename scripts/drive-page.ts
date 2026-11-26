@@ -3868,6 +3868,67 @@ await page.waitForFunction(() => document.activeElement?.matches('[data-diff-sid
 check('a linked unchanged line expands its gap and receives focus', true)
 await capture('changes-context-linked-phone')
 
+// Both repositories use the same path so a stale patch or link cannot pass by filename.
+const multiRepoProject = join(driveRoot, 'project-repositories')
+for (const [folder, label] of [['api', 'API'], ['packages/web', 'Web']] as const) {
+  const path = join(multiRepoProject, folder)
+  mkdirSync(path, { recursive: true })
+  writeFileSync(join(path, 'shared.txt'), 'Shared baseline\n')
+  execFileSync('git', ['init', '-qb', 'main'], { cwd: path })
+  execFileSync('git', ['add', 'shared.txt'], { cwd: path })
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Shared baseline'], { cwd: path })
+  execFileSync('git', ['switch', '-qc', 'review/fixture'], { cwd: path })
+  writeFileSync(join(path, 'shared.txt'), `Shared baseline\n${label} in commit\n`)
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', `${label} review fixture`], { cwd: path })
+  writeFileSync(join(path, 'shared.txt'), `Shared baseline\n${label} in commit\n${label} working copy\n`)
+}
+writeFileSync(join(multiRepoProject, 'fixture.code-workspace'), '{"folders":[{"name":"API service","path":"api"},{"name":"Web frontend","path":"packages/web"}]}')
+const multiRepoId = 'project-repositories'
+const multiRepoWorkspace = derivedId(multiRepoId)
+await harness.engine.dispatch({ id: multiRepoId, at: Date.now(), command: { type: 'workspace.add', profileId: derivedId(ledgerProfile), path: multiRepoProject } })
+await harness.engine.dispatch({ id: 'project-repositories-trust', at: Date.now(), command: { type: 'workspace.trust', workspaceId: multiRepoWorkspace, trusted: true } })
+await harness.engine.dispatch({ id: 'project-repositories-thread', at: Date.now(), command: { type: 'session.create', workspaceId: multiRepoWorkspace, driverKind: 'claude' } })
+const multiRepoPath = `/s/${derivedId('project-repositories-thread')}`
+await page.setViewportSize({ width: 1440, height: 900 })
+await page.goto(new URL(multiRepoPath, baseUrl).href)
+await headerChanges.click()
+const repoPicker = ledgerPanel.getByRole('combobox', { name: 'Git repository' })
+await ledgerPanel.getByText('API working copy', { exact: true }).waitFor()
+check('a plain project opens Changes in its first discovered repository and lists only available choices',
+  await repoPicker.inputValue() === 'api'
+  && await repoPicker.locator('option').count() === 2
+  && await ledgerComparison.locator('option[value="session"], option[value="turn"]').count() === 0)
+await repoPicker.selectOption('packages/web')
+await ledgerPanel.getByText('Web working copy', { exact: true }).waitFor()
+check('switching repositories replaces the patch even when files share a path',
+  await ledgerPanel.getByText('API working copy', { exact: true }).isHidden())
+await ledgerComparison.selectOption('commit')
+await ledgerPanel.getByText('Web in commit', { exact: true }).waitFor()
+check('commit review uses the selected repository and excludes its working copy',
+  await ledgerPanel.getByText('Web working copy', { exact: true }).isHidden()
+  && await ledgerPanel.getByRole('option', { name: /Web review fixture/ }).count() === 1)
+await capture('project-repositories-review-desktop')
+await page.evaluate(() => {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (text: string) => { sessionStorage.setItem('harness-test-diff-link', text) } },
+  })
+})
+await ledgerPanel.getByRole('button', { name: 'After line 2', exact: true }).click()
+await ledgerPanel.getByRole('button', { name: 'Copy line link' }).click()
+await ledgerPanel.getByText('Line link copied.', { exact: true }).waitFor()
+const repositoryLine = new URL((await page.evaluate(() => sessionStorage.getItem('harness-test-diff-link')))!)
+check('the copied line link identifies the selected project repository',
+  new URLSearchParams(repositoryLine.hash.slice('#diff?'.length)).get('repository') === 'packages/web')
+await page.setViewportSize({ width: 390, height: 844 })
+await page.goto(repositoryLine.href)
+await ledgerPanel.getByRole('button', { name: 'After line 2', pressed: true }).waitFor()
+check('the repository link restores the right line and selection on phones',
+  await repoPicker.inputValue() === 'packages/web'
+  && await repoPicker.evaluate(element => element.getBoundingClientRect().height >= 44)
+  && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+await capture('project-repositories-linked-phone')
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()

@@ -14,6 +14,7 @@ export interface DiffLineLocation {
 export interface DiffLineLink extends DiffLineLocation {
   mode: WorkspaceReviewMode | 'session'
   target?: string
+  repository?: string
 }
 
 interface DiffRow {
@@ -186,7 +187,9 @@ export function workspaceDiffLocation(hash: string): DiffLineLink | null {
   if (mode === 'turn' && !positiveInteger(target)) return null
   if (mode === 'branch' && target && !/^refs\/(?:heads|remotes)\/.+/u.test(target)) return null
   if (mode !== 'commit' && mode !== 'turn' && mode !== 'branch' && mode !== 'session' && mode !== 'uncommitted') return null
-  return { path, side, line: Number(line), mode, target }
+  const repository = params.get('repository') || undefined
+  if (repository && (mode === 'session' || mode === 'turn')) return null
+  return { path, side, line: Number(line), mode, target, ...(repository && { repository }) }
 }
 
 function positiveInteger(value: string | null | undefined): boolean {
@@ -200,6 +203,7 @@ export function workspaceDiffLink(href: string, location: DiffLineLink): string 
   if (profile && positiveInteger(profile)) url.searchParams.set('profile', profile)
   const params = new URLSearchParams({ file: location.path, side: location.side, line: String(location.line), mode: location.mode })
   if (location.target) params.set('target', location.target)
+  if (location.repository) params.set('repository', location.repository)
   url.hash = `diff?${params}`
   return url.href
 }
