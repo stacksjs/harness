@@ -5442,7 +5442,10 @@ await modelBatchContext.close()
 
 const savedDraftContext = await browser.newContext({ colorScheme, reducedMotion })
 const savedDraftPage = await savedDraftContext.newPage()
-savedDraftPage.on('pageerror', error => pageErrors.push(error.message))
+savedDraftPage.on('pageerror', error => {
+  console.error('Saved draft page error at', new URL(savedDraftPage.url()).pathname, error.message)
+  pageErrors.push(error.message)
+})
 await savedDraftPage.setViewportSize({ width: 1440, height: 900 })
 await savedDraftPage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
 const savedEditor = savedDraftPage.getByRole('textbox', { name: 'Message', exact: true })
@@ -5562,7 +5565,10 @@ try {
   await savedLink('Draft changed in another tab').waitFor()
   check('the sidebar reflects a saved draft edit from another tab', true)
 }
-finally { await sharedDraftWriter.close() }
+finally {
+  await sharedDraftWriter.waitForLoadState('networkidle')
+  await sharedDraftWriter.close()
+}
 await savedLink('1 attachment').click()
 await savedDraftPage.waitForURL(savedFileUrl)
 await savedDraftPage.getByText('unsent-notes.txt', { exact: true }).waitFor()
@@ -5606,7 +5612,9 @@ check('previous stays at the first visible item', savedDraftPage.url() === topBe
 await savedDraftPage.addInitScript(() => {
   Object.assign(window, { craft: { menu: { set: () => {} } } })
 })
+await savedDraftPage.waitForLoadState('networkidle')
 await savedDraftPage.goto(backgroundDraftUrl)
+await savedDraftPage.bringToFront()
 await savedDraftPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
 await savedLink('Saved draft two').waitFor()
 const primaryModifier = await savedDraftPage.evaluate(() =>
@@ -5674,6 +5682,7 @@ const jumpPinnedId = derivedId('numbered-sidebar-pinned-thread')
 await harness.engine.dispatch({ id: 'numbered-sidebar-active-thread', at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
 await harness.engine.dispatch({ id: 'numbered-sidebar-pinned-thread', at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
 await harness.engine.dispatch({ id: 'numbered-sidebar-initial-pin', at: Date.now(), command: { type: 'session.organize', sessionId: jumpPinnedId, action: 'pin' } })
+await savedDraftPage.waitForLoadState('networkidle')
 await savedDraftPage.goto(backgroundDraftUrl)
 const selectedPanel = savedDraftPage.locator('[data-space-active="true"]')
 const jumpPinned = selectedPanel.locator(`[data-section-id^="pinned-"] a[href="/s/${jumpPinnedId}"]`)
@@ -5699,6 +5708,9 @@ await savedDraftPage.keyboard.up(primaryModifier)
 await pressChord('Meta+6', savedDraftPage)
 await savedDraftPage.waitForURL(new URL(expandedSixth || '', baseUrl).href)
 check('collapsed shelves give their numbers to the following visible threads', Boolean(expandedSixth) && expandedSixth !== sixthHref)
+// A fixture context is torn down immediately. Let the destination's catalog
+// and settlement requests complete first, as they would in an open tab.
+await savedDraftPage.waitForLoadState('networkidle')
 await savedDraftContext.close()
 
 check('browser reported no script errors', pageErrors.length === 0)
