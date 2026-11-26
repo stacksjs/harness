@@ -4040,6 +4040,23 @@ const webChange = changedFilesForTurn.getByRole('button', { name: 'Review shared
 check('the streamed turn lists each repository and the recorded line counts', await webChange.isVisible()
   && await changedFilesForTurn.getByRole('button', { name: 'Review shared.txt in api' }).isVisible()
   && await changedFilesForTurn.locator('[data-turn-file-insertions]:visible').count() === 2)
+check('file totals have readable contrast against the active appearance', await webChange.evaluate(button => {
+  const shell = button.closest('[data-harness-shell]')
+  if (!shell) return false
+  const luminance = (color: string) => {
+    const rgb = color.match(/\d+(?:\.\d+)?/g)?.slice(0, 3).map(Number)
+    if (!rgb || rgb.length !== 3) return NaN
+    const channels = rgb.map(channel => channel / 255).map(channel =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+    return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722
+  }
+  const background = luminance(getComputedStyle(shell).backgroundColor)
+  const totals = [...button.querySelectorAll('[data-turn-file-insertions], [data-turn-file-deletions]')]
+  return totals.length === 2 && totals.every((total) => {
+    const foreground = luminance(getComputedStyle(total).color)
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) >= 4.5
+  })
+}))
 for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
   await page.setViewportSize({ width, height })
   await changedFilesForTurn.scrollIntoViewIfNeeded()
