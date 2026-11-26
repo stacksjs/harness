@@ -3,6 +3,7 @@ import {
   ariaKeyshortcuts,
   chordText,
   conflictingCommand,
+  craftShortcut,
   defaultKeybindings,
   formatChord,
   keybindingCommands,
@@ -167,6 +168,18 @@ describe('stored overrides', () => {
     expect(conflictingCommand(bindings, 'Mod+K', 'thread.search')).toBeNull()
     expect(conflictingCommand(bindings, 'Mod+Shift+K', 'thread.search')).toBeNull()
   })
+
+  it('lets a focused terminal command share a chord with a workspace command', () => {
+    const native = { apple: true, craft: true }
+    const stored = { 'thread.search': 'Mod+D' }
+    const resolved = resolveKeybindings(stored, native)
+    const chord = press({ code: 'KeyD', meta: true })
+    expect(resolved.overrides).toEqual(stored)
+    expect(matchCommand(resolved.bindings, chord, native)).toBe('thread.search')
+    expect(matchCommand(resolved.bindings, chord, { ...native, terminalFocus: true })).toBe('terminal.split')
+    expect(conflictingCommand(resolved.bindings, 'Mod+D', 'terminal.new')?.id).toBe('terminal.split')
+    expect(conflictingCommand(resolved.bindings, 'Mod+D', 'thread.search')).toBeNull()
+  })
 })
 
 describe('matching a keypress', () => {
@@ -202,9 +215,45 @@ describe('matching a keypress', () => {
     expect(matchCommand(rebound, press({ code: 'KeyK', key: 'k', meta: true, shift: true }))).toBe('thread.search')
     expect(matchCommand(rebound, press({ code: 'KeyK', key: 'k', meta: true }))).toBeNull()
   })
+
+  it('keeps terminal commands local to the focused pane and protects shell Control keys', () => {
+    const desktop = { apple: true, craft: true }
+    const terminal = { ...desktop, terminalFocus: true }
+    const native = defaultKeybindings(desktop)
+    const split = press({ code: 'KeyD', meta: true })
+    expect(matchCommand(native, split, desktop)).toBeNull()
+    expect(matchCommand(native, split, terminal)).toBe('terminal.split')
+    expect(matchCommand(native, press({ code: 'KeyD', meta: true, shift: true }), terminal)).toBe('terminal.splitVertical')
+    expect(matchCommand(native, press({ code: 'KeyN', meta: true }), terminal)).toBe('terminal.new')
+    expect(matchCommand(native, press({ code: 'KeyW', meta: true }), terminal)).toBe('terminal.close')
+    expect(matchCommand(native, press({ code: 'KeyD', ctrl: true }), terminal)).toBeNull()
+    expect(matchCommand(native, press({ code: 'KeyK', ctrl: true }), terminal)).toBeNull()
+    expect(matchCommand(native, press({ code: 'Backquote', ctrl: true }), terminal)).toBe('terminal.toggle')
+    expect(matchCommand(bindings, press({ code: 'KeyW', ctrl: true }), { terminalFocus: true })).toBeNull()
+    expect(matchCommand(bindings, press({ code: 'KeyW', alt: true, shift: true }), { terminalFocus: true })).toBe('terminal.close')
+  })
+
+  it('keeps browser-reserved new and close chords out of defaults and formats Craft accelerators', () => {
+    const browser = defaultKeybindings({ apple: true })
+    expect(browser['terminal.new']).toBe('Alt+Shift+N')
+    expect(browser['terminal.close']).toBe('Alt+Shift+W')
+    expect(ariaKeyshortcuts(parseChord('Mod+Shift+D')!, true)).toBe('Meta+Shift+D')
+    expect(craftShortcut('Mod+Shift+D')).toBe('cmd+shift+d')
+    expect(craftShortcut('Ctrl+Alt+ArrowUp')).toBe('ctrl+alt+up')
+  })
 })
 
 describe('the override store', () => {
+  it('resolves and resets terminal overrides against platform defaults', () => {
+    const mac = { apple: true, craft: true }
+    const storage = fakeStorage()
+    const store = createKeybindingStore(storage, undefined, mac)
+    expect(store.read().bindings['terminal.close']).toBe('Mod+W')
+    expect(store.save('terminal.close', 'Alt+Shift+W').ok).toBe(true)
+    expect(store.read().overrides).toEqual({ 'terminal.close': 'Alt+Shift+W' })
+    expect(store.reset('terminal.close').bindings['terminal.close']).toBe('Mod+W')
+  })
+
   it('saves, reports, and resets one binding', () => {
     const storage = fakeStorage()
     const store = createKeybindingStore(storage)

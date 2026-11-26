@@ -34,7 +34,7 @@ export { watchWorkspaceChanges } from './packages/server/src/browser-workspace-c
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
 export { chosenSnoozeTime, threadSnoozeChoices } from './packages/server/src/browser-thread-snooze'
 export { currentSettingsSection, showSettingsSection, leaveSettings } from './packages/server/src/browser-settings-location'
-export { ariaKeyshortcuts, chordFromEvent, chordText, formatChord, formatChordText, matchCommand, parseChord } from './packages/server/src/keybindings'
+export { ariaKeyshortcuts, chordFromEvent, chordText, craftShortcut, formatChord, formatChordText, matchCommand, parseChord } from './packages/server/src/keybindings'
 export { createKeybindingStore, KEYBINDINGS_KEY } from './packages/server/src/keybindings-store'
 export { createTranscriptFinder } from './packages/server/src/browser-transcript-find'
 export { createTranscriptHighlighter } from './packages/server/src/browser-transcript-highlight'

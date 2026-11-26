@@ -312,7 +312,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           </button>
         @endif
         @if(activeWorkspaceId)
-          <button type="button" data-header-pane data-header-terminal ref="termHeaderToggle" @click="toggleTerminal" aria-label="Open terminal" title="Terminal" aria-controls="harness-terminal" :aria-expanded="termOpen() ? 'true' : 'false'" class="harness-icon-button">
+          <button type="button" data-header-pane data-header-terminal ref="termHeaderToggle" @click="toggleTerminal" aria-label="Open terminal" :title="terminalShortcutTitle('terminal.toggle')" :aria-keyshortcuts="shortcutKeys('terminal.toggle')" aria-controls="harness-terminal" :aria-expanded="termOpen() ? 'true' : 'false'" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
           </button>
         @endif
@@ -663,16 +663,16 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <div class="flex items-center shrink-0">
           <span data-terminal-activity role="status" hidden :hidden="!terminalStatus()" :text="terminalStatus()" class="px-2 text-xs"></span>
           <button type="button" data-terminal-restart hidden :hidden="!terminalExited() && !terminalError()" :disabled="terminalBusy() || !sessionOnline()" @click="restartTerminal" class="px-2 h-8 text-xs rounded-md">Restart terminal</button>
-          <button type="button" aria-label="New terminal" title="New terminal" :disabled="terminalBusy() || !sessionOnline()" @click="addTerminalTab()" class="harness-icon-button">
+          <button type="button" aria-label="New terminal" :title="terminalShortcutTitle('terminal.new')" :aria-keyshortcuts="shortcutKeys('terminal.new')" :disabled="terminalBusy() || !sessionOnline()" @click="addTerminalTab()" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-add-01" aria-hidden="true"></span>
           </button>
-          <button type="button" data-terminal-split="columns" aria-label="Split terminal side by side" title="Split terminal side by side" :disabled="!canSplitTerminal()" @click="addTerminalTab('columns')" class="harness-icon-button">
+          <button type="button" data-terminal-split="columns" aria-label="Split terminal side by side" :title="terminalShortcutTitle('terminal.split')" :aria-keyshortcuts="shortcutKeys('terminal.split')" :disabled="!canSplitTerminal()" @click="addTerminalTab('columns')" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-layout-2-column" aria-hidden="true"></span>
           </button>
-          <button type="button" data-terminal-split="rows" aria-label="Split terminal top and bottom" title="Split terminal top and bottom" :disabled="!canSplitTerminal()" @click="addTerminalTab('rows')" class="harness-icon-button">
+          <button type="button" data-terminal-split="rows" aria-label="Split terminal top and bottom" :title="terminalShortcutTitle('terminal.splitVertical')" :aria-keyshortcuts="shortcutKeys('terminal.splitVertical')" :disabled="!canSplitTerminal()" @click="addTerminalTab('rows')" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-layout-2-row" aria-hidden="true"></span>
           </button>
-          <button type="button" aria-label="End terminal session" title="End terminal session" hidden :hidden="!activeTerminalTab()" :disabled="terminalBusy() || !sessionOnline()" @click="endTerminal" class="harness-icon-button">
+          <button type="button" aria-label="End terminal session" :title="terminalShortcutTitle('terminal.close')" :aria-keyshortcuts="shortcutKeys('terminal.close')" hidden :hidden="!activeTerminalTab()" :disabled="terminalBusy() || !sessionOnline()" @click="endTerminal" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-stop" aria-hidden="true"></span>
           </button>
           <button type="button" aria-label="Hide terminal dock" title="Hide terminal dock" @click="toggleTerminal" class="harness-icon-button">
@@ -688,7 +688,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         <div :for="pane in visibleTerminalTabs()" :key="pane.key" data-terminal-pane :data-active="pane.key === terminalTabs().activeKey ? 'true' : 'false'">
           <p data-terminal-error role="alert" hidden :hidden="!terminalStates()[pane.key]?.error" :text="terminalStates()[pane.key]?.error || ''" class="px-3 py-2 text-red-300 text-sm"></p>
           <div role="group" :data-terminal-host="pane.key" :aria-label="(terminalStates()[pane.key]?.shell || 'Terminal') + ' ' + pane.number + ' input and output'"
-            @focus="selectTerminalPane(pane.key)" @keydown="termKeydown(pane, $event)" @paste="terminalController()?.paste(pane.key, $event)"
+            @focus="focusTerminalInput(pane.key)" @blur="blurTerminalInput($event)" @keydown="termKeydown(pane, $event)" @paste="terminalController()?.paste(pane.key, $event)"
             @scroll="terminalController()?.track(pane.key, $event)" tabindex="0" class="terminal-host">
             <span data-term-metric aria-hidden="true" class="term-metric">0123456789</span>
             <div data-terminal-screen></div>
@@ -724,7 +724,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         ><span class="inline-block size-4 i-hugeicons-file-02" aria-hidden="true"></span><span>Changes</span></button>
         @endif
         @if(activeWorkspaceId)
-          <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
+          <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" :title="terminalShortcutTitle('terminal.toggle')" :aria-keyshortcuts="shortcutKeys('terminal.toggle')" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
             <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
             <span>Terminal</span>
           </button>
@@ -1632,6 +1632,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const keybindingOverridden = derived(() => Object.keys(keybindingOverrides()).length > 0)
   const recordingKeybinding = state('')
   const keybindingStatus = state('')
+  const terminalInputFocused = state(false)
+  const craftMenuReady = state(typeof desktop()?.menu?.set === 'function')
+  desktop.onReady(craft => craftMenuReady.set(typeof craft.menu?.set === 'function'))
   // Which spelling of a chord this keyboard uses. `userAgentData` first — it
   // is the only one of the three that is not deprecated — then the two older
   // fields, because Safari and WebKit still answer only those.
@@ -1646,11 +1649,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   function chordLabel(id) {
     const row = keybindingRow(id)
     const bound = keybindingTable()?.bindings?.[id]
-    if (keyboard && bound && bound !== row?.chord) return keyboard.formatChordText(bound, appleKeyboard)
+    if (keyboard && bound) return keyboard.formatChordText(bound, appleKeyboard)
     return (appleKeyboard ? row?.apple : row?.other) || ''
   }
 
   const settingsShortcutTitle = derived(() => `Settings (${chordLabel('settings.open')})`)
+
+  function terminalShortcutTitle(id) {
+    const label = keybindingRow(id)?.label || ''
+    const chord = chordLabel(id)
+    return chord ? `${label} (${chord})` : label
+  }
 
   // What a control advertising this chord should put in `aria-keyshortcuts`.
   // Rebinding has to move the announced chord too, or assistive technology
@@ -1658,17 +1667,32 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   function shortcutKeys(id) {
     const row = keybindingRow(id)
     const bound = keybindingTable()?.bindings?.[id]
-    if (keyboard && bound && bound !== row?.chord) {
+    if (keyboard && bound) {
       const chord = keyboard.parseChord(bound)
-      if (chord) return keyboard.ariaKeyshortcuts(chord)
+      if (chord) return keyboard.ariaKeyshortcuts(chord, appleKeyboard && row?.scope === 'terminal')
     }
     return row?.aria || ''
   }
 
-  function matchedCommand(event) {
+  function matchedCommand(event, terminalFocus = false) {
     const table = keybindingTable()
-    return keyboard && table ? keyboard.matchCommand(table.bindings, event) : null
+    return keyboard && table ? keyboard.matchCommand(table.bindings, event, { terminalFocus, apple: appleKeyboard }) : null
   }
+
+  function readKeyboardStore(craft) {
+    keybindingStore = keyboard.createKeybindingStore(localStorage, keyboard.KEYBINDINGS_KEY, { apple: appleKeyboard, craft })
+    const resolved = keybindingStore.read()
+    keybindingTable.set(resolved)
+    if (resolved.rejected.length) {
+      const names = resolved.rejected.map(entry => keybindingRow(entry.id)?.label || entry.id)
+      keybindingStatus.set(`Restored the default shortcut for ${names.join(', ')}.`)
+    }
+  }
+
+  effect(() => {
+    const craft = craftMenuReady()
+    if (keyboard) readKeyboardStore(craft)
+  })
 
   // Load the registry once, and report anything the stored overrides lost. A
   // preference that silently reverts reads as a bug in the setting, so the
@@ -1677,14 +1701,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (!codecUrl || keybindingStore) return
     try {
       const module = await import(codecUrl)
-      keybindingStore = module.createKeybindingStore(localStorage)
       keyboard = module
-      const resolved = keybindingStore.read()
-      keybindingTable.set(resolved)
-      if (resolved.rejected.length) {
-        const names = resolved.rejected.map(entry => keybindingRow(entry.id)?.label || entry.id)
-        keybindingStatus.set(`Restored the default shortcut for ${names.join(', ')}.`)
-      }
+      readKeyboardStore(craftMenuReady())
       // Announced on the document, because "the chords work now" is not
       // visible on screen: a test, or a person watching, otherwise cannot
       // tell a chord that did nothing from one that arrived too early.
@@ -1731,7 +1749,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         keybindingStatus.set(appleKeyboard ? 'Hold ⌘, ⌃, or ⌥ and press a key.' : 'Hold Ctrl or Alt and press a key.')
       return
     }
-    const text = keyboard.chordText(chord)
+    const text = keyboard.chordText(appleKeyboard && keybindingRow(id)?.scope === 'terminal' ? { ...chord, mod: event.metaKey } : chord)
     const result = keybindingStore.save(id, text)
     const shown = keyboard.formatChordText(text, appleKeyboard)
     if (result.ok) {
@@ -2781,8 +2799,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // the webview at all — and id items come back as `craft:menu:action`
   // events, routed below. In a plain browser there is no bridge and the
   // browser's own menus apply.
-  if (window.craft?.menu?.set) {
-    window.craft.menu.set({ menus: [
+  effect(() => {
+    if (!craftMenuReady()) return
+    const focused = termOpen() && terminalInputFocused()
+    const bindings = keybindingTable()?.bindings
+    const canOperate = focused && sessionOnline() && !terminalBusy()
+    const canSplit = focused && canSplitTerminal()
+    const terminalItem = (id, enabled) => ({
+      id,
+      label: keybindingRow(id)?.label,
+      shortcut: keyboard?.craftShortcut(bindings?.[id]),
+      enabled,
+    })
+    desktop()?.menu?.set({ menus: [
       { label: 'harness', items: [
         { id: 'about', label: 'About harness', role: 'about' },
         { separator: true },
@@ -2795,9 +2824,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         { id: 'quit', label: 'Quit harness', role: 'quit', shortcut: 'cmd+q' },
       ] },
       { label: 'File', items: [
-        { id: 'new-session', label: 'New Session', shortcut: 'cmd+n' },
+        { id: 'new-session', label: 'New Session', shortcut: focused ? undefined : 'cmd+n' },
+        ...(focused ? [terminalItem('terminal.new', canOperate)] : []),
         { separator: true },
-        { id: 'close-window', label: 'Close Window', role: 'close', shortcut: 'cmd+w' },
+        { id: 'close-window', label: 'Close Window', role: 'close', shortcut: focused ? undefined : 'cmd+w' },
+        ...(focused ? [terminalItem('terminal.close', canOperate)] : []),
       ] },
       { label: 'Edit', items: [
         { id: 'undo', label: 'Undo', role: 'undo', shortcut: 'cmd+z' },
@@ -2809,7 +2840,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         { id: 'select-all', label: 'Select All', role: 'selectAll', shortcut: 'cmd+a' },
       ] },
       { label: 'View', items: [
-        { id: 'toggle-terminal', label: 'Toggle Terminal', shortcut: 'ctrl+`' },
+        { id: 'toggle-terminal', label: 'Toggle Terminal', shortcut: keyboard?.craftShortcut(bindings?.['terminal.toggle']) ?? 'ctrl+`' },
+        ...(focused ? [terminalItem('terminal.split', canSplit), terminalItem('terminal.splitVertical', canSplit)] : []),
         { separator: true },
         { id: 'reload', label: 'Reload', role: 'reload', shortcut: 'cmd+r' },
       ] },
@@ -2820,13 +2852,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         { id: 'front', label: 'Bring All to Front', role: 'front' },
       ] },
     ] })
-  }
+  })
 
   useEventListener('craft:menu:action', (event) => {
     const id = event.detail?.id
     if (id === 'settings') openSettings()
     else if (id === 'new-session') openDraft(visibleProfile())
     else if (id === 'toggle-terminal') toggleTerminal()
+    else if (termOpen() && terminalInputFocused()) runTerminalShortcut(id)
   }, { target: window })
 
   // Access: the devices paired with this server. Revoking dispatches the
@@ -3490,6 +3523,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     void nextTick(focusActiveTerminalTab)
   }
 
+  function focusTerminalInput(key) {
+    selectTerminalPane(key)
+    terminalInputFocused.set(true)
+  }
+
+  function blurTerminalInput(event) {
+    if (!event.relatedTarget?.closest?.('[data-terminal-host]')) terminalInputFocused.set(false)
+  }
+
   function terminalTabKeydown(event) {
     const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
     const index = tabs.indexOf(event.target)
@@ -3595,6 +3637,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       captureKeybinding(event)
       return
     }
+    if (event.defaultPrevented) return
     if (projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open || threadActionsDialog.current?.open) return
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
@@ -3625,7 +3668,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     // A command whose precondition fails is left unhandled rather than
     // swallowed, so Cmd+F still reaches the browser's own find on a page with
     // no transcript.
-    const command = matchedCommand(event)
+    const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
     if (command === 'transcript.find' && sessionId) {
       event.preventDefault()
       openTranscriptFind(event.target)
@@ -3652,7 +3695,23 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }, { target: window })
 
   function termKeydown(tab, event) {
-    if (matchedCommand(event) !== 'terminal.toggle') terminalController()?.keydown(tab, event)
+    const command = matchedCommand(event, true)
+    if (command === 'settings.open') return
+    if (!command) {
+      terminalController()?.keydown(tab, event)
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    if (!event.repeat) runTerminalShortcut(command)
+  }
+
+  function runTerminalShortcut(command) {
+    if (command === 'terminal.toggle') toggleTerminal()
+    else if (command === 'terminal.new') addTerminalTab()
+    else if (command === 'terminal.split') addTerminalTab('columns')
+    else if (command === 'terminal.splitVertical') addTerminalTab('rows')
+    else if (command === 'terminal.close') void endTerminal()
   }
 
   // The page speaks CBOR to the socket, so it needs the same codec the server

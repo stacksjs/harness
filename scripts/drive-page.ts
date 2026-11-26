@@ -667,6 +667,11 @@ await page.keyboard.type('for i in $(seq 1 35); do echo "history-$i"; done')
 await page.keyboard.press('Enter')
 await waitForTerminalLine('history-35')
 const terminalHost = page.locator('[data-terminal-host]')
+const terminalShortcut = async (label: string): Promise<string> => {
+  const chord = (await page.getByRole('button', { name: label, exact: true }).getAttribute('aria-keyshortcuts'))?.split(' ')[0]
+  if (!chord) throw new Error(`Missing advertised shortcut for ${label}`)
+  return chord
+}
 await page.keyboard.press('Control+Shift+Home')
 await page.keyboard.type('echo "latest-$((40+5))"')
 await page.keyboard.press('Enter')
@@ -692,12 +697,12 @@ check('a terminal saved before tabs reopens as the first tab', await firstTermin
 await terminalHost.focus()
 await page.keyboard.type('sleep 1; echo "away-$n"')
 await page.keyboard.press('Enter')
-await page.getByRole('button', { name: 'New terminal', exact: true }).click()
+await terminalHost.press(await terminalShortcut('New terminal'))
 await waitForTerminalLine('Harness test terminal')
 await page.keyboard.type('n=73; echo "second-$n"')
 await page.keyboard.press('Enter')
 await waitForTerminalLine('second-73')
-check('a new terminal tab has its own output', await secondTerminalTab.getAttribute('aria-selected') === 'true'
+check('the new-terminal shortcut opens a tab with its own output', await secondTerminalTab.getAttribute('aria-selected') === 'true'
   && !(await terminalScreen.textContent())?.includes('still-44'))
 await page.reload()
 await waitForTerminalLine('second-73')
@@ -746,7 +751,10 @@ const waitForPaneLine = (number: number, line: string) => page.waitForFunction((
 { label: `Terminal ${number} input and output`, line })
 
 await page.setViewportSize({ width: 1280, height: 800 })
-await splitColumns.click()
+const columnsKey = await terminalShortcut('Split terminal side by side')
+await headerTerminal.press(columnsKey)
+check('the split shortcut is scoped to terminal input', await paneHost(2).count() === 0)
+await paneHost(1).press(columnsKey)
 await waitForPaneLine(2, 'Harness test terminal')
 await typeInPane(2, 'n=73; echo "split-$n"')
 await waitForPaneLine(2, 'split-73')
@@ -780,7 +788,7 @@ await waitForPaneLine(2, 'phone-73')
 await capture('terminal-split-phone-360')
 
 await page.setViewportSize({ width: 1280, height: 800 })
-await splitRows.click()
+await paneHost(2).press(await terminalShortcut('Split terminal top and bottom'))
 await waitForPaneLine(3, 'Harness test terminal')
 const topPane = await paneHost(1).boundingBox()
 const bottomPane = await paneHost(3).boundingBox()
@@ -819,9 +827,20 @@ await waitForPaneLine(4, 'Harness test terminal')
 check('the fifth pane is refused without disabling standalone tabs', await splitRows.isDisabled() && await splitColumns.isDisabled()
   && await page.getByRole('button', { name: 'New terminal', exact: true }).isEnabled())
 
+await paneHost(4).focus()
+await page.waitForFunction(() => {
+  const file = (window as any).__menuSet?.menus?.find((menu: { label: string }) => menu.label === 'File')
+  return file?.items?.some((item: { id?: string, shortcut?: string }) => item.id === 'terminal.close' && item.shortcut)
+})
+check('while terminal input is focused, the Craft menu routes close to the terminal', await page.evaluate(() => {
+  const items = (window as any).__menuSet?.menus?.find((menu: { label: string }) => menu.label === 'File')?.items
+  return !items?.find((item: { id?: string }) => item.id === 'close-window')?.shortcut
+    && !items?.find((item: { id?: string }) => item.id === 'new-session')?.shortcut
+}))
 for (const number of [4, 3, 2]) {
   await paneHost(number).focus()
-  await endTerminal.click()
+  if (number === 4) await page.evaluate(() => window.dispatchEvent(new CustomEvent('craft:menu:action', { detail: { id: 'terminal.close' } })))
+  else await paneHost(number).press(await terminalShortcut('End terminal session'))
   await terminalCloseDialog.getByRole('button', { name: 'End terminal', exact: true }).click()
   await terminalCloseDialog.waitFor({ state: 'hidden' })
   await paneHost(number).waitFor({ state: 'detached' })
@@ -830,9 +849,10 @@ await waitForPaneLine(1, 'left-42')
 check('closing split panes leaves the first PTY and its scrollback running', await firstTerminalTab.getAttribute('aria-selected') === 'true'
   && !await terminalGroupPicker.isVisible())
 
-await page.keyboard.type('exit')
-await page.keyboard.press('Enter')
+await paneHost(1).press('Control+D')
 const restartTerminal = page.getByRole('button', { name: 'Restart terminal' })
+await restartTerminal.waitFor({ state: 'visible' })
+check('Control+D reaches the shell and exits a focused pane', await paneHost(1).count() === 1)
 await restartTerminal.click()
 await page.waitForFunction(() => document.activeElement?.matches('[data-terminal-host]')
   && document.querySelector('[data-terminal-screen]')?.textContent?.includes('Harness test terminal')
@@ -962,6 +982,7 @@ await keyboardReload.close()
 // The window answers the new chord and no longer answers the old one.
 await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
 await page.waitForURL(settingsReturn)
+await headerTerminal.focus()
 await pressChord('Meta+K')
 await page.waitForTimeout(250)
 const staleChordOpened = await searchDialogVisible()
@@ -981,6 +1002,29 @@ await page.waitForFunction(() => localStorage.getItem('harness.keybindings.v1') 
 check('resetting every shortcut clears the stored overrides',
   (await searchChord.textContent())?.trim() === defaultChord
   && await page.getByRole('button', { name: 'Reset all shortcuts' }).isDisabled())
+
+const splitKeyRow = page.locator('[data-keybinding-row="terminal.split"]')
+await splitKeyRow.getByRole('button', { name: 'Change' }).click()
+await pressChord('Alt+Shift+H')
+await page.waitForFunction(() => localStorage.getItem('harness.keybindings.v1') === '{"terminal.split":"Alt+Shift+H"}')
+await settingsDialog.getByRole('button', { name: 'Close settings' }).click()
+await page.waitForURL(settingsReturn)
+await page.reload()
+await waitForTerminalLine('Harness test terminal')
+await terminalHost.press(columnsKey)
+check('rebinding a split replaces its default and updates the toolbar announcement',
+  await paneHost(2).count() === 0 && await terminalShortcut('Split terminal side by side') === 'Alt+Shift+H')
+await terminalHost.press('Alt+Shift+H')
+await waitForPaneLine(2, 'Harness test terminal')
+check('the rebound split works from terminal input after reload', await paneHost(1).isVisible())
+await paneHost(2).press(await terminalShortcut('End terminal session'))
+await terminalCloseDialog.getByRole('button', { name: 'End terminal', exact: true }).click()
+await terminalCloseDialog.waitFor({ state: 'hidden' })
+await paneHost(2).waitFor({ state: 'detached' })
+await pressChord('Meta+,')
+await settingsDialog.waitFor({ state: 'visible' })
+await settingsNavigation.getByRole('button', { name: 'Keyboard' }).click()
+await splitKeyRow.getByRole('button', { name: 'Reset' }).click()
 
 await settingsNavigation.getByRole('button', { name: 'Access' }).click()
 await page.waitForURL(url => url.pathname === '/settings/access')

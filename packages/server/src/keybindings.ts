@@ -34,6 +34,18 @@ export interface KeybindingCommand {
   description: string
   /** Default chord, in the same text form stored overrides use. */
   chord: string
+  scope?: 'terminal' | 'global'
+  appleChord?: string
+  craftChord?: string
+}
+
+export interface KeybindingPlatform {
+  apple?: boolean
+  craft?: boolean
+}
+
+export interface KeybindingContext extends KeybindingPlatform {
+  terminalFocus?: boolean
 }
 
 /**
@@ -48,6 +60,7 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     label: 'Open settings',
     description: 'Open the settings sheet at its last section.',
     chord: 'Mod+,',
+    scope: 'global',
   },
   {
     id: 'thread.search',
@@ -72,11 +85,49 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     label: 'Toggle the terminal',
     description: 'Show or hide the docked workspace terminal.',
     chord: 'Ctrl+`',
+    scope: 'global',
+  },
+  {
+    id: 'terminal.new',
+    label: 'New terminal',
+    description: 'Open a separate tab from a focused terminal.',
+    chord: 'Alt+Shift+N',
+    craftChord: 'Mod+N',
+    scope: 'terminal',
+  },
+  {
+    id: 'terminal.split',
+    label: 'Split terminal side by side',
+    description: 'Add a pane beside the focused terminal.',
+    chord: 'Alt+Shift+D',
+    appleChord: 'Mod+D',
+    scope: 'terminal',
+  },
+  {
+    id: 'terminal.splitVertical',
+    label: 'Split terminal top and bottom',
+    description: 'Add a pane to the focused terminal group and stack its panes.',
+    chord: 'Alt+Shift+V',
+    appleChord: 'Mod+Shift+D',
+    scope: 'terminal',
+  },
+  {
+    id: 'terminal.close',
+    label: 'End terminal session',
+    description: 'End the focused shell and clear its scrollback.',
+    chord: 'Alt+Shift+W',
+    craftChord: 'Mod+W',
+    scope: 'terminal',
   },
 ]
 
-/** Lowercase command id to command, for lookups that must not scan. */
+/** Command id to command, for lookups that must not scan. */
 const byId = new Map(keybindingCommands.map(command => [command.id, command]))
+
+function keybindingScopes(command: KeybindingCommand): readonly string[] {
+  if (command.scope === 'global') return ['workspace', 'terminal']
+  return [command.scope ?? 'workspace']
+}
 
 /**
  * Letter and punctuation keys addressed by physical position.
@@ -222,11 +273,18 @@ export function formatChord(chord: Chord, apple: boolean): string {
  * has no notion of a platform-primary modifier and a screen reader should
  * announce the one its user can actually press.
  */
-export function ariaKeyshortcuts(chord: Chord): string {
+export function ariaKeyshortcuts(chord: Chord, appleTerminal = false): string {
   const tail = (chord.alt ? 'Alt+' : '') + (chord.shift ? 'Shift+' : '') + chord.key
   if (chord.ctrl && !chord.mod) return `Control+${tail}`
   if (!chord.mod) return tail
+  if (appleTerminal) return `${chord.ctrl ? 'Control+' : ''}Meta+${tail}`
   return `Meta+${tail} Control+${tail}`
+}
+
+/** Craft menu accelerators use AppKit modifiers even when a web binding accepts aliases. */
+export function craftShortcut(text: string): string | undefined {
+  const chord = parseChord(text)
+  return chord ? chordText(chord).toLowerCase().replace(/^mod\b/, 'cmd').replace(/\+arrow(?=up|down|left|right)/, '+') : undefined
 }
 
 /** Format a stored chord string, falling back to the text when unparsable. */
@@ -238,9 +296,14 @@ export function formatChordText(text: string, apple: boolean): string {
 export type Keybindings = Record<string, string>
 
 /** Every command at its default chord. */
-export function defaultKeybindings(): Keybindings {
+function defaultChord(command: KeybindingCommand, platform: KeybindingPlatform): string {
+  if (platform.apple && platform.craft && command.craftChord) return command.craftChord
+  return (platform.apple && command.appleChord) || command.chord
+}
+
+export function defaultKeybindings(platform: KeybindingPlatform = {}): Keybindings {
   const bindings: Keybindings = {}
-  for (const command of keybindingCommands) bindings[command.id] = command.chord
+  for (const command of keybindingCommands) bindings[command.id] = defaultChord(command, platform)
   return bindings
 }
 
@@ -264,8 +327,8 @@ export interface ResolvedKeybindings {
  * dropped and reported, and the command keeps its default, so a corrupt store
  * costs one binding rather than the keyboard.
  */
-export function resolveKeybindings(stored: unknown): ResolvedKeybindings {
-  const bindings = defaultKeybindings()
+export function resolveKeybindings(stored: unknown, platform: KeybindingPlatform = {}): ResolvedKeybindings {
+  const bindings = defaultKeybindings(platform)
   const overrides: Keybindings = {}
   const rejected: ResolvedKeybindings['rejected'] = []
   if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
@@ -281,7 +344,7 @@ export function resolveKeybindings(stored: unknown): ResolvedKeybindings {
         continue
       }
       const text = chordText(chord)
-      if (text === command.chord) continue
+      if (text === defaultChord(command, platform)) continue
       bindings[id] = text
       overrides[id] = text
     }
@@ -300,9 +363,12 @@ export function resolveKeybindings(stored: unknown): ResolvedKeybindings {
     const claims = new Map<string, string[]>()
     for (const command of keybindingCommands) {
       const text = bindings[command.id] as string
-      const ids = claims.get(text)
-      if (ids) ids.push(command.id)
-      else claims.set(text, [command.id])
+      for (const scope of keybindingScopes(command)) {
+        const claim = `${scope}:${text}`
+        const ids = claims.get(claim)
+        if (ids) ids.push(command.id)
+        else claims.set(claim, [command.id])
+      }
     }
     const collision = [...claims.values()].find(ids => ids.length > 1)
     if (!collision) break
@@ -314,7 +380,7 @@ export function resolveKeybindings(stored: unknown): ResolvedKeybindings {
       rejected.push({ id, chord: bindings[id] as string, reason: 'conflict' })
       overridden.delete(id)
       delete overrides[id]
-      bindings[id] = (byId.get(id) as KeybindingCommand).chord
+      bindings[id] = defaultChord(byId.get(id) as KeybindingCommand, platform)
     }
   }
   return { bindings, overrides, rejected }
@@ -327,8 +393,13 @@ export function resolveKeybindings(stored: unknown): ResolvedKeybindings {
  * not a conflict.
  */
 export function conflictingCommand(bindings: Keybindings, chord: string, exclude: string): KeybindingCommand | null {
+  const recorded = byId.get(exclude)
+  if (!recorded) return null
+  const scopes = keybindingScopes(recorded)
   for (const [id, text] of Object.entries(bindings)) {
-    if (id !== exclude && text === chord) return byId.get(id) ?? null
+    if (id === exclude || text !== chord) continue
+    const command = byId.get(id)
+    if (command && keybindingScopes(command).some(scope => scopes.includes(scope))) return command
   }
   return null
 }
@@ -361,13 +432,19 @@ export function chordFromEvent(event: KeyboardEvent): Chord | null {
  * accepts either primary key but not a stray Control alongside Command. Shift
  * must match, so `Mod+Enter` and `Mod+Shift+Enter` stay separable.
  */
-export function matchCommand(bindings: Keybindings, event: KeyboardEvent): string | null {
+export function matchCommand(bindings: Keybindings, event: KeyboardEvent, context: KeybindingContext = {}): string | null {
+  if (event.isComposing || event.keyCode === 229) return null
   const pressed = chordFromEvent(event)
   if (!pressed) return null
   for (const command of keybindingCommands) {
-    const chord = parseChord(bindings[command.id] ?? command.chord)
+    if (command.scope !== 'global' && (command.scope === 'terminal') !== Boolean(context.terminalFocus)) continue
+    const chord = parseChord(bindings[command.id] ?? defaultChord(command, context))
     if (!chord || chord.key !== pressed.key) continue
     if (chord.alt !== pressed.alt || chord.shift !== pressed.shift) continue
+    if (command.scope === 'terminal' && context.apple) {
+      if (chord.mod !== event.metaKey || chord.ctrl !== event.ctrlKey) continue
+      return command.id
+    }
     if (chord.ctrl && !event.ctrlKey) continue
     if (!chord.ctrl && chord.mod && event.ctrlKey && event.metaKey) continue
     if (!chord.mod && !chord.ctrl && (event.metaKey || event.ctrlKey)) continue

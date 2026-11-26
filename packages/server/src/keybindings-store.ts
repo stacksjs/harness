@@ -13,7 +13,7 @@
  */
 
 import { chordText, conflictingCommand, parseChord, resolveKeybindings } from './keybindings'
-import type { KeybindingCommand, Keybindings, ResolvedKeybindings } from './keybindings'
+import type { KeybindingCommand, KeybindingPlatform, Keybindings, ResolvedKeybindings } from './keybindings'
 
 export const KEYBINDINGS_KEY = 'harness.keybindings.v1'
 
@@ -43,7 +43,7 @@ export interface KeybindingStore {
  * the same origin may have rebound a chord, and a stale table would answer a
  * keypress with the wrong command.
  */
-export function createKeybindingStore(storage: KeybindingStorage, key = KEYBINDINGS_KEY): KeybindingStore {
+export function createKeybindingStore(storage: KeybindingStorage, key = KEYBINDINGS_KEY, platform: KeybindingPlatform = {}): KeybindingStore {
   function read(): ResolvedKeybindings {
     let stored: unknown = null
     try {
@@ -56,7 +56,7 @@ export function createKeybindingStore(storage: KeybindingStorage, key = KEYBINDI
     catch {
       stored = null
     }
-    return resolveKeybindings(stored)
+    return resolveKeybindings(stored, platform)
   }
 
   function write(overrides: Keybindings): ResolvedKeybindings {
@@ -85,7 +85,7 @@ export function createKeybindingStore(storage: KeybindingStorage, key = KEYBINDI
       // this one would not know.
       if (conflict) return { ok: false, reason: 'conflict', command: conflict }
       const overrides = { ...current.overrides }
-      const resolved = resolveKeybindings({ ...overrides, [id]: text })
+      const resolved = resolveKeybindings({ ...overrides, [id]: text }, platform)
       // Back to default is an override removed, not an override recorded.
       if (resolved.overrides[id] === undefined) delete overrides[id]
       else overrides[id] = text

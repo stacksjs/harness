@@ -70,6 +70,7 @@ export interface ViewProps {
     label: string
     description: string
     chord: string
+    scope?: 'terminal' | 'global'
     apple: string
     other: string
     /** `aria-keyshortcuts` value, for the controls that advertise a chord. */
@@ -178,12 +179,14 @@ export function viewProps(state: HarnessState, options: {
     hostSettings: { ...state.settings },
     keybindings: keybindingCommands.map((command) => {
       const chord = parseChord(command.chord)
+      const appleChord = parseChord(command.appleChord ?? command.chord)
       return {
         id: command.id,
         label: command.label,
         description: command.description,
         chord: command.chord,
-        apple: chord ? formatChord(chord, true) : command.chord,
+        scope: command.scope,
+        apple: appleChord ? formatChord(appleChord, true) : command.chord,
         other: chord ? formatChord(chord, false) : command.chord,
         aria: chord ? ariaKeyshortcuts(chord) : '',
       }
