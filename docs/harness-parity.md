@@ -89,7 +89,7 @@ The managed ChatGPT preview opens account consent in the system browser on a mac
 
 ## Stacks upgrade
 
-The managed framework defaults were synced from a clean checkout of [Stacks main `7c94fa7`](https://github.com/stacksjs/stacks/commit/7c94fa7bbb5ae71f1b440a06dce8a4f446829347), which declares 0.75.692. Buddy resolves dependencies from the registry for package-based projects. Its upgrade installed the available Stacks and Buddy 0.75.691, then its managed scaffold sync used the defaults staged by the local source build. The frozen Bun 1.3.14 install resolves stx, components, and the Bun plugin at 0.2.944. Bun 1.3.14 reads the Bun lockfile, and the Pantry lockfile still pins 1.3.14.
+Buddy previewed and applied the upgrade from a clean checkout of [Stacks main `80eb865`](https://github.com/stacksjs/stacks/commit/80eb865121a2824147c6d44b68870bfe1279275f). The app resolves [published Stacks and Buddy 0.75.692](https://github.com/stacksjs/stacks/releases/tag/v0.75.692) with the published 0.75.692 defaults. The frozen Bun 1.3.14 install resolves stx, components, and the Bun plugin at 0.2.946. That version includes the [stx analysis cache change](https://github.com/stacksjs/stx/commit/55e71a5ca5b56424b5f88de127659e3fb5965600). Both lockfiles reflect the upgrade, and Pantry keeps the Bun 1.3.14 pin.
 
 Use `./buddy migrate` before running the updated framework on an existing database. A fresh SQLite database and a copy of a populated Harness v0.0.1 database passed migration and integrity checks. The original thread URL, its transcript, and all seven historical events survived the upgrade. The team-invitation migration tests also cover deduplicating pending invitations while retaining their history.
 
