@@ -607,6 +607,17 @@ await splitReplacement.locator('[data-kind="deletion"]').waitFor()
 check('split diff aligns the original and replacement with the same line number',
   await splitReplacement.locator('[data-kind="deletion"] [data-diff-line-number]:visible').innerText() === '1'
   && await splitReplacement.locator('[data-kind="addition"] [data-diff-line-number]:visible').innerText() === '1')
+await changedNotes.press('ArrowDown')
+const selectionBefore = changedNotes.getByRole('button', { name: 'Before line 1', pressed: true })
+await selectionBefore.waitFor()
+await selectionBefore.press('ArrowRight')
+const selectionAfter = changedNotes.getByRole('button', { name: 'After line 1', pressed: true })
+await selectionAfter.waitFor()
+check('the diff keyboard selects either side of a replacement', await selectionAfter.evaluate(button => button === document.activeElement))
+await changesPane.getByRole('button', { name: 'Collapse all' }).click()
+await changesPane.getByRole('button', { name: 'Copy line link' }).waitFor({ state: 'hidden' })
+await changesPane.locator('[data-diff-file-toggle]').click()
+await changedNotes.getByText('hello from the drive', { exact: true }).waitFor()
 check('changed lines have readable contrast against their backgrounds', await splitReplacement.evaluate((row) => {
   const canvas = document.createElement('canvas')
   canvas.width = 1
@@ -651,6 +662,10 @@ check('an unwrapped split patch scrolls locally on a phone',
   await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
 await wrapLines.click()
 await stackedChanges.click()
+await changedNotes.press('ArrowDown')
+await selectionBefore.press('ArrowDown')
+await selectionAfter.waitFor()
+check('stacked keyboard navigation moves from a removed line to its replacement', true)
 const collapseChanges = changesPane.getByRole('button', { name: 'Collapse all' })
 await collapseChanges.focus()
 await collapseChanges.press('Enter')
@@ -3622,6 +3637,58 @@ await ledgerPanel.getByRole('option', { name: /Branch-only marker/ }).waitFor({ 
 await ledgerPanel.getByText('Branch evidence', { exact: true }).waitFor()
 check('commit review excludes a dirty file while rendering the selected patch',
   await ledgerPanel.locator('[data-diff-file="ledger.txt"]').count() === 0)
+await page.evaluate(() => {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (text: string) => { sessionStorage.setItem('harness-test-diff-link', text) } },
+  })
+})
+await ledgerPanel.getByRole('button', { name: 'After line 1', exact: true }).click()
+await ledgerPanel.getByRole('button', { name: 'Copy line link' }).click()
+await ledgerPanel.getByText('Line link copied.', { exact: true }).waitFor()
+const commitLine = new URL((await page.evaluate(() => sessionStorage.getItem('harness-test-diff-link')))!)
+const commitLinkFields = new URLSearchParams(commitLine.hash.slice('#diff?'.length))
+check('the copied link identifies the displayed commit with its full SHA',
+  commitLine.pathname === ledgerPath && commitLine.search === '' && commitLinkFields.get('mode') === 'commit'
+  && /^[\da-f]{40}$/u.test(commitLinkFields.get('target') ?? '') && commitLinkFields.get('file') === 'branch-only.txt')
+const linkedPatch = await browserContext.newPage()
+await linkedPatch.setViewportSize({ width: 390, height: 844 })
+await linkedPatch.goto(commitLine.href)
+const linkedLine = linkedPatch.getByRole('button', { name: 'After line 1', pressed: true })
+await linkedLine.waitFor()
+check('opening the copied link selects and focuses the right line on a fresh phone viewport',
+  await linkedLine.evaluate(button => button === document.activeElement) && !await linkedPatch.locator('[data-composer]').isVisible())
+await capture('changes-linked-commit-phone', linkedPatch)
+commitLinkFields.set('line', '9999')
+await linkedPatch.evaluate(hash => { location.hash = hash }, `diff?${commitLinkFields}`)
+await linkedPatch.getByText('The selected line is no longer in this comparison.', { exact: true }).waitFor()
+check('a stale diff line shows a recovery state without offering a link to the wrong text',
+  await linkedPatch.getByRole('button', { name: 'Copy line link' }).isHidden())
+const longDiffFile = 'long [draft] #sample.txt'
+const longDiffPath = join(ledgerRepo, longDiffFile)
+writeFileSync(longDiffPath, Array.from({ length: 560 }, (_, index) => `Fixture review row ${index + 1}`).join('\n') + '\n')
+try {
+  const selection = new URLSearchParams({ file: longDiffFile, side: 'after', line: '532', mode: 'uncommitted' })
+  await linkedPatch.evaluate(hash => { location.hash = hash }, `diff?${selection}`)
+  const longPatch = linkedPatch.getByRole('region', { name: `Patch for ${longDiffFile}`, exact: true })
+  const longLine = longPatch.getByRole('button', { name: 'After line 532', pressed: true })
+  await longLine.waitFor()
+  await linkedPatch.getByRole('button', { name: 'Split', exact: true }).click()
+  await linkedPatch.waitForFunction(() => {
+    const line = document.querySelector('[data-diff-layout="split"] [data-diff-side="after"][data-diff-number="532"][aria-pressed="true"]')
+    const panel = line?.closest('[data-diff-body]')?.getBoundingClientRect()
+    const header = document.querySelector('[data-workspace-header]')?.getBoundingClientRect()
+    const bounds = line?.getBoundingClientRect()
+    return Boolean(panel && header && bounds && header.top >= 0 && bounds.top >= panel.top && bounds.bottom <= panel.bottom)
+  })
+  check('a late diff line stays visible after switching layouts without scrolling the workspace', true)
+  check('the linked view renders only a page around a late diff line',
+    await longPatch.locator('[data-diff-row]:not([hidden])').count() <= 200)
+  await capture('changes-linked-late-line-phone', linkedPatch)
+  await linkedPatch.getByRole('button', { name: 'Stacked', exact: true }).click()
+}
+finally { rmSync(longDiffPath) }
+await linkedPatch.close()
 if (screenshotDir) {
   for (const [width, height] of workspaceViewports) {
     await page.setViewportSize({ width, height })

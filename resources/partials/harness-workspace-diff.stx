@@ -1,11 +1,11 @@
-<section id="harness-changes" aria-labelledby="harness-changes-title" data-diff hidden :hidden="!diffOpen()" :data-diff-layout="diffLayout() === 'split' ? 'split' : 'stacked'" :data-diff-wrap="diffWrap()">
+<section id="harness-changes" ref="changesPane" aria-labelledby="harness-changes-title" data-diff hidden :hidden="!diffOpen()" :data-diff-layout="diffLayout() === 'split' ? 'split' : 'stacked'" :data-diff-wrap="diffWrap()">
   <header data-diff-header class="flex flex-wrap gap-1.5 items-center">
     <h2 id="harness-changes-title" class="mr-auto font-semibold text-[13px]">Changes</h2>
     <div data-diff-layout-controls role="group" aria-label="Diff layout">
-      <button type="button" @click="diffLayout.set('stacked')" :aria-pressed="diffLayout() === 'split' ? 'false' : 'true'">Stacked</button>
-      <button type="button" @click="diffLayout.set('split')" :aria-pressed="diffLayout() === 'split' ? 'true' : 'false'">Split</button>
+      <button type="button" @click="changeDiffLayout('stacked')" :aria-pressed="diffLayout() === 'split' ? 'false' : 'true'">Stacked</button>
+      <button type="button" @click="changeDiffLayout('split')" :aria-pressed="diffLayout() === 'split' ? 'true' : 'false'">Split</button>
     </div>
-    <button type="button" data-diff-wrap-control @click="diffWrap.set(!diffWrap())" :aria-pressed="diffWrap() ? 'true' : 'false'" aria-label="Wrap diff lines" title="Wrap lines">Wrap</button>
+    <button type="button" data-diff-wrap-control @click="toggleDiffWrap" :aria-pressed="diffWrap() ? 'true' : 'false'" aria-label="Wrap diff lines" title="Wrap lines">Wrap</button>
     <button type="button" @click="refreshWorkspaceDiff" aria-label="Refresh changes" title="Refresh changes" class="harness-icon-button">
       <span class="inline-block size-4 i-hugeicons-refresh" aria-hidden="true"></span>
     </button>
@@ -35,8 +35,11 @@
     </label>
     <label hidden :hidden="diffReviewMode() !== 'commit'">
       <span>Commit</span>
-      <select aria-label="Branch commit" :value="diffCommit()" :disabled="!diffReviewOptions()?.commits.length" @change="changeDiffCommit">
+      <select aria-label="Branch commit" :value="diffCommit()" :disabled="!diffCommit() && !diffReviewOptions()?.commits.length" @change="changeDiffCommit">
         <option value="">Latest commit</option>
+        <template :if="diffCommit() && !diffReviewOptions()?.commits.some(commit => commit.sha === diffCommit())">
+          <option :value="diffCommit()" :text="diffCommit().slice(0, 7)"></option>
+        </template>
         <template :for="commit in diffReviewOptions()?.commits || []" :key="commit.sha">
           <option :value="commit.sha" :text="commit.sha.slice(0, 7) + ' ' + commit.subject"></option>
         </template>
@@ -55,7 +58,7 @@
   <div data-diff-body>
     <div data-diff-overview>
       <p data-diff-status role="status" :text="diffStatus()">Loading…</p>
-      <button type="button" hidden :hidden="!diffFiles().length" :aria-disabled="diffFileLimits().size ? 'false' : 'true'" @click="diffFileLimits.set(new Map())">Collapse all</button>
+      <button type="button" hidden :hidden="!diffFiles().length" :aria-disabled="diffFileLimits().size ? 'false' : 'true'" @click="collapseDiffFiles">Collapse all</button>
     </div>
     <p data-diff-empty-patch role="status" hidden :hidden="!diffReviewError()" :text="diffReviewError()"></p>
     <div data-diff-patch>
@@ -72,7 +75,8 @@
             <template :if="file.open">
               <div data-diff-file-content>
                 <p data-diff-empty-patch :hidden="file.rows.length > 0" :text="file.status === 'untracked' ? 'Untracked file' : 'No text patch available.'"></p>
-                <div data-diff-lines role="region" :aria-label="'Patch for ' + file.path" tabindex="0" :hidden="!file.rows.length">
+                <button type="button" data-diff-more :hidden="!file.earlier" @click="diffLineReveal.set(null)">Show from beginning</button>
+                <div data-diff-lines role="region" :aria-label="'Patch for ' + file.path" :data-diff-path="file.path" tabindex="0" :hidden="!file.rows.length" @keydown="navigateDiffLines">
                   <div data-diff-grid>
                     <div data-diff-side-headings hidden :hidden="diffLayout() !== 'split'"><span>Before</span><span>After</span></div>
                     <template :for="row in file.rows" :key="row.id">
@@ -80,8 +84,16 @@
                       <div data-diff-row :hidden="Boolean(row.header)">
                         <template :for="(cell, side) in row.cells">
                           <div data-diff-cell :data-kind="cell?.kind || 'empty'">
-                            <span data-diff-line-number aria-hidden="true" :hidden="diffLayout() === 'split'" :text="cell?.before ?? ''"></span>
-                            <span data-diff-line-number aria-hidden="true" :text="diffLayout() === 'split' && side === 0 ? (cell?.before ?? '') : (cell?.after ?? '')"></span>
+                            <button type="button" data-diff-line-number data-diff-side="before" tabindex="-1"
+                              :hidden="diffLayout() === 'split'" :disabled="cell?.before == null" :aria-hidden="cell?.before == null"
+                              :data-diff-number="cell?.before" :aria-label="'Before line ' + cell?.before"
+                              :aria-pressed="isDiffLineSelected(file.path, 'before', cell?.before) ? 'true' : 'false'"
+                              :text="cell?.before ?? ''" @click="selectDiffLine(file.path, 'before', cell.before)"></button>
+                            <button type="button" data-diff-line-number :data-diff-side="diffGutterSide(side)" tabindex="-1"
+                              :disabled="cell?.[diffGutterSide(side)] == null" :aria-hidden="cell?.[diffGutterSide(side)] == null"
+                              :data-diff-number="cell?.[diffGutterSide(side)]" :aria-label="(diffGutterSide(side) === 'before' ? 'Before line ' : 'After line ') + cell?.[diffGutterSide(side)]"
+                              :aria-pressed="isDiffLineSelected(file.path, diffGutterSide(side), cell?.[diffGutterSide(side)]) ? 'true' : 'false'"
+                              :text="cell?.[diffGutterSide(side)] ?? ''" @click="selectDiffLine(file.path, diffGutterSide(side), cell[diffGutterSide(side)])"></button>
                             <span data-diff-mark aria-hidden="true" :text="cell?.kind === 'addition' ? '+' : cell?.kind === 'deletion' ? '−' : ''"></span>
                             <div data-diff-line-content>
                               <span class="sr-only" :text="diffLineLabel(cell, side)"></span>
@@ -106,4 +118,11 @@
       </details>
     </div>
   </div>
+  <footer data-diff-line-actions hidden :hidden="!diffLineSelection() && !diffLineNotice()">
+    <div class="flex-1 min-w-0">
+      <p hidden :hidden="!diffLineSelection()" class="truncate" :title="diffLineSelection()?.path" :text="(diffLineSelection()?.side === 'before' ? 'Before' : 'After') + ' line ' + diffLineSelection()?.line + ' · ' + diffLineSelection()?.path"></p>
+      <p role="status" hidden :hidden="!diffLineNotice()" :text="diffLineNotice()"></p>
+    </div>
+    <button type="button" :hidden="!diffLineSelection()" @click="copyDiffLineLink">Copy line link</button>
+  </footer>
 </section>

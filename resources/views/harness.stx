@@ -1260,18 +1260,27 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const diffTurn = state('')
   const diffReviewOptions = state(null)
   const diffReviewError = state('')
+  const diffLineSelection = state(null)
+  const diffLineNotice = state('')
+  const diffLineReveal = state(null)
   const reviewOptionsLoader = state(null)
   const diffPageSize = 200
   let diffTools = null
+  let diffComparisonTarget
+  let pendingDiffLineLink = null
   const diffDisplayFiles = derived(() => {
     const hunks = diffHunks()
     const limits = diffFileLimits()
     const split = diffLayout() === 'split'
+    const reveal = diffLineReveal()
     return diffFiles().map(file => {
       const limit = limits.get(file.path) || 0
       const fileHunks = hunks.get(file.path)
-      const view = limit && fileHunks ? diffTools.workspaceDiffRows(fileHunks, split, limit) : null
-      return { ...file, open: limit > 0, rows: view?.rows ?? [], more: view?.more ?? false }
+      let view = null
+      if (limit && fileHunks) view = reveal?.path === file.path
+        ? diffTools.workspaceDiffLinkedRows(fileHunks, split, limit, reveal, diffPageSize)
+        : diffTools.workspaceDiffRows(fileHunks, split, limit)
+      return { ...file, open: limit > 0, rows: view?.rows ?? [], more: view?.more ?? false, earlier: view?.earlier ?? false }
     })
   })
   const changesWatcher = state(null)
@@ -1948,6 +1957,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
   const wideWorkspace = useMediaQuery('(min-width: 75rem)')
   const diffClose = useRef('diffCloseBox')
+  const changesPane = useRef('changesPane')
   const workspaceFilesOpen = state(false)
   const workspaceFileState = state(null)
   const workspaceFilePreview = derived(() => workspaceFileState()?.preview)
@@ -3317,7 +3327,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function toggleDiffFile(file) {
+    if (file.open && diffLineSelection()?.path === file.path) diffLineSelection.set(null)
     setDiffFileLimit(file.path, file.open ? 0 : diffPageSize)
+  }
+
+  function collapseDiffFiles() {
+    diffLineSelection.set(null)
+    diffFileLimits.set(new Map())
   }
 
   function showMoreDiffRows(path) {
@@ -3329,12 +3345,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function clearDiffComparison() {
+    pendingDiffLineLink = null
+    diffComparisonTarget = undefined
     batch(() => {
       diffStatus.set('Loading comparison…')
       diffFiles.set([])
       diffPatch.set('')
       diffHunks.set(new Map())
       diffFileLimits.set(new Map())
+      diffLineSelection.set(null)
+      diffLineNotice.set('')
+      diffLineReveal.set(null)
     })
   }
 
@@ -3367,6 +3388,70 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return 'Before line ' + cell.before + ', after line ' + cell.after
   }
 
+  function diffGutterSide(side) {
+    return diffLayout() === 'split' && side === 0 ? 'before' : 'after'
+  }
+
+  function isDiffLineSelected(path, side, line) {
+    const selected = diffLineSelection()
+    return selected?.path === path && selected.side === side && selected.line === line
+  }
+
+  function selectDiffLine(path, side, line) {
+    diffLineSelection.set({ path, side, line })
+    diffLineNotice.set('')
+  }
+
+  function navigateDiffLines(event) {
+    const selected = diffTools?.moveWorkspaceDiffLine(event)
+    if (selected) selectDiffLine(selected.path, selected.side, selected.line)
+  }
+
+  function revealSelectedDiffLine() {
+    const selection = diffLineSelection()
+    if (diffOpen() && selection) void nextTick(() => diffTools.revealWorkspaceDiffLine(changesPane.current, selection))
+  }
+  useEventListener('resize', revealSelectedDiffLine)
+
+  function changeDiffLayout(layout) {
+    diffLayout.set(layout)
+    revealSelectedDiffLine()
+  }
+
+  function toggleDiffWrap() {
+    diffWrap.set(!diffWrap())
+    revealSelectedDiffLine()
+  }
+
+  async function copyDiffLineLink(event) {
+    const line = diffLineSelection()
+    if (!line) return
+    try {
+      await diffTools.copyWorkspaceDiffLink(event.currentTarget, {
+        ...line, mode: diffReviewMode(), target: diffComparisonTarget,
+      }, desktop()?.clipboard)
+      diffLineNotice.set('Line link copied.')
+    }
+    catch { diffLineNotice.set('Could not copy the line link.') }
+  }
+
+  function openLinkedDiffLine() {
+    const link = diffTools?.currentWorkspaceDiffLink(changesPane.current)
+    if (!link) return
+    clearDiffComparison()
+    pendingDiffLineLink = link
+    batch(() => {
+      diffReviewMode.set(link.mode)
+      diffBaseRef.set(link.mode === 'branch' ? link.target || '' : '')
+      diffCommit.set(link.mode === 'commit' ? link.target : '')
+      diffTurn.set(link.mode === 'turn' ? link.target : '')
+      if (workspaceFilesOpen()) closeWorkspaceFiles(false)
+      diffOpen.set(true)
+      refreshWorkspaceDiff()
+    })
+  }
+  useEventListener('hashchange', openLinkedDiffLine)
+
   function showWorkspaceChanges(diff) {
     const files = diff.error ? [] : diff.files
     const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
@@ -3384,6 +3469,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       : !diff.isRepository ? 'This workspace is not a git repository.'
       : files.length ? `${count} ${scope} · +${insertions} −${deletions}`
       : diff.scope === 'working-tree' ? 'No uncommitted changes.' : `No changes ${scope}.`
+    diffComparisonTarget = diff.comparisonTarget
+    const linked = pendingDiffLineLink
+    pendingDiffLineLink = null
     batch(() => {
       diffStatus.set(status)
       const patch = diff.error ? '' : diff.patch
@@ -3395,6 +3483,18 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       if (!previousFiles.length) {
         const first = files.find(file => hunks.has(file.path))
         if (first) limits.set(first.path, diffPageSize)
+      }
+      const selection = linked || diffLineSelection()
+      if (selection && !diffTools.hasWorkspaceDiffLine(hunks.get(selection.path), selection)) {
+        diffLineSelection.set(null)
+        diffLineReveal.set(null)
+        diffLineNotice.set('The selected line is no longer in this comparison.')
+      }
+      else if (linked) {
+        limits.set(linked.path, diffPageSize)
+        diffLineReveal.set(linked)
+        selectDiffLine(linked.path, linked.side, linked.line)
+        void nextTick(() => diffTools.revealWorkspaceDiffLine(changesPane.current, linked, true))
       }
       diffFiles.set(files)
       diffPatch.set(patch)
@@ -3428,8 +3528,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (mode === 'branch') target = diffBaseRef()
     if (mode === 'commit') {
       const options = diffReviewOptions()
-      if (!options || options.requestedBase !== diffBaseRef()) return
-      target = diffCommit() || options.commits[0]?.sha
+      if (!diffCommit() && (!options || options.requestedBase !== diffBaseRef())) return
+      target = diffCommit() || options?.commits[0]?.sha
       if (!target) {
         diffStatus.set('No commits ahead of this branch base.')
         return
@@ -3437,8 +3537,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     if (mode === 'turn') {
       const options = diffReviewOptions()
-      if (!options) return
-      if (!options.turns.length) {
+      if (!diffTurn() && !options) return
+      if (!diffTurn() && !options?.turns.length) {
         diffStatus.set('No recorded turn comparisons.')
         return
       }
@@ -3544,6 +3644,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     if (!hasWorkspaceFiles || !codecUrl) return
     try {
       const tools = await import(codecUrl)
+      if (tools.currentWorkspaceDiffLink(changesPane.current)) return
       const link = tools.workspaceFileLocation(workspaceFileClose.current)
       if (!link) return
       const controller = await loadWorkspaceFiles()
@@ -4719,7 +4820,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions, parseWorkspacePatch, workspaceDiffRows } = await import(codecUrl)
+    const codec = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions } = codec
     const sidebar = sidebarRef.current
     const threadSidebar = sidebar && createThreadSidebar({
       root: sidebar,
@@ -4763,9 +4865,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       connection.open()
       return
     }
-    diffTools = { parseWorkspacePatch, workspaceDiffRows }
+    diffTools = codec
     changesWatcher.set(watchWorkspaceChanges)
     reviewOptionsLoader.set(loadWorkspaceReviewOptions)
+    openLinkedDiffLine()
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({

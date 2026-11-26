@@ -463,7 +463,19 @@ const RESPONSIVE_SHELL = `
 [data-diff-cell] code { font: inherit; white-space: pre; }
 [data-diff][data-diff-wrap="true"] [data-diff-cell] code { white-space: pre-wrap; overflow-wrap: anywhere; }
 [data-diff-line-number], [data-diff-mark] { flex-shrink: 0; color: inherit; opacity: .78; user-select: none; }
-[data-diff-line-number] { min-width: 3ch; text-align: end; }
+[data-diff-line-number] { align-self: flex-start; min-width: 3ch; text-align: end; border-radius: 3px; }
+[data-diff-line-number]:enabled { cursor: pointer; }
+[data-diff-line-number]:enabled:hover { background: var(--workspace-hover); opacity: 1; }
+[data-diff-line-number][aria-pressed="true"] { background: var(--workspace-hover); opacity: 1; font-weight: 700; }
+[data-diff-cell]:has([data-diff-line-number][aria-pressed="true"]:not([hidden])) { box-shadow: inset 0 -1px currentColor; }
+[data-diff-line-number]:focus-visible, [data-diff-line-actions] button:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+[data-diff-line-actions]:not([hidden]) {
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 12px; font-size: 12px;
+  border-block-start: 1px solid var(--workspace-line);
+}
+[data-diff-line-actions] p { margin: 0; }
+[data-diff-line-actions] button { flex-shrink: 0; border: 1px solid var(--workspace-line); padding: 4px 8px; border-radius: 6px; }
+[data-diff-line-actions] button:hover { background: var(--workspace-hover); }
 [data-diff-mark] { width: 1ch; text-align: center; }
 [data-diff-cell][data-kind="addition"] { background: var(--diff-addition); }
 [data-diff-cell][data-kind="deletion"] { background: var(--diff-deletion); }
@@ -485,6 +497,7 @@ const RESPONSIVE_SHELL = `
   [data-diff-header] button, [data-diff-file-toggle], [data-diff-more], [data-diff-overview] button { min-height: 44px; }
 }
 @media (pointer: coarse), (max-width: 47.999rem) {
+  [data-diff-line-actions] button { min-height: 44px; }
   [data-diff-comparison] label { position: relative; }
   [data-diff-comparison] label::after {
     content: ''; pointer-events: none; position: absolute; inset-inline-end: 11px; inset-block-start: calc(50% - 4px);
