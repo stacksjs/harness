@@ -2544,12 +2544,14 @@ const unconfirmed = followUpRows.filter({ hasText: 'Unconfirmed steering fixture
 await unconfirmed.getByText('Delivery unconfirmed').waitFor()
 await page.getByRole('button', { name: 'Stop', exact: true }).click()
 await unconfirmed.getByRole('button', { name: 'Send again', exact: true }).waitFor()
+await originalTurn.getByText('Response interrupted', { exact: true }).waitFor()
 check('an ambiguous steer needs an explicit resend', !await page.locator('[data-resume-queue]').isVisible()
   && steeringCalls.filter(text => text === 'Unconfirmed steering fixture.').length === 1)
 await capture('steering-unconfirmed')
 
 
 await page.goto(`${baseUrl}/s/${steerSessionId}`)
+await originalTurn.getByText('Response interrupted', { exact: true }).waitFor()
 const threadActionsTrigger = page.locator('[data-thread-actions-trigger]')
 const threadActions = page.getByRole('dialog', { name: 'Thread actions' })
 await threadActionsTrigger.click()
