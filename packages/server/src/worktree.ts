@@ -171,7 +171,7 @@ async function resumeBase(repository: string, branch: string): Promise<{ commit:
 
 /** Find the exact registered checkout and leave conflicts untouched. */
 export async function openReserved(intent: CheckoutIntent, mode: WorktreeOpenMode, combinedRoot?: string,
-  authorize = () => false): Promise<WorktreeResult> {
+  authorize = () => false, beforeRestore?: () => void): Promise<WorktreeResult> {
   const { repository, path, branch } = intent
   const recovering = typeof mode === 'string'
   const conflict = { path: null, branch: null, reason: 'checkout-conflict' } as const
@@ -225,6 +225,7 @@ export async function openReserved(intent: CheckoutIntent, mode: WorktreeOpenMod
       if (existing && !(await git(repository, ['worktree', 'remove', '--', path])).ok) return conflict
       if (await occupied() || !authorize()) return conflict
       const checkout = base ? ['--no-track', '-b', branch, '--', path, base.commit] : ['--', path, branch]
+      beforeRestore?.()
       const added = await git(repository, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--no-guess-remote', ...checkout])
       if (!added.ok) return conflict
       const opened = await openReserved(intent, false, combinedRoot)

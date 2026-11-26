@@ -76,6 +76,25 @@ export class ProjectSetup {
       .run(scope.workspaceId, scope.sessionId, scope.checkout, script.id, script.name, crypto.randomUUID(), Number(Boolean(script.waitForSetup)))
   }
 
+  reserveRestored(scope: ProjectSetupScope, script?: ProjectScript): SetupReceipt | null {
+    return this.db.transaction(() => {
+      const previous = this.read(scope)
+      // A combined restore may call this for several repos, or resume after a restart.
+      if (previous?.status === 'pending' && previous.scriptId === script?.id) return null
+      if (previous) {
+        this.remember(scope, previous)
+        this.db.query('DELETE FROM harness_project_setup WHERE resumeKey = ?').run(previous.resumeKey)
+      }
+      if (script) this.reserve(scope, script)
+      return previous
+    }).immediate()
+  }
+
+  private remember(scope: ProjectSetupScope, receipt: SetupReceipt): void {
+    this.db.query('INSERT INTO harness_project_setup_history VALUES (?, ?, ?, ?)')
+      .run(receipt.resumeKey, scope.workspaceId, scope.sessionId, receipt.exitCode)
+  }
+
   read(scope: ProjectSetupScope): SetupReceipt | null {
     const receipt = this.db.query<SetupReceipt, [number, number, string]>(`SELECT scriptId, name, resumeKey, wait, status, exitCode
       FROM harness_project_setup WHERE workspace_id = ? AND session_id = ? AND checkout = ?`)
@@ -167,8 +186,7 @@ export class ProjectSetup {
       const result = this.db.query(`UPDATE harness_project_setup SET scriptId = ?, name = ?, resumeKey = ?, wait = ?, status = 'pending', exitCode = NULL
         WHERE resumeKey = ? AND status IN ('failed', 'running', 'interrupted')`)
         .run(script.id, script.name, crypto.randomUUID(), Number(Boolean(script.waitForSetup)), receipt.resumeKey)
-      if (result.changes) this.db.query('INSERT INTO harness_project_setup_history VALUES (?, ?, ?, ?)')
-        .run(receipt.resumeKey, scope.workspaceId, scope.sessionId, receipt.exitCode)
+      if (result.changes) this.remember(scope, receipt)
       return result.changes > 0
     }).immediate()
   }
