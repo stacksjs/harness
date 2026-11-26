@@ -32,13 +32,14 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { lstat, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 export interface CaptureResult {
   /** The commit holding the snapshot, or null when nothing could be captured. */
   ref: string | null
+  tree?: string
   /** Why capture did not happen, for a caller that must explain itself. */
   reason?: 'not-a-repository' | 'no-commits' | 'git-failed'
 }
@@ -69,9 +70,9 @@ function git(cwd: string, args: string[], env?: Record<string, string>): Promise
     let out = ''
     // A capture runs on the turn path, so it must not be able to hang a turn.
     const timer = setTimeout(() => { child.kill(); resolve({ ok: false, out }) }, 15000)
-    child.stdout?.on('data', (chunk: Buffer) => { out += chunk.toString() })
+    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
     child.on('error', () => { clearTimeout(timer); resolve({ ok: false, out: '' }) })
-    child.on('exit', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
+    child.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
   })
 }
 
@@ -148,20 +149,34 @@ export async function capture(workspacePath: string, message = 'harness checkpoi
     })
     if (!commit.ok) return { ref: null, reason: 'git-failed' as const }
 
-    return { ref: commit.out.trim() }
+    return { ref: commit.out.trim(), tree: tree.out.trim() }
   })
 }
 
-/** Files a tree contains, as repo-relative paths. */
-async function filesIn(workspacePath: string, ref: string): Promise<Set<string>> {
-  const listed = await git(workspacePath, ['ls-tree', '-r', '--name-only', '-z', ref])
-  return new Set(listed.out.split('\0').filter(Boolean))
+/** Git paths come from NUL-terminated output and are always repository-relative. */
+function listedFiles(result: { ok: boolean, out: string }): Set<string> | null {
+  if (!result.ok) return null
+  return new Set(result.out.split('\0').filter(path => path && !path.endsWith('/')))
 }
 
-/** Files present in the working tree now, ignoring anything gitignored. */
-async function filesNow(workspacePath: string): Promise<Set<string>> {
-  const listed = await git(workspacePath, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
-  return new Set(listed.out.split('\0').filter(Boolean))
+/** Plan removals before writing the snapshot, including checks for replaced directories. */
+async function removableFiles(root: string, wanted: Set<string>, present: Set<string>): Promise<string[] | null> {
+  const removals: string[] = []
+  for (const path of present) {
+    if (wanted.has(path)) continue
+    const target = join(root, path)
+    try {
+      // Git can report indexed paths even when a parent directory has since
+      // become a symlink. A rewind must never unlink through that symlink.
+      const parent = dirname(target)
+      if (await realpath(parent) !== parent || (await lstat(target)).isDirectory()) return null
+      removals.push(target)
+    }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null
+    }
+  }
+  return removals
 }
 
 /**
@@ -177,24 +192,31 @@ async function filesNow(workspacePath: string): Promise<Set<string>> {
  * and must not be deleted by one.
  */
 export async function restore(workspacePath: string, ref: string): Promise<RestoreResult> {
-  const inside = await git(workspacePath, ['rev-parse', '--is-inside-work-tree'])
-  if (!inside.ok || inside.out.trim() !== 'true')
+  const root = await realpath(workspacePath).catch(() => null)
+  const inside = root && await git(root, ['rev-parse', '--is-inside-work-tree', '--show-prefix'])
+  if (!root || !inside || !inside.ok || inside.out.trimEnd() !== 'true')
     return { ok: false, restored: 0, removed: 0, reason: 'not a git repository' }
 
   // Refuse an unknown ref rather than half-restoring. `^{commit}` also rejects a
   // ref that resolves to something that is not a commit.
-  const exists = await git(workspacePath, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+  const exists = await git(root, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`])
   if (!exists.ok)
     return { ok: false, restored: 0, removed: 0, reason: `unknown checkpoint: ${ref}` }
 
-  const wanted = await filesIn(workspacePath, ref)
-  const present = await filesNow(workspacePath)
+  const commit = exists.out.trim()
+  const [wanted, present] = await Promise.all([
+    git(root, ['ls-tree', '-r', '--name-only', '-z', commit]).then(listedFiles),
+    git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']).then(listedFiles),
+  ])
+  const removals = wanted && present ? await removableFiles(root, wanted, present) : null
+  if (!wanted || !removals)
+    return { ok: false, restored: 0, removed: 0, reason: 'could not safely enumerate files to restore' }
 
   const written = await withTemporaryIndex(async (env) => {
-    const read = await git(workspacePath, ['read-tree', ref], env)
+    const read = await git(root, ['read-tree', commit], env)
     if (!read.ok) return false
     // `-a -f` writes every file in the index over whatever is there now.
-    const checkout = await git(workspacePath, ['checkout-index', '-a', '-f'], env)
+    const checkout = await git(root, ['checkout-index', '-a', '-f'], env)
     return checkout.ok
   })
 
@@ -210,14 +232,16 @@ export async function restore(workspacePath: string, ref: string): Promise<Resto
   // wrote through a temporary index, so nothing has staged anything, and a
   // revert should not.
   let removed = 0
-  for (const path of present) {
-    if (wanted.has(path)) continue
+  for (const target of removals) {
     try {
-      await rm(join(workspacePath, path), { force: true })
+      const parent = dirname(target)
+      if (await realpath(parent) !== parent) throw new Error('unsafe parent path')
+      await rm(target, { force: true })
       removed++
     }
-    catch {
-      // A file that vanished under us is the outcome we wanted anyway.
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      return { ok: false, restored: wanted.size, removed, reason: 'could not remove files created since the checkpoint' }
     }
   }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { capture, restore } from '../src/checkpoint'
@@ -186,14 +186,44 @@ describe('restoring a checkpoint', () => {
     try {
       const { ref } = await capture(dir)
       const headBefore = g(dir, 'rev-parse', 'HEAD')
+      writeFileSync(join(dir, 'tracked.txt'), 'user staged this\n')
+      g(dir, 'add', 'tracked.txt')
+      const indexBefore = readFileSync(join(dir, '.git', 'index'))
       writeFileSync(join(dir, 'extra.txt'), 'x\n')
 
-      await restore(dir, ref!)
+      expect((await restore(dir, ref!)).ok).toBe(true)
 
+      expect(read(dir, 'tracked.txt')).toBe('original\n')
       expect(g(dir, 'rev-parse', 'HEAD')).toBe(headBefore)
-      expect(g(dir, 'diff', '--cached', '--name-only')).toBe('')
+      expect(readFileSync(join(dir, '.git', 'index'))).toEqual(indexBefore)
+      expect(g(dir, 'show', ':tracked.txt')).toBe('user staged this')
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform === 'win32')('keeps the whole checkout when a staged removal path would traverse a symlink', async () => {
+    const dir = repo()
+    const other = mkdtempSync(join(tmpdir(), 'harness-ckpt-sibling-'))
+    try {
+      const { ref } = await capture(dir)
+      mkdirSync(join(dir, 'added'))
+      writeFileSync(join(dir, 'added', 'file.txt'), 'new staged file')
+      g(dir, 'add', 'added/file.txt')
+      rmSync(join(dir, 'added'), { recursive: true })
+      writeFileSync(join(other, 'file.txt'), 'unrelated file')
+      symlinkSync(other, join(dir, 'added'), 'dir')
+      writeFileSync(join(dir, 'tracked.txt'), 'new working copy')
+      const indexBefore = readFileSync(join(dir, '.git', 'index'))
+
+      expect(await restore(dir, ref!)).toMatchObject({ ok: false, restored: 0, removed: 0 })
+      expect(read(dir, 'tracked.txt')).toBe('new working copy')
+      expect(read(other, 'file.txt')).toBe('unrelated file')
+      expect(readFileSync(join(dir, '.git', 'index'))).toEqual(indexBefore)
+    }
+    finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(other, { recursive: true, force: true })
+    }
   })
 
   it('refuses an unknown ref rather than half-restoring', async () => {
