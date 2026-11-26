@@ -275,6 +275,16 @@ const driver: Driver = {
     return {
       ...instance,
       async *startTurn(input) {
+        if (input.text.startsWith('Review both repositories in turn ')) {
+          const sequence = input.text.slice(-1)
+          for (const [key, label] of [['api', 'API'], ['packages/web', 'Web']] as const) {
+            const file = join(config.workspacePath, key, 'shared.txt')
+            writeFileSync(file, `${readFileSync(file, 'utf8')}${label} edit from turn ${sequence}\n`)
+          }
+          yield { type: 'assistant-delta', text: `Recorded edits for turn ${sequence}.` }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          return
+        }
         if (input.text !== `Read ${referenceLink}`) {
           yield* instance.startTurn(input)
           return
@@ -3947,6 +3957,41 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
     Boolean(picker && picker.x >= 0 && picker.x + picker.width <= width
       && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth)))
   await capture(`project-repositories-linked-${width}x${height}`)
+}
+
+await page.setViewportSize({ width: 1440, height: 900 })
+await page.goto(new URL(multiRepoPath, baseUrl).href)
+const repoTurnPrompt = page.getByRole('textbox', { name: 'Message', exact: true })
+for (const sequence of [1, 2]) {
+  await repoTurnPrompt.fill(`Review both repositories in turn ${sequence}`)
+  await repoTurnPrompt.press('Enter')
+  await page.getByText(`Recorded edits for turn ${sequence}.`, { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Send', exact: true }).waitFor()
+}
+await headerChanges.click()
+await ledgerComparison.getByRole('option', { name: 'Turn', exact: true }).waitFor({ state: 'attached' })
+await ledgerComparison.selectOption('turn')
+const recordedTurnPicker = ledgerPanel.getByRole('combobox', { name: 'Recorded turn' })
+await ledgerPanel.getByText('API edit from turn 2', { exact: true }).waitFor()
+await recordedTurnPicker.selectOption({ label: 'Turn 1' })
+await ledgerPanel.getByText('API edit from turn 1', { exact: true }).waitFor()
+check('Turn review preserves the earlier patch after subsequent edits',
+  !(await ledgerPanel.getByText('API edit from turn 2', { exact: true }).count()))
+const firstRecordedTurn = await recordedTurnPicker.inputValue()
+await repoPicker.selectOption('packages/web')
+await ledgerPanel.getByText('Web edit from turn 1', { exact: true }).waitFor()
+await page.waitForFunction(turn => document.querySelector<HTMLSelectElement>('select[aria-label="Recorded turn"]')?.value === turn, firstRecordedTurn)
+check('switching repository keeps the selected turn and shows its independent patch',
+  await recordedTurnPicker.inputValue() === firstRecordedTurn
+  && await ledgerComparison.inputValue() === 'turn'
+  && !(await ledgerPanel.getByText('API edit from turn 1', { exact: true }).count()))
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  const controls = await Promise.all([repoPicker.boundingBox(), ledgerComparison.boundingBox(), recordedTurnPicker.boundingBox()])
+  check(`repository, comparison, and turn controls stay in view at ${width}×${height}`,
+    controls.every(control => control && control.x >= 0 && control.x + control.width <= width)
+    && await page.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+  await capture(`project-recorded-turn-${width}x${height}`)
 }
 
 if (process.platform !== 'win32') {

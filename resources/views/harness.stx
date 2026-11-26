@@ -3476,14 +3476,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function selectDiffRepository(repository) {
+    const reviewingTurn = diffReviewMode() === 'turn'
     clearDiffComparison()
     batch(() => {
       diffReviewOptions.set(null)
       diffRepository.set(repository)
-      diffReviewMode.set(repository ? 'uncommitted' : 'session')
+      if (!reviewingTurn) {
+        diffReviewMode.set(repository ? 'uncommitted' : 'session')
+        diffTurn.set('')
+      }
       diffBaseRef.set('')
       diffCommit.set('')
-      diffTurn.set('')
     })
   }
 
@@ -3573,6 +3576,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     clearDiffComparison()
     pendingDiffLineLink = link
     batch(() => {
+      if (diffRepository() !== (link.repository || '')) diffReviewOptions.set(null)
       diffRepository.set(link.repository || '')
       diffReviewMode.set(link.mode)
       diffBaseRef.set(link.mode === 'branch' ? link.target || '' : '')
@@ -3703,8 +3707,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     }
     if (mode === 'turn') {
       const options = diffReviewOptions()
-      if (!diffTurn() && !options) return
-      if (!diffTurn() && !options?.turns.length) {
+      if (!options) return
+      if (!diffTurn() && !options.turns.length) {
         diffStatus.set('No recorded turn comparisons.')
         return
       }

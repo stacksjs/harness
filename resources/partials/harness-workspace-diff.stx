@@ -34,7 +34,7 @@
         <option value="uncommitted">Uncommitted</option>
         <option value="branch">Branch changes</option>
         <option value="commit">Commit</option>
-        <template :if="!diffRepository()">
+        <template :if="!diffRepository() || diffReviewOptions()?.turns.length || diffReviewMode() === 'turn'">
           <option value="turn">Turn</option>
         </template>
       </select>
@@ -65,7 +65,7 @@
       <select aria-label="Recorded turn" :value="diffTurn()" :disabled="!diffReviewOptions()?.turns.length" @change="changeDiffTurn">
         <option value="">Latest recorded turn</option>
         <template :for="turn in diffReviewOptions()?.turns.slice().reverse() || []" :key="turn.id">
-          <option :value="String(turn.id)" :text="'Turn ' + turn.number"></option>
+          <option :value="String(turn.id)" :selected="String(turn.id) === diffTurn()" :text="'Turn ' + turn.number"></option>
         </template>
       </select>
     </label>
