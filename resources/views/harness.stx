@@ -5978,6 +5978,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         worktreeSetup.set(false)
         workspaceBranch.set(payload.branch)
         isolatedRewind.set(payload.combined && !payload.combined.checkouts.some(checkout => !checkout.key) ? 'repositories' : 'files')
+      }
+      if (payload.type === 'session.isolated' || payload.type === 'session.worktree-restored') {
         if (diffOpen()) refreshWorkspaceDiff()
         projectSetupPreview = sessionOnline()
         void refreshProjectSetup()
