@@ -28,7 +28,7 @@ interface Pane {
 }
 
 type TerminalFrame =
-  | { t: 'term-opened', termId: number, shell: string, cols: number, rows: number, checkpoint?: Parameters<typeof Terminal.fromCheckpoint>[0], exit?: { code: number | null } }
+  | { t: 'term-opened', termId: number, shell: string, cols: number, rows: number, checkpoint?: Parameters<typeof Terminal.fromCheckpoint>[0], exit?: { code: number | null }, openPreview?: string }
   | { t: 'term-data', termId: number, data: string }
   | { t: 'term-sized', termId: number, cols: number, rows: number }
   | { t: 'term-exit', termId: number, code: number | null }
@@ -45,6 +45,7 @@ interface TerminalDockOptions {
   started: (key: string) => void
   closed: (key: string, action: CloseAction) => void
   updateStatus: (key: string, status: PaneStatus | null) => void
+  openPreview?: (url: string) => void
 }
 
 const terminalHistory = { scrollback: 5000, scrollbackBytes: 8 * 1024 * 1024 }
@@ -57,6 +58,7 @@ const keys: Record<string, string> = {
 export function createTerminalDock(options: TerminalDockOptions) {
   const panes = new Map<string, Pane>()
   const detachedClosingPanes = new Map<number, Pane>()
+  const scriptStarts = new Map<string, string>()
   // Old hosts reply to term-open without a correlation key. Submit one open
   // at a time. Once attached, every pane streams independently by PTY id.
   let opening: Pane | undefined
@@ -124,8 +126,10 @@ export function createTerminalDock(options: TerminalDockOptions) {
     for (const pane of panes.values()) {
       if (pane.id !== null || pane.status.error || [...detachedClosingPanes.values()].some(closing => closing.tab.key === pane.tab.key)) continue
       const size = dimensions(pane) ?? { cols: 100, rows: 24 }
+      const projectScriptId = scriptStarts.get(pane.tab.key)
       if (options.send({ t: 'term-open', workspaceId: options.workspaceId, sessionId: options.sessionId,
-        resumeKey: pane.tab.key, ...size, ...(pane.tab.started ? { resumeOnly: true } : {}) })) {
+        resumeKey: pane.tab.key, ...size, ...(projectScriptId ? { projectScriptId } : pane.tab.started ? { resumeOnly: true } : {}) })) {
+        scriptStarts.delete(pane.tab.key)
         opening = pane
         status(pane, { busy: true })
         return
@@ -144,6 +148,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
         else options.send({ t: 'term-detach', termId: pane.id })
       }
       panes.delete(key)
+      scriptStarts.delete(key)
       options.updateStatus(key, null)
     }
     for (const tab of tabs) {
@@ -207,6 +212,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
       }
       else {
         pane.id = frame.termId
+        if (typeof frame.openPreview === 'string') options.openPreview?.(frame.openPreview)
         pane.model = frame.checkpoint ? Terminal.fromCheckpoint(frame.checkpoint, terminalHistory)
           : new Terminal({ cols: frame.cols, rows: frame.rows, ...terminalHistory })
         status(pane, { busy: false, reconnecting: false, exited: false, activity: '', shell: frame.shell === 'den' ? 'Den terminal' : 'Terminal' })
@@ -298,6 +304,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
 
   return {
     show, receive, onOffline, close, keydown,
+    queueProjectScript: (key: string, scriptId: string) => scriptStarts.set(key, scriptId),
     canEnd: (key: string) => panes.get(key)?.id != null && !panes.get(key)?.status.exited,
     focus: (key: string) => host(key)?.focus({ preventScroll: true }),
     input: (tab: TerminalTab, data: string) => sendInput(paneFor(tab), data),
@@ -317,6 +324,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
       observer?.disconnect()
       panes.clear()
       detachedClosingPanes.clear()
+      scriptStarts.clear()
     },
   }
 }
