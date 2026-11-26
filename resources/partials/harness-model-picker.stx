@@ -1,9 +1,10 @@
-<button type="button" ref="draftPickerTriggerBox" data-model-picker-trigger :data-comparing-models="String(comparingModels())" aria-label="{{ activeCodex ? 'Choose model for the next message' : 'Choose agent and model' }}" :aria-label="comparingModels() ? 'Choose agent and model, ' + draftPickerLabel() : (activeCodex ? 'Choose model for the next message' : 'Choose agent and model')" :title="comparingModels() ? draftPickerLabel() : null" aria-haspopup="dialog" aria-controls="draft-model-picker" :aria-expanded="String(draftPickerOpen())" @click="openDraftPicker" class="flex gap-1.5 items-center px-2 h-8 max-w-full min-w-0 text-xs rounded-md">
+<button type="button" ref="draftPickerTriggerBox" data-model-picker-trigger :data-comparing-models="String(comparingModels())" aria-label="{{ activeCodex ? 'Choose model for the next message' : 'Choose agent and model' }}" :aria-describedby="comparingModels() ? 'draft-model-comparison-description' : null" :title="comparingModels() ? draftPickerLabel() : null" aria-haspopup="dialog" aria-controls="draft-model-picker" :aria-expanded="String(draftPickerOpen())" @click="openDraftPicker" class="flex gap-1.5 items-center px-2 h-8 max-w-full min-w-0 text-xs rounded-md">
   <span class="inline-block shrink-0 size-4 i-hugeicons-ai-brain-01" aria-hidden="true"></span>
   <span data-model-picker-label class="truncate" :text="draftPickerLabel()">Choose agent and model</span>
   <span data-model-picker-count :text="draftModelChoices().length + ' models'" aria-hidden="true"></span>
   <span class="inline-block shrink-0 size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
 </button>
+<span id="draft-model-comparison-description" class="sr-only" :hidden="!comparingModels()" :text="draftPickerLabel()"></span>
 <dialog id="draft-model-picker" ref="draftPickerDialogBox" data-draft-model-dialog aria-label="Agent and model" @cancel.prevent="closeDraftPicker" @click.self="closeDraftPicker">
   <div data-draft-model-layout>
     <section ref="draftPickerAccountsBox" data-draft-model-accounts aria-label="Provider accounts">

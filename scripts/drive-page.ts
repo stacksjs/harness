@@ -5371,7 +5371,9 @@ for (const [width, height] of workspaceViewports) {
 await batchDialog.getByRole('button', { name: 'Done', exact: true }).click()
 check('the mobile composer shows the compact model count with both names accessible',
   await batchPicker.getByText('2 models', { exact: true }).isVisible()
-  && (await batchPicker.getAttribute('aria-label'))?.includes('Fixture Fast, Fixture Balanced') === true)
+  && await batchPicker.getAttribute('aria-label') === 'Choose agent and model'
+  && await batchPicker.getAttribute('aria-describedby') === 'draft-model-comparison-description'
+  && await modelBatchPage.locator('#draft-model-comparison-description').textContent() === 'Fixture Fast, Fixture Balanced')
 await modelBatchPage.locator('[data-draft-worktree] summary').click()
 const batchMode = modelBatchPage.getByLabel('Run in', { exact: true })
 await batchMode.locator('option[value="worktree"]').waitFor({ state: 'attached' })
