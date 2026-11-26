@@ -15,7 +15,7 @@
  */
 import type { Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -34,7 +34,9 @@ function check(name: string, ok: boolean): void {
 // terminal input without starting an actual sign-in on the developer's machine.
 const fixtureBin = mkdtempSync(join(tmpdir(), 'harness-page-bin-'))
 const fixtureShell = join(fixtureBin, 'harness-test-shell')
+const fixtureEditorArgs = join(fixtureBin, 'editor-args')
 writeFileSync(join(fixtureBin, 'codex'), '#!/bin/sh\nprintf "Codex test sign-in\\n"\n', { mode: 0o755 })
+writeFileSync(join(fixtureBin, 'code'), '#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "${0%/*}/editor-args"\n', { mode: 0o755 })
 writeFileSync(fixtureShell, '#!/bin/sh\nprintf "Harness test terminal\\n"\nexec /bin/sh -i\n', { mode: 0o755 })
 process.env.SHELL = fixtureShell
 process.env.ENV = ''
@@ -2003,6 +2005,26 @@ check(`the browser suggests the workspace filename (received ${JSON.stringify(do
   downloadedName === previewFile || normalizedWebKitName)
 check('a fresh page opens the shared line and downloads the original bytes',
   readFileSync((await downloaded.path())!, 'utf8') === previewText)
+const fileEditorButton = fileLinkPage.getByRole('button', { name: 'Open file in editor', exact: true })
+const fileEditorDialog = fileLinkPage.getByRole('dialog', { name: 'Open in editor' })
+await fileEditorButton.click()
+await fileEditorDialog.getByText(`fixture context/${previewFile}:125`, { exact: true }).waitFor()
+const fixtureEditor = fileEditorDialog.getByRole('button', { name: /^VS Code/u })
+await fixtureEditor.waitFor()
+await capture('workspace-editor-file', fileLinkPage)
+await fileEditorDialog.getByRole('button', { name: 'Close editor chooser' }).press('Escape')
+await fileEditorDialog.waitFor({ state: 'hidden', timeout: 4000 })
+await fileLinkPage.waitForFunction(() => document.activeElement?.hasAttribute('data-workspace-file-editor'))
+await fileEditorButton.click()
+const [editorResponse] = await Promise.all([
+  fileLinkPage.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/workspace-editor', { timeout: 4000 }),
+  fixtureEditor.click(),
+])
+if (!editorResponse.ok()) throw new Error(`The editor launch returned ${editorResponse.status()}: ${await editorResponse.text()}`)
+await fileEditorDialog.waitFor({ state: 'hidden', timeout: 4000 })
+const projectFolder = realpathSync(dir)
+check('a linked file opens its exact working file and line, and the chooser returns focus',
+  existsSync(fixtureEditorArgs) && readFileSync(fixtureEditorArgs, 'utf8') === `${projectFolder}\n--goto\n${join(projectFolder, 'fixture context', previewFile)}:125\n`)
 await fileLinkPage.close()
 const fileTools = projectAttachmentDraft.getByRole('button', { name: 'Workspace actions' })
 await fileTools.click()
@@ -2050,6 +2072,17 @@ await touchFilesPage.getByRole('button', { name: previewFile, exact: true }).tap
 const touchSource = touchFilesPage.getByRole('region', { name: 'File source' })
 await touchSource.waitFor()
 await capture('workspace-file-touch-portrait', touchFilesPage)
+await touchFilesPage.getByRole('button', { name: 'Open file in editor', exact: true }).tap()
+const touchEditor = touchFilesPage.getByRole('dialog', { name: 'Open in editor' })
+await touchEditor.getByRole('button', { name: /^VS Code/u }).waitFor()
+check('the editor chooser fits the phone and offers touch-sized options', await touchEditor.evaluate((element) => {
+  const bounds = element.getBoundingClientRect()
+  const choice = element.querySelector('[data-workspace-editor-choice]')?.getBoundingClientRect()
+  return bounds.left >= 0 && bounds.right <= innerWidth && bounds.bottom <= innerHeight && (choice?.height ?? 0) >= 44
+}))
+await capture('workspace-editor-touch', touchFilesPage)
+await touchEditor.getByRole('button', { name: 'Close editor chooser' }).tap()
+await touchEditor.waitFor({ state: 'hidden' })
 await touchFilesPage.setViewportSize({ width: 820, height: 390 })
 check('touch can browse files from a project draft and keep the file open after rotation',
   await touchSource.getByText('Source line 125', { exact: false }).isVisible()
