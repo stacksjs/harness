@@ -145,7 +145,7 @@
     </div>
     <button type="button" :hidden="!diffLineSelection()" @click="copyDiffLineLink">Copy line link</button>
     @if(workspaceEditorAllowed)
-      <button type="button" :hidden="diffLineSelection()?.side !== 'after' || (diffReviewMode() !== 'session' && diffReviewMode() !== 'uncommitted')" @click="chooseDiffEditor($event)" aria-haspopup="dialog">Open line in editor</button>
+      <button type="button" :hidden="!canOpenDiffLineInEditor()" @click="chooseDiffEditor($event)" aria-haspopup="dialog">Open line in editor</button>
     @endif
   </footer>
 </section>

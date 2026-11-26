@@ -3756,6 +3756,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function finishWorkspaceEditorClose() {
+    // The browser queues close events. A keyboard shortcut can reopen the
+    // dialog before the previous close reaches this handler.
+    if (workspaceEditorDialog.current?.open) return
     editorTarget.set(null)
     const trigger = editorTrigger
     editorTrigger = null
@@ -3765,10 +3768,14 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     })
   }
 
+  function canOpenDiffLineInEditor() {
+    return diffLineSelection()?.side === 'after' && ['session', 'uncommitted', 'branch'].includes(diffReviewMode())
+  }
+
   function chooseDiffEditor(event) {
-    const line = diffLineSelection()
-    const live = diffReviewMode() === 'session' || diffReviewMode() === 'uncommitted'
-    if (live && line?.side === 'after') void chooseWorkspaceEditor(event, line.path, line.line)
+    if (!canOpenDiffLineInEditor()) return
+    const { path, line } = diffLineSelection()
+    void chooseWorkspaceEditor(event, path, line)
   }
 
   async function loadWorkspaceFiles() {

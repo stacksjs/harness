@@ -2025,6 +2025,20 @@ await fileEditorDialog.waitFor({ state: 'hidden', timeout: 4000 })
 const projectFolder = realpathSync(dir)
 check('a linked file opens its exact working file and line, and the chooser returns focus',
   existsSync(fixtureEditorArgs) && readFileSync(fixtureEditorArgs, 'utf8') === `${projectFolder}\n--goto\n${join(projectFolder, 'fixture context', previewFile)}:125\n`)
+await fileEditorButton.click()
+await fixtureEditor.getByText('Preferred', { exact: true }).waitFor()
+const [shortcutLaunch] = await Promise.all([
+  fileLinkPage.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/workspace-editor', { timeout: 4000 }),
+  fileEditorDialog.evaluate((element, apple) => {
+    (element as HTMLDialogElement).close()
+    element.ownerDocument.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'o', code: 'KeyO', bubbles: true, cancelable: true, metaKey: apple, ctrlKey: !apple,
+    }))
+  }, process.platform === 'darwin'),
+])
+await fileEditorDialog.waitFor({ state: 'hidden' })
+check('opening the preferred editor immediately after closing the chooser keeps the new request',
+  shortcutLaunch.status() === 204 && readFileSync(fixtureEditorArgs, 'utf8') === `${projectFolder}\n--new-window\n${projectFolder}\n`)
 await fileLinkPage.close()
 const fileTools = projectAttachmentDraft.getByRole('button', { name: 'Workspace actions' })
 await fileTools.click()
@@ -3658,6 +3672,21 @@ await ledgerChanges.getByText('1 changed file against review/ledger · +1 −0',
 await ledgerBase.selectOption('refs/heads/main')
 await ledgerChanges.getByText('2 changed files against main · +2 −0', { exact: true }).waitFor()
 check('branch review changes with the selected base', await ledgerPanel.getByText('branch-only.txt', { exact: true }).isVisible())
+const branchFile = ledgerPanel.locator('[data-diff-file="branch-only.txt"]')
+const branchFileToggle = branchFile.locator('[data-diff-file-toggle]')
+if (await branchFileToggle.getAttribute('aria-expanded') === 'false') await branchFileToggle.click()
+await branchFile.getByRole('button', { name: 'After line 1', exact: true }).click()
+await ledgerPanel.getByRole('button', { name: 'Open line in editor', exact: true }).click()
+const branchEditorDialog = page.getByRole('dialog', { name: 'Open in editor' })
+await branchEditorDialog.getByText('branch-only.txt:1', { exact: true }).waitFor()
+const [branchEditorResponse] = await Promise.all([
+  page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/workspace-editor', { timeout: 4000 }),
+  branchEditorDialog.getByRole('button', { name: /^VS Code/u }).click(),
+])
+await branchEditorDialog.waitFor({ state: 'hidden' })
+const ledgerFolder = realpathSync(ledgerRepo)
+check('a branch comparison opens the after line in the working checkout', branchEditorResponse.status() === 204
+  && readFileSync(fixtureEditorArgs, 'utf8') === `${ledgerFolder}\n--goto\n${join(ledgerFolder, 'branch-only.txt')}:1\n`)
 if (screenshotDir) {
   for (const [width, height] of workspaceViewports) {
     await page.setViewportSize({ width, height })
