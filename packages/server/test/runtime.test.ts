@@ -1,7 +1,7 @@
 import type { Command, HostSettings, InputAnswer, WorktreeSelection } from '@harness/contract'
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance, StartTurnInput } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -11,6 +11,7 @@ import { decode, defaultHostSettings, encode } from '@harness/contract'
 import { ChatGptCredentialStore, CodexDriver, PREVIEW_THREAD_ENV } from '@harness/drivers'
 import { derivedId } from '@harness/engine'
 import { addSavedProvider, removeSavedProvider } from '../src/provider-instances'
+import { ProviderRuntime } from '../src/runtime'
 import { serve } from '../src/server'
 
 /**
@@ -1738,9 +1739,30 @@ describe('a session can have a checkout of its own', () => {
         }
         throw new Error(`Expected settlement state ${status}`)
       }
-      dispatch('first-settlement', settle)
-      expect(await client.waitForDispatch('first-settlement')).toMatchObject({ t: 'dispatched', replayed: false })
-      expect(await getJob('running')).toMatchObject({ name: 'Clean checkout' })
+      const verificationStarted = Promise.withResolvers<void>()
+      const continueVerification = Promise.withResolvers<void>()
+      const verifyCheckout = ProviderRuntime.prototype.checkProjectWorktree
+      const verification = spyOn(ProviderRuntime.prototype, 'checkProjectWorktree').mockImplementation(async function (this: ProviderRuntime, scope) {
+        verificationStarted.resolve()
+        await continueVerification.promise
+        return verifyCheckout.call(this, scope)
+      })
+      try {
+        dispatch('first-settlement', settle)
+        expect(await client.waitForDispatch('first-settlement')).toMatchObject({ t: 'dispatched', replayed: false })
+        await verificationStarted.promise
+        const waiting = await (await fetch(`${base}/project-settlement`)).json()
+        expect(waiting).toMatchObject({ status: 'pending', output: '' })
+      }
+      finally {
+        continueVerification.resolve()
+        verification.mockRestore()
+      }
+      const running = await getJob('running')
+      expect(running).toMatchObject({ name: 'Clean checkout' })
+      client.send({ t: 'term-open', workspaceId: derivedId('c_w'), sessionId, resumeKey: running.resumeKey, resumeOnly: true })
+      for (let attempt = 0; attempt < 100 && !client.events.some(frame => frame.t === 'term-opened'); attempt++) await Bun.sleep(20)
+      expect(client.events.some(frame => frame.t === 'term-opened')).toBe(true)
       writeFileSync(gate, '')
       const failed = await getJob('failed')
       expect(failed).toMatchObject({ exitCode: 7, output: 'Fixture cleanup' })

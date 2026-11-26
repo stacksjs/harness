@@ -1552,9 +1552,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (projectScriptsRoute[2] === 'project-settlement') {
           if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
           const receipt = scope && workspaceFileRoot(params) ? projectSetup.latestSettlement(scope) : null
-          return Response.json(receipt && {
-            name: receipt.name, resumeKey: receipt.resumeKey, status: receipt.status, exitCode: receipt.exitCode,
-            output: terminals.projectJobTail(receipt),
+          if (!receipt) return Response.json(null, { headers })
+          const output = terminals.projectJobTail(receipt)
+          // Checkout verification can still be running before the PTY is attachable.
+          const status = receipt.status === 'running' && output === undefined ? 'pending' : receipt.status
+          return Response.json({
+            name: receipt.name, resumeKey: receipt.resumeKey, status, exitCode: receipt.exitCode,
+            output: output ?? '',
           }, { headers })
         }
         if (projectScriptsRoute[2] === 'project-setup') {
@@ -1564,7 +1568,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return Response.json(receipt && {
             name: receipt.name, resumeKey: receipt.resumeKey, status: receipt.status, exitCode: receipt.exitCode,
             blocking: Boolean(receipt.wait),
-            output: scope ? terminals.projectJobTail({ ...scope, resumeKey: receipt.resumeKey }) : '',
+            output: scope ? terminals.projectJobTail({ ...scope, resumeKey: receipt.resumeKey }) ?? '' : '',
             retry: Boolean(script && script.runOnWorktreeCreate),
             previewUrl: script?.autoOpenPreview ? script.previewUrl : '',
           }, { headers })
