@@ -2354,6 +2354,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const appleKeyboard = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent)
   let keyboard = null
   let keybindingStore = null
+  let sidebarJumpHints
 
   function keybindingRow(id) {
     return keybindings.find(binding => binding.id === id) || null
@@ -2362,7 +2363,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function chordLabel(id) {
     const row = keybindingRow(id)
     const bound = keybindingTable()?.bindings?.[id]
-    if (keyboard && bound) return keyboard.formatChordText(bound, appleKeyboard)
+    if (keyboard && bound !== undefined) return bound ? keyboard.formatChordText(bound, appleKeyboard) : 'Unassigned'
     return (appleKeyboard ? row?.apple : row?.other) || ''
   }
 
@@ -2380,9 +2381,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function shortcutKeys(id) {
     const row = keybindingRow(id)
     const bound = keybindingTable()?.bindings?.[id]
-    if (keyboard && bound) {
+    if (keyboard && bound !== undefined) {
       const chord = keyboard.parseChord(bound)
-      if (chord) return keyboard.ariaKeyshortcuts(chord, appleKeyboard && row?.scope === 'terminal')
+      return chord ? keyboard.ariaKeyshortcuts(chord, appleKeyboard && row?.scope === 'terminal') : ''
     }
     return row?.aria || ''
   }
@@ -2400,8 +2401,30 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function matchedCommand(event, terminalFocus = false, composerFocus = false) {
     const table = keybindingTable()
-    return keyboard && table ? keyboard.matchCommand(table.bindings, event, { terminalFocus, composerFocus, apple: appleKeyboard }) : null
+    return keyboard && table ? keyboard.matchCommand(table.bindings, event, {
+      terminalFocus, composerFocus, apple: appleKeyboard, craft: craftMenuReady(), modelPickerOpen: draftPickerOpen(),
+    }) : null
   }
+
+  function sidebarShortcutBlocked() {
+    return draftPickerOpen() || threadUndoBlocked() || arrangementOpen() || stashOpen() || profileModalOpen()
+  }
+
+  function updateSidebarJumpHints(event) {
+    if (event.repeat || !['Alt', 'Control', 'Meta', 'Shift'].includes(event.key)) return
+    const sidebar = sidebarRef.current
+    if (sidebar && keyboard && !sidebarJumpHints) {
+      sidebarJumpHints = keyboard.createSidebarJumpHints(sidebar, () => ({
+        profile: String(visibleProfile()), bindings: keybindingTable()?.bindings, apple: appleKeyboard,
+        blocked: sidebarShortcutBlocked() || terminalInputFocused() || Boolean(recordingKeybinding()),
+      }))
+    }
+    sidebarJumpHints?.update(event)
+  }
+
+  useEventListener('keyup', updateSidebarJumpHints, { target: window })
+  useEventListener('blur', () => sidebarJumpHints?.clear(), { target: window })
+  onUnmounted(() => sidebarJumpHints?.clear())
 
   function readKeyboardStore(craft) {
     keybindingStore = keyboard.createKeybindingStore(localStorage, keyboard.KEYBINDINGS_KEY, { apple: appleKeyboard, craft })
@@ -3420,6 +3443,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       }).map(model => ({ id: model.id, name: model.name, account: account.value, accountName: account.name, key: `${account.value}/${model.id}` }))
     })
   })
+  const numberedPickerResults = derived(() => pickerResults().filter(result => result.id).slice(0, 9))
   const pickerStatus = derived(() => {
     if (providerCatalog() === 'failed') return 'Could not load provider accounts.'
     if (providerCatalog() === 'loading') return 'Checking provider accounts…'
@@ -3544,6 +3568,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function updatePickerQuery(event) {
     pickerQuery.set(event.currentTarget.value)
     pickerIndex.set(0)
+  }
+
+  function modelPickerShortcut(result, accessible = false) {
+    const index = numberedPickerResults().findIndex(row => row.key === result.key)
+    if (index === -1) return ''
+    const command = 'modelPicker.jump.' + (index + 1)
+    if (!keybindingTable()?.bindings?.[command]) return ''
+    return accessible ? shortcutKeys(command) : chordLabel(command)
   }
 
   function pickerSearchKeydown(event) {
@@ -6038,6 +6070,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // decides — the defaults are still Ctrl+` for the terminal, the editor
   // convention, and Cmd+, for settings, where in the desktop window the menu
   // item usually claims the chord first and arrives as `craft:settings`.
+  effect(() => {
+    if (sidebarShortcutBlocked() || terminalInputFocused() || recordingKeybinding()) sidebarJumpHints?.clear()
+  })
   useEventListener('keydown', (event) => {
     // Recording comes before the dialog guard: the pane records from inside
     // the open settings sheet, and the chord being bound must not also run
@@ -6048,7 +6083,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     if (event.defaultPrevented) return
+    updateSidebarJumpHints(event)
     const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
+    if (draftPickerOpen()) {
+      const number = /^modelPicker\.jump\.([1-9])$/.exec(command || '')
+      if (number && !event.repeat) {
+        event.preventDefault()
+        const result = numberedPickerResults()[Number(number[1]) - 1]
+        if (result) pickDraftModel(result)
+      }
+      return
+    }
     const editable = event.target?.closest?.('textarea, input, [contenteditable="true"]')
     if (command === 'composer.stash' && stashReady() && promptRef.current?.form && !promptRef.current.form.hidden
       && !threadUndoBlocked() && !editingFollowUp() && (!editable || editable === promptRef.current)) {
@@ -6064,6 +6109,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
     if (visibleUndo() && !['Alt', 'Control', 'Meta', 'Shift'].includes(event.key)) threadUndoShortcutClaimed.set(false)
     if (arrangementOpen()) return
+    if (!event.repeat && command && /^thread\.(?:jump\.|next$|previous$)/.test(command) && !sidebarShortcutBlocked()) {
+      const sidebar = sidebarRef.current
+      const target = sidebar && keyboard?.sidebarShortcutTarget(sidebar, String(visibleProfile()), sessionId, command)
+      if (target) {
+        event.preventDefault()
+        if (sidebarOpen()) closeSidebar()
+        const address = new URL(target, location.origin)
+        if (address.pathname !== location.pathname || address.search !== location.search) openDraftAddress(target)
+      }
+      return
+    }
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.

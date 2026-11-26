@@ -202,9 +202,9 @@ export function viewProps(state: HarnessState, options: {
         description: command.description,
         chord: command.chord,
         scope: command.scope,
-        apple: appleChord ? formatChord(appleChord, true) : command.chord,
-        other: chord ? formatChord(chord, false) : command.chord,
-        aria: chord ? ariaKeyshortcuts(chord) : '',
+        apple: command.desktopDefault ? 'Unassigned' : appleChord ? formatChord(appleChord, true) : command.chord,
+        other: command.desktopDefault ? 'Unassigned' : chord ? formatChord(chord, false) : command.chord,
+        aria: chord && !command.desktopDefault ? ariaKeyshortcuts(chord) : '',
       }
     }),
     activeProfile: String(selectedProfile?.id ?? ''),

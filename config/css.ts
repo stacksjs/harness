@@ -152,9 +152,17 @@ const RESPONSIVE_SHELL = `
 [data-navigation-content] [data-sidebar-item] { min-height: 29px; }
 [data-navigation-content] [data-sidebar-item][hidden] { display: none; }
 [data-saved-drafts] { padding: 3px 6px 6px; margin-block-end: 4px; border-block-end: 1px solid var(--workspace-line); }
-[data-saved-draft-link] { padding-inline-end: 40px; background: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }
+[data-navigation-content] [data-saved-draft-link] { grid-template-columns: minmax(0, 1fr); padding-inline-end: 40px; background: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }
 [data-saved-draft-link]:hover, [data-saved-draft-link][aria-current="page"] { background: color-mix(in srgb, var(--workspace-accent) 16%, transparent); }
 [data-saved-draft-link]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
+[data-sidebar-jump]::after, [data-model-jump] {
+  flex: none; padding: 0 4px; border: 1px solid var(--workspace-line); border-radius: 4px;
+  background: var(--workspace-surface); font: 11px/16px ui-monospace, monospace; white-space: nowrap;
+}
+[data-sidebar-jump]::after { content: attr(data-sidebar-jump); margin-inline-start: auto; }
+[data-navigation-content] [data-saved-draft-link][data-sidebar-jump] { grid-template-columns: minmax(0, 1fr) auto; }
+[data-saved-draft-link][data-sidebar-jump]::after { grid-area: 1 / 2; align-self: start; }
+[data-saved-draft-title] { grid-column: 1 / -1; }
 [data-sidebar-row]:has(> [data-draft-discard-row]) { position: relative; }
 [data-sidebar-row]:has(> [data-draft-discard-row]) > [data-sidebar-item] { padding-inline-end: 40px; }
 [data-sidebar-row] > [data-draft-discard-row], [data-saved-draft] > [data-draft-discard-row] {
@@ -843,7 +851,7 @@ const RESPONSIVE_SHELL = `
 @media (max-width: 47.999rem) and (pointer: coarse) {
   [data-workspace-header] .harness-icon-button { width: 40px; height: 44px; flex-basis: 40px; }
   [data-navigation-chrome] button, [data-navigation-footer] button { min-height: 44px; }
-  [data-sidebar-row]:has(> [data-draft-discard-row]) > [data-sidebar-item], [data-saved-draft-link] { min-height: 44px; padding-inline-end: 52px; }
+  [data-sidebar-row]:has(> [data-draft-discard-row]) > [data-sidebar-item], [data-navigation-content] [data-saved-draft-link] { min-height: 44px; padding-inline-end: 52px; }
   [data-sidebar-row] > [data-draft-discard-row], [data-saved-draft] > [data-draft-discard-row] { width: 44px; height: 44px; }
   [data-thread-undo] button, [data-navigation-undo] [data-thread-undo] button { min-height: 44px; }
   [data-composer-toolbar] button:not([hidden]), [data-composer-toolbar] select { min-height: 44px; }

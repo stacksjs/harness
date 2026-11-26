@@ -23,10 +23,11 @@
         <template :for="(result, index) in pickerResults()" :key="result.key">
           <div role="row" data-draft-model-row :aria-selected="String(draftModelSelected(result))" @pointermove="pickerIndex.set(index)">
             <div role="gridcell" :id="'draft-model-result-' + index">
-              <button type="button" data-draft-model-option tabindex="-1" :data-highlighted="String(index === pickerIndex())" :title="result.name" @click="pickDraftModel(result, $event)">
+              <button type="button" data-draft-model-option tabindex="-1" :data-highlighted="String(index === pickerIndex())" :title="result.name" :aria-keyshortcuts="modelPickerShortcut(result, true) || null" @click="pickDraftModel(result, $event)">
                 <span class="truncate" :text="result.name"></span>
                 <small class="truncate" :hidden="!pickerQuery().trim() && pickerAccount() !== 'favorites'" :text="result.accountName"></small>
                 <span class="inline-block shrink-0 size-3 i-hugeicons-tick-02" :hidden="!draftModelSelected(result)" aria-hidden="true"></span>
+                <kbd data-model-jump aria-hidden="true" :hidden="!modelPickerShortcut(result)" :text="modelPickerShortcut(result)"></kbd>
               </button>
             </div>
             <div role="gridcell" :hidden="!result.id || sessionId || !draftWorktreeOptions()?.canStartWorktree">
