@@ -5163,8 +5163,18 @@ for (const [width, height] of workspaceViewports) {
   await backgroundPage.setViewportSize({ width, height })
   await capture(`workspace-background-thread-${width}x${height}`, backgroundPage)
 }
+const openedBackgroundPath = await backgroundLink.getAttribute('href')
+const backgroundReads = Promise.all([
+  backgroundPage.waitForResponse(response => {
+    const url = new URL(response.url())
+    return url.pathname === '/drivers' && !url.searchParams.has('models') && response.ok()
+  }),
+  ...['project-setup', 'project-settlement'].map(endpoint =>
+    backgroundPage.waitForResponse(response => new URL(response.url()).pathname === `${openedBackgroundPath}/${endpoint}` && response.ok())),
+])
 await backgroundLink.click()
 await backgroundPage.getByText('Background turn finished.', { exact: true }).waitFor()
+await Promise.all((await backgroundReads).map(response => response.finished()))
 check('the background notification opens the correct conversation',
   harness.engine.current.sessions.get(Number(new URL(backgroundPage.url()).pathname.split('/').at(-1)))?.turns[0]?.prompt === secondBackgroundText)
 

@@ -2147,6 +2147,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const waitingForProjectSetup = derived(() => projectSetup()?.blocking && ['pending', 'running'].includes(projectSetup()?.status))
   const projectSetupOwnsError = derived(() => projectSetupNeedsAttention() && sessionError().startsWith(projectSetupStatus()))
   let projectSetupPoll
+  let workspaceStatusPaused = false
   let projectSetupRequest
   let projectSetupPreview = false
   const projectSettlement = state(null)
@@ -2729,8 +2730,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     finally { if (read === projectScriptsRead) projectScriptsLoading.set(false) }
   }
 
+  function stopWorkspaceStatusRequests() {
+    workspaceStatusPaused = true
+    providerCatalogRequest?.abort()
+    projectSetupRequest?.abort()
+    projectSetupPoll?.stop()
+    projectSettlementRequest?.abort()
+    projectSettlementPoll?.stop()
+  }
+
   async function refreshProjectSetup() {
-    if (!sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
+    if (workspaceStatusPaused || !sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
     projectSetupPoll?.stop()
     projectSetupRequest?.abort()
     const request = new AbortController()
@@ -2756,7 +2766,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   async function refreshProjectSettlement() {
-    if (!sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
+    if (workspaceStatusPaused || !sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
     projectSettlementPoll?.stop()
     projectSettlementRequest?.abort()
     const request = new AbortController()
@@ -3288,7 +3298,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const providerCatalog = state('loading')
   const modelFavorites = state([])
   let modelFavoritesRevision = 0
-  let providerCatalogRequest = 0
+  let providerCatalogRequest
   const activeDriverValue = state(sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`)
   const currentDriver = derived(() => activeDriverValue().split(':')[0])
   const appliedCodexSelection = state(initialCodexSelection)
@@ -3574,14 +3584,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // the answer in their option labels, with unusable agents disabled — a
   // driver you cannot run should not be one click from a dead session.
   async function annotateDriverPickers() {
-    const request = ++providerCatalogRequest
+    if (workspaceStatusPaused) return
+    providerCatalogRequest?.abort()
+    const request = new AbortController()
+    providerCatalogRequest = request
     if (!defaultProviders().length) providerCatalog.set('loading')
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
     const modelsQuery = canCompose && (!activeSessionId || draftPickerOpen()) ? '&models=1' : ''
     const favoritesRevision = modelFavoritesRevision
-    const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`)
+    const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`, { signal: request.signal })
       .then(response => response.ok ? response.json() : null).catch(() => null)
-    if (request !== providerCatalogRequest) return
+    if (request.signal.aborted) return
     if (!catalog) {
       if (modelsQuery || !defaultProviders().length) providerCatalog.set('failed')
       return
@@ -5289,6 +5302,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     function openFreshDraft() {
       if (!box.isConnected || promptRef.current !== box || box.value || composerFiles().length) return
       const target = activeScratchSession ? `profile=${providerProfileId || 0}&project=none` : `workspace=${activeWorkspaceId}`
+      stopWorkspaceStatusRequests()
       navigate(`/?${target}&draft=${newCommandId()}`)
     }
 
@@ -6397,12 +6411,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   onUnmounted(() => sidebarDrafts?.dispose())
-  onUnmounted(() => {
-    projectSetupRequest?.abort()
-    projectSetupPoll?.stop()
-    projectSettlementRequest?.abort()
-    projectSettlementPoll?.stop()
-  })
+  onUnmounted(stopWorkspaceStatusRequests)
+  useEventListener('pagehide', stopWorkspaceStatusRequests, { target: window })
+  useEventListener('pageshow', (event) => {
+    if (!event.persisted || !workspaceStatusPaused) return
+    workspaceStatusPaused = false
+    void annotateDriverPickers()
+    void refreshProjectSetup()
+    void refreshProjectSettlement()
+  }, { target: window })
   if (codecUrl) void connectComposerDrafts().catch(() => {})
   if ((sessionId || activeProfile || initialSettingsSection) && serverUrl && codecUrl)
     void connectLiveSession().catch(() => sessionConnecting.set(false))
