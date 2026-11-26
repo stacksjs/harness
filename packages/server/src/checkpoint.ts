@@ -107,12 +107,13 @@ async function withTemporaryIndex<T>(run: (env: Record<string, string>) => Promi
  *
  * Built in a temporary index, so nothing the user owns moves.
  */
-export async function snapshotTree(workspacePath: string): Promise<string | null> {
+export async function snapshotTree(workspacePath: string, excluded: string[] = [], sourceIndex?: Uint8Array): Promise<string | null> {
   return withTemporaryIndex(async (env) => {
-    const read = await git(workspacePath, ['read-tree', 'HEAD'], env)
-    if (!read.ok) return null
-    const add = await git(workspacePath, ['add', '-A'], env)
-    if (!add.ok) return null
+    if (sourceIndex) await writeFile(env.GIT_INDEX_FILE!, sourceIndex)
+    else if (!(await git(workspacePath, ['read-tree', 'HEAD'], env)).ok) return null
+
+    const paths = excluded.length ? ['--', '.', ...excluded.map(path => `:(exclude,literal)${path}`)] : []
+    if (!(await git(workspacePath, ['add', '-A', ...paths], env)).ok) return null
     const tree = await git(workspacePath, ['write-tree'], env)
     return tree.ok ? tree.out.trim() : null
   })
@@ -136,32 +137,16 @@ export async function capture(workspacePath: string, message = 'harness checkpoi
   // differ from every other checkpoint's.
   if (!head.ok) return { ref: null, reason: 'no-commits' }
 
-  return withTemporaryIndex(async (env) => {
-    if (sourceIndex) await writeFile(env.GIT_INDEX_FILE!, sourceIndex)
-    else if (!(await git(workspacePath, ['read-tree', 'HEAD'], env)).ok) return { ref: null, reason: 'git-failed' as const }
-
-    // `-A` stages tracked modifications, deletions *and* untracked files, so an
-    // agent's new file is inside the snapshot rather than surviving a revert.
-    const paths = excluded.length ? ['--', '.', ...excluded.map(path => `:(exclude,literal)${path}`)] : []
-    const add = await git(workspacePath, ['add', '-A', ...paths], env)
-    if (!add.ok) return { ref: null, reason: 'git-failed' as const }
-
-    const tree = await git(workspacePath, ['write-tree'], env)
-    if (!tree.ok) return { ref: null, reason: 'git-failed' as const }
-
-    // Checkpoints are internal Git objects. Capture must work before the
-    // user configures an identity or a signing key for their own commits.
-    const commit = await git(workspacePath, ['commit-tree', '--no-gpg-sign', tree.out.trim(), '-p', head.out.trim(), '-m', message], {
-      ...env,
-      GIT_AUTHOR_NAME: 'Harness',
-      GIT_AUTHOR_EMAIL: 'checkpoint@harness.invalid',
-      GIT_COMMITTER_NAME: 'Harness',
-      GIT_COMMITTER_EMAIL: 'checkpoint@harness.invalid',
-    })
-    if (!commit.ok) return { ref: null, reason: 'git-failed' as const }
-
-    return { ref: commit.out.trim(), tree: tree.out.trim() }
+  const tree = await snapshotTree(workspacePath, excluded, sourceIndex)
+  if (!tree) return { ref: null, reason: 'git-failed' }
+  // Checkpoints are internal Git objects. A user identity or signing key is unnecessary.
+  const commit = await git(workspacePath, ['commit-tree', '--no-gpg-sign', tree, '-p', head.out.trim(), '-m', message], {
+    GIT_AUTHOR_NAME: 'Harness',
+    GIT_AUTHOR_EMAIL: 'checkpoint@harness.invalid',
+    GIT_COMMITTER_NAME: 'Harness',
+    GIT_COMMITTER_EMAIL: 'checkpoint@harness.invalid',
   })
+  return commit.ok ? { ref: commit.out.trim(), tree } : { ref: null, reason: 'git-failed' }
 }
 
 /** Git paths come from NUL-terminated output and are always repository-relative. */
@@ -297,6 +282,7 @@ interface RewindTarget {
   before: Buffer | null
   after: Buffer
   backup: string
+  backupTree: string
   recoveryRef: string
   indexRecovery?: { ref: string, object: string }
 }
@@ -335,13 +321,31 @@ async function replaceIndex(path: string, expected: Buffer | null, next: Buffer 
   }
 }
 
+async function verifyPreparedCheckout(target: RewindTarget): Promise<void> {
+  if (await realpath(target.plan.root).catch(() => null) !== target.plan.root)
+    throw new Error(`The checkout moved while preparing the rewind in ${target.label}.`)
+  const [lock, index, head] = await Promise.all([
+    lstat(`${target.index}.lock`).catch((error) => {
+      if (error.code !== 'ENOENT') throw error
+      return null
+    }),
+    readIndex(target.index),
+    git(target.plan.root, ['rev-parse', '--verify', 'HEAD']),
+  ])
+  const indexChanged = target.before ? !index || !index.equals(target.before) : index !== null
+  if (lock || indexChanged || !head.ok || head.out.trim() !== target.head)
+    throw new Error(`Git staging or the checked-out commit changed in ${target.label}.`)
+  if (await snapshotTree(target.plan.root, target.plan.excluded, target.before ?? undefined) !== target.backupTree)
+    throw new Error(`Files changed while preparing the rewind in ${target.label}.`)
+}
+
 export function rewindReference(operation: string): string {
   return `refs/harness/rewind/${new Bun.CryptoHasher('sha256').update(operation).digest('hex').slice(0, 24)}`
 }
 
 /** Preflight all checkouts and retain recovery objects before touching any. */
 export async function restoreRepositories(
-  scopes: RepositoryRestoreTarget[], operation: string, allowed: () => boolean,
+  scopes: RepositoryRestoreTarget[], operation: string, allowed: () => boolean, beforeRestore?: () => Promise<boolean>,
 ): Promise<RestoreResult> {
   const planned: RewindTarget[] = []
   const attempted: RewindTarget[] = []
@@ -378,9 +382,9 @@ export async function restoreRepositories(
       })
       if (!after) return failed(`Could not prepare the Git index for ${scope.label}.`)
       const backup = await capture(plan.root, 'Harness pre-rewind recovery', scope.excluded, before ?? undefined)
-      if (!backup.ref) return failed(`Could not save the current files in ${scope.label}.`)
+      if (!backup.ref || !backup.tree) return failed(`Could not save the current files in ${scope.label}.`)
       const recoveryRef = `${reference}/${position}/files`
-      const target: RewindTarget = { plan, label: scope.label, index, head, before, after, backup: backup.ref, recoveryRef }
+      const target: RewindTarget = { plan, label: scope.label, index, head, before, after, backup: backup.ref, backupTree: backup.tree, recoveryRef }
       if (!(await git(plan.root, ['update-ref', recoveryRef, backup.ref, ''])).ok)
         return failed(`Could not retain recovery files for ${scope.label}.`)
       planned.push(target)
@@ -391,6 +395,19 @@ export async function restoreRepositories(
         if (!blob.ok || !(await git(plan.root, ['update-ref', ref, object, ''])).ok)
           return failed(`Could not retain the recovery index for ${scope.label}.`)
         target.indexRecovery = { ref, object }
+      }
+    }
+    if (beforeRestore) {
+      if (!allowed()) return failed('The worktree is no longer available for rewind.')
+      for (const target of planned) await verifyPreparedCheckout(target)
+      if (!await beforeRestore()) return failed('The provider did not confirm the rewind.')
+      // Codex can take time to respond. Recheck every checkout before touching any of them.
+      for (const target of planned) {
+        await verifyPreparedCheckout(target)
+        const current = await prepareRestore(target.plan.root, target.plan.commit, target.plan.excluded)
+        if ('ok' in current) return failed(`${target.label}: ${current.reason}`)
+        if (current.root !== target.plan.root) return failed(`The checkout moved in ${target.label}.`)
+        target.plan = current
       }
     }
     for (const target of planned) {

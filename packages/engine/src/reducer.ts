@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
-import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
+import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, isTurnActive, isolatedRewindScope, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, sharesCheckout, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -94,17 +94,12 @@ function turnStarted(session: SessionState, text: string, codexSelection?: Codex
   }
 }
 
-function sharesCheckout(state: HarnessState, first: SessionState, second: SessionState): boolean {
-  if (first.id === second.id) return true
-  const path = (session: SessionState) => (session.worktreePath ?? state.workspaces.get(session.workspaceId)?.path)
-    ?.replaceAll('\\', '/').replace(/\/+$/u, '')
-  const a = path(first)
-  const b = path(second)
-  return a !== undefined && b !== undefined && (a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`))
-}
-
-function checkoutRewindPending(state: HarnessState, session: SessionState): boolean {
-  return [...state.sessions.values()].some(other => other.pendingRewind && sharesCheckout(state, session, other))
+function checkoutRewindPending(state: HarnessState, session: SessionState, checkingOwnRewind = false): boolean {
+  for (const other of state.sessions.values()) {
+    if ((other.pendingRewind || (other.conversationRewind?.checkpointId && (!checkingOwnRewind || other.id !== session.id)))
+      && sharesCheckout(state, session, other)) return true
+  }
+  return false
 }
 
 type OrganizeThreadCommand = Extract<Command, { type: 'session.organize' }>
@@ -786,22 +781,37 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('This thread is unavailable for conversation rewind.')
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before rewinding the conversation.')
-      if (isTurnActive(session.state) || session.followUps.entries.length || checkoutRewindPending(state, session))
+      if (isTurnActive(session.state) || session.followUps.entries.length || checkoutRewindPending(state, session, command.verifyOnly === true))
         throw new InvalidCommand('Finish the active turn, queued messages, and file rewind before editing an earlier prompt.')
       const existing = session.conversationRewind
       if (command.verifyOnly === true) {
-        if (existing?.status !== 'uncertain' || existing.turnId !== command.turnId)
+        if (command.restoreFiles || existing?.status !== 'uncertain' || existing.turnId !== command.turnId)
           throw new InvalidCommand('There is no interrupted conversation rewind to check.')
         return [{ sessionId: session.id, commandId, at, payload: {
           type: 'turn.rewind-requested', turnId: existing.turnId, operation: existing.operation, point: existing.point,
+          ...(existing.checkpointId && { checkpointId: existing.checkpointId }),
         } }]
       }
       if (existing) throw new InvalidCommand('Check the current conversation rewind before starting another one.')
       const index = session.turns.findIndex(turn => turn.id === command.turnId)
       const point = conversationRewindPoint(session, index)
       if (!point) throw new InvalidCommand('Choose a completed prompt in the current Codex conversation.')
+      const checkpoint = command.restoreFiles === true
+        ? session.checkpoints.find(point => point.kind === 'turn-start' && point.turnId === command.turnId)
+        : undefined
+      if (command.restoreFiles === true && (!isolatedRewindScope(state, session) || !checkpoint))
+        throw new InvalidCommand('Reverting files with the conversation requires an isolated worktree and an earlier checkpoint.')
       return [{ sessionId: session.id, commandId, at, payload: {
         type: 'turn.rewind-requested', turnId: command.turnId, operation: commandId, point,
+        ...(checkpoint && { checkpointId: checkpoint.id }),
+      } }]
+    }
+
+    case 'thread.turn.rewind-provider-confirmed': {
+      const pending = state.sessions.get(command.sessionId)?.conversationRewind
+      if (pending?.operation !== command.operation || pending.status !== 'running' || !pending.checkpointId) return []
+      return [{ sessionId: command.sessionId, commandId, at, payload: {
+        type: 'turn.rewind-provider-confirmed', operation: command.operation,
       } }]
     }
 

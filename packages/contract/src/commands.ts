@@ -84,7 +84,7 @@ export type ClientCommand =
   | ({ type: 'session.turn.steer', sessionId: number, turnId: number } & ({ id: string } | { text: string }))
   | { type: 'session.approval.respond', sessionId: number, approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
   | ({ type: 'session.input.respond', sessionId: number, requestId: string } & InputResponse)
-  | { type: 'session.turn.rewind', sessionId: number, turnId: number, verifyOnly?: true }
+  | { type: 'session.turn.rewind', sessionId: number, turnId: number, verifyOnly?: true, restoreFiles?: true }
   | { type: 'session.checkpoint.revert', sessionId: number, checkpointId: number }
   | { type: 'session.stop', sessionId: number }
   | ({ type: 'session.organize', sessionId: number, undoScope?: string, undoBatch?: string } & ThreadOrganizationAction)
@@ -168,6 +168,7 @@ export type InternalCommand =
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
+  | { type: 'thread.turn.rewind-provider-confirmed', sessionId: number, operation: string }
   | { type: 'thread.turn.rewind-result', sessionId: number, operation: string, outcome: 'rewound' | 'unchanged' | 'uncertain', message?: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number, skipped?: string[] }
   | { type: 'thread.checkpoint.restore-failed', sessionId: number, checkpointId: number, message: string }

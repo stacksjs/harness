@@ -19,7 +19,7 @@ import { realpath } from 'node:fs/promises'
 import { sep } from 'node:path'
 import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
-import { effectiveClaudeCompaction, providerConversation } from '@harness/engine'
+import { effectiveClaudeCompaction, isolatedRewindScope, providerConversation } from '@harness/engine'
 import { nestedWorktrees, openCombinedRepository, openCombinedWorktree, planCombinedWorktree, releaseCombinedWorktree } from './combined-worktree'
 import type { RepositoryRestoreTarget } from './checkpoint'
 import { capture, restore, restoreRepositories, rewindReference } from './checkpoint'
@@ -803,12 +803,19 @@ export class ProviderRuntime {
     }))
   }
 
+  private interruptedFileRewind(operation: string): string {
+    return `Conversation rewound. Check the working trees and staging before continuing. Any retained recovery objects are under ${rewindReference(operation)}.`
+  }
+
   async recoverConversationRewind(sessionId: number): Promise<void> {
     const pending = this.options.engine.current.sessions.get(sessionId)?.conversationRewind
-    if (pending?.status !== 'running') return
+    if (!pending || pending.status === 'uncertain') return
+    const restoringFiles = pending.status === 'restoring-files'
     await this.options.engine.dispatchInternal(this.envelope({
-      type: 'thread.turn.rewind-result', sessionId, operation: pending.operation, outcome: 'uncertain',
-      message: 'The host restarted during conversation rewind. Check the provider history before sending.',
+      type: 'thread.turn.rewind-result', sessionId, operation: pending.operation,
+      outcome: restoringFiles ? 'rewound' : 'uncertain',
+      message: restoringFiles ? this.interruptedFileRewind(pending.operation)
+        : 'The host restarted during conversation rewind. Check the provider history before sending.',
     }))
   }
 
@@ -817,22 +824,93 @@ export class ProviderRuntime {
     const session = state.sessions.get(sessionId)
     const pending = session?.conversationRewind
     if (!session || pending?.status !== 'running') return
-    const trusted = () => this.options.engine.current.workspaces.get(session.workspaceId)?.trusted === true
-    let outcome: 'rewound' | 'unchanged' | 'uncertain' = verifyOnly ? 'uncertain' : 'unchanged'
+    const { operation, checkpointId } = pending
+    const allowed = () => {
+      const current = this.options.engine.current
+      const thread = current.sessions.get(sessionId)
+      return thread?.conversationRewind?.operation === operation && current.workspaces.get(thread.workspaceId)?.trusted === true
+        && (!checkpointId || verifyOnly || Boolean(isolatedRewindScope(current, thread)))
+    }
+    const resultState: { outcome: 'rewound' | 'unchanged' | 'uncertain' } = { outcome: verifyOnly ? 'uncertain' : 'unchanged' }
     let message: string | undefined = 'The provider account or workspace is unavailable for conversation rewind.'
-    try {
-      const running = trusted() ? await this.instanceFor(sessionId, session.driverKind, false) : null
-      if (running?.instance.rewind && trusted()) {
-        outcome = 'uncertain'
+    let restoredFiles: Awaited<ReturnType<typeof restoreRepositories>> | undefined
+    let checkedProvider = false
+    const rewindProvider = async () => {
+      checkedProvider = true
+      const running = allowed() ? await this.instanceFor(sessionId, session.driverKind, false) : null
+      if (!running?.instance.rewind || !allowed()) return false
+      resultState.outcome = 'uncertain'
+      try {
         const result = await running.instance.rewind({ ...pending.point, verifyOnly })
-        outcome = result.outcome
+        resultState.outcome = result.outcome
         message = result.outcome === 'rewound' ? undefined : result.message
+        return result.outcome === 'rewound'
+      }
+      catch {
+        message = 'Could not confirm conversation rewind with the provider. Check provider history before retrying.'
+        return false
       }
     }
-    catch {
-      message = 'Could not confirm conversation rewind with the provider. Check provider history before retrying.'
+    try {
+      if (checkpointId && !verifyOnly) {
+        const checkpoint = session.checkpoints.find(point => point.id === checkpointId)
+        const workspace = state.workspaces.get(session.workspaceId)
+        if (!allowed() || !checkpoint || !workspace || !session.worktreePath) {
+          message = 'The isolated worktree or checkpoint is unavailable. The conversation was kept.'
+        }
+        else {
+          if (!session.combinedWorktree) {
+            const checkout = await worktree.openReserved({ repository: workspace.path, path: session.worktreePath, branch: session.branch, base: '' }, false)
+            if (!checkout.path) throw new Error('The registered worktree is unavailable.')
+          }
+          const { targets, skipped } = await this.checkpointTargets(session, checkpoint, session.worktreePath)
+          restoredFiles = await restoreRepositories(targets, operation, allowed, async () => {
+            if (!await rewindProvider()) return false
+            // A restart after this event can settle the transcript without another provider call.
+            await this.record({ type: 'thread.turn.rewind-provider-confirmed', sessionId, operation })
+            return true
+          })
+          if (resultState.outcome === 'rewound') {
+            message = restoredFiles.ok ? (skipped.length ? `Rewind finished. No earlier checkpoint for ${skipped.join(', ')}.` : undefined)
+              : `Conversation rewound. File restore stopped. ${restoredFiles.reason ?? ''}`.trim()
+          }
+          else if (!restoredFiles.ok && !checkedProvider)
+            message = `The conversation was kept. ${restoredFiles.reason ?? 'Could not prepare the worktree.'}`
+        }
+      }
+      else if (await rewindProvider() && checkpointId) message = this.interruptedFileRewind(operation)
     }
-    await this.record({ type: 'thread.turn.rewind-result', sessionId, operation: pending.operation, outcome, message })
+    catch (error) {
+      if (resultState.outcome === 'rewound') message = this.interruptedFileRewind(operation)
+      else if (resultState.outcome === 'uncertain') message = 'Could not confirm conversation rewind with the provider. Check provider history before retrying.'
+      else message = error instanceof Error ? `The conversation was kept. ${error.message}` : 'Could not prepare the worktree for rewind.'
+    }
+    await this.record({ type: 'thread.turn.rewind-result', sessionId, operation, outcome: resultState.outcome, message })
+    await restoredFiles?.cleanup?.()
+  }
+
+  private async checkpointTargets(session: SessionState, checkpoint: SessionState['checkpoints'][number], workspacePath: string) {
+    if (!checkpoint.repositories) return {
+      targets: [{ path: workspacePath, label: 'Project worktree', ref: checkpoint.vcsRef, excluded: [] }], skipped: [],
+    }
+    const scopes = await this.checkpointScopes(session, workspacePath)
+    const points = new Map(checkpoint.repositories.map(point => [point.key, point.vcsRef]))
+    const targets: RepositoryRestoreTarget[] = []
+    const skipped: string[] = []
+    for (const scope of scopes) {
+      const ref = points.get(scope.key)
+      if (!ref) {
+        if (scope.key) skipped.push(scope.label)
+        continue
+      }
+      const path = await scope.open()
+      if (!path) throw new Error(`The recorded repository ${scope.label} is unavailable.`)
+      targets.push({ path, label: scope.label, ref, excluded: scope.excluded })
+      points.delete(scope.key)
+    }
+    if (points.size || !targets.length)
+      throw new Error(`Recorded repositories are unavailable: ${[...points.keys()].map(key => key || 'Project root').join(', ') || 'no available checkout'}.`)
+    return { targets, skipped }
   }
 
   async revert(sessionId: number, checkpointId: number, operation: string): Promise<void> {
@@ -854,37 +932,18 @@ export class ProviderRuntime {
       return
     }
 
-    const skipped: string[] = []
+    let skipped: string[] = []
     let result: Awaited<ReturnType<typeof restore>>
     try {
       if (checkpoint.repositories) {
-        const scopes = await this.checkpointScopes(session, workspacePath)
-        const points = new Map(checkpoint.repositories.map(point => [point.key, point.vcsRef]))
-        const targets: RepositoryRestoreTarget[] = []
-        for (const scope of scopes) {
-          const ref = points.get(scope.key)
-          if (!ref) {
-            if (scope.key) skipped.push(scope.label)
-            continue
-          }
-          const path = await scope.open()
-          if (!path) {
-            await fail(`The recorded repository ${scope.label} is unavailable.`)
-            return
-          }
-          targets.push({ path, label: scope.label, ref, excluded: scope.excluded })
-          points.delete(scope.key)
-        }
-        if (points.size || !targets.length) {
-          await fail(`Recorded repositories are unavailable: ${[...points.keys()].map(key => key || 'Project root').join(', ') || 'no available checkout'}.`)
-          return
-        }
-        result = await restoreRepositories(targets, operation, allowed)
+        const planned = await this.checkpointTargets(session, checkpoint, workspacePath)
+        skipped = planned.skipped
+        result = await restoreRepositories(planned.targets, operation, allowed)
       }
       else result = await restore(workspacePath, checkpoint.vcsRef)
     }
-    catch {
-      await fail('Could not prepare the workspace for rewind.')
+    catch (error) {
+      await fail(error instanceof Error ? error.message : 'Could not prepare the workspace for rewind.')
       return
     }
     if (!result.ok) {

@@ -85,7 +85,8 @@ export type EventPayload =
   | { type: 'session.fork-portable' }
   | { type: 'session.fork-failed', message: string }
   | { type: 'session.provider-switched', afterTurnId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions }
-  | { type: 'turn.rewind-requested', turnId: number, operation: string, point: ConversationRewindPoint }
+  | { type: 'turn.rewind-requested', turnId: number, operation: string, point: ConversationRewindPoint, checkpointId?: number }
+  | { type: 'turn.rewind-provider-confirmed', operation: string }
   | { type: 'turn.rewind-settled', operation: string, outcome: 'rewound' | 'unchanged' | 'uncertain', message?: string }
   | { type: 'turn.started', turnId: number, role: 'user' | 'assistant', text?: string, attachments?: ComposerAttachment[], queuedId?: string, codexSelection?: CodexTurnSelection, modelChanged?: boolean, switchedProvider?: DriverKind, compaction?: true, automaticCompaction?: true, freshContext?: true }
   | { type: 'queue.added', entry: QueuedFollowUp }

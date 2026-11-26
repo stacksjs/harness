@@ -45,7 +45,7 @@ export interface SessionState {
   navigation?: ThreadNavigation
   turns: TurnState[]
   lastTurnId?: number
-  conversationRewind?: { operation: string, turnId: number, point: ConversationRewindPoint, status: 'running' | 'uncertain' }
+  conversationRewind?: { operation: string, turnId: number, point: ConversationRewindPoint, checkpointId?: number, status: 'running' | 'restoring-files' | 'uncertain' }
   rewoundPrompt?: { operation: string, text: string, attachments: ComposerAttachment[] }
   conversationRewindNotice?: string
   followUps: FollowUpQueue
@@ -276,6 +276,29 @@ export function providerConversation(session: SessionState) {
 
 function forgetProviderConversation(session: SessionState): void {
   if (session.providerConversations) delete session.providerConversations[providerConversationKey(session)]
+}
+
+export function sharesCheckout(state: HarnessState, first: SessionState, second: SessionState): boolean {
+  if (first.id === second.id) return true
+  const path = (session: SessionState) => {
+    const value = (session.worktreePath || state.workspaces.get(session.workspaceId)?.path)?.replaceAll('\\', '/').replace(/\/+$/u, '')
+    return value && /^[a-z]:\//iu.test(value) ? value.toLowerCase() : value
+  }
+  const a = path(first)
+  const b = path(second)
+  if (a === undefined || b === undefined) return false
+  const contains = (parent: string, child: string) => child.startsWith(`${parent}/`)
+    && !child.slice(parent.length + 1).split('/').includes('.git')
+  return a === b || contains(a, b) || contains(b, a)
+}
+
+export function isolatedRewindScope(state: HarnessState, session: SessionState): 'files' | 'repositories' | undefined {
+  if (!session.isolate || !session.worktreePath || !state.workspaces.get(session.workspaceId)?.trusted) return undefined
+  for (const other of state.sessions.values()) {
+    if (other.id !== session.id && sharesCheckout(state, session, other)) return undefined
+  }
+  const combined = session.combinedWorktree
+  return combined && !combined.checkouts.some(checkout => !checkout.key) ? 'repositories' : 'files'
 }
 
 export function conversationRewindPoint(session: SessionState, index: number): ConversationRewindPoint | undefined {
@@ -618,9 +641,15 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
     case 'turn.rewind-requested': {
       const session = state.sessions.get(event.sessionId)
       if (session) {
-        session.conversationRewind = { operation: p.operation, point: p.point, turnId: p.turnId, status: 'running' }
+        session.conversationRewind = { operation: p.operation, point: p.point, turnId: p.turnId, checkpointId: p.checkpointId, status: 'running' }
         delete session.conversationRewindNotice
       }
+      break
+    }
+
+    case 'turn.rewind-provider-confirmed': {
+      const pending = state.sessions.get(event.sessionId)?.conversationRewind
+      if (pending?.operation === p.operation) pending.status = 'restoring-files'
       break
     }
 

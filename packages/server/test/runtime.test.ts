@@ -2271,6 +2271,144 @@ describe('conversation rewind', () => {
   })
 })
 
+describe('conversation and file rewind', () => {
+  it.each(['single', 'repositories', 'locked-index', 'new-edit', 'provider-refuses', 'shared', 'verify-after-crash', 'confirmed-before-crash'] as const)(
+    'coordinates %s without replaying file changes', async (scenario) => {
+      const workspace = join(dir, 'project')
+      mkdirSync(workspace)
+      const keys = scenario === 'single' ? [''] : ['api', 'packages/web']
+      const git = (cwd: string, ...args: string[]) => {
+        const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+        if (result.status !== 0) throw new Error(`Git ${args.join(' ')}: ${result.stderr}`)
+        return result.stdout
+      }
+      for (const key of keys) {
+        const root = join(workspace, key)
+        mkdirSync(root, { recursive: true })
+        git(root, 'init', '-qb', 'main')
+        writeFileSync(join(root, 'shared.txt'), 'Original file\n')
+        git(root, 'add', 'shared.txt')
+        git(root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Original file')
+      }
+      let turns = 0
+      const checks: boolean[] = []
+      const driver: Driver = {
+        kind: 'codex',
+        async probe() { return { status: 'ready' } },
+        async create({ workspacePath }) {
+          return {
+            async *startTurn() {
+              turns++
+              for (const key of keys) {
+                writeFileSync(join(workspacePath, key, 'shared.txt'), `Change from turn ${turns}\n`)
+                if (turns === 2) writeFileSync(join(workspacePath, key, 'added.txt'), 'created by selected turn')
+              }
+              yield { type: 'session-bound', providerSessionId: 'native-worktree-thread' }
+              yield { type: 'assistant-delta', text: `Response ${turns}` }
+              yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, providerTurnId: `native-${turns}` }
+            },
+            async rewind(input) {
+              checks.push(input.verifyOnly)
+              expect(input).toMatchObject({ providerSessionId: 'native-worktree-thread', beforeTurnId: 'native-2', newestTurnId: 'native-3', retainedTurnId: 'native-1' })
+              if (scenario === 'new-edit') writeFileSync(join(workspacePath, keys.at(-1)!, 'shared.txt'), 'New local edit while Codex was rewinding.\n')
+              if (scenario === 'provider-refuses') return { outcome: 'unchanged', message: 'Provider declined the rewind.' }
+              return { outcome: 'rewound' }
+            },
+            async interrupt() {}, async respondApproval() {}, async stop() {},
+          }
+        },
+      }
+      const start = () => serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+      harness = await start()
+      const url = `ws://127.0.0.1:${port}/ws`
+      let client = await Client.connect(url)
+      const { sessionId } = await bootstrap(client, workspace, true, keys[0] ? { repositories: keys } : undefined, 'codex')
+      const send = (id: string, command: Command) => {
+        client.events = client.events.filter(frame => frame.id !== id)
+        client.send({ t: 'dispatch', envelope: { id, at: Date.now(), command } })
+        return client.waitForDispatch(id)
+      }
+      const session = () => harness.engine.current.sessions.get(sessionId)!
+      try {
+        for (const turnId of [1, 2, 3]) {
+          expect(await send(`fixture-turn-${turnId}`, { type: 'session.turn.start', sessionId, text: `Prompt ${turnId}` })).toMatchObject({ t: 'dispatched' })
+          expect(await client.waitFor('turn.completed', 10_000, event => event.turnId === turnId)).toBeTruthy()
+        }
+        expect(Boolean(session().worktreePath)).toBe(true)
+        const checkouts = keys.map(key => join(session().worktreePath, key))
+        for (const path of checkouts) {
+          writeFileSync(join(path, 'shared.txt'), 'Staged before rewinding.\n')
+          git(path, 'add', 'shared.txt')
+          writeFileSync(join(path, 'shared.txt'), 'Unstaged before rewinding.\n')
+        }
+        const target = session().checkpoints.find(checkpoint => checkpoint.kind === 'turn-start' && checkpoint.turnId === 2)!
+        const indexes = checkouts.map(path => git(path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trimEnd())
+        const savedIndexes = indexes.map(path => readFileSync(path))
+        const command = { type: 'session.turn.rewind', sessionId, turnId: 2, restoreFiles: true } as const
+        if (scenario === 'shared') {
+          await harness.engine.dispatch({ id: 'shared-rewind-folder', at: 9, command: { type: 'workspace.add', profileId: derivedId('c_p'), path: checkouts[0]! } })
+          const workspaceId = derivedId('shared-rewind-folder')
+          await harness.engine.dispatch({ id: 'shared-rewind-trust', at: 10, command: { type: 'workspace.trust', workspaceId, trusted: true } })
+          await harness.engine.dispatch({ id: 'shared-rewind-thread', at: 11, command: { type: 'session.create', workspaceId, driverKind: 'codex' } })
+          expect(await send('combined-edit', command)).toMatchObject({ t: 'rejected' })
+          expect(checks).toEqual([])
+          expect(session().turns).toHaveLength(3)
+          return
+        }
+        if (scenario === 'locked-index') writeFileSync(indexes.at(-1)! + '.lock', 'another Git operation', { flag: 'wx' })
+        if (scenario === 'verify-after-crash' || scenario === 'confirmed-before-crash') {
+          await harness.engine.dispatch({ id: 'combined-edit', at: 12, command })
+          if (scenario === 'confirmed-before-crash') {
+            await harness.engine.dispatchInternal({ id: 'provider-confirmed', at: 13,
+              command: { type: 'thread.turn.rewind-provider-confirmed', sessionId, operation: 'combined-edit' },
+            })
+          }
+          client.close()
+          harness.stop()
+          harness = await start()
+          client = await Client.connect(url)
+          client.send({ t: 'subscribe', sessionId })
+          if (scenario === 'verify-after-crash') {
+            expect(await client.waitFor('turn.rewind-settled')).toMatchObject({ outcome: 'uncertain' })
+            expect(await send('read-after-crash', { type: 'session.turn.rewind', sessionId, turnId: 2, verifyOnly: true })).toMatchObject({ t: 'dispatched' })
+          }
+        }
+        else {
+          expect(await send('combined-edit', command)).toMatchObject({ t: 'dispatched', replayed: false })
+          expect(await client.waitFor('turn.rewind-requested')).toMatchObject({ checkpointId: target.id })
+        }
+        const rejected = scenario === 'locked-index' || scenario === 'provider-refuses'
+        const outcome = rejected ? 'unchanged' : 'rewound'
+        expect(await client.waitFor('turn.rewind-settled', 15_000, event => event.outcome === outcome)).toBeTruthy()
+        expect(await send('combined-edit', command)).toMatchObject({ t: 'dispatched', replayed: true })
+        expect(checks).toEqual(scenario === 'locked-index' || scenario === 'confirmed-before-crash' ? [] : [scenario === 'verify-after-crash'])
+        expect(session().turns.map(turn => turn.id)).toEqual(rejected ? [1, 2, 3] : [1])
+        if (!rejected) expect(session().rewoundPrompt?.text).toBe('Prompt 2')
+        const restored = scenario === 'single' || scenario === 'repositories'
+        for (const [i, path] of checkouts.entries()) {
+          if (restored) {
+            expect(readFileSync(join(path, 'shared.txt'), 'utf8')).toBe('Change from turn 1\n')
+            expect(existsSync(join(path, 'added.txt'))).toBe(false)
+            expect(git(path, 'diff', '--cached', '--name-only')).toBe('')
+          }
+          else {
+            const concurrent = scenario === 'new-edit' && i === checkouts.length - 1
+            expect(readFileSync(join(path, 'shared.txt'), 'utf8')).toBe(concurrent ? 'New local edit while Codex was rewinding.\n' : 'Unstaged before rewinding.\n')
+            expect(existsSync(join(path, 'added.txt'))).toBe(true)
+            expect(readFileSync(indexes[i]!)).toEqual(savedIndexes[i]!)
+          }
+          expect(readFileSync(join(workspace, keys[i]!, 'shared.txt'), 'utf8')).toBe('Original file\n')
+        }
+        if (scenario === 'new-edit') expect(session().conversationRewindNotice).toContain('Files changed while preparing the rewind')
+        if (scenario === 'verify-after-crash' || scenario === 'confirmed-before-crash')
+          expect(session().conversationRewindNotice).toContain('Check the working trees and staging')
+        if (scenario === 'locked-index') expect(readFileSync(indexes.at(-1)! + '.lock', 'utf8')).toBe('another Git operation')
+      }
+      finally { client.close() }
+    }, 25_000,
+  )
+})
+
 describe('queued follow-up delivery', () => {
   it('shares an editable order across clients and delivers each entry once after completion', async () => {
     const gate = Promise.withResolvers<void>()
