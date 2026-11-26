@@ -564,14 +564,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             </div>
           </template>
           <div @if(!liveTurn.response && sessionState !== 'running')hidden@endif
-            :hidden="!ssrHasResponse() && (runningTurnId() !== initialResponseTurn || uiState() !== 'running')"
+            :hidden="!ssrHasResponse() && (runningTurnId() !== initialResponseTurn || uiState() !== 'running' || waitingForProjectSetup())"
             class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
           {{--
             A page can load mid-turn before any token exists; the dots hold
             that gap too, and the first streamed byte hides them.
           --}}
           @if(!liveTurn.response)
-            <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || uiState() !== 'running' || runningTurnId() !== initialResponseTurn" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
+            <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || uiState() !== 'running' || runningTurnId() !== initialResponseTurn || waitingForProjectSetup()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           @endif
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
           <p data-turn-interrupted @if(!initialInterrupted)hidden@endif :hidden="!ssrInterrupted()" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
@@ -658,10 +658,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
               <span :text="questionActivityLabel(request.outcome)"></span>
             </div>
           </template>
-          <div :hidden="!turn.hasResponse && (runningTurnId() !== turn.id || uiState() !== 'running')"
+          <div :hidden="!turn.hasResponse && (runningTurnId() !== turn.id || uiState() !== 'running' || waitingForProjectSetup())"
             class="mb-1 font-medium text-[12px] opacity-50">Agent</div>
           {{-- Until the first token: dots, not a label over blank space. --}}
-          <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || uiState() !== 'running' || runningTurnId() !== turn.id" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
+          <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || uiState() !== 'running' || runningTurnId() !== turn.id || waitingForProjectSetup()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           <div class="transcript-markdown" data-response></div>
           <p data-turn-interrupted hidden :hidden="!turn.interrupted" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
           <button type="button" hidden :data-revert="rewindCheckpoints()[turn.id]?.id"
@@ -692,6 +692,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           </div>
         </template>
       @endif
+      @if(activeSession && workspaceEditorAllowed)
+        <section data-project-setup-status hidden :hidden="!projectSetupStatus()" aria-label="Worktree setup" class="grid mb-4 p-3 text-neutral-700 text-sm dark:text-neutral-200 border border-black/10 rounded-md dark:border-white/15">
+          <div class="flex flex-wrap gap-x-3 items-baseline justify-between min-w-0">
+            <p class="break-words font-medium" :text="projectSetup()?.name"></p>
+            <p role="status" class="text-neutral-600 text-xs dark:text-neutral-300" :text="projectSetupStatus()"></p>
+          </div>
+          <pre :hidden="!projectSetup()?.output" :text="projectSetup()?.output" class="overflow-hidden mt-2 p-2 break-words font-mono text-xs whitespace-pre-wrap bg-black/5 dark:bg-white/5 rounded"></pre>
+          <div class="flex flex-wrap gap-x-3 items-center text-xs">
+            <button type="button" :hidden="projectSetup()?.status === 'pending'" :disabled="!sessionOnline()" @click="viewProjectSetupTerminal" class="min-h-8 font-medium underline underline-offset-2">Open setup terminal</button>
+            <button type="button" :disabled="!sessionOnline()" @click="openProjectScripts" class="min-h-8 font-medium underline underline-offset-2">Setup details</button>
+          </div>
+        </section>
+      @endif
       @includeWhen(activeSession, '../partials/harness-follow-ups')
     </div>
     @if(activeSession)
@@ -720,7 +733,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         <button type="button" data-restore-earlier-prompt hidden :hidden="!canRestoreEarlierPrompt()" :disabled="startPending() || composerFilesPending()" @click="restoreEarlierPrompt" class="px-2 min-h-8 font-medium underline underline-offset-2">Restore earlier prompt</button>
       </div>
       <p data-worktree-setup role="status" @if(!initialWorktreeSetup || sessionState !== 'running')hidden@endif :hidden="!worktreeSetup() || !uiBusy()" class="mb-2 mx-auto text-neutral-600 text-xs dark:text-neutral-300">Preparing the project worktree</p>
-      <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
+      <p data-session-error role="alert" @if(!initialSessionError)hidden@endif :hidden="!sessionError() || projectSetupOwnsError()" :text="sessionError()" class="mx-auto mb-2 px-3 py-2 max-h-28 shrink-0 overflow-auto break-words text-sm text-red-700 border border-red-500/30 rounded-md dark:text-red-300">{{ initialSessionError }}</p>
     @endif
 
     @if(canCompose)
@@ -2029,6 +2042,22 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectScriptsLoading = state(false)
   const projectScriptsBusy = state(false)
   const projectScriptDraft = state(null)
+  const projectSetup = state(null)
+  const projectSetupStatus = derived(() => {
+    const setup = projectSetup()
+    if (!setup) return ''
+    if (setup.status === 'pending') return 'Worktree setup will run with the next message.'
+    if (setup.status === 'running') return 'Running worktree setup…'
+    if (setup.status === 'failed') return `Worktree setup exited with code ${setup.exitCode}.`
+    if (setup.status === 'interrupted') return 'Worktree setup was interrupted.'
+    return ''
+  })
+  const projectSetupNeedsAttention = derived(() => ['failed', 'interrupted'].includes(projectSetup()?.status))
+  const waitingForProjectSetup = derived(() => projectSetup()?.blocking && ['pending', 'running'].includes(projectSetup()?.status))
+  const projectSetupOwnsError = derived(() => projectSetupNeedsAttention() && sessionError().startsWith(projectSetupStatus()))
+  let projectSetupPoll
+  let projectSetupRead = 0
+  let projectSetupPreview = false
   let projectScriptsTrigger = null
   let projectScriptsRead = 0
   const terminalTabs = derived(() => {
@@ -2640,6 +2669,30 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     finally { if (read === projectScriptsRead) projectScriptsLoading.set(false) }
   }
 
+  async function refreshProjectSetup() {
+    if (!sessionId || !workspaceEditorAllowed) return
+    projectSetupPoll?.stop()
+    const read = ++projectSetupRead
+    try {
+      const response = await fetch(`/s/${sessionId}/project-setup`)
+      if (!response.ok || read !== projectSetupRead) return
+      const setup = await response.json()
+      if (read !== projectSetupRead) return
+      projectSetup.set(setup)
+      if (projectSetupPreview && setup?.status === 'running' && setup.previewUrl && !projectScriptsDialog.current?.open) {
+        projectSetupPreview = false
+        void previewProjectScript(setup.previewUrl, true)
+      }
+      if (setup?.status === 'pending' ? uiBusy() : setup?.status === 'running')
+        projectSetupPoll = useTimeout(refreshProjectSetup, 750)
+      else projectSetupPreview = false
+    }
+    catch {
+      if (read === projectSetupRead && sessionOnline() && (uiBusy() || projectSetup()?.status === 'running'))
+        projectSetupPoll = useTimeout(refreshProjectSetup, 1500)
+    }
+  }
+
   function openProjectScripts(event) {
     const dialog = projectScriptsDialog.current
     if (!dialog || dialog.open) return
@@ -2649,6 +2702,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     projectScriptsError.set('')
     dialog.showModal()
     void refreshProjectScripts()
+    void refreshProjectSetup()
   }
 
   function closeProjectScripts(restore = true) {
@@ -2686,6 +2740,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         const body = await response.json()
         throw new Error(body.error || 'Could not update project scripts.')
       }
+      if (operation.action === 'retry-setup' || operation.action === 'skip-setup') await refreshProjectSetup()
       if (projectScriptsDialog.current?.open) {
         projectScriptDraft.set(null)
         await refreshProjectScripts()
@@ -2716,13 +2771,25 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const { tabs, directions } = terminalTabs()
     const tab = { key: crypto.randomUUID(), number: (tabs.at(-1)?.number ?? 0) + 1, name: script.name, started: true }
     dock.queueProjectScript(tab.key, script.id)
+    revealProjectTerminal([...tabs, tab], tab.key, directions)
+  }
+
+  function viewProjectSetupTerminal() {
+    const setup = projectSetup()
+    if (!setup || setup.status === 'pending' || !sessionOnline() || !terminalController()) return
+    const { tabs, directions } = terminalTabs()
+    const tab = { key: setup.resumeKey, number: (tabs.at(-1)?.number ?? 0) + 1, name: setup.name, started: true }
+    revealProjectTerminal(tabs.some(item => item.key === tab.key) ? tabs : [...tabs, tab], tab.key, directions)
+  }
+
+  function revealProjectTerminal(tabs, key, directions) {
     closeProjectScripts(false)
     terminalTrigger = termHeaderToggle.current
     if (!wideWorkspace() && browserPreviewOpen()) closeBrowserPreview(false)
     if (!wideWorkspace() && workspaceFilesOpen()) closeWorkspaceFiles(false)
     if (!wideWorkspace()) diffOpen.set(false)
     termOpen.set(true)
-    showSelectedTerminal([...tabs, tab], tab.key, directions)
+    showSelectedTerminal(tabs, key, directions)
   }
 
   function previewTabLabel(tab) {
@@ -5882,6 +5949,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         workspaceBranch.set(payload.branch)
         isolatedRewind.set(payload.combined && !payload.combined.checkouts.some(checkout => !checkout.key) ? 'repositories' : 'files')
         if (diffOpen()) refreshWorkspaceDiff()
+        projectSetupPreview = sessionOnline()
+        void refreshProjectSetup()
+      }
+      if (payload.type === 'turn.started' && projectSetup()?.status === 'pending') {
+        projectSetupPreview = sessionOnline()
+        void refreshProjectSetup()
       }
       if (payload.type === 'session.fork-finished' || payload.type === 'session.fork-portable') forkStatus.set('ready')
       if (payload.type === 'session.fork-failed') {
@@ -6116,6 +6189,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         if (online) {
           watchSidebarOrder()
           void followUpActions()?.flush()
+          void refreshProjectSetup()
           if (termOpen()) requestAnimationFrame(showTerminalProcess)
         }
         else {
@@ -6138,6 +6212,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   onUnmounted(() => sidebarDrafts?.dispose())
+  onUnmounted(() => {
+    projectSetupRead++
+    projectSetupPoll?.stop()
+  })
   if (codecUrl) void connectComposerDrafts().catch(() => {})
   if ((sessionId || activeProfile) && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
 </script>

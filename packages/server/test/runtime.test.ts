@@ -1603,6 +1603,110 @@ describe('a session can have a checkout of its own', () => {
     return path
   }
 
+  it.skipIf(process.platform === 'win32').each([true, false])('runs worktree setup with provider waiting set to %s', async (waitForSetup) => {
+    const workspace = repoWorkspace2()
+    const gate = join(dir, 'finish-setup')
+    const started = join(dir, 'started-setup')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const launches: string[] = []
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => ({
+      ...driver,
+      async create(config) {
+        launches.push(config.workspacePath)
+        return driver.create(config)
+      },
+    }) })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    try {
+      const { sessionId } = await bootstrapIsolated(client, workspace)
+      const base = `http://127.0.0.1:${port}/s/${sessionId}`
+      const command = `test "$PWD" = "$T3CODE_WORKTREE_PATH" || exit 11\ntest -f "$T3CODE_PROJECT_ROOT/app.txt" || exit 12\nprintf 'started\\n' >> "${started}"\nwhile /bin/test ! -f "${gate}"; do sleep 0.1; done\nprintf 'setup fixture finished\\n'`
+      writeFileSync(join(workspace, 't3.json'), JSON.stringify({ scripts: [{ name: 'Fixture setup', command, runOnWorktreeCreate: true, async: !waitForSetup }] }))
+      const { imports } = await (await fetch(`${base}/project-scripts`)).json()
+      expect(imports[0]).toMatchObject({ waitForSetup, runOnWorktreeCreate: true })
+      expect(await (await fetch(`${base}/project-setup`)).json()).toBeNull()
+      const post = (operation: unknown) => fetch(`${base}/project-scripts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation),
+      })
+      expect((await post({ action: 'import', key: imports[0].key })).status).toBe(201)
+      expect(existsSync(started)).toBe(false)
+      const turn = (id: string) => client.send({ t: 'dispatch', envelope: { id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'Work in isolation.' } } })
+      turn('setup-first-turn')
+      for (let attempt = 0; attempt < 300 && !existsSync(started); attempt++) await Bun.sleep(20)
+      expect(readFileSync(started, 'utf8')).toBe('started\n')
+      const running = await (await fetch(`${base}/project-setup`)).json()
+      expect(running).toMatchObject({ name: 'Fixture setup', status: 'running' })
+      expect(running).not.toHaveProperty('command')
+      if (waitForSetup) expect(launches).toHaveLength(0)
+      else expect(await client.waitFor('turn.completed', 5000)).toBeTruthy()
+      writeFileSync(gate, '')
+      expect(await client.waitFor('turn.completed', 5000)).toBeTruthy()
+      let setup = running
+      for (let attempt = 0; attempt < 100 && setup.status === 'running'; attempt++) {
+        await Bun.sleep(20)
+        setup = await (await fetch(`${base}/project-setup`)).json()
+      }
+      expect(setup).toMatchObject({ status: 'completed', exitCode: 0, resumeKey: running.resumeKey })
+      expect(launches).toEqual([harness.engine.current.sessions.get(sessionId)?.worktreePath])
+      turn('setup-second-turn')
+      expect(await client.waitForDispatch('setup-second-turn')).toMatchObject({ t: 'dispatched' })
+      expect(readFileSync(started, 'utf8')).toBe('started\n')
+    }
+    finally { client.close() }
+  }, 20_000)
+
+  it.skipIf(process.platform === 'win32')('keeps an uncertain worktree setup blocked until an explicit retry after restart', async () => {
+    const workspace = repoWorkspace2()
+    const databasePath = join(dir, 'test.sqlite')
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => driver }
+    const socket = `ws://127.0.0.1:${port}/ws`
+    harness = await serve(options)
+    let client = await Client.connect(socket)
+    try {
+      const { sessionId } = await bootstrapIsolated(client, workspace)
+      const base = `http://127.0.0.1:${port}/s/${sessionId}`
+      const script = { name: 'Fixture setup', command: "printf 'fixture setup output\\n'; exit 7", runOnWorktreeCreate: true, waitForSetup: true }
+      const post = (operation: unknown) => fetch(`${base}/project-scripts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation),
+      })
+      const saved = await post({ action: 'save', script })
+      expect(saved.status).toBe(201)
+      const id = (await saved.json()).script.id
+      const turn = (id: string) => client.send({ t: 'dispatch', envelope: { id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'Work in isolation.' } } })
+      turn('setup-failure')
+      expect(await client.waitFor('session.failed', 5000)).toMatchObject({ message: expect.stringContaining('exited with code 7') })
+      const failed = await (await fetch(`${base}/project-setup`)).json()
+      expect(failed).toMatchObject({ status: 'failed', exitCode: 7 })
+      expect(client.payloads('turn.completed')).toHaveLength(0)
+      client.close()
+      harness.stop()
+      {
+        using db = new Database(databasePath)
+        db.query("UPDATE harness_project_setup SET status = 'running', exitCode = NULL WHERE session_id = ?").run(sessionId)
+      }
+      harness = await serve(options)
+      client = await Client.connect(socket)
+      client.send({ t: 'subscribe', sessionId })
+      expect(await (await fetch(`${base}/project-setup`)).json()).toMatchObject({ status: 'interrupted', resumeKey: failed.resumeKey })
+      turn('setup-no-effect-replay')
+      expect(await client.waitFor('session.failed', 5000, payload => payload.message.includes('was interrupted'))).toBeTruthy()
+      expect(client.payloads('turn.completed')).toHaveLength(0)
+      expect((await post({ action: 'save', id, script: { ...script, command: "printf 'fixture setup recovered\\n'" } })).status).toBe(200)
+      expect((await post({ action: 'retry-setup' })).status).toBe(204)
+      expect(await (await fetch(`${base}/project-setup`)).json()).toMatchObject({ status: 'pending', resumeKey: expect.not.stringMatching(failed.resumeKey) })
+      client.send({ t: 'term-open', workspaceId: derivedId('c_w'), sessionId, resumeKey: failed.resumeKey, resumeOnly: true })
+      for (let attempt = 0; attempt < 100 && !client.events.some(frame => frame.t === 'term-opened'); attempt++) await Bun.sleep(20)
+      const opened = client.events.find(frame => frame.t === 'term-opened')
+      expect(opened).toMatchObject({ exit: { code: null } })
+      expect(JSON.stringify(opened.checkpoint)).toContain('fixture setup output')
+      turn('setup-explicit-retry')
+      expect(await client.waitFor('turn.completed', 5000)).toBeTruthy()
+      expect(await (await fetch(`${base}/project-setup`)).json()).toMatchObject({ status: 'completed', exitCode: 0 })
+    }
+    finally { client.close() }
+  }, 20_000)
+
   it('runs the agent in a worktree and leaves the workspace alone', async () => {
     // What isolation buys: the agent edits its own checkout, so a second
     // session — or the person at the keyboard — is not working in the same

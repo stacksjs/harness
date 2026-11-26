@@ -44,6 +44,8 @@ export interface PtyOptions {
   denIntegration?: boolean
   /** Run one saved project action and keep its exit status and output. */
   command?: string
+  env?: Record<string, string>
+  authorized?: () => boolean
 }
 
 export function findDenShell(): string | null {
@@ -289,7 +291,7 @@ class NativePty implements PtyBackend {
     const shell = options.shell ?? process.env.SHELL ?? (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash')
     // The child gets the server's whole environment with TERM pinned; the
     // buffers must stay referenced across the call, which the locals do.
-    const envStrings = Object.entries(shellEnvironment(shell, options.denIntegration))
+    const envStrings = Object.entries({ ...shellEnvironment(shell, options.denIntegration), ...options.env })
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => cstr(`${key}=${String(value)}`))
     const envArr = new BigUint64Array([...envStrings.map(b => BigInt(native.ptr(b))), 0n])
@@ -406,6 +408,7 @@ class ScriptPty implements PtyBackend {
       detached: true,
       env: {
         ...shellEnvironment(shell, options.denIntegration),
+        ...options.env,
         COLUMNS: String(options.cols),
         LINES: String(options.rows),
       },
@@ -479,12 +482,14 @@ export class Pty implements PtyBackend {
   get processId(): number | undefined { return this.killed ? undefined : this.backend?.processId }
 
   constructor(options: PtyOptions) {
-    void this.open(options)
+    void this.open(options).catch(() => { if (!this.killed) this.pendingExit?.(null) })
   }
 
   private async open(options: PtyOptions): Promise<void> {
     let backend: PtyBackend | null = null
     const native = await loadNativeShim()
+    if (this.killed) return
+    if (options.authorized && !options.authorized()) throw new Error('Terminal access changed.')
     if (native) {
       try {
         backend = new NativePty(native, options)

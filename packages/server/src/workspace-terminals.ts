@@ -18,12 +18,13 @@ interface WorkspaceTerminal<Peer> {
   cols: number
   rows: number
   peers: Set<Peer>
-  pty: Pty
+  pty?: Pty
   model?: Terminal
   savedScope?: SavedTerminalScope
   pendingHistory?: ReturnType<typeof setTimeout>
   exit?: { code: number | null }
   stopOnSettle?: boolean
+  settleJob?: (code: number | null) => void
 }
 
 function savedTerminalScope(scope: TerminalScope): SavedTerminalScope | undefined {
@@ -58,11 +59,23 @@ export class WorkspaceTerminals<Peer> {
     if (saved) return this.history.read(saved)
   }
 
+  projectJobTail(scope: SavedTerminalScope): string {
+    for (const terminal of this.terminals.values()) {
+      if (terminal.scope.workspaceId !== scope.workspaceId || terminal.scope.sessionId !== scope.sessionId
+        || terminal.scope.resumeKey !== scope.resumeKey || !terminal.model) continue
+      const viewport = terminal.model.viewport()
+      let end = viewport.length
+      while (end > 0 && viewport[end - 1]!.every(cell => cell.ch === ' ')) end--
+      return viewport.slice(Math.max(0, end - 4), end).map(row => row.map(cell => cell.ch).join('').trimEnd()).join('\n')
+    }
+    return ''
+  }
+
   processIds(scope: { workspaceId: number, sessionId: number }): number[] {
     const ids: number[] = []
     for (const terminal of this.terminals.values()) {
       if (terminal.exit || terminal.scope.sessionId !== scope.sessionId || terminal.scope.workspaceId !== scope.workspaceId) continue
-      const pid = terminal.pty.processId
+      const pid = terminal.pty?.processId
       if (pid !== undefined) ids.push(pid)
     }
     return ids
@@ -71,6 +84,35 @@ export class WorkspaceTerminals<Peer> {
   open(peer: Peer, scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, saved?: string, script?: ProjectScript): void {
     // Scratch directory creation can yield between the first resume check and opening.
     if (this.resume(peer, scope)) return
+    const terminal = this.create(scope, shell, options, saved, script)
+    this.attach(peer, terminal, saved !== undefined, script?.autoOpenPreview ? script.previewUrl : undefined)
+  }
+
+  runProjectJob(scope: SavedTerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, script: ProjectScript, signal: AbortSignal): Promise<number | null> {
+    if (signal.aborted) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      const terminal = this.create(scope, shell, options, undefined, script)
+      const cancel = () => this.finishJob(terminal, null, true)
+      terminal.settleJob = (code) => {
+        signal.removeEventListener('abort', cancel)
+        resolve(code)
+      }
+      signal.addEventListener('abort', cancel, { once: true })
+    })
+  }
+
+  openProjectHistory(peer: Peer, scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], saved: string, code: number | null): void {
+    if (this.resume(peer, scope)) return
+    const cols = 80
+    const rows = 24
+    const model = new Terminal({ cols, rows, ...terminalHistory })
+    model.restoreHistory(saved)
+    const terminal = { id: ++this.nextId, scope, shell, cols, rows, peers: new Set<Peer>(), model, exit: { code }, savedScope: savedTerminalScope(scope) }
+    this.terminals.set(terminal.id, terminal)
+    this.attach(peer, terminal)
+  }
+
+  private create(scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, saved?: string, script?: ProjectScript): WorkspaceTerminal<Peer> {
     const { cols, rows } = options
     const savedScope = savedTerminalScope(scope)
     const model = savedScope ? new Terminal({ cols, rows, ...terminalHistory }) : undefined
@@ -89,21 +131,26 @@ export class WorkspaceTerminals<Peer> {
       stopOnSettle: script?.stopOnSettle,
     }
     this.terminals.set(terminal.id, terminal)
-    terminal.pty.onData((data) => {
+    terminal.pty!.onData((data) => {
       if (!this.terminals.has(terminal.id)) return
       terminal.model?.write(data)
       if (terminal.model && !terminal.pendingHistory)
         terminal.pendingHistory = setTimeout(() => this.flushHistory(terminal), 500)
       this.broadcast(terminal, { t: 'term-data', termId: terminal.id, data })
     })
-    terminal.pty.onExit((code) => {
-      if (!this.terminals.has(terminal.id)) return
-      terminal.exit = { code }
-      this.flushHistory(terminal)
-      this.broadcast(terminal, { t: 'term-exit', termId: terminal.id, code })
-      if (!scope.resumeKey) this.terminals.delete(terminal.id)
-    })
-    this.attach(peer, terminal, restoring, script?.autoOpenPreview ? script.previewUrl : undefined)
+    terminal.pty!.onExit(code => this.finishJob(terminal, code))
+    return terminal
+  }
+
+  private finishJob(terminal: WorkspaceTerminal<Peer>, code: number | null, kill = false): void {
+    if (!this.terminals.has(terminal.id) || terminal.exit) return
+    terminal.exit = { code }
+    if (kill) terminal.pty?.kill()
+    this.flushHistory(terminal)
+    terminal.settleJob?.(code)
+    terminal.settleJob = undefined
+    this.broadcast(terminal, { t: 'term-exit', termId: terminal.id, code })
+    if (!terminal.scope.resumeKey) this.terminals.delete(terminal.id)
   }
 
   private attach(peer: Peer, terminal: WorkspaceTerminal<Peer>, replay = true, openPreview?: string): void {
@@ -123,7 +170,7 @@ export class WorkspaceTerminals<Peer> {
 
   input(peer: Peer, id: number, data: string): void {
     const terminal = this.terminals.get(id)
-    if (terminal?.peers.has(peer) && !terminal.exit) terminal.pty.write(data)
+    if (terminal?.peers.has(peer) && !terminal.exit) terminal.pty?.write(data)
   }
 
   resize(peer: Peer, id: number, cols: number, rows: number): void {
@@ -132,7 +179,7 @@ export class WorkspaceTerminals<Peer> {
     terminal.cols = cols
     terminal.rows = rows
     terminal.model?.resize(cols, rows)
-    terminal.pty.resize(cols, rows)
+    terminal.pty?.resize(cols, rows)
     if (terminal.scope.resumeKey) this.broadcast(terminal, { t: 'term-sized', termId: id, cols, rows })
   }
 
@@ -163,10 +210,7 @@ export class WorkspaceTerminals<Peer> {
   stopScriptJobs(sessionId: number): void {
     for (const terminal of this.terminals.values()) {
       if (terminal.scope.sessionId !== sessionId || terminal.exit || !terminal.stopOnSettle) continue
-      this.flushHistory(terminal)
-      terminal.exit = { code: null }
-      terminal.pty.kill()
-      this.broadcast(terminal, { t: 'term-exit', termId: terminal.id, code: null })
+      this.finishJob(terminal, null, true)
     }
   }
 
@@ -204,6 +248,7 @@ export class WorkspaceTerminals<Peer> {
     this.terminals.delete(terminal.id)
     if (notify) this.broadcast(terminal, { t: 'term-closed', termId: terminal.id })
     terminal.peers.clear()
-    if (!terminal.exit) terminal.pty.kill()
+    if (!terminal.exit) terminal.pty?.kill()
+    terminal.settleJob?.(null)
   }
 }

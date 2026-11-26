@@ -9,6 +9,15 @@
     <p role="alert" class="mb-2 text-red-700 text-sm dark:text-red-300" :hidden="!projectScriptsError()" :text="projectScriptsError()"></p>
     <p role="status" class="text-sm" :hidden="!projectScriptsLoading()">Loading project scripts…</p>
     <div :hidden="projectScriptsLoading() || !!projectScriptDraft()">
+      <div :hidden="!projectSetup()" class="grid gap-1 mb-3 p-2 text-sm border border-black/10 rounded-md dark:border-white/15">
+        <p class="break-words font-medium" :text="projectSetup()?.name"></p>
+        <p class="text-neutral-600 text-xs dark:text-neutral-300" :text="projectSetupStatus() || (projectSetup()?.status === 'completed' ? 'Worktree setup completed.' : 'Worktree setup skipped.')"></p>
+        <div class="flex flex-wrap gap-x-3 items-center">
+          <button type="button" :hidden="projectSetup()?.status === 'pending'" :disabled="!sessionOnline()" @click="viewProjectSetupTerminal" class="min-h-11 font-medium underline underline-offset-2">View setup terminal</button>
+          <button type="button" :hidden="!projectSetupNeedsAttention() || !projectSetup()?.retry" :disabled="uiBusy() || projectScriptsBusy()" @click="updateProjectScripts({ action: 'retry-setup' })" class="min-h-11 font-medium underline underline-offset-2">Retry on next message</button>
+          <button type="button" :hidden="!projectSetupNeedsAttention()" :disabled="uiBusy() || projectScriptsBusy()" @click="updateProjectScripts({ action: 'skip-setup' })" class="min-h-11 font-medium underline underline-offset-2">Continue without setup</button>
+        </div>
+      </div>
       <ul class="grid gap-1 list-none" aria-label="Saved project scripts">
         <template :for="script in projectScripts().scripts" :key="script.id">
           <li class="flex gap-1 items-center p-1 min-w-0 border border-black/10 rounded-md dark:border-white/15">
@@ -35,6 +44,7 @@
                 <p class="font-medium text-sm truncate" :text="script.name"></p>
                 <p class="font-mono text-neutral-600 text-xs truncate dark:text-neutral-300" :title="script.command" :text="script.command"></p>
                 <p class="text-neutral-600 text-xs truncate dark:text-neutral-300" :hidden="!script.previewUrl" :title="script.previewUrl" :text="script.previewUrl"></p>
+                <p class="text-neutral-600 text-xs dark:text-neutral-300" :hidden="!script.runOnWorktreeCreate" :text="script.waitForSetup ? 'Runs on new worktrees before the first message' : 'Runs on new worktrees in the background'"></p>
               </div>
               <button type="button" :disabled="projectScriptsBusy()" :aria-label="'Import ' + script.name" @click="importProjectScript(script)" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Import</button>
             </li>
@@ -59,6 +69,14 @@
       <label class="flex gap-2 items-center text-sm">
         <input type="checkbox" :checked="!!projectScriptDraft()?.stopOnSettle" @change="patchProjectScript('stopOnSettle', $event.target.checked)">
         Stop when the thread settles
+      </label>
+      <label class="flex gap-2 items-center text-sm">
+        <input type="checkbox" :checked="!!projectScriptDraft()?.runOnWorktreeCreate" @change="patchProjectScript('runOnWorktreeCreate', $event.target.checked)">
+        Run on new worktrees started from this host
+      </label>
+      <label class="flex gap-2 items-center text-sm" :hidden="!projectScriptDraft()?.runOnWorktreeCreate">
+        <input type="checkbox" :checked="!!projectScriptDraft()?.waitForSetup" @change="patchProjectScript('waitForSetup', $event.target.checked)">
+        Wait for setup before starting the provider
       </label>
       <div class="flex flex-wrap gap-2 items-center justify-end">
         <button type="button" :hidden="!projectScriptDraft()?.id" :disabled="projectScriptsBusy()" @click="removeProjectScript" class="mr-auto px-2 py-1.5 text-red-700 text-sm dark:text-red-300">Remove</button>
