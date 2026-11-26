@@ -123,6 +123,39 @@ describe('harness serve — HTTP', () => {
     expect(await response.json()).toMatchObject({ ok: true, profiles: 0, sessions: 0 })
   })
 
+  it('searches only files inside the trusted workspace or the thread worktree', async () => {
+    const project = join(dir, 'project')
+    const worktree = join(dir, 'session-worktree')
+    mkdirSync(project)
+    mkdirSync(worktree)
+    expect(Bun.spawnSync(['git', 'init', '-q'], { cwd: project }).exitCode).toBe(0)
+    await Bun.write(join(project, '.gitignore'), 'ignored-parity.txt\n')
+    await Bun.write(join(project, 'parity notes [draft].md'), 'project fixture\n')
+    await Bun.write(join(project, 'ignored-parity.txt'), 'ignored fixture\n')
+    await Bun.write(join(dir, 'outside-parity.txt'), 'outside fixture\n')
+    symlinkSync(join(dir, 'outside-parity.txt'), join(project, 'outside-parity.txt'))
+    await Bun.write(join(worktree, 'worktree-parity.md'), 'worktree fixture\n')
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    await dispatch('files-profile', { type: 'profile.create', name: 'Files fixture' })
+    const workspaceId = derivedId('files-project')
+    await dispatch('files-project', { type: 'workspace.add', profileId: derivedId('files-profile'), path: project })
+    const route = `http://127.0.0.1:${port}/workspace-files/search`
+    const projectQuery = `${route}?workspace=${workspaceId}&q=parity`
+    expect((await fetch(projectQuery)).status).toBe(404)
+    await dispatch('files-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+    expect((await fetch(projectQuery, { headers: { origin: 'https://example.invalid' } })).status).toBe(403)
+    expect(await (await fetch(projectQuery)).json()).toEqual({ results: ['parity notes [draft].md'] })
+    await dispatch('files-session', { type: 'session.create', workspaceId, driverKind: 'claude' })
+    const sessionId = derivedId('files-session')
+    await harness.engine.dispatchInternal({ id: 'files-isolation', at: Date.now(), command: {
+      type: 'thread.worktree.set', sessionId, worktreePath: worktree, branch: 'test-file-picker',
+    } })
+    expect(await (await fetch(`${route}?session=${sessionId}&workspace=${workspaceId}&q=parity`)).json())
+      .toEqual({ results: ['worktree-parity.md'] })
+    expect((await fetch(`${route}?session=999&workspace=${workspaceId}`)).status).toBe(404)
+  })
+
   it('404s an unknown path rather than upgrading it', async () => {
     expect((await fetch(`http://127.0.0.1:${port}/nope`)).status).toBe(404)
   })

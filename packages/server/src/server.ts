@@ -31,6 +31,7 @@ import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfPro
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
 import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
+import { createWorkspaceFileSearch } from './workspace-file-search'
 import { threadSidebarLayout } from './thread-sidebar'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessView, viewProps } from './views'
@@ -371,6 +372,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       && (!access || access.authenticate(request).deviceId === 'local')
   }
 
+  const searchWorkspaceFiles = createWorkspaceFileSearch()
   const sockets = new Set<HarnessSocket>()
   const terminals = new WorkspaceTerminals<HarnessSocket>(send, new TerminalHistoryStore(databasePath))
   const terminalScopeExists = (scope: TerminalScope) => engine.current.workspaces.has(scope.workspaceId)
@@ -1199,6 +1201,22 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (url.pathname === TRANSCRIPT_HIGHLIGHT_WORKER) return respondTranscriptHighlightWorker(request)
       const asset = respondStxAsset(url.pathname) ?? assetCache.respond(url.pathname)
       if (asset) return asset
+
+      if (url.pathname === '/workspace-files/search' && request.method === 'GET') {
+        if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
+        const headers = { 'cache-control': 'private, no-store' }
+        const sessionId = url.searchParams.get('session')
+        const session = sessionId === null ? undefined : engine.current.sessions.get(Number(sessionId))
+        const workspaceId = sessionId === null ? Number(url.searchParams.get('workspace')) : session?.workspaceId
+        const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
+        if (!workspace?.trusted || workspace.scratch)
+          return Response.json({ error: 'Workspace files are unavailable.' }, { status: 404, headers })
+        const root = session ? defaultWorkspacePath(engine.current, session.id) : workspace.path
+        if (!root) return Response.json({ error: 'Workspace files are unavailable.' }, { status: 404, headers })
+        return searchWorkspaceFiles(root, url.searchParams.get('q') ?? '')
+          .then(results => Response.json({ results }, { headers }))
+          .catch(() => Response.json({ error: 'Could not search workspace files.' }, { status: 503, headers }))
+      }
 
       if (url.pathname === '/threads/search' && request.method === 'GET') {
         const profileId = Number(url.searchParams.get('profile'))
