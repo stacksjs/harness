@@ -8,7 +8,7 @@
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
-import { activeThreadOrder, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
+import { activeThreadOrder, checkpointReviewRepositories, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -749,6 +749,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           turnId: command.turnId,
           kind: command.kind,
           vcsRef: command.vcsRef,
+          ...(command.tree && { tree: command.tree }),
           ...(command.repositories && { repositories: command.repositories }),
         },
       }]
@@ -1119,6 +1120,9 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // not resurrect it as complete.
       const turn = session.turns.find(t => t.id === command.turnId)
       if (!turn || turn.status !== 'running') return []
+      const start = session.checkpoints.find(point => point.turnId === turn.id && point.kind === 'turn-start')
+      const end = session.checkpoints.findLast(point => point.turnId === turn.id && point.kind === 'turn-end')
+      const reviewRepositories = checkpointReviewRepositories(start, end)
       return [{
         sessionId: command.sessionId,
         commandId,
@@ -1131,6 +1135,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           cost: command.cost,
           ...(command.providerTurnId ? { providerTurnId: command.providerTurnId } : {}),
           ...(turn.response.trim() && !turn.compaction ? { responseForkable: true } : {}),
+          ...(reviewRepositories.length && { reviewRepositories }),
           ...(command.contextCompacted ? { contextCompacted: true } : {}),
           ...(command.contextUsage ? { contextUsage: command.contextUsage } : {}),
         },

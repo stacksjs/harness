@@ -51,6 +51,7 @@ export interface RepositoryCheckpoint {
   /** Empty for the project repository, otherwise a project-relative repository key. */
   key: string
   vcsRef: string
+  tree?: string
 }
 
 export interface ProviderContextUsage {
@@ -86,7 +87,7 @@ export type EventPayload =
   | { type: 'turn.steering-ready', turnId: number }
   | { type: 'turn.steer.requested', turnId: number, id: string, requestId: string, text: string }
   | { type: 'turn.steer.resolved', turnId: number, id: string, outcome: SteeringOutcome, text: string }
-  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, responseForkable?: true, contextCompacted?: true, contextUsage?: ProviderContextUsage }
+  | { type: 'turn.completed', turnId: number, tokensIn: number, tokensOut: number, cost: number, providerTurnId?: string, responseForkable?: true, reviewRepositories?: string[], contextCompacted?: true, contextUsage?: ProviderContextUsage }
   | { type: 'turn.interrupted', turnId: number }
   | { type: 'turn.failed', turnId: number, message: string }
   | { type: 'assistant.delta', turnId: number, text: string }
@@ -97,7 +98,7 @@ export type EventPayload =
   | { type: 'input.requested', requestId: string, turnId: number, questions: InputQuestion[] }
   | { type: 'input.resolved', requestId: string, turnId: number, outcome: 'answered' | 'declined' | 'interrupted', attachments?: QuestionAttachment[] }
   /** `vcsRef` is the dangling commit holding the snapshot; see server/checkpoint.ts. */
-  | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string, repositories?: RepositoryCheckpoint[] }
+  | { type: 'checkpoint.captured', checkpointId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string, tree?: string, repositories?: RepositoryCheckpoint[] }
   /**
    * A revert was accepted, in the same sense `turn.started` means a turn was
    * accepted: the checkpoint exists and the runtime has been told to put the

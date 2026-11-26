@@ -275,6 +275,11 @@ const driver: Driver = {
     return {
       ...instance,
       async *startTurn(input) {
+        if (input.text === 'Verify the repositories without editing.') {
+          yield { type: 'assistant-delta', text: 'The fixture was checked without edits.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          return
+        }
         if (input.text.startsWith('Review both repositories in turn ')) {
           const sequence = input.text.slice(-1)
           for (const [key, label] of [['api', 'API'], ['packages/web', 'Web']] as const) {
@@ -3968,12 +3973,25 @@ for (const sequence of [1, 2]) {
   await page.getByText(`Recorded edits for turn ${sequence}.`, { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Send', exact: true }).waitFor()
 }
-await headerChanges.click()
-await ledgerComparison.getByRole('option', { name: 'Turn', exact: true }).waitFor({ state: 'attached' })
-await ledgerComparison.selectOption('turn')
-const recordedTurnPicker = ledgerPanel.getByRole('combobox', { name: 'Recorded turn' })
+const recentTurnDiffs = page.getByRole('button', { name: 'Open diff', exact: true })
+await recentTurnDiffs.nth(1).waitFor()
+await recentTurnDiffs.nth(1).press('Enter')
 await ledgerPanel.getByText('API edit from turn 2', { exact: true }).waitFor()
-await recordedTurnPicker.selectOption({ label: 'Turn 1' })
+check('the streamed transcript action opens exactly the second turn',
+  await recentTurnDiffs.nth(1).getAttribute('aria-expanded') === 'true'
+  && await ledgerComparison.inputValue() === 'turn')
+await ledgerPanel.getByRole('button', { name: 'Close changes' }).click()
+await page.waitForFunction(() => document.activeElement?.matches('[data-open-turn-diff]'))
+check('closing a transcript diff gives its trigger focus', await recentTurnDiffs.nth(1).evaluate(button => document.activeElement === button))
+await repoTurnPrompt.fill('Verify the repositories without editing.')
+await repoTurnPrompt.press('Enter')
+await page.getByText('The fixture was checked without edits.', { exact: true }).waitFor()
+await page.getByRole('button', { name: 'Send', exact: true }).waitFor()
+check('an unchanged turn does not add a transcript diff action', await recentTurnDiffs.count() === 2)
+await page.reload()
+await recentTurnDiffs.first().click()
+const recordedTurnPicker = ledgerPanel.getByRole('combobox', { name: 'Recorded turn' })
+await recordedTurnPicker.locator('option', { hasText: 'Turn 1' }).waitFor({ state: 'attached' })
 await ledgerPanel.getByText('API edit from turn 1', { exact: true }).waitFor()
 check('Turn review preserves the earlier patch after subsequent edits',
   !(await ledgerPanel.getByText('API edit from turn 2', { exact: true }).count()))

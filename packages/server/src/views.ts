@@ -10,7 +10,7 @@
 import type { ClaudeAccountCompaction, HostSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { claudeIdleCompaction, isForkableResponse, providerConversation } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, isForkableResponse, providerConversation } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
@@ -157,6 +157,13 @@ export function viewProps(state: HarnessState, options: {
   })
 
   const active = options.sessionId ? state.sessions.get(options.sessionId) : undefined
+  const checkpointStarts = new Map<number, SessionState['checkpoints'][number]>()
+  const checkpointEnds = new Map<number, SessionState['checkpoints'][number]>()
+  for (const point of active?.checkpoints ?? []) {
+    if (point.kind === 'turn-start' && !checkpointStarts.has(point.turnId)) checkpointStarts.set(point.turnId, point)
+    if (point.kind === 'turn-end') checkpointEnds.set(point.turnId, point)
+  }
+  const activeWorkspaceTrusted = active && state.workspaces.get(active.workspaceId)?.trusted
   const requestedWorkspace = !active && options.workspaceId ? state.workspaces.get(options.workspaceId) : undefined
   const selectedProfile = profiles.find(p => p.id === (requestedWorkspace?.profileId ?? options.profileId))
     ?? profiles.find(p => active && p.sessions.some(session => session.id === active.id))
@@ -261,7 +268,9 @@ export function viewProps(state: HarnessState, options: {
             // The snapshot taken before this turn ran, which is what "undo
             // this turn" reverts to. 0 when there is none — a workspace that
             // is not a repository, or a turn from before checkpointing.
-            checkpointId: active.checkpoints.find(c => c.turnId === turn.id && c.kind === 'turn-start' && !c.repositories)?.id ?? 0,
+            checkpointId: checkpointStarts.get(turn.id)?.repositories ? 0 : checkpointStarts.get(turn.id)?.id ?? 0,
+            reviewRepositories: activeWorkspaceTrusted && turn.status === 'complete'
+              ? checkpointReviewRepositories(checkpointStarts.get(turn.id), checkpointEnds.get(turn.id)) : [],
             toolCalls: turn.toolCalls.map(call => ({
               callId: call.callId,
               name: call.name,

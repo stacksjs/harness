@@ -102,9 +102,24 @@ export interface CheckpointState {
   turnId: number
   kind: 'turn-start' | 'turn-end' | 'manual'
   vcsRef: string
+  tree?: string
   repositories?: RepositoryCheckpoint[]
   /** Set once this checkpoint has been reverted to at least once. */
   reverted: boolean
+}
+
+/** Repository keys whose working-tree contents changed between recorded checkpoints. */
+export function checkpointReviewRepositories(start?: CheckpointState, end?: CheckpointState): string[] {
+  if (!start || !end) return []
+  const snapshots = (point: CheckpointState) => point.repositories ?? [{ key: '', vcsRef: point.vcsRef, tree: point.tree }]
+  const before = new Map(snapshots(start).map(point => [point.key, point]))
+  return snapshots(end).flatMap((point) => {
+    const previous = before.get(point.key)
+    if (!previous) return []
+    // Older events recorded only the commit. Those checkpoints still support review.
+    const changed = previous.tree && point.tree ? previous.tree !== point.tree : previous.vcsRef !== point.vcsRef
+    return changed ? [point.key] : []
+  })
 }
 
 interface NativeForkTarget {
@@ -666,6 +681,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         turnId: p.turnId,
         kind: p.kind,
         vcsRef: p.vcsRef,
+        ...(p.tree && { tree: p.tree }),
         ...(p.repositories && { repositories: p.repositories }),
         reverted: false,
       })

@@ -753,7 +753,7 @@ export class ProviderRuntime {
     const children = combined || session.worktreePath ? [] : await scanProjectRepositories(workspacePath)
     if (!combined && children.length === 0) {
       const result = await capture(workspacePath, message)
-      if (result.ref) await this.emit({ type: 'thread.checkpoint.capture', sessionId, turnId, kind, vcsRef: result.ref })
+      if (result.ref) await this.emit({ type: 'thread.checkpoint.capture', sessionId, turnId, kind, vcsRef: result.ref, tree: result.tree })
       return
     }
 
@@ -775,7 +775,7 @@ export class ProviderRuntime {
         const path = await open()
         if (!path) return null
         const result = await capture(path, message, excluded).catch(() => null)
-        return result?.ref ? { key, vcsRef: result.ref } : null
+        return result?.ref ? { key, vcsRef: result.ref, tree: result.tree } : null
       }))
       for (const point of batch) if (point) repositories.push(point)
     }
