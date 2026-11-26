@@ -753,6 +753,8 @@ const RESPONSIVE_SHELL = `
   [data-header-actions] { gap: 1px; }
   [data-header-files], [data-header-editor], [data-header-project-scripts], [data-header-preview] { display: none; }
   [data-workspace-editor], #harness-project-scripts { inset-block: auto 0; margin-block: 0; width: 100%; max-width: none; border-radius: 12px 12px 0 0; padding-block-end: env(safe-area-inset-bottom); }
+  #harness-project-scripts button, #harness-project-scripts label:has(input[type="checkbox"]) { min-height: 44px; }
+  #harness-project-scripts .harness-icon-button { min-width: 44px; }
   [data-workspace-actions] [data-workspace-editor-menu] { display: flex; min-height: 44px; }
   [data-workspace-layout]:has([data-workspace-actions-toggle]) :is([data-header-settings], [data-thread-search-toggle]) { display: none; }
   [data-workspace-header] .harness-icon-button { width: 36px; height: 40px; flex-basis: 36px; }
