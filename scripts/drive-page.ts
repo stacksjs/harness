@@ -86,6 +86,8 @@ const connectorGate = Promise.withResolvers<void>()
 const connectorWithdrawal = Promise.withResolvers<void>()
 const followUpGate = Promise.withResolvers<void>()
 const followUpDelivery: string[] = []
+const liveSidebarPrompt = 'Verify the sidebar updates on another client.'
+const liveSidebarTurn = Promise.withResolvers<void>()
 const referenceLink = '[parity-notes (draft).md](fixture%20context/parity-notes%20%28draft%29.md)'
 let fixtureMentionContents: string | undefined
 const fixtureHandoffs: StartTurnInput[] = []
@@ -333,6 +335,12 @@ const driver: Driver = {
         }
         if (input.text === 'Verify the repositories without editing.') {
           yield { type: 'assistant-delta', text: 'The fixture was checked without edits.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          return
+        }
+        if (input.text === liveSidebarPrompt) {
+          await liveSidebarTurn.promise
+          yield { type: 'assistant-delta', text: 'Sidebar fixture completed.' }
           yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
           return
         }
@@ -4872,6 +4880,113 @@ await Promise.all([
 await automaticallySettled.waitFor({ state: 'hidden' })
 await page.reload()
 check('manually reopened inactive work stays active through reload', !await automaticallySettled.isVisible())
+
+const sidebarProfile = derivedId('live-sidebar-profile')
+const sidebarFirstProject = derivedId('live-sidebar-first-project')
+const sidebarAnchor = derivedId('live-sidebar-anchor')
+const sidebarNewProject = derivedId('live-sidebar-new-project')
+const sidebarNewThread = derivedId('live-sidebar-new-thread')
+const sidebarFolder = join(driveRoot, 'sidebar-fixture')
+const sidebarNewFolder = join(driveRoot, 'new-sidebar-project')
+mkdirSync(sidebarFolder)
+mkdirSync(sidebarNewFolder)
+await harness.engine.dispatch({ id: 'live-sidebar-profile', at: Date.now(), command: { type: 'profile.create', name: 'Sidebar fixture' } })
+await harness.engine.dispatch({ id: 'live-sidebar-first-project', at: Date.now(), command: { type: 'workspace.add', profileId: sidebarProfile, path: sidebarFolder } })
+await harness.engine.dispatch({ id: 'live-sidebar-first-trust', at: Date.now(), command: { type: 'workspace.trust', workspaceId: sidebarFirstProject, trusted: true } })
+await harness.engine.dispatch({ id: 'live-sidebar-anchor', at: Date.now(), command: { type: 'session.create', workspaceId: sidebarFirstProject, driverKind: 'claude' } })
+const sidebarPhone = await browserContext.newPage()
+sidebarPhone.on('pageerror', error => pageErrors.push(error.message))
+await page.setViewportSize({ width: 1440, height: 900 })
+await sidebarPhone.setViewportSize({ width: 390, height: 844 })
+await Promise.all([page.goto(`${baseUrl}/s/${sidebarAnchor}`), sidebarPhone.goto(`${baseUrl}/s/${sidebarAnchor}`)])
+await sidebarPhone.locator('[data-sidebar-toggle]').click()
+const watchedSidebar = `[data-space-id="${sidebarProfile}"][data-thread-order-ready]`
+await Promise.all([page.locator(watchedSidebar).waitFor(), sidebarPhone.locator(watchedSidebar).waitFor()])
+const initialSidebarLink = page.locator(`${watchedSidebar} a[href="/s/${sidebarAnchor}"]`)
+await initialSidebarLink.focus()
+
+const sidebarWriter = new WebSocket(`ws://localhost:${port}/ws`)
+await new Promise<void>((resolve, reject) => {
+  sidebarWriter.addEventListener('open', () => resolve(), { once: true })
+  sidebarWriter.addEventListener('error', reject, { once: true })
+})
+const sidebarDispatch = (id: string, command: unknown) => sidebarWriter.send(encode({ t: 'dispatch', envelope: { id, at: Date.now(), command } }))
+sidebarDispatch('live-sidebar-new-project', { type: 'workspace.add', profileId: sidebarProfile, path: sidebarNewFolder })
+sidebarDispatch('live-sidebar-new-trust', { type: 'workspace.trust', workspaceId: sidebarNewProject, trusted: true })
+const newSidebarSection = `${watchedSidebar} [data-section-id="project-${sidebarNewProject}"]`
+const newSidebarHeader = page.locator(newSidebarSection).getByRole('button', { name: 'new-sidebar-project' })
+await newSidebarHeader.waitFor()
+const newSidebarCompose = page.locator(newSidebarSection).getByRole('link', { name: 'New thread' })
+check('an open sidebar discovers a newly registered project and its compose link',
+  await newSidebarCompose.getAttribute('href') === `/?workspace=${sidebarNewProject}`)
+await newSidebarHeader.click()
+sidebarDispatch('live-sidebar-new-thread', { type: 'session.create', workspaceId: sidebarNewProject, driverKind: 'claude' })
+const newSidebarLink = page.locator(`${watchedSidebar} a[href="/s/${sidebarNewThread}"]`)
+const newPhoneLink = sidebarPhone.locator(`${watchedSidebar} a[href="/s/${sidebarNewThread}"]`)
+await newPhoneLink.waitFor()
+await newSidebarLink.waitFor({ state: 'attached' })
+check('a thread added to a collapsed project starts hidden and inert',
+  await newSidebarLink.isHidden() && await newSidebarLink.locator('..').getAttribute('inert') !== null)
+await newSidebarHeader.click()
+await newSidebarLink.waitFor()
+await initialSidebarLink.focus()
+sidebarDispatch('live-sidebar-first-turn', { type: 'session.turn.start', sessionId: sidebarNewThread, text: liveSidebarPrompt })
+const workingSidebarLink = page.locator(`${watchedSidebar} [data-section-id^="working-"] a[href="/s/${sidebarNewThread}"]`)
+await workingSidebarLink.getByText(liveSidebarPrompt, { exact: true }).waitFor()
+await newPhoneLink.getByText(liveSidebarPrompt, { exact: true }).waitFor()
+check('desktop and phone receive the first prompt title and working icon without a reload',
+  await workingSidebarLink.locator('.i-hugeicons-loading-03').count() === 1
+  && await initialSidebarLink.evaluate(link => link === link.ownerDocument.activeElement))
+await capture('workspace-live-sidebar-working-phone', sidebarPhone)
+liveSidebarTurn.resolve()
+await page.locator(`${newSidebarSection} a[href="/s/${sidebarNewThread}"]`).getByText(liveSidebarPrompt, { exact: true }).waitFor()
+const renamedSidebarTitle = 'Review the new project'
+sidebarDispatch('live-sidebar-rename', { type: 'session.organize', sessionId: sidebarNewThread, action: 'rename', title: renamedSidebarTitle })
+await newSidebarLink.getByText(renamedSidebarTitle, { exact: true }).waitFor()
+await newPhoneLink.getByText(renamedSidebarTitle, { exact: true }).waitFor()
+check('a rename from another client preserves the route, focus, and title tooltip',
+  page.url().endsWith(`/s/${sidebarAnchor}`) && await newSidebarLink.getAttribute('title') === renamedSidebarTitle
+  && await initialSidebarLink.evaluate(link => link === link.ownerDocument.activeElement))
+await capture('workspace-live-sidebar-renamed')
+for (const [width, height] of workspaceViewports) {
+  const target = width < 768 ? sidebarPhone : page
+  await target.setViewportSize({ width, height })
+  await capture(`workspace-live-sidebar-${width}x${height}`, target)
+}
+await newSidebarLink.focus()
+sidebarDispatch('live-sidebar-archive', { type: 'session.organize', sessionId: sidebarNewThread, action: 'archive' })
+await Promise.all([newSidebarLink.waitFor({ state: 'detached' }), newPhoneLink.waitFor({ state: 'detached' })])
+check('archiving the focused row returns focus to the project header',
+  await newSidebarHeader.evaluate(header => header === header.ownerDocument.activeElement))
+sidebarDispatch('live-sidebar-restore', { type: 'session.organize', sessionId: sidebarNewThread, action: 'restore' })
+await newPhoneLink.getByText(renamedSidebarTitle, { exact: true }).waitFor()
+await newSidebarLink.press('Enter')
+await page.waitForURL(url => url.pathname === `/s/${sidebarNewThread}`)
+await page.locator('[data-workspace-title]').getByText(renamedSidebarTitle, { exact: true }).waitFor()
+check('the restored live row supports keyboard navigation', true)
+let delayedArrangementFrames = false
+await sidebarPhone.routeWebSocket('**/ws', (route) => {
+  const upstream = route.connectToServer()
+  upstream.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(new Uint8Array(message)) as { t?: string } | null
+    if (delayedArrangementFrames && frame?.t === 'sidebar-order') setTimeout(() => route.send(message), 250)
+    else route.send(message)
+  })
+})
+await sidebarPhone.goto(`${baseUrl}/s/${sidebarNewThread}`)
+await sidebarPhone.locator('[data-thread-actions-trigger]').click()
+await sidebarPhone.getByRole('dialog', { name: 'Thread actions' }).getByRole('button', { name: 'Arrange threads' }).click()
+const liveArrangement = sidebarPhone.getByRole('dialog', { name: 'Arrange threads' })
+const liveGrip = liveArrangement.getByRole('button', { name: `Reorder ${renamedSidebarTitle}` })
+await liveGrip.press('Enter')
+delayedArrangementFrames = true
+await liveArrangement.getByRole('button', { name: 'Pin', exact: true }).press('Enter')
+const delayedGrip = liveArrangement.locator('[data-section-id^="pinned-"]').getByRole('button', { name: `Reorder ${renamedSidebarTitle}` })
+await delayedGrip.waitFor()
+await sidebarPhone.waitForFunction(() => document.activeElement?.matches('[data-section-id^="pinned-"] [data-arrangement-grip]'))
+check('keyboard movement restores focus after a delayed sidebar snapshot', true)
+sidebarWriter.close()
+await sidebarPhone.close()
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
