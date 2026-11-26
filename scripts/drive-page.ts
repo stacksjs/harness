@@ -46,7 +46,7 @@ async function editorReceived(expected: string): Promise<boolean> {
 }
 writeFileSync(join(fixtureBin, 'codex'), '#!/bin/sh\nprintf "Codex test sign-in\\n"\n', { mode: 0o755 })
 writeFileSync(join(fixtureBin, 'code'), '#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "${0%/*}/editor-args"\n', { mode: 0o755 })
-writeFileSync(fixtureShell, '#!/bin/sh\nprintf "Harness test terminal\\n"\nexec /bin/sh -i\n', { mode: 0o755 })
+writeFileSync(fixtureShell, '#!/bin/sh\nif [ "$#" -gt 0 ]; then exec /bin/sh "$@"; fi\nprintf "Harness test terminal\\n"\nexec /bin/sh -i\n', { mode: 0o755 })
 process.env.SHELL = fixtureShell
 process.env.ENV = ''
 process.env.PATH = `${fixtureBin}:${process.env.PATH ?? ''}`
@@ -4594,6 +4594,56 @@ await rewindMessage(5).locator('[data-edit-earlier-prompt]').waitFor()
 check('rewinding the first Claude prompt starts fresh within the same Harness thread', claudeRewinds.length === 2
   && claudeRewindTurns.at(-1)?.providerSessionId === undefined
   && harness.engine.current.sessions.get(claudeRewindSession)?.providerSessionId === 'fixture-claude-rewind-5')
+
+const projectScriptFolder = join(driveRoot, 'project-script-fixture')
+mkdirSync(projectScriptFolder)
+const projectScriptSource = join(driveRoot, 'project-script-site.ts')
+const projectScriptMarker = join(projectScriptFolder, 'launched.txt')
+const reservedScriptPort = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() })
+const projectScriptPort = reservedScriptPort.port
+reservedScriptPort.stop(true)
+writeFileSync(projectScriptSource, `
+await Bun.sleep(750)
+const site = Bun.serve({ hostname: '127.0.0.1', port: ${projectScriptPort}, fetch: request => {
+  const url = new URL(request.url)
+  const heading = url.pathname === '/specific' && url.searchParams.get('view') === 'script' ? 'Configured preview path' : 'Wrong preview path'
+  return new Response('<h1>' + heading + '</h1>', { headers: { 'content-type': 'text/html' } })
+} })
+await Bun.write('launched.txt', process.cwd())
+console.log(site.url.href)
+`)
+const projectScriptAddress = `http://127.0.0.1:${projectScriptPort}/specific?view=script`
+writeFileSync(join(projectScriptFolder, 't3.json'), JSON.stringify({ scripts: [{
+  name: 'Development server', command: `"${process.execPath}" --config=/dev/null "${projectScriptSource}"`,
+  previewUrl: projectScriptAddress, autoOpenPreview: true,
+}] }))
+const scriptWorkspace = derivedId('project-script-workspace')
+await harness.engine.dispatch({ id: 'project-script-workspace', at: Date.now(), command: { type: 'workspace.add', profileId: derivedId(ledgerProfile), path: projectScriptFolder } })
+await harness.engine.dispatch({ id: 'project-script-trust', at: Date.now(), command: { type: 'workspace.trust', workspaceId: scriptWorkspace, trusted: true } })
+await harness.engine.dispatch({ id: 'project-script-thread', at: Date.now(), command: { type: 'session.create', workspaceId: scriptWorkspace, driverKind: 'claude' } })
+await page.setViewportSize({ width: 1440, height: 900 })
+await page.goto(`${baseUrl}/s/${derivedId('project-script-thread')}`)
+const scriptDialog = page.getByRole('dialog', { name: 'Project scripts' })
+await page.locator('[data-header-project-scripts]').click()
+await scriptDialog.getByRole('button', { name: 'Import Development server' }).click()
+const runProjectScript = scriptDialog.getByRole('button', { name: 'Run Development server' })
+await runProjectScript.waitFor()
+check('importing an action saves it without starting its terminal', !existsSync(projectScriptMarker))
+for (const [width, height] of workspaceViewports) {
+  await page.setViewportSize({ width, height })
+  await capture(`workspace-project-scripts-${width}x${height}`)
+}
+await page.keyboard.press('Escape')
+await scriptDialog.waitFor({ state: 'hidden' })
+await page.getByRole('button', { name: 'Workspace actions' }).click()
+await page.locator('[data-project-scripts-toggle]').click()
+await runProjectScript.waitFor()
+await page.setViewportSize({ width: 1440, height: 900 })
+await runProjectScript.click()
+await page.frameLocator('iframe:visible').getByRole('heading', { name: 'Configured preview path' }).waitFor()
+check('a project action runs in its thread checkout and opens the configured preview after the listener starts',
+  realpathSync(readFileSync(projectScriptMarker, 'utf8')) === realpathSync(projectScriptFolder))
+await capture('workspace-project-script-configured-preview')
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
