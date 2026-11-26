@@ -204,6 +204,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       <template data-live-sidebar-project>
         <SidebarSection theme="arc" id="project" label="Project" :items="sidebarProjectTemplateItems" />
       </template>
+      <template data-live-sidebar-rename>
+        <input data-sidebar-rename type="text" aria-label="Thread title" maxlength="120" autocomplete="off" class="w-full h-full min-w-0 px-2 text-[13px] bg-white dark:bg-neutral-900 rounded-md" />
+      </template>
       <Sidebar
         :spaces="spaces"
         :space="activeProfile"
@@ -5854,6 +5857,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           await sendThreadOrganization({ sessionId, action: 'drop', ...intent })
           threadOrderStatus.set('Thread position saved.')
         }
+        catch (error) { stxAlert(error.message) }
+      },
+      async rename(sessionId, title) {
+        try { await sendThreadOrganization({ sessionId, action: 'rename', title }) }
         catch (error) { stxAlert(error.message) }
       },
     })

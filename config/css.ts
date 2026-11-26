@@ -150,6 +150,7 @@ const RESPONSIVE_SHELL = `
 [data-navigation-content] [data-space] { min-height: 0; }
 [data-brand-bar] [data-sidebar-close] { order: -1; }
 [data-navigation-content] [data-sidebar-item] { min-height: 29px; }
+[data-navigation-content] [data-sidebar-item][hidden] { display: none; }
 [data-sidebar-row]:has(> [data-draft-discard-row]) { position: relative; }
 [data-sidebar-row]:has(> [data-draft-discard-row]) > [data-sidebar-item] { padding-inline-end: 40px; }
 [data-sidebar-row] > [data-draft-discard-row] {
