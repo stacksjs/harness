@@ -120,7 +120,9 @@ export async function plan(workspacePath: string, sessionId: number, reservation
 
   // A worktree branches from a commit. An empty repository has none, and
   // `worktree add` on one fails with a message about an invalid reference.
-  const base = await checkoutBase(workspacePath, baseBranch, Boolean(baseBranch))
+  // A composer selection with an empty field asks for the default branch.
+  // Older commands may omit the selection entirely and still branch from HEAD.
+  const base = await checkoutBase(workspacePath, baseBranch, baseBranch !== undefined)
   if (!base) return { reason: 'no-commits' }
 
   // The repository's own git directory, resolved rather than assumed: in a
