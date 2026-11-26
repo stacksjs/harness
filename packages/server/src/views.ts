@@ -322,10 +322,9 @@ function resolveView(): string | null {
 export async function renderHarnessView(props: ViewProps): Promise<string | null> {
   const path = resolveView()
   if (!path) return null
-  // Imported lazily, not at module load. `@stacksjs/stx` pulls in the whole
-  // template and CSS toolchain; loading it eagerly made every socket test pay
-  // for a renderer it never calls, to the point of being OOM-killed.
-  const { renderView } = await import('@stacksjs/stx')
+  // Socket-only hosts never need the renderer. Web requests load its STX
+  // subpath directly so rendering does not also load the other SDK features.
+  const { renderView } = await import('@stacksjs/stx/build-views')
   // The app's stx config, loaded explicitly: `renderView` builds its options
   // from `defaultConfig` alone and never reads `config/ui.ts`, so without
   // this spread the config was decorative — `autoShell`, `app.head` and

@@ -13,14 +13,19 @@ export function respondStxAsset(pathname: string): Promise<Response> | null {
   const parts = /^\/_stx\/(?:(runtime|router|modules)\.([0-9a-f]{16})\.js|css\.([0-9a-f]{16})\.css)$/u.exec(pathname)
   if (!parts) return null
   const [, kind, scriptHash, cssHash] = parts
-  return import('@stacksjs/stx').then(async (stx) => {
+  return (async () => {
     let content: string | undefined
-    if (cssHash)
-      content = stx.getCssServeAsset(cssHash)
-    else if (kind === 'modules' && scriptHash)
-      content = stx.getServeModuleBundle(scriptHash)
+    if (cssHash) {
+      const { getCssServeAsset } = await import('@stacksjs/stx/dev-server/ts-css')
+      content = getCssServeAsset(cssHash)
+    }
+    else if (kind === 'modules' && scriptHash) {
+      const { getServeModuleBundle } = await import('@stacksjs/stx/caching')
+      content = getServeModuleBundle(scriptHash)
+    }
     else if (kind === 'runtime' || kind === 'router') {
-      const asset = await stx.getServeClientAsset(kind)
+      const { getServeClientAsset } = await import('@stacksjs/stx/caching')
+      const asset = await getServeClientAsset(kind)
       if (asset.hash === scriptHash) content = asset.content
     }
     if (content === undefined) return new Response('not found', { status: 404 })
@@ -31,7 +36,7 @@ export function respondStxAsset(pathname: string): Promise<Response> | null {
         'x-content-type-options': 'nosniff',
       },
     })
-  })
+  })()
 }
 
 export class AssetCache {
