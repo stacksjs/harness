@@ -1,8 +1,9 @@
 import type { ThreadDrop } from '@harness/contract'
 import type { threadSidebarLayout } from './thread-sidebar'
 
-const sectionSelector = '[data-sidebar-section]'
+const sectionSelector = '[data-sidebar-section], [data-arrangement-section]'
 const threadRowSelector = '[data-sidebar-row]:has(a[data-sidebar-item][href^="/s/"])'
+const targetRowSelector = `${threadRowSelector}, [data-arrangement-row]`
 
 interface SidebarDrop {
   marker: HTMLElement
@@ -12,7 +13,7 @@ interface SidebarDrop {
 
 interface SidebarDrag {
   pointerId: number
-  link: HTMLAnchorElement
+  grip: HTMLElement
   row: HTMLElement
   section: HTMLElement
   panel: HTMLElement
@@ -24,11 +25,13 @@ interface SidebarDrag {
 
 interface ThreadSidebarOptions {
   root: HTMLElement
-  save: (sessionId: number, intent: ThreadDrop) => Promise<void>
+  arrangement?: HTMLDialogElement | null
+  onLayout?: (profileId: number, layout: ReturnType<typeof threadSidebarLayout>) => void
+  save: (sessionId: number, intent: ThreadDrop, fromArrangement: boolean) => Promise<void>
 }
 
 /** Move existing sidebar rows so their links and keyboard state remain owned by stx. */
-export function createThreadSidebar({ root, save }: ThreadSidebarOptions) {
+export function createThreadSidebar({ root, arrangement, onLayout, save }: ThreadSidebarOptions) {
   const document = root.ownerDocument
   const listeners = new AbortController()
   const options = { signal: listeners.signal }
@@ -38,6 +41,20 @@ export function createThreadSidebar({ root, save }: ThreadSidebarOptions) {
   let suppressClick = false
   let saving = false
   let scrollFrame = 0
+  let latestLayout: ReturnType<typeof threadSidebarLayout> | undefined
+  const preview = arrangement?.querySelector<HTMLElement>('[data-arrangement-preview]')
+  const previewTitle = preview?.querySelector('[data-arrangement-preview-title]')
+  const previewAction = preview?.querySelector('[data-arrangement-preview-action]')
+
+  function showPreview(): void {
+    if (!preview || !drag || drag.panel !== arrangement || !drag.started) return
+    const title = drag.row.querySelector('[data-arrangement-title]')?.textContent ?? ''
+    const action = drop?.action || (drop ? 'Move' : '')
+    if (previewTitle && previewTitle.textContent !== title) previewTitle.textContent = title
+    if (previewAction && previewAction.textContent !== action) previewAction.textContent = action
+    preview.style.setProperty('--arrangement-preview-y', `${drag.y}px`)
+    preview.hidden = false
+  }
 
   function showDrop(next?: SidebarDrop): void {
     if (next?.marker === drop?.marker && next?.intent.anchor?.placement === drop?.intent.anchor?.placement) return
@@ -54,11 +71,12 @@ export function createThreadSidebar({ root, save }: ThreadSidebarOptions) {
     const previous = drag
     drag = undefined
     showDrop()
+    if (preview) preview.hidden = true
     if (!previous) return
     previous.row.removeAttribute('data-pin-dragging')
     previous.panel.removeAttribute('data-shelf-dragging')
     previous.panel.removeAttribute('data-projectless-drop')
-    if (previous.link.hasPointerCapture(previous.pointerId)) previous.link.releasePointerCapture(previous.pointerId)
+    if (previous.grip.hasPointerCapture(previous.pointerId)) previous.grip.releasePointerCapture(previous.pointerId)
   }
 
   function scrollAtEdge(): void {
@@ -74,22 +92,24 @@ export function createThreadSidebar({ root, save }: ThreadSidebarOptions) {
     viewport.scrollTop += (bottom - top) * 0.25
     if (viewport.scrollTop === previous) return
     showDrop(dropAt(drag, x, y))
+    showPreview()
     scrollFrame = requestAnimationFrame(scrollAtEdge)
   }
 
   function dropAt(current: SidebarDrag, x: number, y: number): SidebarDrop | undefined {
     const hit = document.elementFromPoint(x, y)
     const section = hit?.closest<HTMLElement>(sectionSelector)
-    if (!section || section.closest('[data-space]') !== current.panel) return
+    if (!section || section.closest('[data-space], [data-thread-arrangement]') !== current.panel) return
     const id = section.dataset.sectionId ?? ''
     const origin = current.section.dataset.sectionId ?? ''
     const destination = id.startsWith('pinned-') ? 'pinned' : id.startsWith('settled-') ? 'settled'
       : id === current.row.dataset.threadActiveSection ? 'active' : undefined
     if (!destination || (destination === 'settled' && current.section === section)) return
-    const hitRow = hit?.closest<HTMLElement>(threadRowSelector)
+    if (current.row.hasAttribute('data-arrangement-row') && current.row.dataset[destination === 'settled' ? 'canSettle' : destination === 'pinned' ? 'canPin' : 'canActivate'] === 'false') return
+    const hitRow = hit?.closest<HTMLElement>(targetRowSelector)
     if (hitRow === current.row) return
     const marker = destination !== 'settled' && hitRow ? hitRow
-      : section.querySelector<HTMLElement>('[data-sidebar-section-header]')
+      : section.querySelector<HTMLElement>('[data-sidebar-section-header], [data-arrangement-header]:not([hidden])')
     if (!marker) return
     const action = current.section === section ? '' : destination === 'pinned' ? 'Pin' : destination === 'settled' ? 'Settle'
       : origin.startsWith('pinned-') ? 'Unpin' : origin.startsWith('snoozed-') ? 'Wake' : 'Un-settle'
@@ -101,58 +121,63 @@ export function createThreadSidebar({ root, save }: ThreadSidebarOptions) {
     return { marker, intent, action }
   }
 
-  root.addEventListener('pointerdown', (event) => {
-    if (drag) return
-    suppressClick = false
-    if (saving || event.button !== 0 || !event.isPrimary || event.pointerType === 'touch'
-      || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !(event.target instanceof Element)) return
-    const link = event.target.closest<HTMLAnchorElement>('a[data-sidebar-item][href^="/s/"]')
-    const row = link?.closest<HTMLElement>('[data-sidebar-row]')
-    const section = row?.closest<HTMLElement>(sectionSelector)
-    const panel = section?.closest<HTMLElement>('[data-thread-order-ready]')
-    if (!link || !row || !section || !panel || !row.dataset.threadActiveSection || section.dataset.sectionId?.startsWith('working-')) return
-    link.setPointerCapture(event.pointerId)
-    drag = { pointerId: event.pointerId, link, row, section, panel, viewport: panel.querySelector('.stx-sidebar-scroll'), x: event.clientX, y: event.clientY, started: false }
-  }, options)
-
-  root.addEventListener('pointermove', (event) => {
-    if (!drag || drag.pointerId !== event.pointerId) return
-    if (!drag.started) {
-      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return
-      drag.started = true
-      suppressClick = true
-      drag.row.setAttribute('data-pin-dragging', '')
-      drag.panel.setAttribute('data-shelf-dragging', '')
-      drag.panel.toggleAttribute('data-projectless-drop', drag.row.dataset.threadActiveSection?.startsWith('projectless-'))
-    }
-    drag.x = event.clientX
-    drag.y = event.clientY
-    showDrop(dropAt(drag, drag.x, drag.y))
-    if (!scrollFrame) scrollFrame = requestAnimationFrame(scrollAtEdge)
-  }, options)
-
-  root.addEventListener('pointerup', (event) => {
-    if (!drag || event.pointerId !== drag.pointerId) return
-    const sessionId = Number(drag.row.dataset.itemId)
-    const intent = drop?.intent
-    cancel()
-    if (!intent) return
-    saving = true
-    void save(sessionId, intent).finally(() => { saving = false })
-  }, options)
-
-  for (const type of ['pointercancel', 'lostpointercapture'] as const) {
-    root.addEventListener(type, (event) => {
-      if (drag?.pointerId === event.pointerId) cancel()
+  function bindPointers(surface: HTMLElement, fromArrangement: boolean): void {
+    surface.addEventListener('pointerdown', (event) => {
+      if (drag) return
+      suppressClick = false
+      if (saving || event.button !== 0 || !event.isPrimary || (!fromArrangement && event.pointerType === 'touch')
+        || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !(event.target instanceof Element)) return
+      const grip = event.target.closest<HTMLElement>(fromArrangement ? '[data-arrangement-grip]:not(:disabled)' : 'a[data-sidebar-item][href^="/s/"]')
+      const row = grip?.closest<HTMLElement>(targetRowSelector)
+      const section = row?.closest<HTMLElement>(sectionSelector)
+      const panel = section?.closest<HTMLElement>('[data-thread-order-ready]')
+      if (!grip || !row || !section || !panel || !row.dataset.threadActiveSection || section.dataset.sectionId?.startsWith('working-')) return
+      grip.setPointerCapture(event.pointerId)
+      drag = { pointerId: event.pointerId, grip, row, section, panel, viewport: panel.querySelector('.stx-sidebar-scroll, [data-arrangement-scroll]'), x: event.clientX, y: event.clientY, started: false }
     }, options)
+
+    surface.addEventListener('pointermove', (event) => {
+      if (!drag || drag.pointerId !== event.pointerId) return
+      if (!drag.started) {
+        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return
+        drag.started = true
+        suppressClick = true
+        drag.row.setAttribute('data-pin-dragging', '')
+        drag.panel.setAttribute('data-shelf-dragging', '')
+        drag.panel.toggleAttribute('data-projectless-drop', drag.row.dataset.threadActiveSection?.startsWith('projectless-'))
+      }
+      drag.x = event.clientX
+      drag.y = event.clientY
+      showDrop(dropAt(drag, drag.x, drag.y))
+      showPreview()
+      if (!scrollFrame) scrollFrame = requestAnimationFrame(scrollAtEdge)
+    }, options)
+
+    surface.addEventListener('pointerup', (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return
+      const sessionId = Number(drag.row.dataset.itemId)
+      const intent = drop?.intent
+      cancel()
+      if (!intent) return
+      saving = true
+      void save(sessionId, intent, fromArrangement).finally(() => { saving = false })
+    }, options)
+
+    for (const type of ['pointercancel', 'lostpointercapture'] as const) {
+      surface.addEventListener(type, (event) => {
+        if (drag?.pointerId === event.pointerId) cancel()
+      }, options)
+    }
+    surface.addEventListener('dragstart', (event) => { if (drag) event.preventDefault() }, options)
+    surface.addEventListener('click', (event) => {
+      if (!suppressClick || event.detail === 0) return
+      suppressClick = false
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }, { ...options, capture: true })
   }
-  root.addEventListener('dragstart', (event) => { if (drag) event.preventDefault() }, options)
-  root.addEventListener('click', (event) => {
-    if (!suppressClick || event.detail === 0) return
-    suppressClick = false
-    event.preventDefault()
-    event.stopImmediatePropagation()
-  }, { ...options, capture: true })
+  bindPointers(root, false)
+  if (arrangement) bindPointers(arrangement, true)
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !drag?.started) return
     cancel()
@@ -220,7 +245,13 @@ export function createThreadSidebar({ root, save }: ThreadSidebarOptions) {
       if (!Number.isSafeInteger(order.profileId) || !Array.isArray(order.sections)) return true
       const panel = root.querySelector<HTMLElement>(`[data-space-id="${order.profileId}"]:not([data-space-deferred])`)
       if (panel) applyOrder(panel, order.sections)
+      if (drag && drag.panel === arrangement && JSON.stringify(latestLayout) !== JSON.stringify(order.sections)) cancel()
+      latestLayout = order.sections
+      onLayout?.(order.profileId!, order.sections)
       return true
+    },
+    cancelArrangement() {
+      if (drag && drag.panel === arrangement) cancel()
     },
     dispose() {
       cancel()

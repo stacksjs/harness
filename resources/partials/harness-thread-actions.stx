@@ -9,6 +9,9 @@
       <span class="i-hugeicons-archive-02" aria-hidden="true"></span>Restore thread
     </button>
     <div :hidden="Boolean(threadNavigation().archivedAt)">
+      <button type="button" data-thread-action @click="openThreadArrangement" aria-haspopup="dialog" aria-controls="harness-thread-arrangement">
+        <span class="i-hugeicons-menu-02" aria-hidden="true"></span>Arrange threads
+      </button>
       <button type="button" data-thread-action :hidden="threadNavigation().pinnedOrder != null || Boolean(threadNavigation().settledAt || threadNavigation().snoozedUntil)" @click="organizeThread('pin')" :disabled="threadActionBusy()">
         <span class="i-hugeicons-pin" aria-hidden="true"></span>Pin thread
       </button>

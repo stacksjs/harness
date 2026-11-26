@@ -755,6 +755,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   @if(activeSession)
     @include('../partials/harness-thread-actions')
+    @include('../partials/harness-thread-arrangement')
   @endif
 
   <dialog data-thread-search ref="threadSearchDialogBox" aria-labelledby="thread-search-heading" @cancel="cancelThreadSearch" @click.self="closeThreadSearch" class="mb-auto mt-8 mx-auto p-0 md:mt-auto text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[12px] dark:border-white/15 shadow-xl">
@@ -1266,6 +1267,111 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const threadWakeTime = useRef('threadWakeTimeBox')
   const threadWakeDuration = useRef('threadWakeDurationBox')
   const threadTitleEdit = useRef('threadTitleEditBox')
+  const threadArrangement = useRef('threadArrangementBox')
+  const arrangementOpen = state(false)
+  const arrangementLayout = state(null)
+  const arrangementExpanded = state([])
+  const arrangementChoice = state(null)
+  const arrangementBusy = state(false)
+  const arrangementStatus = state('')
+  const arrangementError = state('')
+  let cancelArrangementDrag = () => {}
+
+  function arrangementReady() {
+    return Boolean(sessionOnline() && arrangementLayout() && !arrangementBusy())
+  }
+
+  const arrangementSections = derived(() => {
+    const layout = arrangementLayout() || []
+    let showedActive = false
+    return layout.flatMap((section) => {
+      const kind = section.id.split('-')[0]
+      if (kind === 'working' || (kind === 'snoozed' && !section.rows.length)) return []
+      const active = kind === 'project' || kind === 'projectless'
+      if (kind === 'projectless' && !layout.some(group => group.rows.some(row => row.activeSection === section.id))) return []
+      const startsActive = active && !showedActive
+      if (active) showedActive = true
+      return [{ ...section, active, kind, startsActive, parked: kind === 'settled' || kind === 'snoozed' }]
+    })
+  })
+
+  function openThreadArrangement() {
+    const dialog = threadArrangement.current
+    if (!dialog || dialog.open) return
+    closeThreadActions()
+    arrangementLayout.set(null)
+    arrangementExpanded.set([])
+    arrangementChoice.set(null)
+    arrangementError.set('')
+    arrangementStatus.set('')
+    arrangementOpen.set(true)
+    dialog.showModal()
+    watchSidebarOrder()
+  }
+
+  function closeThreadArrangement(event) {
+    event?.preventDefault()
+    threadArrangement.current?.close()
+  }
+
+  function finishThreadArrangement() {
+    cancelArrangementDrag()
+    arrangementOpen.set(false)
+    arrangementLayout.set(null)
+    watchSidebarOrder()
+    threadActionsTrigger.current?.focus()
+  }
+
+  function arrangementSectionOpen(id) {
+    return arrangementExpanded().includes(id)
+  }
+
+  function toggleArrangementSection(id) {
+    arrangementExpanded.update(open => open.includes(id) ? open.filter(value => value !== id) : [...open, id])
+  }
+
+  function toggleArrangementChoice(id) {
+    arrangementChoice.set(arrangementChoice() === id ? null : id)
+  }
+
+  function arrangementOptions(section, row) {
+    const options = []
+    if (section.active || section.kind === 'pinned') {
+      const destination = section.active ? 'active' : 'pinned'
+      const index = section.rows.findIndex(item => item.id === row.id)
+      const before = section.rows[index - 1]
+      const after = section.rows[index + 1]
+      if (before) options.push({ label: 'Move up', intent: { destination, anchor: { sessionId: before.id, placement: 'before' } } })
+      if (after) options.push({ label: 'Move down', intent: { destination, anchor: { sessionId: after.id, placement: 'after' } } })
+    }
+    if (section.kind !== 'pinned' && row.canPin) options.push({ label: 'Pin', intent: { destination: 'pinned' } })
+    if (!section.active && row.canActivate) options.push({ label: section.kind === 'pinned' ? 'Unpin' : section.kind === 'snoozed' ? 'Wake' : 'Un-settle', intent: { destination: 'active' } })
+    if (section.kind !== 'settled' && row.canSettle) options.push({ label: 'Settle', intent: { destination: 'settled' } })
+    return options
+  }
+
+  async function saveArrangement(id, intent, restoreFocus = false) {
+    if (!arrangementReady()) return
+    arrangementBusy.set(true)
+    arrangementError.set('')
+    arrangementStatus.set('')
+    try {
+      await sendCommand({ type: 'session.organize', sessionId: id, action: 'drop', ...intent })
+      arrangementChoice.set(null)
+      arrangementStatus.set('Thread position saved.')
+    }
+    catch (error) { arrangementError.set(error.message) }
+    finally {
+      arrangementBusy.set(false)
+      if (restoreFocus) void nextTick(() => requestAnimationFrame(() => {
+        const dialog = threadArrangement.current
+        if (!dialog?.open) return
+        const grip = dialog.querySelector(`[data-arrangement-row][data-item-id="${id}"] [data-arrangement-grip]`)
+        if (grip && !grip.closest('[hidden]')) grip.focus({ preventScroll: true })
+        else dialog.querySelector('[data-arrangement-section][data-section-id^="settled-"] button[data-arrangement-header]')?.focus({ preventScroll: true })
+      }))
+    }
+  }
 
   function positionThreadActions() {
     const trigger = threadActionsTrigger.current
@@ -3706,7 +3812,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const sidebar = sidebarRef.current
     const threadSidebar = sidebar && createThreadSidebar({
       root: sidebar,
-      async save(sessionId, intent) {
+      arrangement: threadArrangement.current,
+      onLayout(profileId, layout) {
+        if (arrangementOpen() && profileId === Number(providerProfileId)) arrangementLayout.set(layout)
+      },
+      async save(sessionId, intent, fromArrangement) {
+        if (fromArrangement) {
+          await saveArrangement(sessionId, intent)
+          return
+        }
         threadOrderStatus.set('')
         try {
           await sendCommand({ type: 'session.organize', sessionId, action: 'drop', ...intent })
@@ -3715,9 +3829,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         catch (error) { stxAlert(error.message) }
       },
     })
+    cancelArrangementDrag = () => threadSidebar?.cancelArrangement()
     const watchOrder = (connection) => {
       watchSidebarOrder = () => {
-        const profileId = Number(visibleProfile())
+        const profileId = Number(arrangementOpen() ? providerProfileId : visibleProfile())
         if (profileId) connection.send({ t: 'watch-sidebar', profileId })
       }
     }
@@ -4035,7 +4150,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           void followUpActions()?.flush()
           if (termOpen()) requestAnimationFrame(showTerminalProcess)
         }
-        else terminal.onOffline()
+        else {
+          cancelArrangementDrag()
+          arrangementLayout.set(null)
+          terminal.onOffline()
+        }
       },
     })
     watchOrder(connection)

@@ -1,0 +1,49 @@
+<dialog id="harness-thread-arrangement" ref="threadArrangementBox" data-thread-arrangement aria-labelledby="thread-arrangement-heading" aria-describedby="thread-arrangement-hint" :aria-busy="String(arrangementBusy())" :data-thread-order-ready="arrangementReady() ? 'true' : null" @cancel="closeThreadArrangement" @close="finishThreadArrangement">
+  <header data-arrangement-chrome>
+    <div class="flex gap-4 items-center justify-between">
+      <h2 id="thread-arrangement-heading" class="min-w-0 font-semibold text-[17px]">Arrange threads</h2>
+      <button type="button" autofocus @click="closeThreadArrangement" class="px-3 min-h-11 font-semibold text-sm rounded-md" data-arrangement-done>Done</button>
+    </div>
+    <p id="thread-arrangement-hint" class="text-[13px] text-neutral-600 dark:text-neutral-300">Drag a handle to move a thread. Tap a handle for move options.</p>
+    <p role="alert" :hidden="!arrangementError()" :text="arrangementError()" class="mt-2 text-red-700 text-sm dark:text-red-300"></p>
+    <p role="status" class="sr-only" :text="arrangementStatus()"></p>
+  </header>
+  <div data-arrangement-scroll>
+    <p class="p-4 text-neutral-600 text-sm dark:text-neutral-300" :hidden="arrangementReady() || arrangementBusy()" :text="sessionOnline() ? 'Loading threads…' : 'Reconnect to move threads.'"></p>
+    <template :if="arrangementOpen()">
+      <template :for="section in arrangementSections()" :key="section.id">
+        <section data-arrangement-section :data-section-id="section.id">
+          <h3 class="pt-3 font-semibold text-xs" :hidden="!section.startsActive">Active</h3>
+          <button type="button" data-arrangement-header :hidden="!section.parked" :aria-expanded="String(arrangementSectionOpen(section.id))" @click="toggleArrangementSection(section.id)">
+            <span :text="section.label"></span>
+            <span class="size-4 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+          </button>
+          <h3 data-arrangement-header :hidden="section.parked" :text="section.label"></h3>
+          <ul :hidden="section.parked && !arrangementSectionOpen(section.id)" class="m-0 p-0 list-none">
+            <template :for="row in section.rows" :key="row.id">
+              <li data-arrangement-row :data-item-id="String(row.id)" :data-thread-active-section="row.activeSection" :data-can-settle="String(row.canSettle)" :data-can-pin="String(row.canPin)" :data-can-activate="String(row.canActivate)">
+                <div class="flex gap-3 items-center justify-between min-w-0">
+                  <span data-arrangement-title class="min-w-0 break-words text-sm" :text="row.title"></span>
+                  <button type="button" data-arrangement-grip :aria-label="'Reorder ' + row.title" :aria-expanded="String(arrangementChoice() === row.id)" :aria-controls="'arrangement-moves-' + row.id" :disabled="!arrangementReady() || (!row.canPin && !row.canActivate)" @click="toggleArrangementChoice(row.id)">
+                    <span class="size-4 i-hugeicons-menu-02" aria-hidden="true"></span>
+                  </button>
+                </div>
+                <div role="group" :id="'arrangement-moves-' + row.id" :aria-label="'Move ' + row.title" :hidden="arrangementChoice() !== row.id" class="flex flex-wrap gap-1 pb-2">
+                  <template :if="arrangementChoice() === row.id">
+                    <template :for="choice in arrangementOptions(section, row)" :key="choice.label">
+                      <button type="button" class="px-2 min-h-10 text-xs border border-black/15 rounded-md dark:border-white/20" :text="choice.label" :disabled="!arrangementReady()" @click="saveArrangement(row.id, choice.intent, true)"></button>
+                    </template>
+                  </template>
+                </div>
+              </li>
+            </template>
+          </ul>
+        </section>
+      </template>
+    </template>
+  </div>
+  <div data-arrangement-preview hidden aria-hidden="true">
+    <span data-arrangement-preview-title class="truncate"></span>
+    <span data-arrangement-preview-action class="shrink-0 font-semibold text-xs"></span>
+  </div>
+</dialog>

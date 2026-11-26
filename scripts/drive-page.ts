@@ -1970,6 +1970,81 @@ await capture('thread-actions-phone')
 await page.keyboard.press('Escape')
 await threadActions.waitFor({ state: 'hidden' })
 check('closing thread actions returns focus to its button', await threadActionsTrigger.evaluate(button => button === document.activeElement))
+
+const arrangement = page.getByRole('dialog', { name: 'Arrange threads' })
+const openArrangement = async () => {
+  await threadActionsTrigger.click()
+  await threadActions.getByRole('button', { name: 'Arrange threads', exact: true }).click()
+  await page.locator('[data-thread-arrangement][data-thread-order-ready]').waitFor()
+}
+await openArrangement()
+const arrangementPin = arrangement.locator('[data-section-id^="pinned-"] [data-arrangement-row]').filter({ hasText: 'Parity release review' })
+const arrangementSettled = arrangement.locator('[data-section-id^="settled-"]')
+const arrangementGrip = arrangementPin.getByRole('button', { name: 'Reorder Parity release review' })
+await arrangementGrip.waitFor()
+check('Arrange threads covers the phone viewport and starts with a named drag handle', await arrangement.evaluate((dialog) => {
+  const bounds = dialog.getBoundingClientRect()
+  const handle = dialog.querySelector('[data-arrangement-grip]')
+  return bounds.width === innerWidth && bounds.height === innerHeight && document.documentElement.scrollWidth === innerWidth
+    && handle?.getBoundingClientRect().width === 44 && getComputedStyle(handle).touchAction === 'none'
+}))
+await capture('thread-arrangement-phone')
+const arrangementTouch = browserName === 'chromium' ? await browserContext.newCDPSession(page) : null
+const beginArrangeDrop = async () => {
+  const from = await arrangementGrip.boundingBox()
+  const to = await arrangementSettled.locator('button[data-arrangement-header]').boundingBox()
+  if (!from || !to) throw new Error('The phone arrangement controls are not visible')
+  const origin = { x: from.x + from.width / 2, y: from.y + from.height / 2 }
+  const destination = { x: to.x + to.width / 2, y: to.y + to.height / 2 }
+  if (arrangementTouch) {
+    await arrangementTouch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [origin] })
+    for (let step = 1; step <= 10; step++) {
+      const fraction = step / 10
+      const x = origin.x + (destination.x - origin.x) * fraction
+      const y = origin.y + (destination.y - origin.y) * fraction
+      await arrangementTouch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] })
+    }
+  }
+  else {
+    await page.mouse.move(origin.x, origin.y)
+    await page.mouse.down()
+    await page.mouse.move(destination.x, destination.y, { steps: 10 })
+  }
+  await arrangement.locator('[data-arrangement-preview-action]').getByText('Settle', { exact: true }).waitFor()
+}
+const endArrangeDrop = async (cancel: boolean) => {
+  if (arrangementTouch) await arrangementTouch.send('Input.dispatchTouchEvent', { type: cancel ? 'touchCancel' : 'touchEnd', touchPoints: [] })
+  else {
+    if (cancel) await page.keyboard.press('Escape')
+    await page.mouse.up()
+  }
+}
+await beginArrangeDrop()
+await capture('thread-arrangement-phone-drop')
+await endArrangeDrop(true)
+await arrangementGrip.waitFor()
+check('canceling a phone arrangement drop keeps the sheet and saved pin', await arrangement.isVisible()
+  && await arrangement.locator('[data-arrangement-preview]').isHidden())
+await beginArrangeDrop()
+await endArrangeDrop(false)
+await arrangementTouch?.detach()
+await arrangementPin.waitFor({ state: 'detached' })
+const arrangedParked = arrangementSettled.getByRole('button', { name: 'Reorder Parity release review' })
+await arrangementSettled.locator('button[data-arrangement-header]').click()
+await arrangedParked.focus()
+await page.keyboard.press('Enter')
+await arrangementSettled.getByRole('button', { name: 'Pin', exact: true }).press('Enter')
+await arrangementGrip.waitFor()
+await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Reorder Parity release review')
+await arrangement.getByRole('button', { name: 'Done' }).click()
+await arrangement.waitFor({ state: 'hidden' })
+await page.waitForFunction(() => document.activeElement?.hasAttribute('data-thread-actions-trigger'))
+await page.reload()
+await openArrangement()
+await arrangementGrip.waitFor()
+check('the phone sheet saves drag and keyboard moves across reload and restores focus', harness.engine.current.sessions.get(steerSessionId)?.navigation?.settledAt === null)
+await arrangement.getByRole('button', { name: 'Done' }).click()
+await arrangement.waitFor({ state: 'hidden' })
 await page.setViewportSize({ width: 1280, height: 800 })
 await threadActionsTrigger.click()
 await threadActions.getByRole('button', { name: 'Snooze', exact: true }).click()

@@ -528,7 +528,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const changes = event.payload.changes
         if ('snoozedUntil' in changes) scheduleThreadWake()
       }
-      if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'turn.started'
+      if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'session.created' || event.payload.type === 'turn.started'
         || event.payload.type === 'turn.completed' || event.payload.type === 'turn.interrupted'
         || event.payload.type === 'session.failed' || event.payload.type === 'session.stopped'
         || event.payload.type === 'approval.requested' || event.payload.type === 'approval.resolved'

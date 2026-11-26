@@ -1,10 +1,13 @@
 import type { SessionState, WorkspaceState } from '@harness/engine'
 import { pinOrder } from '@harness/contract'
-import { activeThreadOrder, threadShelf } from '@harness/engine'
+import { activeThreadOrder, isTurnActive, threadShelf } from '@harness/engine'
+import { basename } from 'node:path'
+import { threadTitle } from './thread-search'
 
 export function threadSidebarLayout(profileId: number, workspaces: WorkspaceState[], sessions: SessionState[]) {
   const activeSections = new Map(workspaces.filter(workspace => !workspace.scratch)
     .map(workspace => [workspace.id, `project-${workspace.id}`]))
+  const projectNames = new Map(workspaces.map(workspace => [workspace.id, basename(workspace.path) || workspace.path]))
   const projectless = `projectless-${profileId}`
   const shelves = { pinned: [], working: [], active: [], snoozed: [], settled: [], archived: [] } as Record<ReturnType<typeof threadShelf>, SessionState[]>
   for (const session of [...sessions].reverse()) shelves[threadShelf(session)].push(session)
@@ -18,11 +21,15 @@ export function threadSidebarLayout(profileId: number, workspaces: WorkspaceStat
   const items = (rows: SessionState[]) => rows.map(session => ({
     id: session.id,
     activeSection: activeSections.get(session.workspaceId) ?? projectless,
+    title: threadTitle(session),
+    canSettle: !isTurnActive(session.state),
+    canActivate: session.state !== 'stopped' && session.state !== 'running',
+    canPin: session.state !== 'stopped',
   }))
   return [
     { id: `pinned-${profileId}`, label: 'Pinned', rows: items(shelves.pinned) },
     { id: `working-${profileId}`, label: 'Working', rows: items(shelves.working) },
-    ...[...activeSections].map(([workspaceId, id]) => ({ id, workspaceId, label: '', rows: items(active.get(id) ?? []) })),
+    ...[...activeSections].map(([workspaceId, id]) => ({ id, workspaceId, label: projectNames.get(workspaceId) ?? 'Project', rows: items(active.get(id) ?? []) })),
     { id: projectless, label: 'Without a project', rows: items(active.get(projectless) ?? []) },
     { id: `snoozed-${profileId}`, label: 'Snoozed', rows: items(shelves.snoozed) },
     { id: `settled-${profileId}`, label: `Settled (${shelves.settled.length})`, rows: items(shelves.settled) },
