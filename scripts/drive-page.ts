@@ -88,6 +88,7 @@ const followUpGate = Promise.withResolvers<void>()
 const followUpDelivery: string[] = []
 const liveSidebarPrompt = 'Verify the sidebar updates on another client.'
 const liveSidebarTurn = Promise.withResolvers<void>()
+const backgroundLaunches: StartTurnInput[] = []
 const referenceLink = '[parity-notes (draft).md](fixture%20context/parity-notes%20%28draft%29.md)'
 let fixtureMentionContents: string | undefined
 const fixtureHandoffs: StartTurnInput[] = []
@@ -127,6 +128,13 @@ const instance: ProviderInstance = {
     yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
   },
   async *startTurn(input) {
+    if (input.text.startsWith('Background fixture:')) {
+      const count = backgroundLaunches.push(input)
+      yield { type: 'session-bound', providerSessionId: `background-fixture-${count}` }
+      yield { type: 'assistant-delta', text: 'Background turn finished.' }
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     if (input.text.startsWith('Claude rewind fixture: ')) {
       const sequence = claudeRewindTurns.push(input)
       if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: `fixture-claude-rewind-${sequence}` }
@@ -5089,6 +5097,110 @@ await sidebarPhone.waitForFunction(() => document.activeElement?.matches('[data-
 check('keyboard movement restores focus after a delayed sidebar snapshot', true)
 sidebarWriter.close()
 await sidebarPhone.close()
+
+if (harness.engine.current.settings.defaultDriver !== 'claude')
+  await harness.engine.dispatch({ id: 'background-fixture-agent', at: Date.now(), command: { type: 'settings.update', changes: { defaultDriver: 'claude' } } })
+execFileSync('git', ['branch', 'background-fixture-base'], { cwd: dir })
+const backgroundContext = await browser.newContext({ colorScheme, reducedMotion })
+const backgroundPage = await backgroundContext.newPage()
+const backgroundDraftUrl = `${baseUrl}/?workspace=${workspaceId}`
+const backgroundMessage = backgroundPage.getByRole('textbox', { name: 'Message', exact: true })
+const backgroundNotice = backgroundPage.locator('[data-background-thread]')
+const backgroundLink = backgroundNotice.getByRole('link', { name: 'Open thread' })
+await backgroundPage.goto(backgroundDraftUrl)
+await backgroundPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
+await backgroundPage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
+await backgroundPage.locator('[data-draft-worktree] summary').click()
+const backgroundMode = backgroundPage.getByLabel('Run in', { exact: true })
+await backgroundMode.selectOption('worktree')
+const backgroundBase = backgroundPage.getByRole('textbox', { name: 'Base branch', exact: true })
+await backgroundBase.fill('background-fixture-base')
+const priorSessions = new Set(harness.engine.current.sessions.keys())
+const firstBackgroundText = 'Background fixture: first isolated thread'
+const secondBackgroundText = 'Background fixture: second isolated thread'
+await backgroundMessage.fill(firstBackgroundText)
+await backgroundPage.locator('[data-composer-file-input]').setInputFiles({
+  name: 'background-notes.txt',
+  mimeType: 'text/plain',
+  buffer: Buffer.from('Background attachment fixture.'),
+})
+await backgroundPage.locator('[data-send]:enabled').waitFor()
+await backgroundMessage.press('Control+Enter')
+await backgroundLink.waitFor()
+const firstBackgroundLink = await backgroundLink.getAttribute('href')
+check('background start stays on the draft and returns its composer focus',
+  backgroundPage.url() === backgroundDraftUrl && await backgroundMessage.inputValue() === ''
+  && await backgroundMessage.evaluate(editor => editor === document.activeElement))
+check('background start retains the selected worktree and base branch',
+  await backgroundMode.inputValue() === 'worktree' && await backgroundBase.inputValue() === 'background-fixture-base')
+await backgroundNotice.getByRole('button', { name: 'Dismiss background notification' }).press('Enter')
+await backgroundNotice.waitFor({ state: 'hidden' })
+check('dismissing a background notification returns focus to the composer',
+  await backgroundMessage.evaluate(editor => editor === document.activeElement))
+await backgroundMessage.fill(secondBackgroundText)
+const backgroundBefore = await backgroundMessage.boundingBox()
+await backgroundMessage.press('Control+Enter')
+await backgroundLink.waitFor()
+await backgroundPage.waitForFunction(first => document.querySelector('[data-background-thread] a')?.getAttribute('href') !== first, firstBackgroundLink)
+const backgroundAfter = await backgroundMessage.boundingBox()
+check('the background notification does not move the composer',
+  Boolean(backgroundBefore && backgroundAfter && Math.abs(backgroundBefore.y - backgroundAfter.y) < 1))
+for (let attempt = 0; attempt < 160 && backgroundLaunches.length < 2; attempt++) await Bun.sleep(50)
+const backgroundThreads = [...harness.engine.current.sessions.values()].filter(thread => !priorSessions.has(thread.id))
+check('repeated background sends start separate threads and isolated checkouts',
+  backgroundThreads.length === 2 && backgroundLaunches.length === 2
+  && backgroundThreads.every(thread => thread.turns.length === 1 && Boolean(thread.worktreePath))
+  && new Set(backgroundThreads.map(thread => thread.worktreePath)).size === 2)
+check('background start transfers its attachment to the launched thread',
+  backgroundThreads.find(thread => thread.turns[0]?.prompt === firstBackgroundText)?.turns[0]?.attachments?.[0]?.name === 'background-notes.txt')
+for (const [width, height] of workspaceViewports) {
+  await backgroundPage.setViewportSize({ width, height })
+  await capture(`workspace-background-thread-${width}x${height}`, backgroundPage)
+}
+await backgroundLink.click()
+await backgroundPage.getByText('Background turn finished.', { exact: true }).waitFor()
+check('the background notification opens the correct conversation',
+  harness.engine.current.sessions.get(Number(new URL(backgroundPage.url()).pathname.split('/').at(-1)))?.turns[0]?.prompt === secondBackgroundText)
+
+const backgroundRetryText = 'Background fixture: first turn with a lost receipt'
+let droppedBackgroundReceipt = false
+const backgroundAttemptIds: string[] = []
+await backgroundPage.routeWebSocket('**/ws', (client) => {
+  const upstream = client.connectToServer()
+  client.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (frame?.t === 'dispatch' && frame.envelope?.command?.text === backgroundRetryText)
+      backgroundAttemptIds.push(frame.envelope.id)
+    upstream.send(message)
+  })
+  upstream.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (!droppedBackgroundReceipt && frame?.t === 'dispatched' && backgroundAttemptIds.includes(frame.id)) {
+      droppedBackgroundReceipt = true
+      return
+    }
+    client.send(message)
+  })
+})
+await backgroundPage.setViewportSize({ width: 1280, height: 800 })
+await backgroundPage.goto(`${baseUrl}/?project=none&profile=${providerProfileId}`)
+await backgroundPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
+const countBeforeBackgroundRetry = harness.engine.current.sessions.size
+await backgroundMessage.fill(backgroundRetryText)
+await backgroundMessage.press('Control+Enter')
+await backgroundPage.getByText('The server did not confirm the request. Try again.').waitFor({ timeout: 12_000 })
+check('a lost first-turn receipt keeps the projectless draft available', droppedBackgroundReceipt && await backgroundMessage.inputValue() === backgroundRetryText)
+await backgroundPage.keyboard.press('Escape')
+await backgroundMessage.press('Enter')
+await backgroundPage.waitForURL(/\/s\/\d+/)
+await backgroundPage.getByText('Background turn finished.', { exact: true }).waitFor()
+const resumedBackgroundId = Number(new URL(backgroundPage.url()).pathname.split('/').at(-1))
+const resumedBackground = harness.engine.current.sessions.get(resumedBackgroundId)
+check('a foreground retry reuses the projectless session and first-turn receipt',
+  backgroundAttemptIds.length === 2 && backgroundAttemptIds[0] === backgroundAttemptIds[1]
+  && harness.engine.current.sessions.size === countBeforeBackgroundRetry + 1
+  && resumedBackground?.turns.length === 1 && harness.engine.current.workspaces.get(resumedBackground.workspaceId)?.scratch === true)
+await backgroundContext.close()
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
