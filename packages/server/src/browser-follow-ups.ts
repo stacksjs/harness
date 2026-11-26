@@ -1,6 +1,8 @@
-import type { ClientCommand, QueuedFollowUp } from '@harness/contract'
+import type { ClientCommand, ComposerUploads, QueuedFollowUp } from '@harness/contract'
 
 interface LocalFollowUp extends QueuedFollowUp {
+  uploads?: ComposerUploads
+  fileNames?: string[]
   attempted?: boolean
   error?: string
 }
@@ -113,11 +115,11 @@ export function createFollowUpActions(options: FollowUpOptions) {
     clearTimeout(retry)
     let entry = local()?.[0]
     while (entry && !disposed && online() && (!entry.error || retryFailed)) {
-      const { id, text, codexSelection, freshContext } = entry
+      const { id, text, codexSelection, freshContext, uploads } = entry
       sending.set(id)
       local.set(local().map(item => item.id === id ? { ...item, attempted: true } : item))
       try {
-        await send({ type: 'session.queue.add', sessionId, text, ...(codexSelection ? { codexSelection } : {}), ...(freshContext ? { freshContext } : {}) }, id)
+        await send({ type: 'session.queue.add', sessionId, text, ...(uploads ? { uploads } : {}), ...(codexSelection ? { codexSelection } : {}), ...(freshContext ? { freshContext } : {}) }, id)
         local.set(local().filter(item => item.id !== id))
       }
       catch (error) {

@@ -2,6 +2,7 @@ const draftPrefix = 'harness.composer.v1:'
 
 interface ComposerDraft {
   text: string
+  files?: unknown[]
   [field: string]: unknown
 }
 
@@ -27,7 +28,7 @@ function read(storage: Storage, key: string): Partial<ComposerDraft & DiscardMar
 
 export function discardComposerDraft(storage: Storage, key: string, claim: string, expectedText?: string): DiscardedDraft | null {
   const draft = read(storage, key)
-  if (!draft || typeof draft.text !== 'string' || !draft.text || (expectedText !== undefined && draft.text !== expectedText)) return null
+  if (!draft || typeof draft.text !== 'string' || (!draft.text && !draft.files?.length) || (expectedText !== undefined && draft.text !== expectedText)) return null
   storage.setItem(key, JSON.stringify({ discardedDraft: claim }))
   return { key, claim, draft: { ...draft, text: draft.text } }
 }
@@ -69,7 +70,8 @@ export function watchSidebarDrafts(root: HTMLElement, template: HTMLTemplateElem
       const key = profile && target ? `${draftPrefix}${profile}:${target}` : ''
       const row = link.parentElement!
       const existing = row.querySelector<HTMLButtonElement>(':scope > [data-draft-discard-row]')
-      if (!key || !read(storage, key)?.text) {
+      const draft = key && read(storage, key)
+      if (!draft || (!draft.text && !draft.files?.length)) {
         existing?.remove()
         continue
       }

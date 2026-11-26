@@ -1476,6 +1476,72 @@ await discardSidebarDraft(scratchSessionId).waitFor({ state: 'detached' })
 check('retry uses the same id and clears the draft after receipt', attemptedIds.length === 2 && attemptedIds[0] === attemptedIds[1]
   && harness.engine.current.sessions.get(scratchSessionId)?.turns.filter(turn => turn.prompt === retryText).length === 1)
 
+const attachmentPicker = page.locator('[data-composer-file-input]')
+const draftFiles = page.locator('[data-composer-file]')
+const fileFixture = { name: 'notes <draft>.txt', mimeType: 'text/plain', buffer: Buffer.from('Harness attachment fixture') }
+const imageFixture = {
+  name: 'reference-pattern.png',
+  mimeType: 'image/png',
+  buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAQklEQVR4nGMoPrsTK7Iq2oYVkaqeYdSCUQuGgAXUMgiX+lELRi0YChZQyyBc6kctGLVgKFhALYNwqR+1YNSCIWABAEpwtlu9JLzZAAAAAElFTkSuQmCC', 'base64'),
+}
+let failAttachmentOnce = true
+await page.route('**/composer-attachments?**', async (route) => {
+  if (route.request().method() === 'POST' && failAttachmentOnce) {
+    failAttachmentOnce = false
+    await route.fulfill({ status: 503, json: { error: 'Fixture upload interrupted.' } })
+  }
+  else await route.continue()
+})
+await attachmentPicker.setInputFiles(fileFixture)
+const failedFile = draftFiles.filter({ hasText: 'Fixture upload interrupted.' })
+await failedFile.waitFor()
+check('failed upload keeps the file visible and prevents sending', await page.locator('[data-send]').isDisabled())
+await failedFile.getByRole('button', { name: 'Retry' }).click()
+await page.locator('[data-composer-file][data-status="ready"]').waitFor()
+await page.unroute('**/composer-attachments?**')
+await attachmentPicker.setInputFiles(imageFixture)
+await page.waitForFunction(() => document.querySelectorAll('[data-composer-file][data-status="ready"]').length === 2)
+await page.waitForFunction(() => ((document.querySelector('[data-composer-file] img:not([hidden])') as HTMLImageElement | null)?.naturalWidth ?? 0) > 0)
+await promptBox.fill('Review these fixture files')
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`composer-attachments-${width}`)
+  }
+}
+await page.setViewportSize({ width: 390, height: 844 })
+await page.reload()
+await page.waitForFunction(() => document.querySelectorAll('[data-composer-file][data-status="ready"]').length === 2)
+check('attachment names and text persist after reloading', await draftFiles.count() === 2
+  && await promptBox.inputValue() === 'Review these fixture files'
+  && (await draftFiles.first().textContent())?.includes('notes _draft_.txt') === true)
+await discardComposer.click()
+await compactDraftUndo.getByRole('button', { name: 'Undo', exact: true }).click()
+await page.waitForFunction(() => document.querySelectorAll('[data-composer-file][data-status="ready"]').length === 2)
+check('discard and Undo restore the uploaded files and prompt', await promptBox.inputValue() === 'Review these fixture files')
+await page.locator('[data-send]').click()
+const sentFile = page.locator('[data-sent-attachment]').filter({ hasText: 'notes _draft_.txt' })
+await sentFile.waitFor()
+const sentFileUrl = new URL((await sentFile.getAttribute('href'))!, baseUrl).href
+const sentFileResponse = await page.request.get(sentFileUrl)
+check('sent file links return the exact committed bytes', sentFileResponse.ok() && await sentFileResponse.text() === 'Harness attachment fixture')
+await page.reload()
+await sentFile.waitFor()
+check('committed attachment links render from history after reload', await sentFile.isVisible() && await draftFiles.count() === 0)
+
+const projectAttachmentDraft = await browserContext.newPage()
+await projectAttachmentDraft.goto(`${baseUrl}/?workspace=${workspaceId}`)
+await projectAttachmentDraft.locator('[data-composer-file-input]').setInputFiles(fileFixture)
+await projectAttachmentDraft.locator('[data-composer-file][data-status="ready"]').waitFor()
+await projectAttachmentDraft.locator('[data-send]').click()
+await projectAttachmentDraft.waitForURL('**/s/*')
+await projectAttachmentDraft.locator('[data-sent-attachment]').filter({ hasText: 'notes _draft_.txt' }).waitFor()
+const attachmentOnlyThread = Number(new URL(projectAttachmentDraft.url()).pathname.split('/').at(-1))
+const attachmentOnlyTurn = harness.engine.current.sessions.get(attachmentOnlyThread)?.turns[0]
+check('starting a project thread carries an attachment-only draft into the first message',
+  attachmentOnlyTurn?.prompt === '' && attachmentOnlyTurn.attachments?.[0]?.name === 'notes _draft_.txt')
+await projectAttachmentDraft.close()
+
 await page.addInitScript(() => {
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,

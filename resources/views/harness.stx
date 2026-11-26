@@ -360,6 +360,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           @if(!turn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(turn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
+          @if(turn.attachments.length)
+            <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
+              @foreach(turn.attachments as file)
+                <li class="max-w-full min-w-0">
+                  <a data-sent-attachment href="/composer-attachments/{{ file.id }}?session={{ activeSession.id }}" download class="flex items-center gap-2 px-2 min-h-8 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
+                    <span class="shrink-0 size-4 i-hugeicons-attachment-01" aria-hidden="true"></span><span class="truncate">{{ file.nameHtml }}</span>
+                  </a>
+                </li>
+              @endforeach
+            </ul>
+          @endif
           @if(turn.contextCompacted)<p data-context-compacted class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>@endif
           @foreach(turn.steered as message)
             <div data-steered-message class="mb-3 ps-3 border-blue-500/40 border-s-2">
@@ -426,6 +437,17 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           @if(!liveTurn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(liveTurn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
+          @if(liveTurn.attachments.length)
+            <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
+              @foreach(liveTurn.attachments as file)
+                <li class="max-w-full min-w-0">
+                  <a data-sent-attachment href="/composer-attachments/{{ file.id }}?session={{ activeSession.id }}" download class="flex items-center gap-2 px-2 min-h-8 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
+                    <span class="shrink-0 size-4 i-hugeicons-attachment-01" aria-hidden="true"></span><span class="truncate">{{ file.nameHtml }}</span>
+                  </a>
+                </li>
+              @endforeach
+            </ul>
+          @endif
           <p data-context-compacted @if(!liveTurn.contextCompacted)hidden@endif :hidden="ssrCompactedTurn() !== {{ liveTurn.id }}" class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>
           <div data-steering-history>
             @foreach(liveTurn.steered as message)
@@ -513,6 +535,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <div class="sr-only" :hidden="turn.automaticCompaction">You</div>
           <p data-automatic-compaction hidden :hidden="!turn.automaticCompaction" class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
+          <ul :hidden="!turn.attachments?.length" aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
+            <template :for="file in turn.attachments ?? []" :key="file.id">
+              <li class="max-w-full min-w-0">
+                <a data-sent-attachment :href="'/composer-attachments/' + file.id + '?session=' + sessionId" download class="flex items-center gap-2 px-2 min-h-8 text-[12px] border border-black/15 rounded-lg dark:border-white/20">
+                  <span class="shrink-0 size-4 i-hugeicons-attachment-01" aria-hidden="true"></span><span class="truncate" :text="file.name"></span>
+                </a>
+              </li>
+            </template>
+          </ul>
           <p data-context-compacted hidden :hidden="!turn.contextCompacted" class="mb-4 text-center text-neutral-600 text-xs dark:text-neutral-300">Context compacted</p>
           <div data-steering-history></div>
           <div data-tools>
@@ -573,7 +604,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
 
     @if(canCompose)
-    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" class="grid gap-2 items-end shrink-0">
+    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerDrop" class="grid gap-2 items-end shrink-0">
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -588,8 +619,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <span class="text-neutral-600 dark:text-neutral-300">Start a fresh session</span>
         </button>
       </div>
+      @include('../partials/harness-composer-attachments')
       <textarea
         data-prompt
+        @paste="composerPaste"
         ref="promptBox"
         @keydown="promptKeydown"
         @input="rememberPrompt"
@@ -604,6 +637,9 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       ></textarea>
       <p data-handoff-hint role="status" hidden :hidden="!pendingProviderSwitch()" :text="handoffHint()" class="text-neutral-600 text-xs dark:text-neutral-300"></p>
       <div data-composer-toolbar>
+        <button type="button" data-attach-composer @click="chooseComposerFilesDialog" :hidden="Boolean(editingFollowUp())" :disabled="startPending()" aria-label="Attach files" title="Attach files" class="shrink-0 me-auto harness-icon-button">
+          <span class="size-4 i-hugeicons-attachment-01" aria-hidden="true"></span>
+        </button>
         <div data-composer-provider-controls>
         @include('../partials/harness-model-picker')
         </div>
@@ -612,7 +648,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
           </button>
           <button type="button" data-idle-compaction hidden :hidden="!idleCompactionOffer()" @click="toggleIdleCompaction" :aria-pressed="compactNextPrompt()" :aria-label="idleCompactionLabel()" :title="idleCompactionLabel()" class="px-2 min-h-8 text-[12px] border border-black/10 rounded-full dark:border-white/20" :text="idleCompactionChip()"></button>
-          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!composerText().trim() || startPending() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
             <span data-send-text :text="sendLabel()">Send</span>
           </button>
@@ -1226,6 +1262,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const composerDraft = useLocalStorage(promptDraftKey, null, {
     listenToStorageChanges: false,
   })
+  const composerFileInput = useRef('composerFileInput')
+  const composerUploadSources = new Map()
+  const composerFiles = derived(() => Array.isArray(composerDraft()?.files) ? composerDraft().files : [])
+  const composerFilesError = state('')
+  const composerFilesPending = derived(() => !editingFollowUp() && composerFiles().some(file => file.status !== 'ready'))
+  const hasComposerMessage = derived(() => Boolean(composerText().trim() || (editingFollowUp() ? editingFollowUp()?.attachments?.length : composerFiles().length)))
+  const uploadScope = promptScope === 'projectless' ? `scratch:${Number(activeProfile) || 0}` : promptScope
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
   const followUps = state(initialFollowUps)
   const steeringMessage = useRef('steeringMessageBox')
@@ -1284,7 +1327,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   let sidebarDrafts
   let sidebarHasDraft
   effect(() => {
-    const hasDraft = Boolean(composerDraft()?.text)
+    const hasDraft = Boolean(composerDraft()?.text || composerFiles().length)
     if (sidebarHasDraft === hasDraft) return
     sidebarHasDraft = hasDraft
     void nextTick(() => sidebarDrafts?.update())
@@ -1621,8 +1664,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   const uiBusy = derived(() => uiState() === 'running' || uiState() === 'awaiting-approval' || uiState() === 'awaiting-input')
-  const showResume = derived(() => Boolean(sessionId && !uiBusy() && followUps().held && followUps().entries.length && !steeringPending() && followUps().entries[0]?.steeringIssue !== 'uncertain' && !composerText().trim() && !editingFollowUp()))
-  const showSend = derived(() => !showResume() && Boolean(!uiBusy() || composerText().trim() || editingFollowUp()))
+  const showResume = derived(() => Boolean(sessionId && !uiBusy() && followUps().held && followUps().entries.length && !steeringPending() && followUps().entries[0]?.steeringIssue !== 'uncertain' && !hasComposerMessage() && !editingFollowUp()))
+  const showSend = derived(() => !showResume() && Boolean(!uiBusy() || hasComposerMessage() || editingFollowUp()))
   const sendLabel = derived(() => {
     if (editingFollowUp()) return 'Save edit'
     if (pendingProviderSwitch()) return 'Send'
@@ -1631,7 +1674,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   })
   function showQueueSend(entry) {
     return !entry.local && !entry.steering && entry.steeringIssue !== 'uncertain'
-      && editingFollowUp()?.id !== entry.id && (!uiBusy() || (!entry.freshContext && entry.text.trim() !== '/compact' && canSteer() && matchesActiveCodexSelection(entry.codexSelection)))
+      && editingFollowUp()?.id !== entry.id && (!uiBusy() || (!entry.freshContext && !entry.attachments?.length && entry.text.trim() !== '/compact' && canSteer() && matchesActiveCodexSelection(entry.codexSelection)))
   }
   function sendQueuedFollowUp(id) {
     if (canSteer()) return followUpActions()?.steerQueued(id, runningTurnId())
@@ -2487,7 +2530,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     draftSpeed.set(typeof selection.serviceTier === 'string' ? selection.serviceTier : '')
   }
   function canSteerDraft() {
-    return !freshSessionArmed() && composerText().trim() !== '/compact' && !pendingProviderSwitch() && canSteer() && matchesActiveCodexSelection(draftCodexSelection())
+    return !composerFiles().length && !freshSessionArmed() && composerText().trim() !== '/compact' && !pendingProviderSwitch() && canSteer() && matchesActiveCodexSelection(draftCodexSelection())
   }
   const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
   const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
@@ -3286,13 +3329,136 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     return (hash >>> 0) % 2147483647 + 1
   }
 
+  function chooseComposerFilesDialog() {
+    composerFileInput.current?.click()
+  }
+
+  function chooseComposerFiles(event) {
+    addComposerFiles(Array.from(event.target.files ?? []))
+    event.target.value = ''
+  }
+
+  function composerDragOver(event) {
+    if (Array.from(event.dataTransfer?.types ?? []).includes('Files')) event.preventDefault()
+  }
+
+  function composerDrop(event) {
+    const files = Array.from(event.dataTransfer?.files ?? [])
+    if (!files.length) return
+    event.preventDefault()
+    addComposerFiles(files)
+  }
+
+  function composerPaste(event) {
+    const clipboard = event.clipboardData
+    const files = Array.from(clipboard?.files ?? [])
+    if (!files.length) {
+      const text = clipboard?.getData('text/plain') ?? ''
+      if (new Blob([text]).size < 32 * 1024) return
+      files.push(new File([text], 'pasted-text.txt', { type: 'text/plain' }))
+    }
+    if (editingFollowUp() || startPending()) return
+    event.preventDefault()
+    addComposerFiles(files)
+  }
+
+  function setComposerFiles(files, upload) {
+    const previous = composerDraft()
+    const remainder = { ...previous }
+    delete remainder.commandId
+    delete remainder.files
+    delete remainder.upload
+    delete remainder.discardedDraft
+    const text = promptRef.current?.value ?? remainder.text ?? ''
+    composerDraft.set(files.length ? { ...remainder, text, files, upload } : text ? { ...remainder, text } : null)
+    sidebarDrafts?.update()
+  }
+
+  function addComposerFiles(files) {
+    if (!files.length || startPending() || editingFollowUp()) return
+    if (composerFiles().length + files.length > 100) {
+      composerFilesError.set('A message can contain up to 100 attachments.')
+      return
+    }
+    const upload = composerDraft()?.upload ?? {
+      draft: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join(''),
+      scope: uploadScope,
+    }
+    const added = files.map((source) => {
+      const key = newCommandId()
+      composerUploadSources.set(key, source)
+      return { key, name: source.name, size: source.size, status: 'uploading' }
+    })
+    composerFilesError.set('')
+    setComposerFiles([...composerFiles(), ...added], upload)
+    for (const file of added) void uploadComposerFile(file.key)
+  }
+
+  function composerFileUrl(upload, id = '', name = '') {
+    const params = new URLSearchParams({ scope: upload.scope, draft: upload.draft })
+    if (name) params.set('name', name)
+    return `/composer-attachments${id ? '/' + id : ''}?${params}`
+  }
+
+  function composerFilePreview(id) {
+    const upload = composerDraft()?.upload
+    return upload ? composerFileUrl(upload, id) + '&preview=1' : null
+  }
+
+  async function uploadComposerFile(key) {
+    const upload = composerDraft()?.upload
+    const source = composerUploadSources.get(key)
+    if (!upload || !source || startPending()) return
+    const update = (changes) => {
+      if (composerDraft()?.upload?.draft !== upload.draft || !composerFiles().some(file => file.key === key)) return false
+      setComposerFiles(composerFiles().map(file => file.key === key ? { ...file, ...changes } : file), upload)
+      return true
+    }
+    update({ status: 'uploading', error: '' })
+    try {
+      const response = await fetch(composerFileUrl(upload, '', source.name), {
+        method: 'POST',
+        body: source,
+        headers: { 'Content-Type': source.type || 'application/octet-stream' },
+      })
+      const file = await response.json().catch(() => null)
+      if (!response.ok || !file?.id) throw new Error(file?.error || 'Upload failed. Try again.')
+      if (!update({ ...file, status: 'ready' }))
+        void fetch(composerFileUrl(upload, file.id), { method: 'DELETE' }).catch(() => {})
+      composerUploadSources.delete(key)
+    }
+    catch (cause) {
+      update({ status: 'failed', error: cause.message || 'Upload failed. Try again.' })
+    }
+  }
+
+  function removeComposerFile(key) {
+    if (startPending()) return
+    const upload = composerDraft()?.upload
+    const file = composerFiles().find(item => item.key === key)
+    if (!upload || !file) return
+    composerUploadSources.delete(key)
+    composerFilesError.set('')
+    setComposerFiles(composerFiles().filter(item => item.key !== key), upload)
+    if (file.id) void fetch(composerFileUrl(upload, file.id), { method: 'DELETE' }).catch(() => {})
+    promptRef.current?.focus()
+  }
+
+  function composerFileStatus(file) {
+    if (file.status === 'uploading') return 'Uploading…'
+    if (file.status === 'failed') return file.error
+    if (file.size < 1024) return file.size + ' B'
+    if (file.size < 1024 * 1024) return Math.round(file.size / 1024) + ' KiB'
+    return (file.size / (1024 * 1024)).toFixed(1) + ' MiB'
+  }
+
   function rememberPrompt() {
     const box = promptRef.current
     if (!box) return
     composerText.set(box.value)
     if (editingFollowUp()) return
     const previous = composerDraft()
-    if (!box.value) {
+    if (!box.value && !previous?.files?.length) {
       if (previous?.text) composerDraft.set(null)
       return
     }
@@ -3306,6 +3472,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       && sameSelection) return
     composerDraft.set({
       text, start, end, direction,
+      ...(previous?.files?.length ? { files: previous.files, upload: previous.upload } : {}),
       ...(codexSelection ? { codexSelection } : {}),
       ...(provider ? { provider, model } : {}),
       ...(sameSelection && previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
@@ -3313,7 +3480,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function canDiscardComposer() {
-    return draftDiscardReady() && Boolean(composerDraft()?.text) && !editingFollowUp() && !startPending()
+    return draftDiscardReady() && Boolean(composerDraft()?.text || composerFiles().length) && !editingFollowUp() && !startPending()
+      && !composerFiles().some(file => file.status === 'uploading')
   }
 
   function discardCurrentDraft() {
@@ -3360,6 +3528,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         composerDraft.set({ discardedDraft: claim })
         if (!sidebarOpen()) box.focus()
       }
+      if (here) composerFilesError.set('')
       draftUndo.set(offers)
       threadUndoBatch.set(claim)
       threadUndoShortcutClaimed.set(true)
@@ -3405,7 +3574,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const first = sessionId && pending?.sessionId === sessionId && typeof pending.text === 'string' ? pending : null
     if (first) pendingFirstPrompt.set(null)
     const current = typeof saved?.text === 'string' ? saved : first
-    if (!current?.text) return
+    if (!current?.text && !current?.files?.length) return
+    if (current === first && first.files?.length) composerDraft.set(first)
+    if (current.files?.some(file => file.status === 'uploading' && !composerUploadSources.has(file.key))) {
+      const files = current.files.map(file => file.status === 'uploading' && !composerUploadSources.has(file.key)
+        ? { ...file, status: 'failed', error: 'Upload interrupted. Attach this file again.' } : file)
+      composerDraft.set({ ...current, files })
+    }
     if (sessionId && typeof current.provider === 'string' && KNOWN_DRIVERS.includes(agentChoice(current.provider).driverKind)) {
       draftProvider.set(current.provider)
       draftModel.set(typeof current.model === 'string' ? current.model : '')
@@ -3420,6 +3595,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   }
 
   function armFreshProviderSession() {
+    if (composerFiles().length) {
+      composerFilesError.set('Remove the attachments before running this command.')
+      return
+    }
     if (!sessionId || !runningTurnId()) {
       stxAlert('Send a message before starting a fresh provider session.')
       return
@@ -3443,7 +3622,13 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
-    if (!text || startPending()) return
+    if (!hasComposerMessage() || startPending() || composerFilesPending()) return
+    const files = editingFollowUp() ? [] : composerFiles()
+    if (files.length && ['/clear', '/compact'].includes(text.toLowerCase())) {
+      composerFilesError.set('Remove the attachments before running this command.')
+      return
+    }
+    composerFilesError.set('')
     const editing = editingFollowUp()
     if (!editing && text.toLowerCase() === '/clear') {
       armFreshProviderSession()
@@ -3469,6 +3654,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     rememberPrompt()
     const draft = composerDraft()
     const commandId = draft?.commandId ?? newCommandId()
+    const uploads = files.length ? { ...draft.upload, ids: files.map(file => file.id) } : null
+    const attachmentInput = uploads ? { uploads } : {}
     if (draft) composerDraft.set({ ...draft, commandId })
 
     const codexSelection = draftCodexSelection()
@@ -3478,7 +3665,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         const choice = agentChoice(draftProvider())
         const model = draftModel() ? { model: draftModel() } : {}
         const { model: _model, ...options } = codexSelection ?? {}
-        await sendCommand({ type: 'session.handoff', sessionId, afterTurnId: runningTurnId(), text, ...choice, ...model,
+        await sendCommand({ type: 'session.handoff', sessionId, afterTurnId: runningTurnId(), text, ...attachmentInput, ...choice, ...model,
           ...(codexSelection ? { codexTurnOptions: options } : {}), ...freshContext }, commandId)
         if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
         if (box.value === raw) {
@@ -3486,6 +3673,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           composerText.set('')
           composerDraft.set(null)
         }
+        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
       }
       catch (error) {
         stxAlert(error.message || 'Could not switch providers. Your draft is still here.')
@@ -3506,6 +3694,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           composerText.set('')
           composerDraft.set(null)
         }
+        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
       }
       catch (error) {
         stxAlert(error.message || 'Could not steer the turn. Your draft is still here.')
@@ -3520,7 +3709,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       || (freshContext.freshContext && followUps().entries.length))) {
       const actions = followUpActions()
       if (!actions) return
-      actions.stage({ id: commandId, text, ...(codexSelection ? { codexSelection } : {}), ...freshContext })
+      actions.stage({ id: commandId, text, ...attachmentInput, ...(uploads ? { fileNames: files.map(file => file.name) } : {}), ...(codexSelection ? { codexSelection } : {}), ...freshContext })
       if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
       box.value = ''
       composerText.set('')
@@ -3549,18 +3738,19 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           : {}
         if (draftWithoutProject) {
           const profileId = Number(activeProfile) || undefined
-          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text, ...model, ...options }, commandId)
+          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text || files[0]?.name, ...model, ...options }, commandId)
         }
         else {
           await sendCommand({ type: 'session.create', workspaceId: draftProject.id, ...choice, ...model, ...options }, commandId)
         }
         const nextSession = derivedSessionId(commandId)
-        pendingFirstPrompt.set({ sessionId: nextSession, text: raw })
+        pendingFirstPrompt.set({ sessionId: nextSession, text: raw, ...(uploads ? { upload: draft.upload, files } : {}) })
         if (box.value === raw) {
           box.value = ''
           composerText.set('')
           composerDraft.set(null)
         }
+        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
         navigate(`/s/${nextSession}`)
       }
       catch (error) {
@@ -3573,7 +3763,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     startPending.set(true)
     try {
       const compactAfterTurnId = compactNextPrompt() ? idleCompactionOffer()?.afterTurnId : undefined
-      await sendCommand({ type: 'session.turn.start', sessionId, text, ...(codexSelection ? { codexSelection } : {}),
+      await sendCommand({ type: 'session.turn.start', sessionId, text, ...attachmentInput, ...(codexSelection ? { codexSelection } : {}),
         ...(compactAfterTurnId === undefined ? {} : { compactAfterTurnId }), ...freshContext }, commandId)
       if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
       if (box.value === raw) {
@@ -3581,6 +3771,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         composerText.set('')
         composerDraft.set(null)
       }
+      else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
     }
     catch (error) {
       stxAlert(error.message || 'Could not send the prompt. Your draft is still here.')
@@ -4142,7 +4333,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     followUpActions.set(createFollowUpActions({
       sessionId, online: sessionOnline, inputBlocked: () => Boolean(inputRequest()),
       editor: () => promptRef.current, setText: text => composerText.set(text),
-      rememberDraft: rememberPrompt, restoreDraft: restorePrompt, hasDraft: () => Boolean(composerDraft()?.text),
+      rememberDraft: rememberPrompt, restoreDraft: restorePrompt, hasDraft: () => Boolean(composerDraft()?.text || composerFiles().length),
       editing: editingFollowUp, local: localFollowUps, sending: outboxSending, pending: queueActionPending,
       send: sendCommand, alert: stxAlert,
       transcript: () => transcriptRef.current, steeringMessage: () => steeringMessage.current,
@@ -4246,6 +4437,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
             prompt: payload.text ?? '',
+            attachments: payload.attachments ?? [],
             automaticCompaction: payload.automaticCompaction === true,
             freshContext: payload.freshContext === true,
             providerSwitch: payload.switchedProvider ? 'Continued with ' + DRIVER_LABELS[payload.switchedProvider] : '',
