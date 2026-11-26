@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { decode, encode } from '@harness/contract'
 import { ChatGptCredentialStore } from '@harness/drivers'
@@ -1585,23 +1585,38 @@ describe('a session can have a checkout of its own', () => {
     client.close()
   }, 30_000)
 
-  it('reuses the same worktree across turns', async () => {
-    // A second checkout per turn would be absurd, and the branch would fork.
+  it.each(['present', 'missing before send', 'missing before file rewind'] as const)('reuses the same worktree across turns with checkout %s', async (scenario) => {
     const workspace = repoWorkspace2()
     const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
-    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    const opened: string[] = []
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => ({
+      ...driver,
+      async create(config) {
+        opened.push(config.workspacePath)
+        return driver.create(config)
+      },
+    }) })
 
     const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     const { sessionId } = await bootstrapIsolated(client, workspace)
     client.send({ t: 'dispatch', envelope: { id: 'c_t1', at: 5, command: { type: 'session.turn.start', sessionId, text: 'one' } } })
-    await client.waitFor('turn.completed')
-    const first = harness.engine.current.sessions.get(sessionId)!.worktreePath
+    expect(await client.waitFor('turn.completed')).toBeTruthy()
+    const session = harness.engine.current.sessions.get(sessionId)!
+    const first = session.worktreePath
+    if (scenario !== 'present') rmSync(first, { recursive: true })
+    if (scenario === 'missing before file rewind') {
+      const checkpointId = session.checkpoints.find(checkpoint => checkpoint.kind === 'turn-start')!.id
+      client.send({ t: 'dispatch', envelope: { id: 'file-recovery', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId } } })
+      expect(await client.waitFor('checkpoint.restored', 8000)).toMatchObject({ checkpointId })
+      expect(existsSync(first)).toBe(true)
+    }
 
     client.send({ t: 'dispatch', envelope: { id: 'c_t2', at: 6, command: { type: 'session.turn.start', sessionId, text: 'two' } } })
-    await new Promise(r => setTimeout(r, 500))
+    expect(await client.waitFor('turn.completed', 8000, event => event.turnId === 2)).toBeTruthy()
 
     expect(harness.engine.current.sessions.get(sessionId)!.worktreePath).toBe(first)
     expect(client.payloads('session.isolated')).toHaveLength(1)
+    expect(opened).toEqual(scenario === 'present' ? [first] : [first, first])
     client.close()
   }, 30_000)
 
@@ -2351,11 +2366,11 @@ describe('Claude conversation rewind', () => {
 })
 
 describe('conversation and file rewind', () => {
-  it.each(['single', 'repositories', 'locked-index', 'new-edit', 'provider-refuses', 'shared', 'verify-after-crash', 'confirmed-before-crash'] as const)(
+  it.each(['single', 'repositories', 'missing-single', 'missing-child', 'missing-project', 'locked-index', 'new-edit', 'provider-refuses', 'shared', 'verify-after-crash', 'confirmed-before-crash'] as const)(
     'coordinates %s without replaying file changes', async (scenario) => {
       const workspace = join(dir, 'project')
       mkdirSync(workspace)
-      const keys = scenario === 'single' ? [''] : ['api', 'packages/web']
+      const keys = scenario === 'single' || scenario === 'missing-single' ? [''] : ['api', 'packages/web']
       const git = (cwd: string, ...args: string[]) => {
         const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
         if (result.status !== 0) throw new Error(`Git ${args.join(' ')}: ${result.stderr}`)
@@ -2423,6 +2438,7 @@ describe('conversation and file rewind', () => {
         const target = session().checkpoints.find(checkpoint => checkpoint.kind === 'turn-start' && checkpoint.turnId === 2)!
         const indexes = checkouts.map(path => git(path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trimEnd())
         const savedIndexes = indexes.map(path => readFileSync(path))
+        const heads = checkouts.map(path => git(path, 'rev-parse', 'HEAD'))
         const command = { type: 'session.turn.rewind', sessionId, turnId: 2, restoreFiles: true } as const
         if (scenario === 'shared') {
           await harness.engine.dispatch({ id: 'shared-rewind-folder', at: 9, command: { type: 'workspace.add', profileId: derivedId('c_p'), path: checkouts[0]! } })
@@ -2435,6 +2451,16 @@ describe('conversation and file rewind', () => {
           return
         }
         if (scenario === 'locked-index') writeFileSync(indexes.at(-1)! + '.lock', 'another Git operation', { flag: 'wx' })
+        if (scenario.startsWith('missing-')) {
+          const missing = scenario === 'missing-project' ? dirname(session().worktreePath) : checkouts.at(-1)!
+          rmSync(missing, { recursive: true })
+          client.close()
+          harness.stop()
+          harness = await start()
+          client = await Client.connect(url)
+          client.send({ t: 'subscribe', sessionId })
+          expect(existsSync(missing)).toBe(false)
+        }
         if (scenario === 'verify-after-crash' || scenario === 'confirmed-before-crash') {
           await harness.engine.dispatch({ id: 'combined-edit', at: 12, command })
           if (scenario === 'confirmed-before-crash') {
@@ -2463,12 +2489,13 @@ describe('conversation and file rewind', () => {
         expect(checks).toEqual(scenario === 'locked-index' || scenario === 'confirmed-before-crash' ? [] : [scenario === 'verify-after-crash'])
         expect(session().turns.map(turn => turn.id)).toEqual(rejected ? [1, 2, 3] : [1])
         if (!rejected) expect(session().rewoundPrompt?.text).toBe('Prompt 2')
-        const restored = scenario === 'single' || scenario === 'repositories'
+        const restored = scenario === 'single' || scenario === 'repositories' || scenario.startsWith('missing-')
         for (const [i, path] of checkouts.entries()) {
           if (restored) {
             expect(readFileSync(join(path, 'shared.txt'), 'utf8')).toBe('Change from turn 1\n')
             expect(existsSync(join(path, 'added.txt'))).toBe(false)
             expect(git(path, 'diff', '--cached', '--name-only')).toBe('')
+            expect(git(path, 'rev-parse', 'HEAD')).toBe(heads[i]!)
           }
           else {
             const concurrent = scenario === 'new-edit' && i === checkouts.length - 1

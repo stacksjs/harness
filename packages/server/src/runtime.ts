@@ -112,7 +112,7 @@ export class ProviderRuntime {
     }
   }
 
-  private async instanceFor(sessionId: number, driverKind: DriverKind, allowProjectCommands: boolean): Promise<Running | null> {
+  private async instanceFor(sessionId: number, driverKind: DriverKind, allowProjectCommands: boolean, restoreMissing = true): Promise<Running | null> {
     const session = this.options.engine.current.sessions.get(sessionId)
     const workspace = session ? this.options.engine.current.workspaces.get(session.workspaceId) : undefined
     const savedId = session?.providerInstanceId
@@ -142,8 +142,8 @@ export class ProviderRuntime {
     const claudeAutoCompactAfter = driverKind === 'claude' && session
       ? effectiveClaudeCompaction(this.options.engine.current, session).autoCompactAfter
       : undefined
+    if (session?.worktreePath && !await this.ensureWorktree(sessionId, allowProjectCommands, restoreMissing)) return null
     const existing = this.sessions.get(sessionId)
-    if (existing && session?.combinedWorktree && !await this.ensureWorktree(sessionId, allowProjectCommands)) return null
     if (existing) {
       if (existing.savedLaunch?.binaryPath !== savedLaunch?.binaryPath
         || existing.savedLaunch?.home !== savedLaunch?.home
@@ -168,7 +168,7 @@ export class ProviderRuntime {
 
     // Made now rather than at session creation, so a session nobody runs does
     // not leave a checkout behind.
-    if (!await this.ensureWorktree(sessionId, allowProjectCommands)) return null
+    if (!session?.worktreePath && !await this.ensureWorktree(sessionId, allowProjectCommands, restoreMissing)) return null
 
     const state = this.options.engine.current
     const workspacePath = state.sessions.get(sessionId)?.worktreePath || (this.options.workspacePath
@@ -641,14 +641,38 @@ export class ProviderRuntime {
     }))
   }
 
-  private async ensureWorktree(sessionId: number, allowProjectCommands: boolean): Promise<boolean> {
+  private async registeredWorktree(session: SessionState, authorize?: () => boolean): Promise<boolean> {
+    const mode = authorize ? 'recover' : false
+    if (session.combinedWorktree) return openCombinedWorktree(session.combinedWorktree, mode, authorize)
+    const state = this.options.engine.current
+    const repository = this.options.workspacePath ? this.options.workspacePath(state, session.id) : repositoryPath(state, session.id)
+    if (!repository || session.branch !== worktree.branchFor(session.id)) return false
+    const checkout = { repository, path: session.worktreePath, branch: session.branch, base: '' }
+    return Boolean((await worktree.openReserved(checkout, mode, undefined, authorize)).path)
+  }
+
+  private async restoreWorktree(session: SessionState, authorize: () => boolean): Promise<boolean> {
+    if (await this.registeredWorktree(session)) return true
+    if (!authorize()) return false
+    // The old process may still have its cwd set to an unlinked directory.
+    await this.stopSession(session.id).catch(() => {})
+    return this.registeredWorktree(session, authorize)
+  }
+
+  private async ensureWorktree(sessionId: number, allowProjectCommands: boolean, restoreMissing: boolean): Promise<boolean> {
     const session = this.options.engine.current.sessions.get(sessionId)
-    if (session?.combinedWorktree) {
-      if (await openCombinedWorktree(session.combinedWorktree, false)) return true
-      await this.emit({ type: 'thread.error', sessionId, message: 'The combined worktree is unavailable. Restore its checkout folders before retrying.' })
+    if (session?.worktreePath) {
+      const authorize = () => {
+        const state = this.options.engine.current
+        const active = state.sessions.get(sessionId)
+        return Boolean(active && !active.navigation?.archivedAt && isolatedRewindScope(state, active))
+      }
+      const available = restoreMissing ? await this.restoreWorktree(session, authorize) : await this.registeredWorktree(session)
+      if (available) return true
+      await this.emit({ type: 'thread.error', sessionId, message: 'The registered worktree is unavailable. Check its branch and checkout folder, then retry.' })
       return false
     }
-    if (!session?.isolate || session.worktreePath) return true
+    if (!session?.isolate) return true
     const pending = this.worktreeCreations.get(sessionId)
     if (pending) return pending.result
     const cancel = new AbortController()
@@ -840,7 +864,7 @@ export class ProviderRuntime {
     let checkedProvider = false
     const rewindProvider = async () => {
       checkedProvider = true
-      const running = allowed() ? await this.instanceFor(sessionId, session.driverKind, false) : null
+      const running = allowed() ? await this.instanceFor(sessionId, session.driverKind, false, false) : null
       if (!running?.instance.rewind || !allowed()) return false
       resultState.outcome = 'uncertain'
       try {
@@ -864,10 +888,7 @@ export class ProviderRuntime {
           message = 'The isolated worktree or checkpoint is unavailable. The conversation was kept.'
         }
         else {
-          if (!session.combinedWorktree) {
-            const checkout = await worktree.openReserved({ repository: workspace.path, path: session.worktreePath, branch: session.branch, base: '' }, false)
-            if (!checkout.path) throw new Error('The registered worktree is unavailable.')
-          }
+          if (!await this.restoreWorktree(session, allowed)) throw new Error('The registered worktree is unavailable. Check its branch and checkout folder, then retry.')
           const { targets, skipped } = await this.checkpointTargets(session, checkpoint, session.worktreePath)
           restoredFiles = await restoreRepositories(targets, operation, allowed, async () => {
             if (!await rewindProvider()) return false
@@ -932,7 +953,7 @@ export class ProviderRuntime {
     const workspacePath = session.worktreePath || (this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
       : defaultWorkspacePath(state, sessionId))
-    if (!allowed() || !workspacePath || !existsSync(workspacePath)) {
+    if (!allowed() || !workspacePath) {
       await fail('The workspace is unavailable for rewind.')
       return
     }
@@ -940,6 +961,15 @@ export class ProviderRuntime {
     let skipped: string[] = []
     let result: Awaited<ReturnType<typeof restore>>
     try {
+      if (session.worktreePath) {
+        const authorize = () => {
+          const current = this.options.engine.current
+          const active = current.sessions.get(sessionId)
+          return Boolean(allowed() && active && isolatedRewindScope(current, active))
+        }
+        if (!await this.restoreWorktree(session, authorize)) throw new Error('The registered worktree is unavailable. Check its branch and checkout folder, then retry.')
+      }
+      else if (!existsSync(workspacePath)) throw new Error('The workspace is unavailable for rewind.')
       if (checkpoint.repositories) {
         const planned = await this.checkpointTargets(session, checkpoint, workspacePath)
         skipped = planned.skipped

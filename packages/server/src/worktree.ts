@@ -149,11 +149,13 @@ export async function create(workspacePath: string, sessionId: number): Promise<
 }
 
 /** Find the exact registered checkout and leave conflicts untouched. */
-export async function openReserved(intent: CheckoutIntent, createIfMissing: boolean, combinedRoot?: string): Promise<WorktreeResult> {
+export async function openReserved(intent: CheckoutIntent, mode: boolean | 'recover', combinedRoot?: string,
+  authorize = () => false): Promise<WorktreeResult> {
   const { repository, path, branch } = intent
+  const recovering = mode === 'recover'
   const conflict = { path: null, branch: null, reason: 'checkout-conflict' } as const
   const common = await gitDirectory(repository)
-  if (!common) return conflict
+  if (!common || normalize(path) !== path) return conflict
   if (combinedRoot) {
     const entry = relative(combinedRoot, path)
     if (!entry || entry.startsWith(`..${sep}`) || entry === '..' || isAbsolute(entry)) return conflict
@@ -162,32 +164,42 @@ export async function openReserved(intent: CheckoutIntent, createIfMissing: bool
   const registrations = await gitWorktrees(repository)
   if (!registrations) return conflict
   const existing = registrations.find(entry => entry.path === path)
-  if (existing) {
-    if (existing.branch !== branch || existing.locked || existing.prunable) return conflict
+  if (existing && (existing.branch !== branch || existing.locked)) return conflict
+  if (existing && !existing.prunable) {
     const [actual, marker, linkedCommon] = await Promise.all([
       realpath(path).catch(() => null), lstat(join(path, '.git')).catch(() => null), gitDirectory(path),
     ])
     return actual === path && marker?.isFile() && linkedCommon === common ? { path, branch } : conflict
   }
-  if (!createIfMissing) return conflict
+  if (!mode || (existing && !recovering)) return conflict
 
   try {
     // An unregistered path may hold files from an incomplete checkout or a user.
-    if (await lstat(path).then(() => true, (error) => {
+    const occupied = () => lstat(path).then(() => true, (error) => {
       if (error.code === 'ENOENT') return false
       throw error
-    })) return conflict
+    })
+    if (await occupied()) return conflict
     const parent = dirname(path)
-    if (combinedRoot) {
-      let current = combinedRoot
-      for (const part of relative(combinedRoot, parent).split(sep).filter(Boolean)) {
-        current = join(current, part)
-        await mkdir(current).catch((error) => { if (error.code !== 'EEXIST') throw error })
-        if (await realpath(current) !== current) return conflict
-      }
+    const root = combinedRoot ?? common
+    if (recovering && (!authorize() || registrations.some(entry => entry.path !== path && entry.branch === branch)
+      || !await commitAt(repository, `refs/heads/${branch}`))) return conflict
+    if (await realpath(root) !== root) return conflict
+    let current = root
+    for (const part of relative(root, parent).split(sep).filter(Boolean)) {
+      current = join(current, part)
+      await mkdir(current).catch((error) => { if (error.code !== 'EEXIST') throw error })
+      if (await realpath(current) !== current) return conflict
     }
-    else await mkdir(parent, { recursive: true })
-    if (await realpath(parent) !== parent) return conflict
+    if (recovering) {
+      // Drop only the stale registration at the verified path. Git's normal
+      // removal and add checks still protect dirty or separately checked-out branches.
+      if (await occupied() || !authorize()) return conflict
+      if (existing && !(await git(repository, ['worktree', 'remove', '--', path])).ok) return conflict
+      if (await occupied() || !authorize()) return conflict
+      const added = await git(repository, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--', path, branch])
+      return added.ok ? openReserved(intent, false, combinedRoot) : conflict
+    }
     const created = await add(intent)
     return created.path ? openReserved(intent, false, combinedRoot) : created
   }

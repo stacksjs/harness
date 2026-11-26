@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { nestedWorktrees, openCombinedWorktree, planCombinedWorktree, releaseCombinedWorktree } from '../src/combined-worktree'
@@ -67,6 +67,43 @@ describe('reserved worktrees', () => {
       writeFileSync(join(intent.path, 'unknown.txt'), 'Keep this file\n')
       expect(await openReserved(intent, true)).toMatchObject({ path: null, reason: 'checkout-conflict' })
       expect(readFileSync(join(intent.path, 'unknown.txt'), 'utf8')).toBe('Keep this file\n')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+
+  it('reattaches the branch and leaves other stale Git registrations and path conflicts alone', async () => {
+    const dir = repo()
+    try {
+      const intent = await plan(dir, 42, crypto.randomUUID())
+      if ('reason' in intent) throw new Error(intent.reason)
+      expect(await openReserved(intent, true)).toMatchObject({ path: intent.path })
+      writeFileSync(join(intent.path, 'app.txt'), 'Committed by the session\n')
+      const head = await commitTurn(intent.path, 'Session change')
+      expect(head).toBeTruthy()
+      const unrelated = join(intent.repository, 'other')
+      expect(spawnSync('git', ['worktree', 'add', '-qb', 'unrelated', unrelated], { cwd: dir }).status).toBe(0)
+      rmSync(unrelated, { recursive: true })
+      rmSync(intent.path, { recursive: true })
+
+      expect(await openReserved(intent, 'recover')).toMatchObject({ path: null })
+      mkdirSync(intent.path)
+      writeFileSync(join(intent.path, 'unowned.txt'), 'Keep this file\n')
+      expect(await openReserved(intent, 'recover', undefined, () => true)).toMatchObject({ path: null })
+      expect(readFileSync(join(intent.path, 'unowned.txt'), 'utf8')).toBe('Keep this file\n')
+      rmSync(intent.path, { recursive: true })
+      symlinkSync(dir, intent.path, 'junction')
+      expect(await openReserved(intent, 'recover', undefined, () => true)).toMatchObject({ path: null })
+      rmSync(intent.path)
+
+      expect(await openReserved(intent, 'recover', undefined, () => true)).toMatchObject({ path: intent.path })
+      expect(g(intent.path, 'symbolic-ref', '--short', 'HEAD')).toBe(intent.branch)
+      expect(g(intent.path, 'rev-parse', 'HEAD')).toBe(head!)
+      expect(await exists(dir, unrelated)).toBe(true)
+      expect(await remove(dir, intent.path)).toEqual({ ok: true })
+      const separate = join(dir, 'separate')
+      expect(spawnSync('git', ['worktree', 'add', '-q', separate, intent.branch], { cwd: dir }).status).toBe(0)
+      expect(await openReserved(intent, 'recover', undefined, () => true)).toMatchObject({ path: null })
+      expect(readFileSync(join(separate, 'app.txt'), 'utf8')).toBe('Committed by the session\n')
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   }, GIT_TIMEOUT)

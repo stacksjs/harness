@@ -122,13 +122,16 @@ async function rollbackCleanLayoutCheckouts(intent: CombinedWorktreeIntent, root
   }
 }
 
-/** An interrupted allocation may be incomplete. Startup only adopts a full layout. */
-export async function openCombinedWorktree(intent: CombinedWorktreeIntent, create: boolean,
+/** Startup only adopts a full layout. Recovery checks out existing branches at their recorded paths. */
+export async function openCombinedWorktree(intent: CombinedWorktreeIntent, mode: boolean | 'recover',
   authorize = () => false, signal?: AbortSignal): Promise<boolean> {
+  const create = mode === true
+  const recover = mode === 'recover'
   if (create && intent.layout && !authorize())
     throw new Error('This project uses a worktree layout command. Start its first turn from the trusted Harness host.')
   try {
-    const root = await ownedRoot(intent, create)
+    const restorePaths = recover && authorize() && !intent.layout
+    const root = await ownedRoot(intent, create || restorePaths)
     if (!root) return false
     if (intent.layout) {
       if (create) {
@@ -141,22 +144,24 @@ export async function openCombinedWorktree(intent: CombinedWorktreeIntent, creat
         }
       }
       if (await worktreeLayoutOutcome(intent, 'create') !== 'complete') return false
-      return await verifyLayout(intent, root)
+      if (!recover) return await verifyLayout(intent, root)
     }
     for (const checkout of intent.checkouts) {
       if (await realpath(checkout.repository).catch(() => null) !== checkout.repository) return false
-      if (!(await openReserved(checkout, create, root)).path) return false
+      if (!(await openReserved(checkout, mode, root, authorize)).path) return false
     }
-    if (create && !await prepareDirectory(root, intent.path)) return false
+    if ((create || (restorePaths && authorize())) && !await prepareDirectory(root, intent.path)) return false
     if (await realpath(intent.path).catch(() => null) !== intent.path) return false
     for (const link of intent.links) {
       if (!within(intent.path, link.path)) return false
       const parent = dirname(link.path)
-      if (create && !await prepareDirectory(root, parent)) return false
+      const mayCreate = create || (restorePaths && authorize())
+      if (mayCreate && !await prepareDirectory(root, parent)) return false
       if (await realpath(parent).catch(() => null) !== parent) return false
       if (await readlink(link.path).catch(() => null) === link.source) continue
-      if (!create) return false
+      if (!mayCreate) return false
       const type = (await lstat(link.source)).isDirectory() ? 'dir' : 'file'
+      if (recover && !authorize()) return false
       await symlink(link.source, link.path, type)
     }
     return true
