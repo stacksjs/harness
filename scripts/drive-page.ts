@@ -89,6 +89,7 @@ const followUpDelivery: string[] = []
 const liveSidebarPrompt = 'Verify the sidebar updates on another client.'
 const liveSidebarTurn = Promise.withResolvers<void>()
 const backgroundLaunches: StartTurnInput[] = []
+const backgroundSourceGate = Promise.withResolvers<void>()
 const referenceLink = '[parity-notes (draft).md](fixture%20context/parity-notes%20%28draft%29.md)'
 let fixtureMentionContents: string | undefined
 const fixtureHandoffs: StartTurnInput[] = []
@@ -131,6 +132,10 @@ const instance: ProviderInstance = {
     if (input.text.startsWith('Background fixture:')) {
       const count = backgroundLaunches.push(input)
       yield { type: 'session-bound', providerSessionId: `background-fixture-${count}` }
+      if (input.text === 'Background fixture: keep source busy') {
+        yield { type: 'assistant-delta', text: 'Holding the source turn.' }
+        await backgroundSourceGate.promise
+      }
       yield { type: 'assistant-delta', text: 'Background turn finished.' }
       yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
       return
@@ -5103,6 +5108,7 @@ if (harness.engine.current.settings.defaultDriver !== 'claude')
 execFileSync('git', ['branch', 'background-fixture-base'], { cwd: dir })
 const backgroundContext = await browser.newContext({ colorScheme, reducedMotion })
 const backgroundPage = await backgroundContext.newPage()
+backgroundPage.on('pageerror', error => pageErrors.push(error.message))
 const backgroundDraftUrl = `${baseUrl}/?workspace=${workspaceId}`
 const backgroundMessage = backgroundPage.getByRole('textbox', { name: 'Message', exact: true })
 const backgroundNotice = backgroundPage.locator('[data-background-thread]')
@@ -5162,21 +5168,77 @@ await backgroundPage.getByText('Background turn finished.', { exact: true }).wai
 check('the background notification opens the correct conversation',
   harness.engine.current.sessions.get(Number(new URL(backgroundPage.url()).pathname.split('/').at(-1)))?.turns[0]?.prompt === secondBackgroundText)
 
+// An existing thread submits before leaving. The regular project draft and
+// the newly opened draft can both retain their own text.
+const sourceThreadUrl = backgroundPage.url()
+const sourceThreadId = Number(new URL(sourceThreadUrl).pathname.split('/').at(-1))
+const savedProjectText = 'Keep this unsent project draft.'
+await backgroundPage.goto(backgroundDraftUrl)
+await backgroundMessage.fill(savedProjectText)
+await backgroundPage.waitForFunction(text => Object.entries(localStorage)
+  .some(([key, value]) => key.startsWith('harness.composer.v1:') && value.includes(text)), savedProjectText)
+await backgroundPage.goto(sourceThreadUrl)
+await backgroundPage.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
+await backgroundMessage.fill('Background fixture: keep source busy')
+await backgroundPage.locator('[data-send]:enabled').waitFor()
+await backgroundMessage.press('Alt+Enter')
+check('Alt+Enter alone preserves the existing-thread prompt',
+  (await backgroundMessage.inputValue()).includes('Background fixture: keep source busy'))
+await backgroundMessage.fill('Background fixture: keep source busy')
+await pressChord('Control+Alt+Enter', backgroundPage)
+const freshProjectDraft = (url: URL) => url.pathname === '/' && url.searchParams.get('workspace') === String(workspaceId)
+  && Boolean(url.searchParams.get('draft'))
+await backgroundPage.waitForURL(freshProjectDraft)
+await backgroundPage.waitForFunction(() => document.activeElement?.matches('textarea[aria-label="Message"]'))
+const firstFreshUrl = backgroundPage.url()
+check('sending from an existing thread opens an empty focused draft in the same project', await backgroundMessage.inputValue() === '')
+check('the existing thread continues running after the composer opens a draft',
+  harness.engine.current.sessions.get(sourceThreadId)?.turns.at(-1)?.prompt === 'Background fixture: keep source busy')
+for (const [width, height] of workspaceViewports) {
+  await backgroundPage.setViewportSize({ width, height })
+  await capture(`workspace-send-and-new-${width}x${height}`, backgroundPage)
+}
+await backgroundMessage.fill('Keep this separate fresh draft.')
+await backgroundPage.reload()
+await backgroundPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value === 'Keep this separate fresh draft.')
+await backgroundPage.goto(backgroundDraftUrl)
+await backgroundPage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value === text, savedProjectText)
+check('a fresh draft survives reload and preserves the project draft', true)
+
+await backgroundPage.goto(sourceThreadUrl)
+await backgroundPage.getByText('Holding the source turn.', { exact: true }).waitFor()
+const queuedBackgroundText = 'Background fixture: wait behind the source'
+await backgroundMessage.fill(queuedBackgroundText)
+await backgroundPage.getByRole('button', { name: 'Queue', exact: true }).waitFor()
+await pressChord('Control+Alt+Enter', backgroundPage)
+await backgroundPage.waitForURL(url => freshProjectDraft(url) && url.href !== firstFreshUrl)
+check('a background queue entry is accepted before leaving the running thread',
+  harness.engine.current.sessions.get(sourceThreadId)?.followUps?.entries.some(entry => entry.text === queuedBackgroundText) === true)
+backgroundSourceGate.resolve()
+for (let attempt = 0; attempt < 160 && !backgroundLaunches.some(launch => launch.text === queuedBackgroundText); attempt++) await Bun.sleep(50)
+check('the background queue delivers once without revisiting the source thread',
+  backgroundLaunches.filter(launch => launch.text === queuedBackgroundText).length === 1 && await backgroundMessage.inputValue() === '')
+
 const backgroundRetryText = 'Background fixture: first turn with a lost receipt'
-let droppedBackgroundReceipt = false
+const scratchFollowUp = 'Background fixture: send and reset the scratch draft'
 const backgroundAttemptIds: string[] = []
+const scratchAttemptIds: string[] = []
+const droppedReceipts = new Set<string>()
 await backgroundPage.routeWebSocket('**/ws', (client) => {
   const upstream = client.connectToServer()
   client.onMessage((message) => {
     const frame = typeof message === 'string' ? null : decode(message) as any
     if (frame?.t === 'dispatch' && frame.envelope?.command?.text === backgroundRetryText)
       backgroundAttemptIds.push(frame.envelope.id)
+    if (frame?.t === 'dispatch' && frame.envelope?.command?.text === scratchFollowUp)
+      scratchAttemptIds.push(frame.envelope.id)
     upstream.send(message)
   })
   upstream.onMessage((message) => {
     const frame = typeof message === 'string' ? null : decode(message) as any
-    if (!droppedBackgroundReceipt && frame?.t === 'dispatched' && backgroundAttemptIds.includes(frame.id)) {
-      droppedBackgroundReceipt = true
+    if (frame?.t === 'dispatched' && !droppedReceipts.has(frame.id)
+      && (backgroundAttemptIds.includes(frame.id) || scratchAttemptIds.includes(frame.id))) {
+      droppedReceipts.add(frame.id)
       return
     }
     client.send(message)
@@ -5189,7 +5251,7 @@ const countBeforeBackgroundRetry = harness.engine.current.sessions.size
 await backgroundMessage.fill(backgroundRetryText)
 await backgroundMessage.press('Control+Enter')
 await backgroundPage.getByText('The server did not confirm the request. Try again.').waitFor({ timeout: 12_000 })
-check('a lost first-turn receipt keeps the projectless draft available', droppedBackgroundReceipt && await backgroundMessage.inputValue() === backgroundRetryText)
+check('a lost first-turn receipt keeps the projectless draft available', droppedReceipts.size === 1 && await backgroundMessage.inputValue() === backgroundRetryText)
 await backgroundPage.keyboard.press('Escape')
 await backgroundMessage.press('Enter')
 await backgroundPage.waitForURL(/\/s\/\d+/)
@@ -5200,6 +5262,22 @@ check('a foreground retry reuses the projectless session and first-turn receipt'
   backgroundAttemptIds.length === 2 && backgroundAttemptIds[0] === backgroundAttemptIds[1]
   && harness.engine.current.sessions.size === countBeforeBackgroundRetry + 1
   && resumedBackground?.turns.length === 1 && harness.engine.current.workspaces.get(resumedBackground.workspaceId)?.scratch === true)
+await backgroundMessage.fill(scratchFollowUp)
+await backgroundPage.locator('[data-send]:enabled').waitFor()
+await pressChord('Control+Alt+Enter', backgroundPage)
+await backgroundPage.getByText('The server did not confirm the request. Try again.').waitFor({ timeout: 12_000 })
+check('an unconfirmed send keeps the source thread and its prompt open',
+  new URL(backgroundPage.url()).pathname === `/s/${resumedBackgroundId}`
+  && await backgroundMessage.inputValue() === scratchFollowUp)
+await backgroundPage.keyboard.press('Escape')
+await backgroundMessage.focus()
+await pressChord('Control+Alt+Enter', backgroundPage)
+await backgroundPage.waitForURL(url => url.pathname === '/' && url.searchParams.get('project') === 'none'
+  && url.searchParams.get('profile') === String(providerProfileId) && Boolean(url.searchParams.get('draft')))
+check('sending from a scratch thread keeps the fresh draft projectless and on the same profile',
+  await backgroundMessage.inputValue() === ''
+  && scratchAttemptIds.length === 2 && scratchAttemptIds[0] === scratchAttemptIds[1]
+  && harness.engine.current.sessions.get(resumedBackgroundId)?.turns.filter(turn => turn.prompt === scratchFollowUp).length === 1)
 await backgroundContext.close()
 
 check('browser reported no script errors', pageErrors.length === 0)

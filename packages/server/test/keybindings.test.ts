@@ -99,9 +99,13 @@ describe('the keyboard registry', () => {
     expect(matchCommand(defaults, enter)).toBeNull()
     expect(matchCommand(defaults, enter, { terminalFocus: true })).toBeNull()
     expect(matchCommand(defaults, enter, { composerFocus: true })).toBe('composer.startBackground')
-    const rebound = resolveKeybindings({ 'composer.startBackground': 'Mod+Alt+Enter' }).bindings
-    expect(matchCommand(rebound, enter, { composerFocus: true })).toBeNull()
-    expect(matchCommand(rebound, press({ key: 'Enter', meta: true, alt: true }), { composerFocus: true })).toBe('composer.startBackground')
+    const sendAndOpen = press({ key: 'Enter', meta: true, alt: true })
+    expect(matchCommand(defaults, sendAndOpen, { terminalFocus: true })).toBeNull()
+    expect(matchCommand(defaults, sendAndOpen, { composerFocus: true })).toBe('composer.sendAndNewThread')
+    const rebound = resolveKeybindings({ 'composer.sendAndNewThread': 'Mod+Shift+Enter' }).bindings
+    expect(matchCommand(rebound, sendAndOpen, { composerFocus: true })).toBeNull()
+    expect(matchCommand(rebound, press({ key: 'Enter', meta: true, shift: true }), { composerFocus: true })).toBe('composer.sendAndNewThread')
+    expect(matchCommand(rebound, enter, { composerFocus: true })).toBe('composer.startBackground')
   })
 })
 
