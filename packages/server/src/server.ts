@@ -30,6 +30,8 @@ import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
 import { ProjectScripts, respondProjectScripts, scriptIdPattern } from './project-scripts'
+import type { ProjectSetupScope } from './project-setup'
+import { ProjectSetup } from './project-setup'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -190,6 +192,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const previewOwner = (sessionId: number) => createHash('sha256').update(previewDatabase).update('\0').update(String(sessionId)).digest('hex')
   const savedProviders = new SavedProviderInstances(databasePath)
   const projectScripts = new ProjectScripts(databasePath)
+  const projectSetup = new ProjectSetup(databasePath)
   const chatGptCredentials = new ChatGptCredentialStore(options.chatGptCredentialDirectory ?? chatGptCredentialDirectory())
   const engine = new Engine({
     store,
@@ -259,6 +262,29 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     workspacePath: options.workspacePath,
     previewOwner,
     combinedWorktreesDirectory: resolve(databasePath + '.harness-worktrees'),
+    reserveWorktreeSetup(scope) {
+      const script = projectScripts.list(scope.workspaceId).find(script => script.runOnWorktreeCreate)
+      if (script) projectSetup.reserve(scope, script)
+    },
+    runWorktreeSetup(scope, signal) {
+      return projectSetup.run(scope, signal, async (receipt) => {
+        const script = projectScripts.get(scope.workspaceId, receipt.scriptId)
+        const workspace = engine.current.workspaces.get(scope.workspaceId)
+        const shellKind = engine.current.settings.terminalShell
+        const shell = shellKind === 'den' ? findDenShell() : undefined
+        if (!script?.runOnWorktreeCreate || !workspace?.trusted || workspace.scratch || shell === null) return null
+        const authorized = () => {
+          const session = engine.current.sessions.get(scope.sessionId)
+          return !signal.aborted && !closing && session?.workspaceId === scope.workspaceId && session.worktreePath === scope.checkout
+            && !session.navigation?.archivedAt && engine.current.workspaces.get(scope.workspaceId)?.trusted === true
+        }
+        if (!authorized()) return null
+        const env = { T3CODE_PROJECT_ROOT: workspace.path, T3CODE_WORKTREE_PATH: scope.checkout }
+        return terminals.runProjectJob({ ...scope, resumeKey: receipt.resumeKey }, shellKind, {
+          cwd: scope.checkout, cols: 80, rows: 24, shell, command: script.command, env, authorized, denIntegration: shellKind === 'den',
+        }, script, signal)
+      })
+    },
     autoApprove: options.autoApprove,
     // Push provider output the moment it lands, so a transcript streams rather
     // than appearing all at once when the turn ends.
@@ -508,6 +534,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const terminalScopeExists = (scope: TerminalScope) => engine.current.workspaces.has(scope.workspaceId)
     && (scope.sessionId === undefined || engine.current.sessions.get(scope.sessionId)?.workspaceId === scope.workspaceId)
   terminals.prune(terminalScopeExists)
+  projectSetup.prune(terminalScopeExists)
   const assetCache = new AssetCache()
   // Built once, before listening: the page references it by URL, so it must be
   // servable by the time the first render can hand that URL out.
@@ -643,8 +670,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (events.length > 0) stateRev++
     const changedProfiles = new Set<number>()
     for (const event of events) {
-      if (event.payload.type === 'profile.deleted')
+      if (event.payload.type === 'profile.deleted') {
         terminals.prune(terminalScopeExists)
+        projectSetup.prune(terminalScopeExists)
+      }
       // A revoke has to reach the connection, not just the next handshake.
       // Closed before the event is delivered, so the socket being cut off does
       // not first get told why in a frame it could act on.
@@ -989,6 +1018,22 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return
         }
         const scope = { workspaceId: workspace.id, sessionId: session?.id, resumeKey: frame.resumeKey }
+        const setupHistory = session && frame.resumeKey ? projectSetup.history(workspace.id, session.id, frame.resumeKey) : null
+        if (setupHistory) {
+          if (!workspace.trusted || frame.projectScriptId) {
+            send(socket, { t: 'term-error', message: 'Open the worktree setup terminal on its host.' })
+            return
+          }
+          if (!terminals.resume(socket, scope)) {
+            try {
+              const history = terminals.savedHistory(scope)
+              if (history !== undefined) terminals.openProjectHistory(socket, scope, engine.current.settings.terminalShell, history, setupHistory.exitCode)
+              else send(socket, { t: 'term-error', message: 'The worktree setup has no saved terminal output.' })
+            }
+            catch { send(socket, { t: 'term-error', message: 'Could not load the worktree setup output.' }) }
+          }
+          return
+        }
         if (terminals.resume(socket, scope)) return
         const shellKind = engine.current.settings.terminalShell
         const shell = shellKind === 'den' ? findDenShell() : undefined
@@ -1339,7 +1384,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch))
       }
 
-      const projectScriptsRoute = /^\/s\/([1-9]\d*)\/project-scripts$/u.exec(url.pathname)
+      const projectScriptsRoute = /^\/s\/([1-9]\d*)\/(project-scripts|project-setup)$/u.exec(url.pathname)
       if (projectScriptsRoute) {
         const headers = { 'cache-control': 'private, no-store' }
         const fetchSite = request.headers.get('sec-fetch-site')
@@ -1348,7 +1393,27 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const session = engine.current.sessions.get(Number(projectScriptsRoute[1]))
         if (!session) return new Response(null, { status: 404, headers })
         const params = new URLSearchParams({ session: String(session.id) })
-        return respondProjectScripts(request, projectScripts, session.workspaceId, () => workspaceFileRoot(params))
+        const scope: ProjectSetupScope | null = session.worktreePath
+          ? { sessionId: session.id, workspaceId: session.workspaceId, checkout: session.worktreePath }
+          : null
+        if (projectScriptsRoute[2] === 'project-setup') {
+          if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
+          const receipt = scope && workspaceFileRoot(params) ? projectSetup.read(scope) : null
+          const script = receipt && projectScripts.get(session.workspaceId, receipt.scriptId)
+          return Response.json(receipt && {
+            name: receipt.name, resumeKey: receipt.resumeKey, status: receipt.status, exitCode: receipt.exitCode,
+            blocking: Boolean(receipt.wait),
+            output: scope ? terminals.projectJobTail({ ...scope, resumeKey: receipt.resumeKey }) : '',
+            retry: Boolean(script && script.runOnWorktreeCreate),
+            previewUrl: script?.autoOpenPreview ? script.previewUrl : '',
+          }, { headers })
+        }
+        return respondProjectScripts(request, projectScripts, session.workspaceId, () => workspaceFileRoot(params), (action) => {
+          const active = engine.current.sessions.get(session.id)
+          if (!scope || active?.worktreePath !== scope.checkout || active.navigation?.archivedAt || isTurnActive(active.state)) return false
+          const receipt = projectSetup.read(scope)
+          return Boolean(receipt && projectSetup.resolve(scope, action, projectScripts.get(scope.workspaceId, receipt.scriptId)))
+        })
       }
 
       const previewServersRoute = /^\/s\/([1-9]\d*)\/preview-servers$/u.exec(url.pathname)
@@ -1601,6 +1666,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       server.stop(true)
       savedProviders.close()
       projectScripts.close()
+      projectSetup.close()
       store.close()
       throw error
     }
@@ -1631,6 +1697,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       server.stop(true)
       savedProviders.close()
       projectScripts.close()
+      projectSetup.close()
       store.close()
     },
   }

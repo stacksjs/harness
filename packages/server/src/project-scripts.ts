@@ -9,6 +9,8 @@ export interface ProjectScriptInput {
   previewUrl: string
   autoOpenPreview: boolean
   stopOnSettle: boolean
+  runOnWorktreeCreate?: boolean
+  waitForSetup?: boolean
 }
 
 export interface ProjectScript extends ProjectScriptInput {
@@ -43,6 +45,7 @@ export function projectScriptInput(value: unknown): ProjectScriptInput {
     name, command, previewUrl,
     autoOpenPreview: Boolean(previewUrl) && input.autoOpenPreview === true,
     stopOnSettle: input.stopOnSettle === true,
+    ...(input.runOnWorktreeCreate === true && { runOnWorktreeCreate: true, waitForSetup: input.waitForSetup === true }),
   }
 }
 
@@ -61,7 +64,7 @@ export async function readProjectScriptImports(root: string): Promise<Array<Proj
       if (!('scripts' in config)) return []
       if (!Array.isArray(config.scripts) || config.scripts.length > maxScripts) throw new ProjectScriptError('t3.json must contain at most 50 scripts.')
       return config.scripts.map((entry) => {
-        const input = projectScriptInput(entry)
+        const input = projectScriptInput(entry && typeof entry === 'object' ? { ...entry, waitForSetup: entry.async === false } : entry)
         return { ...input, key: createHash('sha256').update(JSON.stringify(input)).digest('hex') }
       })
     }
@@ -106,6 +109,8 @@ export class ProjectScripts {
       if (!id && scripts.length >= maxScripts) throw new ProjectScriptError('A project can have up to 50 scripts.')
       if (scripts.some(script => script.id !== id && (script.name.toLowerCase() === input.name.toLowerCase() || script.command === input.command)))
         throw new ProjectScriptError('This project already has a script with that name or command.')
+      if (input.runOnWorktreeCreate && scripts.some(script => script.id !== id && script.runOnWorktreeCreate))
+        throw new ProjectScriptError('Only one script can run automatically when a worktree is created.')
       const key = id ?? randomUUID()
       if (id) this.db.query('UPDATE harness_project_scripts SET config = ? WHERE workspace_id = ? AND id = ?').run(JSON.stringify(input), workspaceId, id)
       else this.db.query('INSERT INTO harness_project_scripts VALUES (?, ?, ?)').run(key, workspaceId, JSON.stringify(input))
@@ -145,7 +150,9 @@ async function scriptOperation(request: Request): Promise<Record<string, unknown
   finally { void reader.cancel().catch(() => {}) }
 }
 
-export async function respondProjectScripts(request: Request, scripts: ProjectScripts, workspaceId: number, root: () => string | null): Promise<Response> {
+export async function respondProjectScripts(request: Request, scripts: ProjectScripts, workspaceId: number, root: () => string | null,
+  resolveSetup?: (action: 'retry-setup' | 'skip-setup') => boolean,
+): Promise<Response> {
   const headers = { 'cache-control': 'private, no-store' }
   const json = (data: unknown, status = 200) => Response.json(data, { status, headers })
   const cwd = root()
@@ -176,6 +183,10 @@ export async function respondProjectScripts(request: Request, scripts: ProjectSc
       return json({ script: scripts.save(workspaceId, projectScriptInput(selected)) }, 201)
     }
     if (root() !== cwd) return json({ error: 'The project checkout changed. Open Scripts again.' }, 409)
+    if (operation.action === 'retry-setup' || operation.action === 'skip-setup') {
+      if (!resolveSetup?.(operation.action)) return json({ error: 'This setup run can no longer be changed. Reload the thread.' }, 409)
+      return new Response(null, { status: 204, headers })
+    }
     const id = operation.id
     if (id !== undefined && (typeof id !== 'string' || !scriptIdPattern.test(id)))
       throw new ProjectScriptError('Select a saved project script.')

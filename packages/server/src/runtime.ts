@@ -28,6 +28,7 @@ import { missingReferences, resolveForDriver } from './mcp'
 import type { SavedProviderInstances, SavedProviderLaunch } from './provider-instances'
 import { providerLaunchConfig } from './provider-instances'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
+import type { ProjectSetupScope } from './project-setup'
 import { openScratchWorkspace } from './scratch-workspace'
 import * as worktree from './worktree'
 
@@ -42,6 +43,8 @@ export interface RuntimeOptions {
   workspacePath?: (state: HarnessState, sessionId: number) => string | null
   previewOwner?: (sessionId: number) => string
   combinedWorktreesDirectory: string
+  reserveWorktreeSetup?: (scope: ProjectSetupScope) => void
+  runWorktreeSetup?: (scope: ProjectSetupScope, signal: AbortSignal) => Promise<string | null>
   now?: () => number
   /** Auto-approve tool calls. Off by default; see PLAN.md §12. */
   autoApprove?: boolean
@@ -660,6 +663,18 @@ export class ProviderRuntime {
   }
 
   private async ensureWorktree(sessionId: number, allowProjectCommands: boolean, restoreMissing: boolean): Promise<boolean> {
+    const pending = this.worktreeCreations.get(sessionId)
+    if (pending) return pending.result
+    const session = this.options.engine.current.sessions.get(sessionId)
+    if (!session?.isolate && !session?.worktreePath) return true
+    const cancel = new AbortController()
+    const result = this.prepareWorktree(sessionId, allowProjectCommands, restoreMissing, cancel.signal)
+    this.worktreeCreations.set(sessionId, { result, cancel })
+    try { return await result }
+    finally { this.worktreeCreations.delete(sessionId) }
+  }
+
+  private async prepareWorktree(sessionId: number, allowProjectCommands: boolean, restoreMissing: boolean, signal: AbortSignal): Promise<boolean> {
     const session = this.options.engine.current.sessions.get(sessionId)
     if (session?.worktreePath) {
       const authorize = () => {
@@ -668,18 +683,21 @@ export class ProviderRuntime {
         return Boolean(active && !active.navigation?.archivedAt && isolatedRewindScope(state, active))
       }
       const available = restoreMissing ? await this.restoreWorktree(session, authorize, 'resume') : await this.registeredWorktree(session)
-      if (available) return true
-      await this.emit({ type: 'thread.error', sessionId, message: 'The registered worktree is unavailable. Check its branch and checkout folder, then retry.' })
-      return false
+      if (!available) {
+        await this.emit({ type: 'thread.error', sessionId, message: 'The registered worktree is unavailable. Check its branch and checkout folder, then retry.' })
+        return false
+      }
     }
-    if (!session?.isolate) return true
-    const pending = this.worktreeCreations.get(sessionId)
-    if (pending) return pending.result
-    const cancel = new AbortController()
-    const result = this.createWorktree(sessionId, allowProjectCommands, cancel.signal)
-    this.worktreeCreations.set(sessionId, { result, cancel })
-    try { return await result }
-    finally { this.worktreeCreations.delete(sessionId) }
+    else if (!await this.createWorktree(sessionId, allowProjectCommands, signal)) return false
+    if (signal.aborted) return false
+    const active = this.options.engine.current.sessions.get(sessionId)
+    if (!active?.worktreePath || !this.options.runWorktreeSetup) return true
+    const turnId = active.turns.at(-1)?.id
+    const error = await this.options.runWorktreeSetup({ workspaceId: active.workspaceId, sessionId, checkout: active.worktreePath }, signal)
+    if (signal.aborted) return false
+    if (!error) return true
+    await this.emit({ type: 'thread.error', sessionId, turnId, message: error })
+    return false
   }
 
   private async createWorktree(sessionId: number, allowProjectCommands: boolean, signal: AbortSignal): Promise<boolean> {
@@ -720,6 +738,9 @@ export class ProviderRuntime {
       if (!complete)
         throw new Error('Could not open the reserved worktree. Check its Git branch and checkout, then retry.')
       if (signal.aborted) return false
+      const workspaceId = engine.current.sessions.get(sessionId)?.workspaceId
+      if (allowProjectCommands && workspaceId !== undefined && scoped())
+        this.options.reserveWorktreeSetup?.({ workspaceId, sessionId, checkout: intent.path })
       await this.record({ type: 'thread.worktree.set', sessionId, worktreePath: intent.path, branch: intent.branch }).catch(() => {
         throw new Error('Could not record the checkout. Retry the turn to recover it.')
       })
