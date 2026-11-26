@@ -27,6 +27,7 @@ import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
+import { readPreviewServers } from './preview-servers'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -497,6 +498,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const searchWorkspaceFiles = createWorkspaceFileSearch()
   const sockets = new Set<HarnessSocket>()
   const terminals = new WorkspaceTerminals<HarnessSocket>(send, new TerminalHistoryStore(databasePath))
+  const previewScans = new Map<string, ReturnType<typeof readPreviewServers>>()
   const terminalScopeExists = (scope: TerminalScope) => engine.current.workspaces.has(scope.workspaceId)
     && (scope.sessionId === undefined || engine.current.sessions.get(scope.sessionId)?.workspaceId === scope.workspaceId)
   terminals.prune(terminalScopeExists)
@@ -1307,6 +1309,26 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           : defaultWorkspacePath(engine.current, id))
         const workspace = session && engine.current.workspaces.get(session.workspaceId)
         return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch))
+      }
+
+      const previewServersRoute = /^\/s\/([1-9]\d*)\/preview-servers$/u.exec(url.pathname)
+      if (previewServersRoute) {
+        const headers = { 'cache-control': 'private, no-store' }
+        const fetchSite = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || fetchSite === 'cross-site' || fetchSite === 'same-site') return new Response(null, { status: 403, headers })
+        if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
+        const session = engine.current.sessions.get(Number(previewServersRoute[1]))
+        if (!session || !engine.current.workspaces.has(session.workspaceId)) return new Response(null, { status: 404, headers })
+        const scope = { workspaceId: session.workspaceId, sessionId: session.id }
+        const roots = terminals.processIds(scope)
+        const key = roots.join(',')
+        let scan = previewScans.get(key)
+        if (!scan) {
+          scan = readPreviewServers(roots).finally(() => previewScans.delete(key))
+          previewScans.set(key, scan)
+        }
+        return scan.then(result => Response.json({ ...result, servers: key === terminals.processIds(scope).join(',') ? result.servers : [] }, { headers }))
       }
 
       // Shared page assets. Checked before the page routes because their

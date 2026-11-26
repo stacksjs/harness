@@ -62,6 +62,7 @@ function shellEnvironment(shell: string, denIntegration?: boolean) {
 }
 
 interface PtyBackend {
+  readonly processId: number | undefined
   onData: (listener: (chunk: string) => void) => void
   onExit: (listener: (code: number | null) => void) => void
   write: (data: string) => void
@@ -266,6 +267,8 @@ class NativePty implements PtyBackend {
   private readonly readBuf = new Uint8Array(65536)
   private readonly decoder = new TextDecoder('utf-8', { fatal: false })
 
+  get processId(): number | undefined { return this.finished ? undefined : this.pid }
+
   constructor(private readonly native: NativeShim, options: PtyOptions) {
     const { shim } = native
     this.master = shim.harness_open_pty_master()
@@ -376,6 +379,8 @@ class ScriptPty implements PtyBackend {
   /** Bytes that arrived before anyone listened — the shell's banner races the reply frame. */
   private buffered = ''
 
+  get processId(): number | undefined { return this.child.pid }
+
   constructor(options: PtyOptions) {
     const shell = options.shell ?? process.env.SHELL ?? (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash')
     // `"$0"` carries the shell path through untouched, so a path with spaces
@@ -461,6 +466,8 @@ export class Pty implements PtyBackend {
 
   /** Which backend actually opened, for doctors and tests: 'native' | 'script'. */
   backendKind: 'native' | 'script' | 'pending' = 'pending'
+
+  get processId(): number | undefined { return this.killed ? undefined : this.backend?.processId }
 
   constructor(options: PtyOptions) {
     void this.open(options)

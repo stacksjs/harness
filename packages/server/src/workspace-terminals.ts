@@ -56,6 +56,16 @@ export class WorkspaceTerminals<Peer> {
     if (saved) return this.history.read(saved)
   }
 
+  processIds(scope: { workspaceId: number, sessionId: number }): number[] {
+    const ids: number[] = []
+    for (const terminal of this.terminals.values()) {
+      if (terminal.exit || terminal.scope.sessionId !== scope.sessionId || terminal.scope.workspaceId !== scope.workspaceId) continue
+      const pid = terminal.pty.processId
+      if (pid !== undefined) ids.push(pid)
+    }
+    return ids
+  }
+
   open(peer: Peer, scope: TerminalScope, shell: WorkspaceTerminal<Peer>['shell'], options: PtyOptions, saved?: string): void {
     // Scratch directory creation can yield between the first resume check and opening.
     if (this.resume(peer, scope)) return
