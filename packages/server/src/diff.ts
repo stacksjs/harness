@@ -127,7 +127,7 @@ export function parseNumstat(raw: string): Map<string, { insertions: number, del
   for (let i = 0; i < fields.length; i++) {
     const field = fields[i]
     if (!field) continue
-    const match = field.match(/^(\d+|-)\t(\d+|-)\t(.*)$/)
+    const match = field.match(/^(\d+|-)\t(\d+|-)\t(.*)$/su)
     if (!match) continue
 
     let path = match[3] ?? ''

@@ -63,13 +63,13 @@ describe('parsing numstat', () => {
 })
 
 describe('reading a real workspace', () => {
-  function repo(): string {
+  function repo(initialPath = 'tracked.txt'): string {
     const dir = mkdtempSync(join(tmpdir(), 'harness-diff-'))
     const run = (...args: string[]) => spawnSync('git', args, { cwd: dir })
     run('init', '-q')
     run('config', 'user.email', 'test@example.com')
     run('config', 'user.name', 'Test')
-    writeFileSync(join(dir, 'tracked.txt'), 'one\ntwo\nthree\n')
+    writeFileSync(join(dir, initialPath), 'one\ntwo\nthree\n')
     run('add', '.')
     run('commit', '-qm', 'first')
     return dir
@@ -109,6 +109,18 @@ describe('reading a real workspace', () => {
       expect(file.insertions).toBe(1)
       expect(file.deletions).toBe(0)
       expect(diff.patch).toContain('+four')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform === 'win32')('keeps line counts for filenames containing tabs and newlines', async () => {
+    const path = 'notes [draft]\nwith\ta tab.txt'
+    const dir = repo(path)
+    try {
+      writeFileSync(join(dir, path), 'one\ntwo\nupdated\n')
+      expect((await workspaceDiff(dir)).files).toEqual([
+        { path, status: 'modified', insertions: 1, deletions: 1 },
+      ])
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   })
