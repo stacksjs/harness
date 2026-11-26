@@ -1,6 +1,6 @@
 import type { InputAnswer, QuestionAttachment } from '@harness/contract'
 import { MAX_QUESTION_ATTACHMENTS, MAX_QUESTION_FILE_BYTES, MAX_QUESTION_IMAGE_BYTES, MAX_QUESTION_TOTAL_IMAGE_BYTES } from '@harness/contract'
-import { mkdir, open, readdir, rm, writeFile } from 'node:fs/promises'
+import { link, mkdir, open, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -138,6 +138,42 @@ export class QuestionAttachments {
       const { questionId, name, size, image } = stored
       return { id, questionId, name, size, image }
     }
+  }
+
+  /** Import private host files into a draft. Existing matching IDs make a retry safe. */
+  async linkDrafts(sessionId: number, requestId: string, owner: string, sources: Array<{ file: QuestionAttachment, path: string }>): Promise<QuestionAttachment[]> {
+    return this.serialize(sessionId, requestId, async () => {
+      const directory = requestFolder(this.root, sessionId, requestId)
+      const created: string[] = []
+      const files: QuestionAttachment[] = []
+      let count = (await names(directory)).length
+      try {
+        for (const { file, path } of sources) {
+          if (!uuidPattern.test(file.id)) throw new AttachmentError('An attachment reference is invalid.')
+          const existing = await this.find(sessionId, requestId, file.id)
+          if (existing) {
+            if (existing.owner !== owner || existing.name !== file.name || existing.size !== file.size || existing.image !== file.image)
+              throw new AttachmentError('A draft attachment conflicts with the stashed file.', 409)
+          }
+          else {
+            if (count >= MAX_QUESTION_ATTACHMENTS) throw new AttachmentError(`${this.subject} can contain up to 100 files.`, 409)
+            const slot = join(directory, file.id)
+            await mkdir(directory, { recursive: true, mode: 0o700 })
+            await mkdir(slot, { mode: 0o700 })
+            created.push(slot)
+            await link(path, this.path(sessionId, requestId, file))
+            await writeFile(join(slot, 'metadata.json'), JSON.stringify({ ...file, owner }), { flag: 'wx', mode: 0o600 })
+            count++
+          }
+          files.push(file)
+        }
+        return files
+      }
+      catch (cause) {
+        await Promise.all(created.map(slot => rm(slot, { recursive: true, force: true }).catch(() => {})))
+        throw cause
+      }
+    })
   }
 
   async removeDraft(sessionId: number, requestId: string, id: string, owner: string): Promise<void> {

@@ -1,6 +1,8 @@
 import type { ComposerAttachment, ComposerUploads } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
 import { MAX_COMPOSER_ATTACHMENTS } from '@harness/contract'
+import { join } from 'node:path'
+import { ComposerAttachmentStashes, composerStashRoute } from './composer-attachment-stashes'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 
 const draftPattern = /^[a-f\d]{32}$/u
@@ -41,10 +43,14 @@ async function imageContentType(file: Blob): Promise<string | undefined> {
 
 export class ComposerAttachments {
   private readonly files: QuestionAttachments
+  private readonly stashes: ComposerAttachmentStashes
 
-  constructor(root: string, private readonly state: () => HarnessState) {
+  constructor(root: string, private readonly state: () => HarnessState, now = Date.now) {
     this.files = new QuestionAttachments(root, 'A draft')
+    this.stashes = new ComposerAttachmentStashes(join(root, 'stashes'), this.files, now)
   }
+
+  reapStashes(): Promise<void> { return this.stashes.reap() }
 
   resolve(uploads: ComposerUploads, sessionId: number, owner: string): Promise<ComposerAttachment[]> {
     const state = this.state()
@@ -75,15 +81,16 @@ export class ComposerAttachments {
 
   async respond(request: Request, url: URL, owner: string): Promise<Response | undefined> {
     const route = attachmentRoute.exec(url.pathname)
-    if (!route) return
-    const id = route[1]
+    const stashId = composerStashRoute.exec(url.pathname)?.[1]
+    if (!route && !stashId) return
+    const id = route?.[1]
     const headers = { 'Cache-Control': 'private, no-store' }
     const state = this.state()
     const session = state.sessions.get(Number(url.searchParams.get('session')))
     const scope = url.searchParams.get('scope') ?? ''
     const draft = url.searchParams.get('draft') ?? ''
     const bucket = sourceBucket({ scope, draft })
-    if (request.method === 'GET' && id) {
+    if (!stashId && request.method === 'GET' && id) {
       const preview = url.searchParams.get('preview') === '1'
       const stored = preview && draftPattern.test(draft) && uploadScope(scope)
         ? await this.files.draftFile(0, bucket, id, owner) : undefined
@@ -112,8 +119,28 @@ export class ComposerAttachments {
     }
     const origin = request.headers.get('origin')
     if (origin !== null && origin !== url.origin) return new Response(null, { status: 403, headers })
-    if (!draftPattern.test(draft) || !uploadScope(scope)) return new Response(null, { status: 400, headers })
     try {
+      if (stashId && request.method === 'DELETE') {
+        await this.stashes.remove(stashId, owner)
+        return new Response(null, { status: 204, headers })
+      }
+      if (!draftPattern.test(draft) || !uploadScope(scope)) return new Response(null, { status: 400, headers })
+      if (stashId) {
+        if (!scopeAvailable(this.state(), uploadScope(scope)))
+          throw new AttachmentError('This draft is unavailable for stashed attachments.', 409)
+        if (request.method === 'POST') {
+          const ids = url.searchParams.getAll('file')
+          if (!ids.length || ids.length > MAX_COMPOSER_ATTACHMENTS || new Set(ids).size !== ids.length)
+            throw new AttachmentError('Choose valid attachments to stash.')
+          await this.stashes.save(stashId, bucket, ids, owner)
+          return new Response(null, { status: 204, headers })
+        }
+        if (request.method === 'PUT') {
+          const files = await this.stashes.restore(stashId, bucket, owner)
+          return Response.json(files.map(({ id, name, size, image }) => ({ id, name, size, image })), { headers })
+        }
+        return new Response(null, { status: 405, headers })
+      }
       if (request.method === 'POST' && !id) {
         if (!scopeAvailable(state, uploadScope(scope)))
           return Response.json({ error: 'This draft is unavailable for uploads.' }, { status: 409, headers })

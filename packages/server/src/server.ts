@@ -1382,6 +1382,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
   }
 
+  const reapComposerStashes = () => void composerAttachments.reapStashes().catch(() => {})
+  reapComposerStashes()
+  const composerStashTimer = setInterval(reapComposerStashes, 60 * 60 * 1000)
+  composerStashTimer.unref()
   scheduleThreadWake()
   return {
     server,
@@ -1394,6 +1398,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (closing) return
       closing = true
       clearTimeout(wakeTimer)
+      clearInterval(composerStashTimer)
       for (const timer of compactTimers.values()) clearTimeout(timer)
       compactTimers.clear()
       void tunnel?.close()
