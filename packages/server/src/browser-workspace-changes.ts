@@ -33,12 +33,13 @@ export async function loadWorkspaceReviewOptions(sessionId: number, base: string
 /** Refresh a visible Changes pane without asking Git to rebuild an unchanged patch. */
 export function watchWorkspaceChanges(sessionId: number, show: (diff: WorkspaceDiff) => void, unavailable: (error?: string) => void,
   comparison?: { mode: WorkspaceReviewMode, target?: string, repository?: string }): () => void {
-  const controller = new AbortController()
-  const { signal } = controller
+  let controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   let knownRevision: string | undefined
 
   async function refresh(): Promise<void> {
+    const { signal } = controller
+    if (signal.aborted) return
     const params = new URLSearchParams()
     if (knownRevision) params.set('knownRevision', knownRevision)
     if (comparison) {
@@ -72,9 +73,24 @@ export function watchWorkspaceChanges(sessionId: number, show: (diff: WorkspaceD
     }
   }
 
-  void refresh()
-  return () => {
+  function pause(): void {
     controller.abort()
     clearTimeout(timer)
+  }
+  function restore(event: PageTransitionEvent): void {
+    if (!event.persisted || !controller.signal.aborted) return
+    controller = new AbortController()
+    knownRevision = undefined
+    void refresh()
+  }
+
+  // A pane can outlive its document in WebKit's back-forward cache.
+  globalThis.addEventListener('pagehide', pause)
+  globalThis.addEventListener('pageshow', restore)
+  void refresh()
+  return () => {
+    pause()
+    globalThis.removeEventListener('pagehide', pause)
+    globalThis.removeEventListener('pageshow', restore)
   }
 }
