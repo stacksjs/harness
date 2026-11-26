@@ -428,7 +428,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           @if(turn.status === 'interrupted')<p data-turn-interrupted class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>@endif
           @if(turn.reviewRepositories.length)
           <button type="button" data-open-turn-diff aria-controls="harness-changes"
-            :hidden="!turnDiffs()[{{ turn.id }}]?.length" :aria-expanded="diffOpen() && diffTurn() === String({{ turn.id }}) ? 'true' : 'false'"
+            :hidden="!turnDiffs()[{{ turn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ turn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ turn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -534,7 +534,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
           <p data-turn-interrupted @if(!initialInterrupted)hidden@endif :hidden="!ssrInterrupted()" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
           <button type="button" data-open-turn-diff aria-controls="harness-changes"
-            @if(!liveTurn.reviewRepositories.length)hidden@endif :hidden="!turnDiffs()[{{ liveTurn.id }}]?.length" :aria-expanded="diffOpen() && diffTurn() === String({{ liveTurn.id }}) ? 'true' : 'false'"
+            @if(!liveTurn.reviewRepositories.length)hidden@endif :hidden="!turnDiffs()[{{ liveTurn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ liveTurn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ liveTurn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -615,7 +615,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
           <div class="transcript-markdown" data-response></div>
           <p data-turn-interrupted hidden :hidden="!turn.interrupted" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
           <button type="button" data-open-turn-diff aria-controls="harness-changes"
-            hidden :hidden="!turnDiffs()[turn.id]?.length" :aria-expanded="diffOpen() && diffTurn() === String(turn.id) ? 'true' : 'false'"
+            hidden :hidden="!turnDiffs()[turn.id]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String(turn.id) ? 'true' : 'false'"
             @click="openTurnDiff(turn.id, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>

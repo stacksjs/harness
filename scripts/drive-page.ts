@@ -3980,6 +3980,10 @@ await ledgerPanel.getByText('API edit from turn 2', { exact: true }).waitFor()
 check('the streamed transcript action opens exactly the second turn',
   await recentTurnDiffs.nth(1).getAttribute('aria-expanded') === 'true'
   && await ledgerComparison.inputValue() === 'turn')
+await ledgerComparison.selectOption('uncommitted')
+check('a transcript action reports collapsed in another comparison mode', await recentTurnDiffs.nth(1).getAttribute('aria-expanded') === 'false')
+await recentTurnDiffs.nth(1).press('Enter')
+await ledgerPanel.getByText('API edit from turn 2', { exact: true }).waitFor()
 await ledgerPanel.getByRole('button', { name: 'Close changes' }).click()
 await page.waitForFunction(() => document.activeElement?.matches('[data-open-turn-diff]'))
 check('closing a transcript diff gives its trigger focus', await recentTurnDiffs.nth(1).evaluate(button => document.activeElement === button))
