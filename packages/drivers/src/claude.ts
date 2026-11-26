@@ -16,11 +16,12 @@
 
 import type { AccountInfo, CanUseTool, ElicitationRequest, ElicitationResult, Options, PermissionResult, Query, query as sdkQuery, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { ApprovalChoice, InputAnswer } from '@harness/contract'
-import type { Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
+import type { ConversationRewindInput, ConversationRewindResult, Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
 import { lstat, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
+import type { ClaudeHistoryRequest, ClaudeHistoryResult } from './claude-history-worker'
 import { claudeEnvironment } from './account-environment'
 import { EventQueue } from './event-queue'
 import { toolInputQuestions } from './input-questions'
@@ -96,7 +97,7 @@ interface PendingPermission {
 
 export class ClaudeInstance implements ProviderInstance {
   private running: Query | null = null
-  private forkAbort?: AbortController
+  private historyAbort?: AbortController
   private activeQueue: EventQueue | null = null
   private pending = new Map<string, PendingPermission>()
   private readonly mcpConsents = new Map<string, { queue: EventQueue, acceptance: ElicitationResult, resolve: (result: ElicitationResult) => void }>()
@@ -220,43 +221,58 @@ export class ClaudeInstance implements ProviderInstance {
     return this.beginTurn(input, false)
   }
 
-  compact(providerSessionId: string, resume?: Pick<StartTurnInput, 'forkAcrossWorktrees'>): AsyncIterable<ProviderEvent> {
+  compact(providerSessionId: string, resume?: Pick<StartTurnInput, 'forkAcrossWorktrees' | 'resumeSessionAt'>): AsyncIterable<ProviderEvent> {
     return this.beginTurn({ text: '/compact', providerSessionId, requireResume: true, ...resume }, true)
   }
 
   async fork(input: ForkInput): Promise<ForkResult | null> {
     if (!input.providerTurnId) return null
-    if (this.forkAbort) throw new Error('This Claude Code account is already preparing a fork for this thread.')
+    return this.history({ type: 'fork', input: {
+      providerSessionId: input.providerSessionId, providerTurnId: input.providerTurnId,
+      inheritedProviderTurnIds: input.inheritedProviderTurnIds,
+    } })
+  }
 
+  async rewind(input: ConversationRewindInput): Promise<ConversationRewindResult> {
+    if (this.activeQueue && !this.activeQueue.closed)
+      return { outcome: 'unchanged', message: 'Wait for Claude Code to finish the active turn.' }
+    // CLI history stays in place. The host persists the verified head and
+    // Claude starts there when the edited prompt is sent.
+    try {
+      return await this.history({ type: 'rewind', input }) ? { outcome: 'rewound' }
+        : { outcome: 'unchanged', message: 'Claude Code could not find the selected boundary in this account’s history.' }
+    }
+    catch {
+      return { outcome: 'unchanged', message: 'Claude Code could not read the selected account’s history. Check the account and retry.' }
+    }
+  }
+
+  private async history<T extends ClaudeHistoryRequest>(request: T): Promise<ClaudeHistoryResult<T>> {
+    if (this.historyAbort) throw new Error('Claude Code is already reading conversation history for this thread.')
     const { CLAUDE_CONFIG_DIR, HOME, USERPROFILE } = claudeEnvironment(this.config)
-    // The SDK history functions read the environment of the caller. Set it
-    // only in the worker, so a simultaneous turn can use another Claude home.
+    // SDK history APIs read their caller's environment. Each worker keeps its own account's configuration.
     const worker = new Worker(new URL('./claude-history-worker.ts', import.meta.url), {
       env: { CLAUDE_CONFIG_DIR, HOME, USERPROFILE },
     })
     const abort = new AbortController()
-    this.forkAbort = abort
-    const deadline = setTimeout(() => abort.abort(new Error('Claude Code timed out while preparing the fork.')), 20_000)
+    this.historyAbort = abort
+    const deadline = setTimeout(() => abort.abort(new Error('Claude Code timed out while reading conversation history.')), 20_000)
     try {
-      return await new Promise<ForkResult | null>((resolve, reject) => {
-        const failed = () => reject(new Error('Claude Code could not verify a fork at the selected response.'))
+      return await new Promise<ClaudeHistoryResult<T>>((resolve, reject) => {
+        const failed = () => reject(new Error('Claude Code could not read the selected account’s conversation history.'))
         abort.signal.addEventListener('abort', () => reject(abort.signal.reason), { once: true })
         worker.once('error', failed)
         worker.once('exit', failed)
-        worker.once('message', (message: { result?: ForkResult | null }) => {
+        worker.once('message', (message: { result?: ClaudeHistoryResult<T> }) => {
           if (message.result === undefined) failed()
           else resolve(message.result)
         })
-        worker.postMessage({
-          providerSessionId: input.providerSessionId,
-          providerTurnId: input.providerTurnId,
-          inheritedProviderTurnIds: input.inheritedProviderTurnIds,
-        })
+        worker.postMessage(request)
       })
     }
     finally {
       clearTimeout(deadline)
-      this.forkAbort = undefined
+      this.historyAbort = undefined
       await worker.terminate()
     }
   }
@@ -283,13 +299,21 @@ export class ClaudeInstance implements ProviderInstance {
         // also accepts the transcript filename while keeping the new cwd.
         options.resume = await forkTranscript(input.providerSessionId, options.env)
       }
+      if (input.resumeSessionAt) {
+        if (!input.providerSessionId || !await this.history({ type: 'resume',
+          providerSessionId: input.providerSessionId, resumeSessionAt: input.resumeSessionAt,
+        })) throw new Error('Claude Code could not find the saved rewind point. Check the selected account before retrying.')
+        options.resumeSessionAt = input.resumeSessionAt
+      }
       if (queue.closed) return
       const requestedAt = Date.now()
       run = query({ prompt: input.text, options })
       this.running = run
       for await (const message of run as AsyncIterable<SDKMessage>) {
-        if (input.requireResume && 'session_id' in message && message.session_id !== bound) {
-          queue.finish({ type: 'error', message: 'Claude Code opened a different conversation. Send again to continue in a fresh conversation.' })
+        if ((input.requireResume || input.resumeSessionAt) && 'session_id' in message && message.session_id !== bound) {
+          const message = input.resumeSessionAt ? 'Claude Code opened a different conversation. Check the selected account before retrying the saved rewind point.'
+            : 'Claude Code opened a different conversation. Send again to continue in a fresh conversation.'
+          queue.finish({ type: 'error', message })
           return
         }
         if (!bound && 'session_id' in message && message.session_id) {
@@ -410,7 +434,7 @@ export class ClaudeInstance implements ProviderInstance {
   }
 
   async stop(): Promise<void> {
-    this.forkAbort?.abort(new Error('The fork was stopped. Return to the source response to try again.'))
+    this.historyAbort?.abort(new Error('The conversation history request was stopped.'))
     const run = this.running
     await this.interrupt()
     run?.close()

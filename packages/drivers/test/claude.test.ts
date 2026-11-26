@@ -193,6 +193,60 @@ it('forks and remaps Claude history within the selected account without changing
   }
 })
 
+it('verifies a Claude rewind in the selected account and passes the durable boundary to the SDK', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'harness-claude-rewind-'))
+  const providerSessionId = crypto.randomUUID()
+  const ids = Array.from({ length: 6 }, () => crypto.randomUUID())
+  const differentIds = Array.from({ length: 6 }, () => crypto.randomUUID())
+  const point = { providerSessionId, beforeTurnId: ids[3]!, newestTurnId: ids[5]!, retainedTurnId: ids[1]! }
+  const transcript = async (home: string, messages: string[]) => {
+    const project = join(root, home, 'projects', 'fixture-project')
+    await mkdir(project, { recursive: true })
+    const content = messages.map((uuid, index) => {
+      const type = index % 2 === 0 ? 'user' : 'assistant'
+      return JSON.stringify({ type, uuid, parentUuid: messages[index - 1] ?? null, sessionId: providerSessionId,
+        isSidechain: false, cwd: root, timestamp: '2026-01-01T00:00:00.000Z', version: '2.1.191', userType: 'external',
+        message: { role: type, content: [{ type: 'text', text: `${home} messages ${index + 1}` }] },
+      })
+    }).join('\n') + '\n'
+    const path = join(project, `${providerSessionId}.jsonl`)
+    await writeFile(path, content)
+    return { path, content }
+  }
+  try {
+    const work = await transcript('work', ids)
+    const personal = await transcript('personal', differentIds)
+    let launches = 0
+    const instance = new ClaudeInstance({ workspacePath: root, home: 'work' }, ({ prompt, options }) => {
+      launches++
+      expect(prompt).toBe('Send the edited prompt.')
+      expect(options?.resume).toBe(providerSessionId)
+      expect(options?.resumeSessionAt).toBe(ids[1]!)
+      expect(options?.env?.CLAUDE_CONFIG_DIR).toBe(join(root, 'work'))
+      return {
+        async *[Symbol.asyncIterator]() { yield { ...successResult(0), session_id: providerSessionId } },
+        close() {},
+      } as unknown as Query
+    })
+    const other = new ClaudeInstance({ workspacePath: root, home: 'personal' })
+    expect(await instance.rewind(point)).toEqual({ outcome: 'rewound' })
+    expect(await other.rewind(point)).toMatchObject({ outcome: 'unchanged' })
+    expect(await instance.rewind({ ...point, newestTurnId: ids[3]! })).toMatchObject({ outcome: 'unchanged' })
+    expect(await instance.rewind({ ...point, newestTurnId: ids[3]!, activeResumeSessionAt: ids[3]! })).toEqual({ outcome: 'rewound' })
+    expect(await instance.rewind({ ...point, retainedTurnId: ids[5]! })).toMatchObject({ outcome: 'unchanged' })
+    expect(await instance.rewind({ ...point, retainedTurnId: undefined, beforeTurnId: ids[1]!, verifyOnly: true })).toEqual({ outcome: 'rewound' })
+    const events = []
+    for await (const event of instance.startTurn({ text: 'Send the edited prompt.', providerSessionId, resumeSessionAt: ids[1] })) events.push(event)
+    expect(events.at(-1)).toMatchObject({ type: 'turn-complete' })
+    for await (const event of instance.startTurn({ text: 'Do not launch.', providerSessionId, resumeSessionAt: differentIds[1] })) events.push(event)
+    expect(events.at(-1)).toMatchObject({ type: 'error', message: expect.stringContaining('saved rewind point') })
+    expect(launches).toBe(1)
+    expect(await readFile(work.path, 'utf8')).toBe(work.content)
+    expect(await readFile(personal.path, 'utf8')).toBe(personal.content)
+  }
+  finally { await rm(root, { recursive: true, force: true }) }
+})
+
 describe('Claude driver — translating the SDK stream', () => {
   it('turns a text delta into an assistant delta', () => {
     expect(translate(streamDelta('Hello'))).toEqual([{ type: 'assistant-delta', text: 'Hello' }])

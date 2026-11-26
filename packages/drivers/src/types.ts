@@ -77,6 +77,8 @@ export interface StartTurnInput {
   providerSessionId?: string
   /** A failed resume must settle before any prompt is sent to a different conversation. */
   requireResume?: boolean
+  /** Resume Claude Code through this saved assistant message. */
+  resumeSessionAt?: string
   /** The native fork transcript can still be stored under the source worktree. */
   forkAcrossWorktrees?: true
 }
@@ -101,6 +103,7 @@ export interface ConversationRewindInput {
   beforeTurnId: string
   newestTurnId: string
   retainedTurnId?: string
+  activeResumeSessionAt?: string
   verifyOnly?: boolean
 }
 
@@ -114,10 +117,10 @@ export interface ProviderInstance {
   /** Stream one turn. Ends when the provider says the turn is over. */
   startTurn: (input: StartTurnInput) => AsyncIterable<ProviderEvent>
   /** Compact an existing provider conversation without a new user prompt. */
-  compact?: (providerSessionId: string, resume?: Pick<StartTurnInput, 'forkAcrossWorktrees'>) => AsyncIterable<ProviderEvent>
+  compact?: (providerSessionId: string, resume?: Pick<StartTurnInput, 'forkAcrossWorktrees' | 'resumeSessionAt'>) => AsyncIterable<ProviderEvent>
   /** Create a separate conversation through the selected response. Null means the saved boundary is unavailable. */
   fork?: (input: ForkInput) => Promise<ForkResult | null>
-  /** Restore the existing native conversation to just before a recorded provider turn. */
+  /** Rewind the native conversation or verify the boundary for its next resume. */
   rewind?: (input: ConversationRewindInput) => Promise<ConversationRewindResult>
   /** Stop the running turn. Safe to call when nothing is running. */
   interrupt: () => Promise<void>

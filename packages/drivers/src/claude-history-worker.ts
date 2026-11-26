@@ -1,8 +1,25 @@
 import { forkSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk'
 import { parentPort } from 'node:worker_threads'
-import type { ForkInput, ForkResult } from './types'
+import type { ConversationRewindInput, ForkInput, ForkResult } from './types'
 
 type ClaudeForkInput = Pick<ForkInput, 'providerSessionId' | 'providerTurnId' | 'inheritedProviderTurnIds'>
+
+export type ClaudeHistoryRequest =
+  | { type: 'fork', input: ClaudeForkInput }
+  | { type: 'rewind', input: ConversationRewindInput }
+  | { type: 'resume', providerSessionId: string, resumeSessionAt: string }
+
+export type ClaudeHistoryResult<T extends ClaudeHistoryRequest> = T['type'] extends 'fork' ? ForkResult | null : boolean
+
+async function verifyClaudeRewind(input: ConversationRewindInput): Promise<boolean> {
+  const history = (await getSessionMessages(input.providerSessionId)).filter(message => message.type !== 'system')
+  const assistantAt = (id: string) => history.findIndex(message => message.uuid === id && message.type === 'assistant')
+  const head = input.activeResumeSessionAt ? assistantAt(input.activeResumeSessionAt) : history.length - 1
+  const selected = assistantAt(input.beforeTurnId)
+  const retained = input.retainedTurnId ? assistantAt(input.retainedTurnId) : undefined
+  return head >= selected && selected >= 0 && history[head]?.uuid === input.newestTurnId
+    && history[head]?.type === 'assistant' && (retained === undefined || (retained >= 0 && retained < selected))
+}
 
 async function forkClaudeHistory(input: ClaudeForkInput): Promise<ForkResult | null> {
   // Search the selected Claude home by ID. A renamed project or a worktree
@@ -32,8 +49,15 @@ async function forkClaudeHistory(input: ClaudeForkInput): Promise<ForkResult | n
   }
 }
 
-parentPort?.once('message', (input: ClaudeForkInput) => {
-  void forkClaudeHistory(input).then(
+async function run(request: ClaudeHistoryRequest): Promise<ForkResult | null | boolean> {
+  if (request.type === 'fork') return forkClaudeHistory(request.input)
+  if (request.type === 'rewind') return verifyClaudeRewind(request.input)
+  const messages = await getSessionMessages(request.providerSessionId)
+  return messages.some(message => message.type === 'assistant' && message.uuid === request.resumeSessionAt)
+}
+
+parentPort?.once('message', (request: ClaudeHistoryRequest) => {
+  void run(request).then(
     result => parentPort?.postMessage({ result }),
     () => parentPort?.postMessage({ error: true }),
   )
