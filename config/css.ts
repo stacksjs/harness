@@ -130,6 +130,8 @@ const RESPONSIVE_SHELL = `
   color: inherit;
 }
 [data-navigation-content] .stx-sidebar-rim { display: none; }
+/* The installed SidebarSpace needs a zero flex minimum to keep its list scrollable. */
+[data-navigation-content] [data-space] { min-height: 0; }
 [data-brand-bar] [data-sidebar-close] { order: -1; }
 [data-navigation-content] [data-sidebar-item] { min-height: 29px; }
 [data-navigation-content] [data-sidebar-row][data-collapsed] { visibility: hidden; }
