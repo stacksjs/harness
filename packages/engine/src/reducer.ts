@@ -7,11 +7,12 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
-import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadUndoDuration, validInputAnswers } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
 import { activeThreadOrder, forkResponsePoint, isTurnActive, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, threadShelf } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
+import { restoreThreadUndoGroup } from './thread-undo'
 
 export class InvalidCommand extends Error {
   constructor(message: string) {
@@ -94,20 +95,23 @@ function turnStarted(session: SessionState, text: string, codexSelection?: Codex
 
 type OrganizeThreadCommand = Extract<Command, { type: 'session.organize' }>
 
-const placementKeys = ['pinnedOrder', 'activeOrder', 'settledAt', 'archivedAt', 'snoozedUntil'] as const
-
 function organizeThread(state: HarnessState, command: OrganizeThreadCommand, envelope: CommandEnvelope): AppendableEvent[] {
   const session = state.sessions.get(command.sessionId)
   if (!session) throw new InvalidCommand('This thread no longer exists.')
   const profileId = state.workspaces.get(session.workspaceId)?.profileId
 
   if (command.action === 'undo') {
+    if (command.undoScope) {
+      const events = restoreThreadUndoGroup(state, profileId, command.undoScope, session.id, command.sourceCommandId, envelope)
+      if (!events.length) throw new InvalidCommand('This action can no longer be undone.')
+      return events
+    }
     const record = profileId === undefined ? undefined : state.profiles.get(profileId)?.threadUndo
     if (!record || record.sourceCommandId !== command.sourceCommandId || record.sessionId !== session.id
       || record.expiresAt <= envelope.at || record.entries.some(entry => {
         const current = state.sessions.get(entry.sessionId)
         return !current || state.workspaces.get(current.workspaceId)?.profileId !== profileId
-          || placementKeys.some(key => key in entry.after && (current.navigation?.[key] ?? null) !== entry.after[key])
+          || threadPlacementKeys.some(key => key in entry.after && (current.navigation?.[key] ?? null) !== entry.after[key])
       })) throw new InvalidCommand('This action can no longer be undone.')
     return record.entries.map(({ sessionId, before }) => ({
       sessionId, commandId: envelope.id, at: envelope.at, payload: {
@@ -133,7 +137,7 @@ function organizeThread(state: HarnessState, command: OrganizeThreadCommand, env
       const navigation = state.sessions.get(sessionId)?.navigation
       const before: Omit<ThreadNavigation, 'title'> = {}
       const after: Omit<ThreadNavigation, 'title'> = {}
-      for (const key of placementKeys) {
+      for (const key of threadPlacementKeys) {
         if (key in payload.changes) {
           before[key] = navigation?.[key] ?? null
           after[key] = payload.changes[key] ?? null
@@ -142,6 +146,11 @@ function organizeThread(state: HarnessState, command: OrganizeThreadCommand, env
       return [{ sessionId, before, after }]
     })
     last.undo = { sourceCommandId: envelope.id, sessionId: session.id, action, expiresAt: envelope.at + threadUndoDuration, entries }
+    if (command.undoScope) {
+      for (const event of events) {
+        if (event.payload.type === 'session.navigation-changed') event.payload.undoScope = { key: command.undoScope }
+      }
+    }
   }
   return events
 }

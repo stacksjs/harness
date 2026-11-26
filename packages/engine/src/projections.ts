@@ -9,6 +9,8 @@
 import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
+import { projectThreadUndo } from './thread-undo'
+import type { ThreadUndoStack } from './thread-undo'
 
 export interface InputRequestState {
   attachments?: QuestionAttachment[]
@@ -173,6 +175,7 @@ export interface ProfileState {
   modelFavorites?: ModelFavorite[]
   claudeCompactionByAccount?: Record<number, ClaudeAccountCompaction>
   threadUndo?: ThreadUndoRecord
+  threadUndoStacks?: Map<string, ThreadUndoStack>
 }
 
 export function modelFavoriteIndex(favorites: readonly ModelFavorite[], favorite: ModelFavorite): number {
@@ -517,7 +520,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       session.navigation = { ...session.navigation, ...p.changes }
       const workspace = state.workspaces.get(session.workspaceId)
       const profile = workspace && state.profiles.get(workspace.profileId)
-      if (profile && Object.keys(p.changes).some(key => key !== 'title')) profile.threadUndo = p.undo
+      if (profile) projectThreadUndo(profile, event.sessionId, event.at, p)
       break
     }
 

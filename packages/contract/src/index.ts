@@ -37,5 +37,5 @@ export { acceptedClaudeAccountCompaction, acceptedSettings, defaultHostSettings,
 export { claudeCompactionReturnAt } from './idle-compaction'
 export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, HostSettings, TerminalShell } from './settings'
 
-export { maximumThreadSnooze, pinOrder, threadDisplayTitle, threadUndoDuration } from './thread-navigation'
-export type { ThreadDrop, ThreadNavigation, ThreadOrganizationAction, ThreadUndoOffer, ThreadUndoRecord } from './thread-navigation'
+export { maximumThreadSnooze, pinOrder, threadDisplayTitle, threadPlacementKeys, threadUndoDuration } from './thread-navigation'
+export type { ThreadDrop, ThreadNavigation, ThreadOrganizationAction, ThreadPlacement, ThreadUndoOffer, ThreadUndoRecord, ThreadUndoResult, ThreadUndoScopeUpdate } from './thread-navigation'

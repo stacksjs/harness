@@ -221,6 +221,79 @@ describe('Engine — the M1 exit criterion', () => {
 })
 
 describe('Thread navigation', () => {
+  it('undoes consecutive unpins together, keeps the preceding action, and preserves each rank after restart', async () => {
+    const { engine, store } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    async function create(): Promise<number> {
+      const command = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+      await engine.dispatch(command)
+      return derivedId(command.id)
+    }
+    const first = await create()
+    const second = await create()
+    const third = await create()
+    const undoScope = 'tab-a'
+    for (const sessionId of [first, second, third])
+      await engine.dispatch(envelope({ type: 'session.organize', sessionId, action: 'pin' }))
+    const until = clock + 60_000
+    const snooze = envelope({ type: 'session.organize', sessionId: third, action: 'snooze', until, undoScope })
+    const unpinFirst = envelope({ type: 'session.organize', sessionId: first, action: 'unpin', undoScope })
+    await engine.dispatch(snooze)
+    await engine.dispatch(unpinFirst)
+    clock += 4000
+    const unpinSecond = envelope({ type: 'session.organize', sessionId: second, action: 'unpin', undoScope })
+    await engine.dispatch(unpinSecond)
+    const restarted = new Engine({ store, reducer: reduce })
+    await restarted.hydrate()
+    clock += 2000
+    const undo = envelope({ type: 'session.organize', sessionId: second, action: 'undo', sourceCommandId: unpinSecond.id, undoScope })
+    await expect(restarted.dispatch({ ...undo, at: unpinSecond.at + 5000 })).rejects.toThrow('can no longer be undone')
+    expect((await restarted.dispatch(undo)).events).toHaveLength(2)
+    expect((await restarted.dispatch(undo)).replayed).toBe(true)
+    expect([first, second].map(id => restarted.current.sessions.get(id)?.navigation?.pinnedOrder)).toEqual([1, 2])
+    expect(restarted.current.sessions.get(third)?.navigation?.snoozedUntil).toBe(until)
+    await restarted.dispatch(envelope({ type: 'session.organize', sessionId: third, action: 'undo', sourceCommandId: snooze.id, undoScope }))
+    expect(restarted.current.sessions.get(third)?.navigation?.snoozedUntil).toBeNull()
+  })
+
+  it('restores the safe members of an Undo group while preserving another tab’s newer rank and snooze', async () => {
+    const { engine } = await bootedEngine()
+    const { workspaceId } = await withWorkspace(engine)
+    const ids: number[] = []
+    for (let index = 0; index < 5; index++) {
+      const create = envelope({ type: 'session.create', workspaceId, driverKind: 'claude' })
+      await engine.dispatch(create)
+      const sessionId = derivedId(create.id)
+      ids.push(sessionId)
+      if (index < 4) await engine.dispatch(envelope({ type: 'session.organize', sessionId, action: 'pin' }))
+    }
+    const [safe, retained, occupied, changed, newcomer] = ids as [number, number, number, number, number]
+    const undoScope = 'tab-a'
+    const unpin = (sessionId: number) => envelope({ type: 'session.organize', sessionId, action: 'unpin', undoScope })
+    await engine.dispatch(unpin(safe))
+    await engine.dispatch(unpin(changed))
+    const latest = unpin(occupied)
+    await engine.dispatch(latest)
+    const otherScope = 'tab-b'
+    const until = clock + 60_000
+    const snooze = envelope({ type: 'session.organize', sessionId: changed, action: 'snooze', until, undoScope: otherScope })
+    await engine.dispatch(snooze)
+    await engine.dispatch(envelope({ type: 'session.organize', sessionId: newcomer, action: 'pin', undoScope: otherScope }))
+    const undo = (scope: string) => envelope({
+      type: 'session.organize', sessionId: occupied, action: 'undo', sourceCommandId: latest.id, undoScope: scope,
+    })
+    await expect(engine.dispatch(undo(otherScope))).rejects.toThrow('can no longer be undone')
+    const result = await engine.dispatch(undo(undoScope))
+    expect(result.events.at(-1)?.payload).toMatchObject({ undoScope: { result: { restored: 1, skipped: 2 } } })
+    expect(ids.map(id => engine.current.sessions.get(id)?.navigation?.pinnedOrder)).toEqual([1, 2, null, null, 3])
+    expect(engine.current.sessions.get(changed)?.navigation?.snoozedUntil).toBe(until)
+    expect(engine.current.sessions.get(retained)?.navigation?.pinnedOrder).toBe(2)
+    await engine.dispatch(envelope({
+      type: 'session.organize', sessionId: changed, action: 'undo', sourceCommandId: snooze.id, undoScope: otherScope,
+    }))
+    expect(engine.current.sessions.get(changed)?.navigation?.snoozedUntil).toBeNull()
+  })
+
   it('restores a multi-row drop exactly after restart without overwriting a later rename', async () => {
     const { engine, store } = await bootedEngine()
     const { workspaceId } = await withWorkspace(engine)

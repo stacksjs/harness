@@ -21,7 +21,9 @@ export type ThreadOrganizationAction =
   | { action: 'undo', sourceCommandId: string }
   | { action: 'pin' | 'unpin' | 'settle' | 'unsettle' | 'archive' | 'restore' | 'wake' }
 
-type ThreadPlacement = Omit<ThreadNavigation, 'title'>
+export type ThreadPlacement = Omit<ThreadNavigation, 'title'>
+
+export const threadPlacementKeys = ['pinnedOrder', 'activeOrder', 'settledAt', 'archivedAt', 'snoozedUntil'] as const
 
 export interface ThreadUndoRecord {
   sourceCommandId: string
@@ -31,7 +33,19 @@ export interface ThreadUndoRecord {
   entries: Array<{ sessionId: number, before: ThreadPlacement, after: ThreadPlacement }>
 }
 
-export type ThreadUndoOffer = Pick<ThreadUndoRecord, 'sourceCommandId' | 'sessionId' | 'action'> & { remainingMs: number }
+export interface ThreadUndoResult {
+  restored: number
+  skipped: number
+  sessionId?: number
+}
+
+export interface ThreadUndoScopeUpdate {
+  key: string
+  consumed?: string[]
+  result?: ThreadUndoResult
+}
+
+export type ThreadUndoOffer = Pick<ThreadUndoRecord, 'sourceCommandId' | 'sessionId' | 'action'> & { remainingMs: number, count: number }
 
 export const threadUndoDuration = 5000
 export const maximumThreadSnooze = 366 * 24 * 60 * 60 * 1000

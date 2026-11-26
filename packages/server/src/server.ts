@@ -18,7 +18,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState } from '@harness/engine'
-import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore } from '@harness/engine'
+import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import { workspaceDiff, workspaceDiffRevision } from './diff'
@@ -933,7 +933,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }
         const useHostClock = received.command.type === 'session.organize'
           || (received.command.type === 'session.turn.start' && received.command.compactAfterTurnId !== undefined)
-        const envelope = useHostClock ? { ...received, at: Date.now() } : received
+        let envelope = useHostClock ? { ...received, at: Date.now() } : received
         // Read before dispatching: a deleted profile takes its sessions with
         // it, and their worktree paths go with them.
         const doomed = envelope.command.type === 'profile.delete'
@@ -941,6 +941,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           : []
 
         try {
+          if (envelope.command.type === 'session.organize' && envelope.command.undoScope !== undefined) {
+            const tab = envelope.command.undoScope
+            if (typeof tab !== 'string' || !/^[a-z0-9-]{1,80}$/.test(tab)) throw new Error('Choose a valid thread Undo scope.')
+            const undoScope = new Bun.CryptoHasher('sha256').update(JSON.stringify([socket.data.deviceId ?? 'local', tab])).digest('hex')
+            envelope = { ...envelope, command: { ...envelope.command, undoScope } }
+          }
           const command = envelope.command
           if (command.type === 'profile.claude-compaction.update' && !socket.data.canUseHostPrivileges)
             throw new Error('Change Claude account settings on the Harness host.')
@@ -976,18 +982,25 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             : await engine.dispatch(envelope)
           const last = result.events.at(-1)?.payload
           const undo = last?.type === 'session.navigation-changed' ? last.undo : undefined
-          const session = undo && engine.current.sessions.get(undo.sessionId)
+          const session = command.type === 'session.organize' && engine.current.sessions.get(command.sessionId)
           const workspace = session && engine.current.workspaces.get(session.workspaceId)
-          const pendingUndo = workspace && engine.current.profiles.get(workspace.profileId)?.threadUndo
-          const remainingMs = (undo?.expiresAt ?? 0) - Date.now()
+          const profile = workspace ? engine.current.profiles.get(workspace.profileId) : undefined
+          const now = Date.now()
+          const remainingMs = (undo?.expiresAt ?? 0) - now
+          const offer = command.type === 'session.organize' && command.undoScope
+            ? threadUndoOffer(profile, command.undoScope, now)
+            : undo && remainingMs > 0 && undo.sourceCommandId === profile?.threadUndo?.sourceCommandId
+              ? { sourceCommandId: undo.sourceCommandId, sessionId: undo.sessionId, action: undo.action, remainingMs, count: 1 }
+              : undefined
+          const undoResult = last?.type === 'session.navigation-changed' && command.type === 'session.organize'
+            && last.undoScope?.key === command.undoScope ? last.undoScope?.result : undefined
           send(socket, {
             t: 'dispatched',
             id: envelope.id,
             replayed: result.replayed,
             seqs: result.events.map(event => event.seq),
-            ...(undo && remainingMs > 0 && undo.sourceCommandId === pendingUndo?.sourceCommandId && {
-              threadUndo: { sourceCommandId: undo.sourceCommandId, sessionId: undo.sessionId, action: undo.action, remainingMs },
-            }),
+            ...(offer && { threadUndo: offer }),
+            ...(undoResult && { undoResult }),
           })
           // Broadcast after acking, so the dispatcher's own ack cannot arrive
           // after the events it caused.
