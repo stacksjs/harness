@@ -678,9 +678,23 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       } }]
     }
 
+    case 'thread.worktree.reserve': {
+      const session = state.sessions.get(command.sessionId)
+      if (!session?.isolate || !state.workspaces.get(session.workspaceId)?.trusted || session.navigation?.archivedAt)
+        throw new InvalidCommand('The session must have a trusted workspace to create a worktree.')
+      if (session.worktreePath || session.worktreeIntent) return []
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'session.worktree-reserved', intent: command.intent } }]
+    }
+
     case 'thread.worktree.set': {
-      if (!state.sessions.has(command.sessionId))
+      const session = state.sessions.get(command.sessionId)
+      if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      if (session.worktreePath === command.worktreePath && session.branch === command.branch) return []
+      const intent = session.worktreeIntent
+      if (intent && (intent.path !== command.worktreePath || intent.branch !== command.branch
+        || !state.workspaces.get(session.workspaceId)?.trusted || session.navigation?.archivedAt))
+        throw new InvalidCommand('This checkout does not match the session’s trusted worktree reservation.')
 
       return [{
         sessionId: command.sessionId,

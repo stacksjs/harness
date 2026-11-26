@@ -15,6 +15,7 @@ import type { ApprovalChoice, CommandEnvelope, ComposerAttachment, ConnectorAppr
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState } from '@harness/engine'
 import { existsSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { inputResponseValues } from '@harness/contract'
 import { resolveDriver } from '@harness/drivers'
 import { effectiveClaudeCompaction, providerConversation } from '@harness/engine'
@@ -77,6 +78,7 @@ function commandId(prefix: string): string {
 
 export class ProviderRuntime {
   private sessions = new Map<number, Running>()
+  private worktreeCreations = new Map<number, Promise<boolean>>()
 
   constructor(private options: RuntimeOptions) {}
 
@@ -163,9 +165,9 @@ export class ProviderRuntime {
     if (!await this.ensureWorktree(sessionId)) return null
 
     const state = this.options.engine.current
-    const workspacePath = this.options.workspacePath
+    const workspacePath = state.sessions.get(sessionId)?.worktreePath || (this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
-      : defaultWorkspacePath(state, sessionId)
+      : defaultWorkspacePath(state, sessionId))
 
     if (!workspacePath) {
       await this.emit({ type: 'thread.error', sessionId, message: 'session has no workspace path' })
@@ -598,47 +600,83 @@ export class ProviderRuntime {
     }
   }
 
-  /**
-   * Give an isolated session its own checkout, once.
-   *
-   * Silent when it cannot: a workspace that is not a repository has nothing to
-   * branch from, and a session must still run there. The alternative — refusing
-   * the turn — would make `--isolate` a footgun on any directory that happens
-   * not to be under version control.
-   */
-  private async ensureWorktree(sessionId: number): Promise<boolean> {
+  private worktreeSource(sessionId: number): string | null {
     const state = this.options.engine.current
     const session = state.sessions.get(sessionId)
-    if (!session?.isolate || session.worktreePath) return true
-
-    const forkCheckout = session.fork && state.sessions.get(session.fork.sessionId)?.worktreePath
-    const repository = forkCheckout || (this.options.workspacePath
+    const forkCheckout = session?.fork && state.sessions.get(session.fork.sessionId)?.worktreePath
+    return forkCheckout || (this.options.workspacePath
       ? this.options.workspacePath(state, sessionId)
       : repositoryPath(state, sessionId))
-    if (!repository || !existsSync(repository)) return true
+  }
 
-    // Clears a registration left by a crash, which is otherwise enough to make
-    // `worktree add` refuse this session's name.
-    await worktree.prune(repository)
+  /** Recover a completed Git operation before accepting connections. */
+  async recoverWorktree(sessionId: number): Promise<void> {
+    const state = this.options.engine.current
+    const session = state.sessions.get(sessionId)
+    const intent = session?.worktreeIntent
+    if (!intent || session.worktreePath || session.navigation?.archivedAt || !state.workspaces.get(session.workspaceId)?.trusted) return
+    const source = this.worktreeSource(sessionId)
+    if (!source || await realpath(source).catch(() => null) !== intent.repository) return
+    const found = await worktree.openReserved(intent, false)
+    if (!found.path || !found.branch) return
+    // No clients are listening yet. This appends the isolated event without
+    // using the live event observer, which is initialized later in serve().
+    await this.options.engine.dispatchInternal(this.envelope({
+      type: 'thread.worktree.set', sessionId, worktreePath: found.path, branch: found.branch,
+    }))
+  }
 
-    const created = await worktree.create(repository, sessionId)
-    if (!created.path || !created.branch) {
-      if (created.reason === 'not-a-repository' || created.reason === 'no-commits') return true
+  private async ensureWorktree(sessionId: number): Promise<boolean> {
+    const session = this.options.engine.current.sessions.get(sessionId)
+    if (!session?.isolate || session.worktreePath) return true
+    const pending = this.worktreeCreations.get(sessionId)
+    if (pending) return pending
+    const creation = this.createWorktree(sessionId)
+    this.worktreeCreations.set(sessionId, creation)
+    try { return await creation }
+    finally { this.worktreeCreations.delete(sessionId) }
+  }
+
+  private async createWorktree(sessionId: number): Promise<boolean> {
+    const engine = this.options.engine
+    const repository = this.worktreeSource(sessionId)
+    const scoped = () => {
+      const session = engine.current.sessions.get(sessionId)
+      return session && !session.navigation?.archivedAt && engine.current.workspaces.get(session.workspaceId)?.trusted
+    }
+    let intent = engine.current.sessions.get(sessionId)?.worktreeIntent
+    try {
+      if (!scoped()) throw new Error('Trust this workspace before creating its worktree.')
+      if (!intent) {
+        if (!repository || !existsSync(repository)) return true
+        const proposed = await worktree.plan(repository, sessionId, crypto.randomUUID())
+        if ('reason' in proposed) {
+          if (proposed.reason === 'not-a-repository' || proposed.reason === 'no-commits') return true
+          throw new Error('Could not plan a worktree for this session.')
+        }
+        await this.record({ type: 'thread.worktree.reserve', sessionId, intent: proposed }).catch(() => {
+          throw new Error('Could not save the worktree reservation. Retry the turn.')
+        })
+        intent = engine.current.sessions.get(sessionId)?.worktreeIntent
+      }
+      if (!scoped() || !intent || !repository || await realpath(repository).catch(() => null) !== intent.repository)
+        throw new Error('The reserved worktree is outside the current trusted checkout. Restore access and retry.')
+      const created = await worktree.openReserved(intent, true)
+      if (!created.path || !created.branch)
+        throw new Error('Could not open the reserved worktree. Check its Git branch and checkout, then retry.')
+      await this.record({ type: 'thread.worktree.set', sessionId, worktreePath: created.path, branch: created.branch }).catch(() => {
+        throw new Error('Could not record the checkout. Retry the turn to recover it.')
+      })
+      return true
+    }
+    catch (error) {
       await this.emit({
         type: 'thread.error',
         sessionId,
-        message: `could not isolate this session: ${created.reason ?? 'unknown reason'}`,
+        message: error instanceof Error ? error.message : 'Could not isolate this session.',
       })
       return false
     }
-
-    await this.emit({
-      type: 'thread.worktree.set',
-      sessionId,
-      worktreePath: created.path,
-      branch: created.branch,
-    })
-    return true
   }
 
   /**

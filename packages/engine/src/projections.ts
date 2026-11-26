@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, ComposerAttachment, ConnectorApproval, DriverKind, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, ThreadNavigation, ThreadUndoRecord, WorktreeIntent } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -59,6 +59,7 @@ export interface SessionState {
   pendingInputs: InputRequestState[]
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
+  worktreeIntent?: WorktreeIntent
   /**
    * Where the agent actually runs, once isolated.
    *
@@ -635,11 +636,18 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       break
     }
 
+    case 'session.worktree-reserved': {
+      const session = state.sessions.get(event.sessionId)
+      if (session) session.worktreeIntent = p.intent
+      break
+    }
+
     case 'session.isolated': {
       const session = state.sessions.get(event.sessionId)
       if (!session) break
       session.worktreePath = p.worktreePath
       session.branch = p.branch
+      delete session.worktreeIntent
       break
     }
 

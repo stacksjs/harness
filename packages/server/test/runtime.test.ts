@@ -1604,6 +1604,69 @@ describe('a session can have a checkout of its own', () => {
     expect(client.payloads('session.isolated')).toHaveLength(1)
     client.close()
   }, 30_000)
+
+  it.each(['session.worktree-reserved', 'session.isolated'] as const)('recovers safely when recording %s fails', async (failure) => {
+    const workspace = repoWorkspace2()
+    const databasePath = join(dir, 'test.sqlite')
+    const checkouts: string[] = []
+    const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
+    const options = { port, databasePath, resolveDriver: () => ({
+      ...driver,
+      async create(config: DriverConfig) {
+        checkouts.push(config.workspacePath)
+        return driver.create(config)
+      },
+    }) }
+    harness = await serve(options)
+    let client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+    try {
+      const { sessionId } = await bootstrapIsolated(client, workspace)
+      const git = (...args: string[]) => spawnSync('git', args, { cwd: workspace, encoding: 'utf8' }).stdout.trim()
+      {
+        using db = new Database(databasePath)
+        db.exec(`CREATE TRIGGER fail_worktree_event BEFORE INSERT ON events WHEN NEW.type = '${failure}'
+          BEGIN SELECT RAISE(ABORT, 'fixture refused worktree event'); END`)
+      }
+      const turn = (id: string) => client.send({ t: 'dispatch', envelope: { id, at: 5, command: { type: 'session.turn.start', sessionId, text: 'work in isolation' } } })
+      turn('worktree-first-turn')
+      expect(await client.waitFor('session.failed', 8000)).toMatchObject({ message: expect.stringContaining('Retry the turn') })
+      const interrupted = harness.engine.current.sessions.get(sessionId)!
+      const intent = interrupted.worktreeIntent
+      expect(interrupted.worktreePath).toBe('')
+      expect(checkouts).toHaveLength(0)
+      if (failure === 'session.isolated') {
+        expect(intent).toBeDefined()
+        expect(git('worktree', 'list', '--porcelain')).toContain(`worktree ${intent!.path}`)
+        writeFileSync(join(intent!.path, 'preserve.txt'), 'Retained through restart\n')
+      }
+      else {
+        expect(intent).toBeUndefined()
+        expect(git('branch', '--list', 'harness/*')).toBe('')
+      }
+
+      client.close()
+      harness.stop()
+      {
+        using db = new Database(databasePath)
+        db.exec('DROP TRIGGER fail_worktree_event')
+      }
+      harness = await serve(options)
+      client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+      expect(checkouts).toHaveLength(0)
+      expect(harness.engine.current.sessions.get(sessionId)?.worktreePath).toBe(intent?.path ?? '')
+      client.send({ t: 'subscribe', sessionId })
+      turn('worktree-retry-turn')
+      expect(await client.waitFor('turn.completed', 8000)).toBeTruthy()
+      const recovered = harness.engine.current.sessions.get(sessionId)!
+      expect(checkouts).toEqual([recovered.worktreePath])
+      expect(recovered.worktreeIntent).toBeUndefined()
+      expect(git('worktree', 'list', '--porcelain').match(/^worktree /gmu)).toHaveLength(2)
+      if (intent) expect(readFileSync(join(recovered.worktreePath, 'preserve.txt'), 'utf8')).toBe('Retained through restart\n')
+      using db = new Database(databasePath)
+      expect(db.query("SELECT COUNT(*) AS count FROM events WHERE session_id = ? AND type = 'session.isolated'").get(sessionId)).toEqual({ count: 1 })
+    }
+    finally { client.close() }
+  }, 30_000)
 })
 
 describe('checkpoint and revert', () => {

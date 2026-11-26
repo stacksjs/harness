@@ -8,7 +8,7 @@
  * ordering and one audit trail rather than two.
  */
 
-import type { ProviderContextUsage } from './events'
+import type { ProviderContextUsage, WorktreeIntent } from './events'
 import type { SteeringOutcome } from './follow-ups'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { ComposerAttachment, ComposerUploads } from './composer-attachments'
@@ -165,6 +165,7 @@ export type InternalCommand =
   | { type: 'thread.fork.finished', sessionId: number, providerSessionId: string, copiedProviderTurnIds?: Record<string, string> }
   | { type: 'thread.fork.portable', sessionId: number }
   | { type: 'thread.fork.failed', sessionId: number, message: string }
+  | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number }
   | { type: 'thread.checkpoint.capture', sessionId: number, turnId: number, kind: 'turn-start' | 'turn-end' | 'manual', vcsRef: string }

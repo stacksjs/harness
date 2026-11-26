@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { branchFor, commitTurn, create, exists, list, prune, release, remove } from '../src/worktree'
+import { branchFor, commitTurn, create, exists, list, openReserved, plan, prune, release, remove } from '../src/worktree'
 
 /**
  * The point of a worktree is that two sessions cannot see each other's files.
@@ -34,6 +34,42 @@ const g = (dir: string, ...args: string[]) => spawnSync('git', args, { cwd: dir,
  * `--timeout` on the command line is a suite that fails in CI.
  */
 const GIT_TIMEOUT = 30_000
+
+describe('reserved worktrees', () => {
+  it('keeps the reserved base when the project moves forward before checkout', async () => {
+    const dir = repo()
+    try {
+      const intent = await plan(dir, 42, crypto.randomUUID())
+      if ('reason' in intent) throw new Error(intent.reason)
+      writeFileSync(join(dir, 'app.txt'), 'next commit\n')
+      g(dir, 'commit', '-qam', 'Move project forward')
+      expect(g(dir, 'rev-parse', 'HEAD')).not.toBe(intent.base)
+      expect(await openReserved(intent, false)).toMatchObject({ path: null })
+      expect(await openReserved(intent, true)).toEqual({ path: intent.path, branch: intent.branch })
+      expect(readFileSync(join(intent.path, 'app.txt'), 'utf8')).toBe('original\n')
+      expect(await list(dir)).toContainEqual({ path: intent.path, branch: intent.branch, sessionId: 42, dirty: false })
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+
+  it('preserves a checkout with the same branch at a different path and an unregistered reserved directory', async () => {
+    const dir = repo()
+    try {
+      const intent = await plan(dir, 42, crypto.randomUUID())
+      if ('reason' in intent) throw new Error(intent.reason)
+      const separate = join(dir, 'separate')
+      expect(spawnSync('git', ['worktree', 'add', '-b', intent.branch, separate], { cwd: dir }).status).toBe(0)
+      writeFileSync(join(separate, 'separate.txt'), 'Keep this checkout\n')
+      expect(await openReserved(intent, true)).toMatchObject({ path: null, reason: 'already-exists' })
+      expect(readFileSync(join(separate, 'separate.txt'), 'utf8')).toBe('Keep this checkout\n')
+      mkdirSync(intent.path, { recursive: true })
+      writeFileSync(join(intent.path, 'unknown.txt'), 'Keep this file\n')
+      expect(await openReserved(intent, true)).toMatchObject({ path: null, reason: 'checkout-conflict' })
+      expect(readFileSync(join(intent.path, 'unknown.txt'), 'utf8')).toBe('Keep this file\n')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+})
 
 describe('creating a worktree for a session', () => {
   it('gives it a directory and a branch of its own', async () => {
@@ -343,6 +379,24 @@ describe('listing and releasing', () => {
       const released = await release(dir, made.path!)
       expect(released.removed).toBe(true)
       expect(released.committed).toBeNull()
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+
+  it('retains a dirty checkout when a Git hook refuses its cleanup commit', async () => {
+    const dir = repo()
+    try {
+      const made = await create(dir, 4545)
+      const hooks = join(dir, '.git', 'test-hooks')
+      mkdirSync(hooks)
+      writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+      g(dir, 'config', 'core.hooksPath', hooks)
+      const unsaved = join(made.path!, 'unsaved.txt')
+      writeFileSync(unsaved, 'Keep uncommitted work\n')
+      expect(await release(dir, made.path!)).toEqual({ removed: false, committed: null, reason: 'the worktree has uncommitted changes' })
+      expect(await exists(dir, made.path!)).toBe(true)
+      expect(readFileSync(unsaved, 'utf8')).toBe('Keep uncommitted work\n')
+      expect(g(dir, 'rev-parse', made.branch!)).toBe(g(dir, 'rev-parse', 'HEAD'))
     }
     finally { rmSync(dir, { recursive: true, force: true }) }
   }, GIT_TIMEOUT)

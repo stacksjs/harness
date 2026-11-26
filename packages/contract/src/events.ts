@@ -22,6 +22,13 @@ export interface EventBase {
   at: number
 }
 
+export interface WorktreeIntent {
+  repository: string
+  path: string
+  branch: string
+  base: string
+}
+
 export interface ProviderContextUsage {
   usedTokens: number
   maxTokens?: number
@@ -82,6 +89,8 @@ export type EventPayload =
    * acceptance alone reloaded into a half-restored tree — files rewritten,
    * files the agent added not yet removed.
    */
+  /** The host reserved this exact checkout before asking Git to create it. */
+  | { type: 'session.worktree-reserved', intent: WorktreeIntent }
   /** This session got its own checkout and branch. */
   | { type: 'session.isolated', worktreePath: string, branch: string }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number }

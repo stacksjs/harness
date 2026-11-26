@@ -316,6 +316,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // Recorded as an interruption rather than quietly rewritten, so the log says
   // what happened.
   for (const session of engine.current.sessions.values()) {
+    if (session.worktreeIntent) await runtime.recoverWorktree(session.id)
     if (session.fork?.state === 'pending') {
       await engine.dispatchInternal({
         id: `boot_fork_${session.id}`,
@@ -753,7 +754,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       const released = await releaseWorktrees(doomed)
       for (const entry of released) {
         console.warn(
-          `[worktree] released ${entry.path}`
+          `[worktree] ${entry.removed ? 'released' : 'retained'} ${entry.path}`
           + (entry.committed ? ` (committed leftovers as ${entry.committed.slice(0, 8)})` : ''),
         )
       }

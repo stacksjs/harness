@@ -35,15 +35,17 @@
  * own merge flow would be a worse version of one you have.
  */
 
+import type { WorktreeIntent } from '@harness/contract'
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { lstat, mkdir, realpath } from 'node:fs/promises'
+import { basename, dirname, join, normalize } from 'node:path'
 
 export interface WorktreeResult {
   /** Directory the agent should run in, or null when none was made. */
   path: string | null
   /** Branch the work lands on. */
   branch: string | null
-  reason?: 'not-a-repository' | 'no-commits' | 'git-failed' | 'already-exists'
+  reason?: 'not-a-repository' | 'no-commits' | 'git-failed' | 'already-exists' | 'checkout-conflict'
 }
 
 function git(cwd: string, args: string[]): Promise<{ ok: boolean, out: string }> {
@@ -60,9 +62,9 @@ function git(cwd: string, args: string[]): Promise<{ ok: boolean, out: string }>
     // Creating a worktree copies a checkout, which is slow on a large
     // repository but must not be unbounded — it runs on the turn path.
     const timer = setTimeout(() => { child.kill(); resolve({ ok: false, out }) }, 60000)
-    child.stdout?.on('data', (chunk: Buffer) => { out += chunk.toString() })
+    child.stdout?.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
     child.on('error', () => { clearTimeout(timer); resolve({ ok: false, out: '' }) })
-    child.on('exit', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
+    child.on('close', code => { clearTimeout(timer); resolve({ ok: code === 0, out }) })
   })
 }
 
@@ -77,34 +79,78 @@ export function branchFor(sessionId: number): string {
   return `harness/session-${sessionId}`
 }
 
-/** Give a session its own checkout and branch. */
-export async function create(workspacePath: string, sessionId: number): Promise<WorktreeResult> {
+async function gitDirectory(path: string): Promise<string | null> {
+  const result = await git(path, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  return result.ok ? realpath(result.out.trimEnd()).catch(() => null) : null
+}
+
+/** Resolve a stable base and a checkout path before any Git mutation. */
+export async function plan(workspacePath: string, sessionId: number, reservation?: string): Promise<WorktreeIntent | { reason: NonNullable<WorktreeResult['reason']> }> {
   const inside = await git(workspacePath, ['rev-parse', '--is-inside-work-tree'])
   if (!inside.ok || inside.out.trim() !== 'true')
-    return { path: null, branch: null, reason: 'not-a-repository' }
+    return { reason: 'not-a-repository' }
 
   // A worktree branches from a commit. An empty repository has none, and
   // `worktree add` on one fails with a message about an invalid reference.
   const head = await git(workspacePath, ['rev-parse', 'HEAD'])
-  if (!head.ok) return { path: null, branch: null, reason: 'no-commits' }
+  if (!head.ok) return { reason: 'no-commits' }
 
   // The repository's own git directory, resolved rather than assumed: in a
   // worktree or a submodule, `.git` is a file pointing elsewhere.
-  const gitDir = await git(workspacePath, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-  if (!gitDir.ok) return { path: null, branch: null, reason: 'git-failed' }
+  const [gitDir, repository] = await Promise.all([gitDirectory(workspacePath), realpath(workspacePath).catch(() => null)])
+  if (!gitDir || !repository) return { reason: 'git-failed' }
+  const leaf = reservation ? `${sessionId}-${reservation}` : String(sessionId)
+  return { path: join(gitDir, 'harness', 'worktrees', leaf), branch: branchFor(sessionId), repository, base: head.out.trim() }
+}
 
-  const path = join(gitDir.out.trim(), 'harness', 'worktrees', String(sessionId))
-  const branch = branchFor(sessionId)
-
-  const added = await git(workspacePath, ['worktree', 'add', '-b', branch, path, head.out.trim()])
+async function add(intent: WorktreeIntent): Promise<WorktreeResult> {
+  const { repository, path, branch, base } = intent
+  const added = await git(repository, ['worktree', 'add', '-b', branch, path, base])
   if (!added.ok) {
-    // Most often a leftover from a previous run with the same session id, which
-    // `prune` clears. Reported rather than forced: removing someone's worktree
-    // because a name collided is not a decision to make silently.
+    // Keep any existing branch or checkout when the reservation collides.
     return { path: null, branch: null, reason: 'already-exists' }
   }
 
   return { path, branch }
+}
+
+/** Give a session its own checkout and branch. */
+export async function create(workspacePath: string, sessionId: number): Promise<WorktreeResult> {
+  const intent = await plan(workspacePath, sessionId)
+  return 'reason' in intent ? { path: null, branch: null, reason: intent.reason } : add(intent)
+}
+
+/** Find the exact registered checkout and leave conflicts untouched. */
+export async function openReserved(intent: WorktreeIntent, createIfMissing: boolean): Promise<WorktreeResult> {
+  const { repository, path, branch } = intent
+  const conflict = { path: null, branch: null, reason: 'checkout-conflict' } as const
+  const common = await gitDirectory(repository)
+  if (!common || join(common, 'harness', 'worktrees', basename(path)) !== path) return conflict
+  const registrations = await gitWorktrees(repository)
+  if (!registrations) return conflict
+  const existing = registrations.find(entry => entry.path === path)
+  if (existing) {
+    if (existing.branch !== branch || existing.locked || existing.prunable) return conflict
+    const [actual, marker, linkedCommon] = await Promise.all([
+      realpath(path).catch(() => null), lstat(join(path, '.git')).catch(() => null), gitDirectory(path),
+    ])
+    return actual === path && marker?.isFile() && linkedCommon === common ? { path, branch } : conflict
+  }
+  if (!createIfMissing) return conflict
+
+  try {
+    // An unregistered path may hold files from an incomplete checkout or a user.
+    if (await lstat(path).then(() => true, (error) => {
+      if (error.code === 'ENOENT') return false
+      throw error
+    })) return conflict
+    const parent = dirname(path)
+    await mkdir(parent, { recursive: true })
+    if (await realpath(parent) !== parent) return conflict
+    const created = await add(intent)
+    return created.path ? openReserved(intent, false) : created
+  }
+  catch { return conflict }
 }
 
 /**
@@ -184,6 +230,21 @@ export interface WorktreeEntry {
   dirty: boolean
 }
 
+async function gitWorktrees(workspacePath: string) {
+  const listed = await git(workspacePath, ['worktree', 'list', '--porcelain', '-z'])
+  if (!listed.ok) return null
+  return listed.out.split('\0\0').flatMap((record) => {
+    const [path, ...fields] = record.split('\0')
+    if (!path?.startsWith('worktree ')) return []
+    return [{
+      path: normalize(path.slice('worktree '.length)),
+      branch: fields.find(field => field.startsWith('branch refs/heads/'))?.slice('branch refs/heads/'.length) ?? null,
+      locked: fields.some(field => field === 'locked' || field.startsWith('locked ')),
+      prunable: fields.some(field => field === 'prunable' || field.startsWith('prunable ')),
+    }]
+  })
+}
+
 /**
  * Every worktree of this repository, with harness's own identified.
  *
@@ -192,15 +253,11 @@ export interface WorktreeEntry {
  * is part of that answer.
  */
 export async function list(workspacePath: string): Promise<WorktreeEntry[]> {
-  const listed = await git(workspacePath, ['worktree', 'list', '--porcelain'])
-  if (!listed.ok) return []
-
+  const listed = await gitWorktrees(workspacePath)
+  if (!listed) return []
   const entries: WorktreeEntry[] = []
-  let current: { path: string, branch: string | null } | null = null
-
-  const flush = async (): Promise<void> => {
-    if (!current) return
-    const match = /\/harness\/worktrees\/(\d+)$/.exec(current.path)
+  for (const current of listed) {
+    const match = /[\\/]harness[\\/]worktrees[\\/](\d+)(?:-[a-f\d-]{36})?$/u.exec(current.path)
     const status = await git(current.path, ['status', '--porcelain'])
     entries.push({
       path: current.path,
@@ -208,19 +265,7 @@ export async function list(workspacePath: string): Promise<WorktreeEntry[]> {
       sessionId: match ? Number(match[1]) : null,
       dirty: status.ok && status.out.trim().length > 0,
     })
-    current = null
   }
-
-  for (const line of listed.out.split('\n')) {
-    if (line.startsWith('worktree ')) {
-      await flush()
-      current = { path: line.slice('worktree '.length), branch: null }
-    }
-    else if (line.startsWith('branch ') && current) {
-      current.branch = line.slice('branch '.length).replace('refs/heads/', '')
-    }
-  }
-  await flush()
 
   return entries
 }
@@ -239,18 +284,11 @@ export async function list(workspacePath: string): Promise<WorktreeEntry[]> {
 export async function release(workspacePath: string, path: string): Promise<{ removed: boolean, committed: string | null, reason?: string }> {
   const committed = await commitTurn(path, 'harness: work left uncommitted when the session went away')
   const removed = await remove(workspacePath, path, false)
-  if (!removed.ok) {
-    // Forced only after the work is safely on the branch, so what this discards
-    // is the checkout and not the output.
-    const forced = await remove(workspacePath, path, true)
-    if (!forced.ok) return { removed: false, committed, reason: forced.reason }
-  }
+  if (!removed.ok) return { removed: false, committed, reason: removed.reason }
   return { removed: true, committed }
 }
 
 /** Whether a path is a live worktree of this repository. */
 export async function exists(workspacePath: string, path: string): Promise<boolean> {
-  const listed = await git(workspacePath, ['worktree', 'list', '--porcelain'])
-  if (!listed.ok) return false
-  return listed.out.split('\n').some(line => line === `worktree ${path}`)
+  return (await gitWorktrees(workspacePath))?.some(entry => entry.path === normalize(path)) ?? false
 }
