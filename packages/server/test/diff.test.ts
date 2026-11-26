@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { expandWorkspaceDiffGap, parseWorkspacePatch, revealWorkspaceDiffContext, workspaceDiffContextKey, workspaceDiffLink, workspaceDiffLinkedRows, workspaceDiffLocation, workspaceDiffRows } from '../src/browser-diff'
-import { MAX_PATCH_BYTES, parseNumstat, parseStatus, workspaceDiff } from '../src/diff'
+import { capture } from '../src/checkpoint'
+import { MAX_PATCH_BYTES, parseNumstat, parseStatus, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff } from '../src/diff'
 
 it('expands unchanged lines with distinct before and after numbers across an insertion', () => {
   const path = 'sample.txt'
@@ -104,7 +105,134 @@ describe('parsing numstat', () => {
   })
 })
 
+describe('turn attribution', () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+    if (result.status !== 0) throw new Error(result.stderr)
+    return result.stdout.trimEnd()
+  }
+  const identity = (cwd: string) => {
+    git(cwd, 'config', 'user.name', 'Harness Fixture')
+    git(cwd, 'config', 'user.email', 'fixture@example.invalid')
+  }
+  const changed = async (cwd: string, before: string, after: string) => {
+    const [summary, patch] = await Promise.all([
+      summarizeTurnFiles(cwd, { before, after }),
+      reviewWorkspaceDiff(cwd, 'turn', '1', [{ id: 1, number: 1, before, after }]),
+    ])
+    expect(patch?.error).toBeUndefined()
+    expect(patch?.files).toEqual(summary?.files ?? [])
+    return { summary, patch }
+  }
+
+  it.each(['fast-forward', 'rebase', 'import only'] as const)('excludes imported commits during %s while keeping the saved workspace intact', async (mode) => {
+    const dir = mkdtempSync(join(tmpdir(), 'harness-attribution-'))
+    try {
+      const upstream = join(dir, 'upstream')
+      const workspace = join(dir, 'workspace')
+      git(dir, 'init', '-qb', 'main', upstream)
+      identity(upstream)
+      writeFileSync(join(upstream, 'shared.txt'), 'Baseline\n')
+      git(upstream, 'add', '.')
+      git(upstream, 'commit', '-qm', 'Baseline')
+      git(dir, 'clone', '-q', upstream, workspace)
+      identity(workspace)
+      if (mode === 'rebase') {
+        writeFileSync(join(workspace, 'preexisting local.txt'), 'Local commit\n')
+        git(workspace, 'add', '.')
+        git(workspace, 'commit', '-qm', 'Local before rebase')
+      }
+      const before = (await capture(workspace)).ref!
+      writeFileSync(join(upstream, 'imported [docs].txt'), 'Only upstream wrote this\n')
+      git(upstream, 'add', '.')
+      git(upstream, 'commit', '-qm', 'Upstream import')
+      git(workspace, 'fetch', '-q', 'origin')
+      git(workspace, ...(mode === 'rebase' ? ['rebase', 'origin/main'] : ['merge', '--ff-only', 'origin/main']))
+      if (mode !== 'import only') {
+        git(workspace, 'mv', '--', 'shared.txt', ':!renamed [draft].txt')
+        git(workspace, 'commit', '-qm', 'Rename locally')
+        writeFileSync(join(workspace, 'turn notes.txt'), 'Written by the turn\n')
+      }
+      const after = (await capture(workspace)).ref!
+      const { patch, summary } = await changed(workspace, before, after)
+      expect(summary?.total).toBe(mode === 'import only' ? 0 : 2)
+      expect(patch?.patch).not.toContain('imported [docs].txt')
+      if (mode !== 'import only') {
+        expect(summary?.files.map(file => file.path).sort()).toEqual([':!renamed [draft].txt', 'turn notes.txt'])
+        expect(patch?.patch).toContain('rename to :!renamed [draft].txt')
+        expect(patch?.patch).toContain('+Written by the turn')
+      }
+      expect(git(workspace, 'diff', '--name-only', before, after)).toContain('imported [docs].txt')
+      expect((await reviewWorkspaceDiff(workspace, 'commit', git(upstream, 'rev-parse', 'HEAD'), []))?.patch).toContain('Only upstream wrote this')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, 20_000)
+
+  it('keeps a merge conflict resolved to the upstream version and omits unrelated imports', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'harness-attribution-merge-'))
+    try {
+      git(dir, 'init', '-qb', 'main')
+      identity(dir)
+      git(dir, 'config', 'core.precomposeunicode', 'false')
+      const shared = join(dir, 'shared.txt')
+      const retired = 'é [retired]'
+      writeFileSync(shared, 'Baseline\n')
+      writeFileSync(join(dir, retired), 'File retired by both branches\n')
+      git(dir, 'add', '.')
+      git(dir, 'commit', '-qm', 'Baseline')
+      git(dir, 'checkout', '-qb', 'upstream')
+      writeFileSync(shared, 'Upstream\n')
+      writeFileSync(join(dir, 'upstream-only.txt'), 'Unrelated\n')
+      git(dir, 'rm', '--', retired)
+      mkdirSync(join(dir, retired))
+      writeFileSync(join(dir, retired, 'child.txt'), 'Imported nested file\n')
+      git(dir, 'add', '-A')
+      const oldDate = '2020-01-01T12:00:00Z'
+      expect(spawnSync('git', ['commit', '-qm', 'Old upstream commit'], {
+        cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate },
+      }).status).toBe(0)
+      git(dir, 'checkout', '-q', 'main')
+      writeFileSync(shared, 'Local\n')
+      git(dir, 'commit', '-qam', 'Conflicting local commit')
+      const before = (await capture(dir)).ref!
+      git(dir, 'rm', '--', retired)
+      git(dir, 'commit', '-qm', 'Retire the original file')
+      expect(spawnSync('git', ['merge', '--no-edit', 'upstream'], { cwd: dir }).status).toBe(1)
+      writeFileSync(shared, 'Upstream\n')
+      git(dir, 'add', '--', 'shared.txt')
+      git(dir, 'commit', '-qm', 'Resolve conflict to upstream')
+      const after = (await capture(dir)).ref!
+
+      const { summary, patch } = await changed(dir, before, after)
+      expect(summary?.files.map(file => file.path).sort()).toEqual(['shared.txt', retired])
+      expect(patch?.patch).toContain('+Upstream')
+      expect(patch?.patch).toContain('-File retired by both branches')
+      expect(patch?.patch).not.toContain('upstream-only.txt')
+      expect(patch?.patch).not.toContain('Imported nested file')
+      expect(git(dir, 'diff', '--name-only', before, after)).toContain('upstream-only.txt')
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, 20_000)
+})
+
 describe('reading a real workspace', () => {
+  it('keeps totals for the entire checkpoint comparison while bounding the transcript preview', async () => {
+    const dir = repo()
+    try {
+      const head = () => spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).stdout.trim()
+      const before = head()
+      for (let i = 0; i < 10; i++) writeFileSync(join(dir, `file [${i}].txt`), 'a\nb\n')
+      expect(spawnSync('git', ['add', '.'], { cwd: dir }).status).toBe(0)
+      expect(spawnSync('git', ['commit', '-qm', 'Add ten files'], { cwd: dir }).status).toBe(0)
+      const after = head()
+      writeFileSync(join(dir, 'outside the turn.txt'), 'Later\n')
+      const result = await summarizeTurnFiles(dir, { before, after })
+      expect(result).toMatchObject({ total: 10, insertions: 20, deletions: 0 })
+      expect(result?.files).toHaveLength(8)
+      expect(result?.files[0]).toEqual({ path: 'file [0].txt', status: 'added', insertions: 2, deletions: 0 })
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  })
   function repo(initialPath = 'tracked.txt'): string {
     const dir = mkdtempSync(join(tmpdir(), 'harness-diff-'))
     const run = (...args: string[]) => spawnSync('git', args, { cwd: dir })

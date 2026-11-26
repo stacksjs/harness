@@ -1585,7 +1585,7 @@ describe('a session can have a checkout of its own', () => {
     client.close()
   }, 30_000)
 
-  it.each(['present', 'missing before send', 'missing before file rewind'] as const)('reuses the same worktree across turns with checkout %s', async (scenario) => {
+  it.each(['present', 'missing before send', 'missing before file rewind', 'deleted branch before file rewind and send'] as const)('reuses the same worktree across turns with checkout %s', async (scenario) => {
     const workspace = repoWorkspace2()
     const { driver } = fakeDriver([{ type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }])
     const opened: string[] = []
@@ -1604,6 +1604,14 @@ describe('a session can have a checkout of its own', () => {
     const session = harness.engine.current.sessions.get(sessionId)!
     const first = session.worktreePath
     if (scenario !== 'present') rmSync(first, { recursive: true })
+    if (scenario === 'deleted branch before file rewind and send') {
+      const deleted = spawnSync('git', ['update-ref', '-d', `refs/heads/${session.branch}`], { cwd: workspace })
+      expect(deleted.status).toBe(0)
+      const checkpointId = session.checkpoints.find(checkpoint => checkpoint.kind === 'turn-start')!.id
+      client.send({ t: 'dispatch', envelope: { id: 'reject-file-recovery', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId } } })
+      expect(await client.waitFor('checkpoint.restore-failed', 8000)).toMatchObject({ checkpointId, message: expect.stringContaining('branch') })
+      expect(existsSync(first)).toBe(false)
+    }
     if (scenario === 'missing before file rewind') {
       const checkpointId = session.checkpoints.find(checkpoint => checkpoint.kind === 'turn-start')!.id
       client.send({ t: 'dispatch', envelope: { id: 'file-recovery', at: 6, command: { type: 'session.checkpoint.revert', sessionId, checkpointId } } })
@@ -2102,6 +2110,16 @@ describe('checkpoint and revert', () => {
       harness = await serve({ port, databasePath, resolveDriver: () => driver })
 
       const endpoint = `http://127.0.0.1:${port}/s/${sessionId}/diff`
+      const files = await (await fetch(`${endpoint}/turn-files?target=${completed.turnId}`)).json()
+      expect(files.repositories.map(({ key }: { key: string }) => key).sort()).toEqual([...keys].sort())
+      for (const { summary } of files.repositories) {
+        expect(summary).toMatchObject({ total: 2, insertions: 2, deletions: 1 })
+        expect(summary.files).toEqual(expect.arrayContaining([
+          { path: 'binary.dat', status: 'added', insertions: 0, deletions: 0 },
+          { path: 'shared.txt', status: 'modified', insertions: 2, deletions: 1 },
+        ]))
+      }
+      expect((await fetch(`${endpoint}/turn-files?target=missing`)).status).toBe(404)
       for (const [key, other] of [[keys[0]!, keys[1]!], [keys[1]!, keys[0]!]]) {
         const params = new URLSearchParams({ repository: key })
         expect((await (await fetch(`${endpoint}/options?${params}`)).json()).turns).toEqual([{ id: completed.turnId, number: 1 }])

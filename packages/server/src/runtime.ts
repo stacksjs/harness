@@ -641,8 +641,7 @@ export class ProviderRuntime {
     }))
   }
 
-  private async registeredWorktree(session: SessionState, authorize?: () => boolean): Promise<boolean> {
-    const mode = authorize ? 'recover' : false
+  private async registeredWorktree(session: SessionState, mode: false | 'recover' | 'resume' = false, authorize?: () => boolean): Promise<boolean> {
     if (session.combinedWorktree) return openCombinedWorktree(session.combinedWorktree, mode, authorize)
     const state = this.options.engine.current
     const repository = this.options.workspacePath ? this.options.workspacePath(state, session.id) : repositoryPath(state, session.id)
@@ -651,12 +650,12 @@ export class ProviderRuntime {
     return Boolean((await worktree.openReserved(checkout, mode, undefined, authorize)).path)
   }
 
-  private async restoreWorktree(session: SessionState, authorize: () => boolean): Promise<boolean> {
+  private async restoreWorktree(session: SessionState, authorize: () => boolean, mode: 'recover' | 'resume' = 'recover'): Promise<boolean> {
     if (await this.registeredWorktree(session)) return true
     if (!authorize()) return false
     // The old process may still have its cwd set to an unlinked directory.
     await this.stopSession(session.id).catch(() => {})
-    return this.registeredWorktree(session, authorize)
+    return this.registeredWorktree(session, mode, authorize)
   }
 
   private async ensureWorktree(sessionId: number, allowProjectCommands: boolean, restoreMissing: boolean): Promise<boolean> {
@@ -667,7 +666,7 @@ export class ProviderRuntime {
         const active = state.sessions.get(sessionId)
         return Boolean(active && !active.navigation?.archivedAt && isolatedRewindScope(state, active))
       }
-      const available = restoreMissing ? await this.restoreWorktree(session, authorize) : await this.registeredWorktree(session)
+      const available = restoreMissing ? await this.restoreWorktree(session, authorize, 'resume') : await this.registeredWorktree(session)
       if (available) return true
       await this.emit({ type: 'thread.error', sessionId, message: 'The registered worktree is unavailable. Check its branch and checkout folder, then retry.' })
       return false

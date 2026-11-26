@@ -231,6 +231,12 @@ export function revealWorkspaceDiffLine(pane: Element | undefined, location: Dif
   else if (lineBounds.right > patchBounds.right) patch.scrollLeft += lineBounds.right - patchBounds.right
 }
 
+export function focusWorkspaceDiffFile(pane: Element | undefined, path: string): void {
+  const button = pane?.querySelector<HTMLButtonElement>(`[data-diff-file="${CSS.escape(path)}"] [data-diff-file-toggle]`)
+  button?.focus({ preventScroll: true })
+  button?.scrollIntoView({ block: 'nearest' })
+}
+
 export function moveWorkspaceDiffLine(event: KeyboardEvent): DiffLineLocation | null {
   if (event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return null
   if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return null

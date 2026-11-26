@@ -260,7 +260,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     @pointercancel="cancelSidebarResize"
   ></div>
 
-  <main data-workspace-layout data-details-open="true" :data-details-open="workspaceDetailsOpen()" :data-diff-open="diffOpen()" :data-files-open="workspaceFilesOpen()" :inert="!desktopSidebar() && sidebarOpen()" class="flex-1 min-w-0">
+  <main data-workspace-layout data-details-open="true" :data-details-open="workspaceDetailsOpen()" :data-diff-open="diffOpen()" :data-files-open="workspaceFilesOpen()" :data-preview-open="browserPreviewOpen()" :inert="!desktopSidebar() && sidebarOpen()" class="flex-1 min-w-0">
     <header data-workspace-header class="flex relative gap-3 items-center shrink-0 px-4">
       <button type="button" data-sidebar-toggle class="harness-icon-button" ref="sidebarToggleBox" @click="toggleSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
         <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
@@ -337,7 +337,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           </button>
         @endif
         @if(draftProject || activeSession || draftWithoutProject)
-          <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" title="Workspace tools" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="(wideWorkspace() ? workspaceDetailsOpen() && !workspaceFilesOpen() && !diffOpen() : workspaceActionsOpen()) ? 'true' : 'false'" class="harness-icon-button">
+          <button type="button" data-header-preview ref="browserPreviewToggleBox" @click="toggleBrowserPreview" aria-label="Open workspace browser" title="Browser" aria-controls="harness-browser-preview" :aria-expanded="browserPreviewOpen() ? 'true' : 'false'" class="harness-icon-button">
+            <span class="size-4 i-hugeicons-globe-02" aria-hidden="true"></span>
+          </button>
+          <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" title="Workspace tools" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="(wideWorkspace() ? workspaceDetailsOpen() && !workspaceFilesOpen() && !diffOpen() && !browserPreviewOpen() : workspaceActionsOpen()) ? 'true' : 'false'" class="harness-icon-button">
             <span data-workspace-tools-icon hidden :hidden="!wideWorkspace()" class="size-4 i-hugeicons-sidebar-right" aria-hidden="true"></span>
             <span data-workspace-menu-icon :hidden="wideWorkspace()" class="size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
           </button>
@@ -452,8 +455,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
           @if(turn.status === 'interrupted')<p data-turn-interrupted class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>@endif
           @if(turn.reviewRepositories.length)
-          <button type="button" data-open-turn-diff aria-controls="harness-changes"
-            :hidden="!turnDiffs()[{{ turn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ turn.id }}) ? 'true' : 'false'"
+          <template :for="reviewTurn in [{{ turn.id }}]" :key="reviewTurn">
+            @includeWhen(activeSession, '../partials/harness-turn-file-summary')
+          </template>
+          <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[{{ turn.id }}]?.length ? String({{ turn.id }}) : ''"
+            :hidden="!canOpenTurnDiff({{ turn.id }})" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ turn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ turn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -563,8 +569,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @endif
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
           <p data-turn-interrupted @if(!initialInterrupted)hidden@endif :hidden="!ssrInterrupted()" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
-          <button type="button" data-open-turn-diff aria-controls="harness-changes"
-            @if(!liveTurn.reviewRepositories.length)hidden@endif :hidden="!turnDiffs()[{{ liveTurn.id }}]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ liveTurn.id }}) ? 'true' : 'false'"
+          <template :for="reviewTurn in [{{ liveTurn.id }}]" :key="reviewTurn">
+            @includeWhen(activeSession, '../partials/harness-turn-file-summary')
+          </template>
+          <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[{{ liveTurn.id }}]?.length ? String({{ liveTurn.id }}) : ''"
+            @if(!liveTurn.reviewRepositories.length)hidden@endif :hidden="!canOpenTurnDiff({{ liveTurn.id }})" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String({{ liveTurn.id }}) ? 'true' : 'false'"
             @click="openTurnDiff({{ liveTurn.id }}, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -653,8 +662,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             :hidden="!rewindCheckpoints()[turn.id] || uiBusy()" :disabled="Boolean(revertingId()) || !sessionOnline()"
             class="harness-response-action" @click="revertTurn(turn.id)"
             :text="revertingId() && revertingId() === rewindCheckpoints()[turn.id]?.id ? 'Reverting…' : 'Revert this turn'">Revert this turn</button>
-          <button type="button" data-open-turn-diff aria-controls="harness-changes"
-            hidden :hidden="!turnDiffs()[turn.id]?.length" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String(turn.id) ? 'true' : 'false'"
+          <template :for="reviewTurn in [turn.id]" :key="reviewTurn">
+            @includeWhen(activeSession, '../partials/harness-turn-file-summary')
+          </template>
+          <button type="button" data-open-turn-diff aria-controls="harness-changes" :data-turn-file-review="turnDiffs()[turn.id]?.length ? String(turn.id) : ''"
+            hidden :hidden="!canOpenTurnDiff(turn.id)" :aria-expanded="diffOpen() && diffReviewMode() === 'turn' && diffTurn() === String(turn.id) ? 'true' : 'false'"
             @click="openTurnDiff(turn.id, $event)" class="harness-response-action">
             <span class="inline-block size-4 i-hugeicons-file-01" aria-hidden="true"></span><span>Open diff</span>
           </button>
@@ -678,12 +690,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     </div>
     @if(activeSession)
       @include('../partials/harness-transcript-find')
-      <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="absolute bottom-3 inset-e-4 px-3 h-9 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full shadow-sm dark:border-white/20">Jump to latest</button>
       <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
     @endif
     </div>
 
     @if(activeSession)
+      <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="px-3 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full dark:border-white/20">Jump to latest</button>
       <div data-thread-archived @if(!initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().archivedAt" class="mx-auto mb-3 px-3 py-2 flex gap-2 items-center text-sm border border-black/10 rounded-md dark:border-white/15">
         <span>Archived thread</span>
         <button type="button" @click="organizeThread('restore')" :disabled="threadActionBusy()" class="font-medium underline">Restore thread</button>
@@ -887,6 +899,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <span>Terminal</span>
           </button>
         @endif
+        <button type="button" data-preview-toggle @click="toggleBrowserPreview" aria-controls="harness-browser-preview" :aria-expanded="browserPreviewOpen() ? 'true' : 'false'">
+          <span class="inline-block size-4 i-hugeicons-globe-02" aria-hidden="true"></span><span>Browser</span>
+        </button>
         @if(activeScratchSession)
           <button type="button" data-promote-scratch @click="promoteScratchProject" :disabled="projectBusy()" class="px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Turn into project</button>
         @endif
@@ -910,6 +925,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         @if(hasWorkspaceFiles)
           @include('../partials/harness-workspace-files')
         @endif
+        @include('../partials/harness-browser-preview')
       </aside>
     @endif
     </div>
@@ -1391,6 +1407,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let diffTools = null
   let diffComparisonTarget
   let pendingDiffLineLink = null
+  let pendingTurnFile = null
   const diffDisplayFiles = derived(() => {
     const hunks = diffHunks()
     const limits = diffFileLimits()
@@ -1416,6 +1433,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const forkingResponseId = state(0)
   const forkableTurns = state(initialForkableTurns)
   const turnDiffs = state(initialTurnDiffs)
+  const turnFiles = state({})
+  let turnFilesObserver = null
   const forkStatus = state(initialFork?.state || 'ready')
   const forkError = state(initialFork?.error || '')
   const forkStatusText = derived(() => forkStatus() === 'pending' ? 'Creating fork…'
@@ -2082,6 +2101,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     showContextWindow.set(event.currentTarget.checked)
   }
   const wideWorkspace = useMediaQuery('(min-width: 75rem)')
+  const browserPreviewOpen = state(false)
+  const browserPreviewTools = state(null)
+  const storedBrowserPreview = useLocalStorage(`harness.browser-preview.v1:${activeProfile || 0}:${promptScope}`, null, { listenToStorageChanges: false })
+  const browserPreview = state(null)
+  const browserPreviewTabs = derived(() => browserPreview()?.tabs || [])
+  const activePreviewTab = derived(() => browserPreviewTabs().find(tab => tab.id === browserPreview()?.active))
+  const activePreviewUrl = derived(() => activePreviewTab()?.history[activePreviewTab().index] || '')
+  const previewAddressDraft = state('')
+  const previewError = state('')
+  const browserPreviewPane = useRef('browserPreviewPaneBox')
+  const browserPreviewAddress = useRef('browserPreviewAddressBox')
+  const browserPreviewToggle = useRef('browserPreviewToggleBox')
+  let browserPreviewTrigger = null
   const diffClose = useRef('diffCloseBox')
   const changesPane = useRef('changesPane')
   const workspaceFilesOpen = state(false)
@@ -2489,6 +2521,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     sidebarDrag = null
   }
   function toggleWorkspaceActions() {
+    if (browserPreviewOpen()) closeBrowserPreview(false)
     if (!wideWorkspace()) {
       if (workspaceFilesOpen()) closeWorkspaceFiles(false)
       workspaceActionsOpen.update(open => !open)
@@ -2512,6 +2545,97 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (!workspaceActionsOpen()) return
     workspaceActionsOpen.set(false)
     workspaceActionsToggle.current?.focus()
+  }
+
+  async function toggleBrowserPreview(event) {
+    if (browserPreviewOpen()) { closeBrowserPreview(); return }
+    browserPreviewTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
+    workspaceActionsOpen.set(false)
+    if (workspaceFilesOpen()) closeWorkspaceFiles(false)
+    diffOpen.set(false)
+    diffTrigger = null
+    browserPreviewOpen.set(true)
+    previewError.set('')
+    try {
+      if (!browserPreviewTools()) browserPreviewTools.set(await import(codecUrl))
+      if (!browserPreview()) browserPreview.set(browserPreviewTools().restoreBrowserPreview(storedBrowserPreview(), browserPreviewPane.current?.ownerDocument.location.origin))
+      previewAddressDraft.set(activePreviewUrl())
+    }
+    catch { previewError.set('Could not load the browser pane. Close it and try again.') }
+    void nextTick(() => { if (browserPreviewOpen()) browserPreviewAddress.current?.focus() })
+  }
+
+  function closeBrowserPreview(restoreFocus = true) {
+    browserPreviewOpen.set(false)
+    const trigger = browserPreviewTrigger
+    browserPreviewTrigger = null
+    if (restoreFocus) void nextTick(() => [trigger, browserPreviewToggle.current, workspaceActionsToggle.current].find(element => element?.getClientRects().length)?.focus())
+  }
+
+  function previewTabLabel(tab) {
+    const address = tab.history[tab.index]
+    if (!address) return 'New tab'
+    const url = new URL(address)
+    return url.pathname === '/' ? url.host : url.host + url.pathname
+  }
+
+  function setBrowserPreview(tabs, active) {
+    const next = { tabs, active }
+    browserPreview.set(next)
+    storedBrowserPreview.set(next)
+    previewAddressDraft.set(activePreviewUrl())
+    previewError.set('')
+  }
+
+  function selectPreviewTab(id) {
+    setBrowserPreview(browserPreviewTabs(), id)
+  }
+
+  function addPreviewTab() {
+    const tabs = browserPreviewTabs()
+    if (tabs.length >= browserPreviewTools().MAX_PREVIEW_TABS) return
+    let id = 1
+    while (tabs.some(tab => tab.id === id)) id++
+    setBrowserPreview([...tabs, { id, history: [], index: 0 }], id)
+    void nextTick(() => browserPreviewAddress.current?.focus())
+  }
+
+  function closePreviewTab(id) {
+    const tabs = browserPreviewTabs()
+    const remaining = tabs.filter(tab => tab.id !== id)
+    const closedIndex = tabs.findIndex(tab => tab.id === id)
+    const replacement = remaining[Math.min(closedIndex, remaining.length - 1)]?.id
+    const active = activePreviewTab()?.id === id ? replacement : activePreviewTab()?.id
+    setBrowserPreview(remaining.length ? remaining : [{ id: 1, history: [], index: 0 }], active || 1)
+    void nextTick(() => browserPreviewAddress.current?.focus())
+  }
+
+  function guardPreviewComposition(event) {
+    if (event.key === 'Enter' && (event.isComposing || event.keyCode === 229)) event.preventDefault()
+  }
+
+  function openPreviewAddress() {
+    const tab = activePreviewTab()
+    const origin = browserPreviewPane.current?.ownerDocument.location.origin
+    if (!tab || !origin || !browserPreviewTools()) return
+    const result = browserPreviewTools().previewAddress(previewAddressDraft(), origin)
+    if (result.error) { previewError.set(result.error); return }
+    browserPreviewAddress.current?.blur()
+    if (result.url === activePreviewUrl()) { reloadBrowserPreview(); return }
+    const next = browserPreviewTools().navigatePreviewTab(tab, result.url)
+    setBrowserPreview(browserPreviewTabs().map(entry => entry.id === tab.id ? next : entry), tab.id)
+  }
+
+  function stepPreviewHistory(direction) {
+    const tab = activePreviewTab()
+    if (!tab || !tab.history[tab.index + direction]) return
+    setBrowserPreview(browserPreviewTabs().map(entry => entry.id === tab.id ? { ...tab, index: tab.index + direction } : entry), tab.id)
+  }
+
+  function reloadBrowserPreview() {
+    previewError.set('')
+    previewAddressDraft.set(activePreviewUrl())
+    browserPreviewTools()?.reloadPreviewFrame(browserPreviewPane.current, activePreviewTab()?.id)
   }
 
   // The "name this profile" form. Replaces window.prompt: the name arrives
@@ -3645,6 +3769,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function clearDiffComparison() {
     stopDiffContextRequests()
     pendingDiffLineLink = null
+    pendingTurnFile = null
     diffComparisonTarget = undefined
     batch(() => {
       diffStatus.set('Loading comparison…')
@@ -3817,6 +3942,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       : diff.scope === 'working-tree' ? 'No uncommitted changes.' : `No changes ${scope}.`
     diffComparisonTarget = diff.comparisonTarget
     const linked = pendingDiffLineLink
+    const selectedFile = pendingTurnFile
+    pendingTurnFile = null
     batch(() => {
       diffStatus.set(status)
       const patch = diff.error ? '' : diff.patch
@@ -3826,7 +3953,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const paths = new Set(files.map(file => file.path))
       for (const path of limits.keys()) if (!paths.has(path)) limits.delete(path)
       if (!previousFiles.length) {
-        const first = files.find(file => hunks.has(file.path))
+        const first = selectedFile ? files.find(file => file.path === selectedFile) : files.find(file => hunks.has(file.path))
         if (first) limits.set(first.path, diffPageSize)
       }
       const selection = diffLineSelection()
@@ -3844,6 +3971,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     })
     for (const [path] of diffFileLimits()) void loadDiffContext(path)
     if (linked) void selectLinkedDiffLine(linked)
+    if (selectedFile && diffOpen()) void nextTick(() => diffTools.focusWorkspaceDiffFile(changesPane.current, selectedFile))
   }
 
   effect(() => {
@@ -4043,6 +4171,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   async function toggleWorkspaceFiles(event) {
     if (workspaceFilesOpen()) { closeWorkspaceFiles(); return }
+    if (browserPreviewOpen()) closeBrowserPreview(false)
     workspaceFilesTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
     workspaceActionsOpen.set(false)
     diffOpen.set(false)
@@ -4122,17 +4251,61 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   })
   onDestroy(() => workspaceFilesController?.dispose())
 
-  function openTurnDiff(turnId, event) {
+  onMount(async () => {
+    if (!sessionId || !codecUrl) return
+    const codec = await import(codecUrl).catch(() => null)
+    const transcript = transcriptRef.current
+    if (codec && transcript?.isConnected) turnFilesObserver = codec.observeTurnFiles(transcript, sessionId, (id, repositories) => {
+      turnFiles.update(files => ({ ...files, [id]: repositories }))
+    })
+  })
+  onDestroy(() => turnFilesObserver?.dispose())
+
+  function canOpenTurnDiff(turnId) {
+    const repositories = turnFiles()[turnId]
+    return Boolean(turnDiffs()[turnId]?.length) && (!repositories || repositories.some(repo => !repo.summary || repo.summary.total))
+  }
+
+  function turnFileLabel(turnId) {
+    const repositories = turnFiles()[turnId]
+    if (repositories === undefined) return ''
+    if (repositories === null) return 'Recorded files unavailable'
+    const total = repositories.reduce((sum, repo) => sum + (repo.summary?.total || 0), 0)
+    if (!total) return repositories.some(repo => !repo.summary) ? 'Recorded files unavailable' : ''
+    const insertions = repositories.reduce((sum, repo) => sum + (repo.summary?.insertions || 0), 0)
+    const deletions = repositories.reduce((sum, repo) => sum + (repo.summary?.deletions || 0), 0)
+    const count = total + (total === 1 ? ' changed file' : ' changed files')
+    return insertions || deletions ? count + ' · +' + insertions + ' −' + deletions : count
+  }
+
+  function retryTurnFiles(turnId) {
+    void turnFilesObserver?.load(String(turnId))
+  }
+
+  function canRetryTurnFiles(turnId) {
+    const repositories = turnFiles()[turnId]
+    return repositories === null || Boolean(repositories?.some(repo => !repo.summary))
+  }
+
+  function turnFileActionLabel(repo, file) {
+    const label = 'Review ' + file.path + ' in ' + repo.label
+    return file.insertions || file.deletions ? label + ', ' + file.insertions + ' additions, ' + file.deletions + ' deletions' : label
+  }
+
+  function openTurnDiff(turnId, event, selectedRepository, path) {
     const repositories = turnDiffs()[turnId]
     if (!repositories?.length) return
-    const repository = repositories.includes(diffRepository()) ? diffRepository() : repositories[0]
+    const preferred = selectedRepository ?? diffRepository()
+    const repository = repositories.includes(preferred) ? preferred : repositories[0]
     clearDiffComparison()
+    pendingTurnFile = path ?? null
     batch(() => {
       if (repository !== diffRepository()) diffReviewOptions.set(null)
       diffRepository.set(repository)
       diffReviewMode.set('turn')
       diffTurn.set(String(turnId))
       openDiffPane(event.currentTarget)
+      refreshWorkspaceDiff()
     })
   }
 
@@ -4140,6 +4313,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     diffTrigger = trigger
     closeWorkspaceActions()
     if (workspaceFilesOpen()) closeWorkspaceFiles(false)
+    if (browserPreviewOpen()) closeBrowserPreview(false)
     diffOpen.set(true)
     void nextTick(() => diffClose.current?.focus())
   }
@@ -4147,6 +4321,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function toggleDiff(event) {
     if (diffOpen()) {
       diffOpen.set(false)
+      pendingTurnFile = null
       const trigger = diffTrigger
       diffTrigger = null
       void nextTick(() => (trigger?.getClientRects().length ? trigger : workspaceActionsToggle.current)?.focus())
@@ -4188,6 +4363,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     followingTranscript.set(true)
     transcript.scrollTop = transcript.scrollHeight
     transcript.focus({ preventScroll: true })
+    void nextTick(() => { transcript.scrollTop = transcript.scrollHeight })
   }
 
   async function handleTranscriptControl(event) {
@@ -5219,6 +5395,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function toggleTerminal(event) {
     // No workspace, no shell to open.
     if (!sessionId || !Number(activeWorkspaceId)) return
+    if (!wideWorkspace() && browserPreviewOpen()) closeBrowserPreview(false)
     if (!wideWorkspace() && workspaceFilesOpen()) {
       closeWorkspaceFiles(false)
       if (termOpen()) {
@@ -5305,6 +5482,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       else if (workspaceFilesOpen()) {
         event.preventDefault()
         closeWorkspaceFiles()
+      }
+      else if (browserPreviewOpen()) {
+        event.preventDefault()
+        closeBrowserPreview()
       }
       else if (diffOpen()) {
         event.preventDefault()

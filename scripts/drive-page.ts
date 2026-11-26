@@ -36,6 +36,14 @@ function check(name: string, ok: boolean): void {
 const fixtureBin = mkdtempSync(join(tmpdir(), 'harness-page-bin-'))
 const fixtureShell = join(fixtureBin, 'harness-test-shell')
 const fixtureEditorArgs = join(fixtureBin, 'editor-args')
+async function editorReceived(expected: string): Promise<boolean> {
+  const deadline = Date.now() + 4_000
+  do {
+    if (existsSync(fixtureEditorArgs) && readFileSync(fixtureEditorArgs, 'utf8') === expected) return true
+    await Bun.sleep(20)
+  } while (Date.now() < deadline)
+  return false
+}
 writeFileSync(join(fixtureBin, 'codex'), '#!/bin/sh\nprintf "Codex test sign-in\\n"\n', { mode: 0o755 })
 writeFileSync(join(fixtureBin, 'code'), '#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "${0%/*}/editor-args"\n', { mode: 0o755 })
 writeFileSync(fixtureShell, '#!/bin/sh\nprintf "Harness test terminal\\n"\nexec /bin/sh -i\n', { mode: 0o755 })
@@ -283,6 +291,14 @@ const instance: ProviderInstance = {
   },
   async stop() {},
 }
+function importProjectFixture(workspace: string, name: string) {
+  const source = join(driveRoot, 'api-import-source')
+  writeFileSync(join(source, name), 'Only the upstream repository wrote this.\n')
+  execFileSync('git', ['add', '--', name], { cwd: source })
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', name], { cwd: source })
+  execFileSync('git', ['pull', '-q', '--ff-only', 'fixture-upstream', 'review/fixture'], { cwd: join(workspace, 'api') })
+}
+
 const driver: Driver = {
   kind: 'claude',
   async probe() { return { status: 'ready' } },
@@ -291,6 +307,12 @@ const driver: Driver = {
     return {
       ...instance,
       async *startTurn(input) {
+        if (input.text === 'Import upstream changes without making edits.') {
+          importProjectFixture(config.workspacePath, 'imported-only.txt')
+          yield { type: 'assistant-delta', text: 'Upstream changes were imported without local edits.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          return
+        }
         if (input.text === 'Verify the repositories without editing.') {
           yield { type: 'assistant-delta', text: 'The fixture was checked without edits.' }
           yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
@@ -298,6 +320,7 @@ const driver: Driver = {
         }
         if (input.text.startsWith('Review both repositories in turn ')) {
           const sequence = input.text.slice(-1)
+          if (sequence === '2') importProjectFixture(config.workspacePath, 'upstream [notes].txt')
           for (const [key, label] of [['api', 'API'], ['packages/web', 'Web']] as const) {
             const file = join(config.workspacePath, key, 'shared.txt')
             writeFileSync(file, `${readFileSync(file, 'utf8')}${label} edit from turn ${sequence}\n`)
@@ -2080,7 +2103,7 @@ if (!editorResponse.ok()) throw new Error(`The editor launch returned ${editorRe
 await fileEditorDialog.waitFor({ state: 'hidden', timeout: 4000 })
 const projectFolder = realpathSync(dir)
 check('a linked file opens its exact working file and line, and the chooser returns focus',
-  existsSync(fixtureEditorArgs) && readFileSync(fixtureEditorArgs, 'utf8') === `${projectFolder}\n--goto\n${join(projectFolder, 'fixture context', previewFile)}:125\n`)
+  await editorReceived(`${projectFolder}\n--goto\n${join(projectFolder, 'fixture context', previewFile)}:125\n`))
 await fileEditorButton.click()
 await fixtureEditor.getByText('Preferred', { exact: true }).waitFor()
 const [shortcutLaunch] = await Promise.all([
@@ -2094,7 +2117,7 @@ const [shortcutLaunch] = await Promise.all([
 ])
 await fileEditorDialog.waitFor({ state: 'hidden' })
 check('opening the preferred editor immediately after closing the chooser keeps the new request',
-  shortcutLaunch.status() === 204 && readFileSync(fixtureEditorArgs, 'utf8') === `${projectFolder}\n--new-window\n${projectFolder}\n`)
+  shortcutLaunch.status() === 204 && await editorReceived(`${projectFolder}\n--new-window\n${projectFolder}\n`))
 await fileLinkPage.close()
 const fileTools = projectAttachmentDraft.getByRole('button', { name: 'Workspace actions' })
 await fileTools.click()
@@ -2198,11 +2221,15 @@ check('assistant markup stays text while Markdown code renders',
 check('reloading mid-turn preserves literal entities when streaming resumes',
   await transcript.locator('p code').last().textContent() === '&lt;')
 await jump.click()
+await jump.waitFor({ state: 'hidden' })
+await page.waitForFunction(() => {
+  const pane = document.querySelector('[data-transcript]')
+  return pane && pane.scrollHeight - pane.scrollTop - pane.clientHeight < 16
+})
+check('jump returns to the latest response and restores transcript focus', await transcript.evaluate(element => element.ownerDocument.activeElement === element))
 const copy = transcript.getByRole('button', { name: 'Copy code' })
 await copy.click()
 check('the copy action preserves the fenced code', await page.locator('body').getAttribute('data-fixture-clipboard') === 'const result = 42\nconst format = "{{ value }}"\n')
-check('jump returns to the latest response', await jump.isHidden()
-  && await transcript.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight < 16))
 await capture('transcript-markdown-mobile')
 await page.setViewportSize({ width: 1280, height: 800 })
 await page.reload()
@@ -3712,6 +3739,89 @@ await harness.engine.dispatch({ id: ledgerThread, at: Date.now(), command: { typ
 const ledgerPath = `/s/${derivedId(ledgerThread)}`
 await page.setViewportSize({ width: 1440, height: 900 })
 await page.goto(new URL(ledgerPath, baseUrl).href)
+const previewSite = Bun.serve({
+  hostname: '127.0.0.1', port: 0,
+  fetch(request) {
+    const path = new URL(request.url).pathname
+    if (path === '/counter.js') return new Response("const button = document.querySelector('button'); button.disabled = false; button.addEventListener('click', () => { button.textContent = 'Updated' })", { headers: { 'content-type': 'text/javascript' } })
+    const heading = path === '/second' ? 'Second preview page' : 'Local development preview'
+    return new Response(`<h1>${heading}</h1><button disabled>Update</button><script type="module" src="/counter.js"></script>`, { headers: { 'content-type': 'text/html' } })
+  },
+})
+try {
+  const browserPane = page.getByRole('region', { name: 'Browser', exact: true })
+  const previewTrigger = page.getByRole('button', { name: 'Open workspace browser' })
+  const previewAddress = browserPane.getByRole('textbox', { name: 'Preview address' })
+  const activeFrame = browserPane.frameLocator('iframe:not([hidden])')
+  const loopback = `127.0.0.1:${previewSite.port}`
+  const visitPreview = async (address: string) => {
+    await previewAddress.fill(address)
+    await previewAddress.press('Enter')
+  }
+  await previewTrigger.click()
+  await previewAddress.waitFor()
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Preview address')
+  check('the preview address uses the active Harness appearance',
+    await previewAddress.evaluate(input => getComputedStyle(input).backgroundColor === 'rgba(0, 0, 0, 0)'))
+  await capture('workspace-browser-empty')
+  await visitPreview(loopback)
+  await activeFrame.getByRole('heading', { name: 'Local development preview' }).waitFor()
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') !== 'Preview address')
+  await activeFrame.getByRole('button', { name: 'Update' }).click()
+  await activeFrame.getByRole('button', { name: 'Updated' }).waitFor()
+  check('a live local app can run its own frontend modules in the Browser pane', true)
+  await browserPane.getByRole('button', { name: 'New browser tab' }).click()
+  await visitPreview(`${loopback}/second`)
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  await browserPane.locator('[data-preview-select="1"]').click()
+  await activeFrame.getByRole('button', { name: 'Updated' }).waitFor()
+  check('switching browser tabs preserves the first page’s runtime', true)
+  await visitPreview(`${loopback}/second`)
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  await browserPane.getByRole('button', { name: 'Browser back' }).click()
+  await activeFrame.getByRole('heading', { name: 'Local development preview' }).waitFor()
+  await browserPane.getByRole('button', { name: 'Browser forward' }).click()
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  const openExternally = browserPane.getByRole('link', { name: 'Open preview in browser' })
+  check('browser back and forward restore entered addresses with an isolated pop-out link',
+    await openExternally.getAttribute('href') === `http://${loopback}/second` && await openExternally.getAttribute('rel') === 'noopener noreferrer')
+  await visitPreview(new URL(ledgerPath, baseUrl).href)
+  await browserPane.getByRole('alert').getByText('Open Harness in its main window.').waitFor()
+  check('the browser pane rejects Harness itself and leaves the current preview in place',
+    await activeFrame.getByRole('heading', { name: 'Second preview page' }).isVisible())
+  await capture('workspace-browser-address-error')
+  await browserPane.getByRole('button', { name: 'Reload preview' }).click()
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    check(`browser controls and preview fit at ${width}×${height}`, await browserPane.evaluate((pane) => {
+      const bounds = pane.getBoundingClientRect()
+      const input = pane.querySelector('input')?.getBoundingClientRect()
+      const exit = pane.querySelector('[aria-label="Close browser pane"]')?.getBoundingClientRect()
+      return bounds.left >= 0 && bounds.right <= innerWidth && bounds.height > 200 && document.documentElement.scrollWidth === innerWidth
+        && Boolean(input && exit && input.width >= 60 && exit.right <= innerWidth)
+    }))
+    const transcript = page.locator('[data-workspace-lane]')
+    check(`the preview and transcript use the available workspace width at ${width}×${height}`,
+      (await transcript.isVisible()) === (width >= 1024))
+    await capture(`workspace-browser-${width}x${height}`)
+  }
+  const restoredPage = await page.reload()
+  await page.getByRole('button', { name: 'Workspace actions' }).click()
+  await page.locator('[data-preview-toggle]').click()
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  check('phone workspace actions restore both browser tabs after reloading the thread',
+    await browserPane.locator('[data-preview-select]').count() === 2
+    && restoredPage?.headers()['x-frame-options'] === 'DENY'
+    && restoredPage?.headers()['content-security-policy'] === "frame-ancestors 'none'")
+  await browserPane.getByRole('button', { name: /^Close tab:/u }).last().click()
+  check('closing a saved browser tab keeps the selected page available', await browserPane.locator('[data-preview-select]').count() === 1)
+  await page.keyboard.press('Escape')
+  await browserPane.waitFor({ state: 'hidden' })
+  await page.waitForFunction(() => document.activeElement?.hasAttribute('data-workspace-actions-toggle'))
+  check('closing the phone browser returns focus to Workspace actions', true)
+  await page.setViewportSize({ width: 1440, height: 900 })
+}
+finally { previewSite.stop(true) }
 let ledgerReads = 0
 page.on('request', (request) => {
   if (new URL(request.url()).pathname === `${ledgerPath}/diff`) ledgerReads++
@@ -3744,7 +3854,7 @@ const [branchEditorResponse] = await Promise.all([
 await branchEditorDialog.waitFor({ state: 'hidden' })
 const ledgerFolder = realpathSync(ledgerRepo)
 check('a branch comparison opens the after line in the working checkout', branchEditorResponse.status() === 204
-  && readFileSync(fixtureEditorArgs, 'utf8') === `${ledgerFolder}\n--goto\n${join(ledgerFolder, 'branch-only.txt')}:1\n`)
+  && await editorReceived(`${ledgerFolder}\n--goto\n${join(ledgerFolder, 'branch-only.txt')}:1\n`))
 if (screenshotDir) {
   for (const [width, height] of workspaceViewports) {
     await page.setViewportSize({ width, height })
@@ -3953,6 +4063,8 @@ for (const [folder, label] of [['api', 'API'], ['packages/web', 'Web']] as const
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', `${label} review fixture`], { cwd: path, env: multiRepoGit })
   writeFileSync(join(path, 'shared.txt'), `Shared baseline\n${label} in commit\n${label} working copy\n`)
 }
+execFileSync('git', ['clone', '-q', join(multiRepoProject, 'api'), join(driveRoot, 'api-import-source')])
+execFileSync('git', ['remote', 'add', 'fixture-upstream', join(driveRoot, 'api-import-source')], { cwd: join(multiRepoProject, 'api') })
 writeFileSync(join(multiRepoProject, 'fixture.code-workspace'), '{"folders":[{"name":"API service","path":"api"},{"name":"Web frontend","path":"packages/web"}]}')
 const multiRepoId = 'project-repositories'
 const multiRepoWorkspace = derivedId(multiRepoId)
@@ -4024,6 +4136,9 @@ await ledgerPanel.getByText('API edit from turn 2', { exact: true }).waitFor()
 check('the streamed transcript action opens exactly the second turn',
   await recentTurnDiffs.nth(1).getAttribute('aria-expanded') === 'true'
   && await ledgerComparison.inputValue() === 'turn')
+check('the turn patch omits a fetched file that remains in the repository',
+  existsSync(join(multiRepoProject, 'api', 'upstream [notes].txt'))
+  && await ledgerPanel.getByText('upstream [notes].txt', { exact: true }).count() === 0)
 await ledgerComparison.selectOption('uncommitted')
 check('a transcript action reports collapsed in another comparison mode', await recentTurnDiffs.nth(1).getAttribute('aria-expanded') === 'false')
 await recentTurnDiffs.nth(1).press('Enter')
@@ -4031,12 +4146,78 @@ await ledgerPanel.getByText('API edit from turn 2', { exact: true }).waitFor()
 await ledgerPanel.getByRole('button', { name: 'Close changes' }).click()
 await page.waitForFunction(() => document.activeElement?.matches('[data-open-turn-diff]'))
 check('closing a transcript diff gives its trigger focus', await recentTurnDiffs.nth(1).evaluate(button => document.activeElement === button))
+const changedFilesForTurn = page.locator('[data-turn="2"] [data-turn-file-summary]')
+await changedFilesForTurn.getByText(/2 changed files/u).waitFor()
+const webChange = changedFilesForTurn.getByRole('button', { name: 'Review shared.txt in packages/web' })
+check('the streamed turn lists each repository and the recorded line counts', await webChange.isVisible()
+  && await changedFilesForTurn.getByRole('button', { name: 'Review shared.txt in api' }).isVisible()
+  && await changedFilesForTurn.locator('[data-turn-file-insertions]:visible').count() === 2)
+check('file totals have readable contrast against the active appearance', await webChange.evaluate(button => {
+  const shell = button.closest('[data-harness-shell]')
+  if (!shell) return false
+  const luminance = (color: string) => {
+    const rgb = color.match(/\d+(?:\.\d+)?/g)?.slice(0, 3).map(Number)
+    if (!rgb || rgb.length !== 3) return NaN
+    const channels = rgb.map(channel => channel / 255).map(channel =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+    return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722
+  }
+  const background = luminance(getComputedStyle(shell).backgroundColor)
+  const totals = [...button.querySelectorAll('[data-turn-file-insertions], [data-turn-file-deletions]')]
+  return totals.length === 2 && totals.every((total) => {
+    const foreground = luminance(getComputedStyle(total).color)
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) >= 4.5
+  })
+}))
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  await changedFilesForTurn.scrollIntoViewIfNeeded()
+  await webChange.scrollIntoViewIfNeeded()
+  check(`transcript file rows fit at ${width}×${height}`, await webChange.evaluate(el => {
+    const bounds = el.getBoundingClientRect()
+    const transcript = el.closest('[data-transcript]')?.getBoundingClientRect()
+    const jump = document.querySelector('[data-jump-to-latest]:not([hidden])')?.getBoundingClientRect()
+    return bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
+      && Boolean(transcript && bounds.top >= transcript.top && bounds.bottom <= transcript.bottom + 1
+        && (!jump || jump.top >= transcript.bottom))
+  }))
+  await capture(`turn-changed-files-${width}x${height}`)
+}
+await page.setViewportSize({ width: 1440, height: 900 })
+await webChange.press('Enter')
+await ledgerPanel.getByText('Web edit from turn 2', { exact: true }).waitFor()
+const selectedTurnFile = ledgerPanel.locator('[data-diff-file="shared.txt"] [data-diff-file-toggle]')
+await page.waitForFunction(() => document.activeElement?.matches('[data-diff-file="shared.txt"] [data-diff-file-toggle]'))
+check('the file row opens and focuses its own recorded patch in the selected repository',
+  await repoPicker.inputValue() === 'packages/web' && await selectedTurnFile.getAttribute('aria-expanded') === 'true')
+await ledgerPanel.getByRole('button', { name: 'Close changes' }).click()
+await page.waitForFunction(() => document.activeElement?.matches('[data-turn-file]'))
+check('closing the file patch returns keyboard focus to its transcript row', await webChange.evaluate(button => button.ownerDocument.activeElement === button))
 await repoTurnPrompt.fill('Verify the repositories without editing.')
 await repoTurnPrompt.press('Enter')
 await page.getByText('The fixture was checked without edits.', { exact: true }).waitFor()
 await page.getByRole('button', { name: 'Send', exact: true }).waitFor()
 check('an unchanged turn does not add a transcript diff action', await recentTurnDiffs.count() === 2)
+await repoTurnPrompt.fill('Import upstream changes without making edits.')
+const importedTurnSummary = page.waitForResponse(response => {
+  const url = new URL(response.url())
+  return url.pathname.endsWith('/diff/turn-files') && url.searchParams.get('target') === '4' && response.ok()
+})
+await repoTurnPrompt.press('Enter')
+const importedTurnResponse = page.getByText('Upstream changes were imported without local edits.', { exact: true })
+await importedTurnResponse.scrollIntoViewIfNeeded()
+await page.locator('[data-turn="4"] [data-turn-file-review="4"]').evaluate((button) => {
+  if (!(button as HTMLButtonElement).hidden) button.scrollIntoView({ block: 'nearest' })
+})
+const importOnlyResult = await (await importedTurnSummary).json()
+await page.locator('[data-turn="4"] [data-open-turn-diff]').waitFor({ state: 'hidden' })
+check('an import-only turn does not add a transcript diff action', existsSync(join(multiRepoProject, 'api', 'imported-only.txt'))
+  && importOnlyResult.repositories.some((repository: { key: string, summary: { total: number } | null }) => repository.key === 'api' && repository.summary?.total === 0)
+  && await recentTurnDiffs.count() === 2)
 await page.reload()
+await recentTurnDiffs.first().scrollIntoViewIfNeeded()
+await page.locator('[data-turn="1"] [data-turn-file-summary]').getByText(/2 changed files/u).waitFor()
+check('the first turn lists its recorded files again after reload', await page.locator('[data-turn="1"] [data-turn-file]:visible').count() === 2)
 await recentTurnDiffs.first().click()
 const recordedTurnPicker = ledgerPanel.getByRole('combobox', { name: 'Recorded turn' })
 await recordedTurnPicker.locator('option', { hasText: 'Turn 1' }).waitFor({ state: 'attached' })
@@ -4302,6 +4483,31 @@ check('combined rewind recreates the missing checkout, restores both working tre
   && await rewindMessage(1).isVisible() && await rewindMessage(2).count() === 0 && await rewindMessage(3).count() === 0
   && fixtureCodexRewinds.length === 2 && fixtureCodexRewinds.at(-1)?.providerSessionId === 'rewind-worktree-fixture-thread')
 await capture('combined-conversation-rewind-restored-phone')
+
+const resumeBases = worktrees.map((checkout, index) => {
+  if (!checkout.path.startsWith(realpathSync(driveRoot) + sep)) throw new Error('Could not identify the fixture worktree')
+  const cachedBranch = checkout.key === 'api'
+  if (cachedBranch) {
+    execFileSync('git', ['remote', 'add', 'origin', join(driveRoot, 'unreachable.git')], { cwd: checkout.repository })
+    execFileSync('git', ['update-ref', `refs/remotes/origin/${checkout.branch}`, checkoutHeads[index]!.trim()], { cwd: checkout.repository })
+  }
+  rmSync(checkout.path, { recursive: true })
+  execFileSync('git', ['update-ref', '-d', `refs/heads/${checkout.branch}`], { cwd: checkout.repository })
+  return cachedBranch ? checkoutHeads[index] : execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkout.repository, encoding: 'utf8' })
+})
+await rewindPrompt.fill('Rewind worktree fixture: Continue after branch recovery.')
+await page.locator('[data-send]').click()
+await rewindMessage(4).locator('[data-edit-earlier-prompt]').waitFor()
+check('sending rebuilds missing branches from their cached remote or the project checkout and resumes the same thread',
+  worktrees.length === 2 && worktrees.every((checkout, index) =>
+    execFileSync('git', ['rev-parse', 'HEAD^'], { cwd: checkout.path, encoding: 'utf8' }) === resumeBases[index]
+    && readFileSync(join(checkout.repository, 'shared.txt'), 'utf8') === sourceContents[index])
+  && fixtureCodexTurns.at(-1)?.providerSessionId === 'rewind-worktree-fixture-thread')
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  await capture(`worktree-branch-recovery-${width}x${height}`)
+}
+await page.setViewportSize({ width: 1440, height: 900 })
 
 const claudeRewindId = 'claude-rewind-thread'
 const claudeRewindSession = derivedId(claudeRewindId)

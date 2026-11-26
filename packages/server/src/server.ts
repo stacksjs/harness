@@ -18,11 +18,11 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
-import { isWorkspaceGitRoot, reviewWorkspaceDiff, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
+import { isWorkspaceGitRoot, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
@@ -393,6 +393,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return session ? defaultWorkspacePath(engine.current, session.id) : workspace.path
   }
 
+  async function reviewRepositoryPath(root: string, session: SessionState | undefined, repository: string): Promise<string | null> {
+    const combined = session?.combinedWorktree
+    if (!combined) return repository ? resolveProjectRepository(root, repository) : root
+    const checkout = combined.checkouts.find(entry => entry.key === repository)
+    return checkout ? openCombinedRepository(combined, checkout) : repository ? null : root
+  }
+
   async function renderWorkspaceReview(root: string | null, url: URL, operation: string | undefined,
     session: SessionState | undefined, trusted: boolean): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
@@ -402,12 +409,29 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const target = url.searchParams.get('target') || undefined
     if ((operation || mode || repository) && !trusted)
       return Response.json({ error: 'Git review is unavailable for this workspace.' }, { status: 404, headers })
+    if (operation === 'turn-files') {
+      const turn = session?.turns.find(entry => String(entry.id) === target && entry.status === 'complete')
+      if (!root || !session || !turn) return Response.json({ error: 'This recorded turn is unavailable.' }, { status: 404, headers })
+      const start = session.checkpoints.find(point => point.turnId === turn.id && point.kind === 'turn-start')
+      const end = session.checkpoints.findLast(point => point.turnId === turn.id && point.kind === 'turn-end')
+      const keys = checkpointReviewRepositories(start, end)
+      const repositories = []
+      for (let offset = 0; offset < keys.length; offset += 4) {
+        repositories.push(...await Promise.all(keys.slice(offset, offset + 4).map(async (key) => {
+          const label = session.combinedWorktree?.checkouts.find(checkout => checkout.key === key)?.label || key || 'Project root'
+          const before = checkpointRef(start, key)
+          const after = checkpointRef(end, key)
+          const path = await reviewRepositoryPath(root, session, key).catch(() => null)
+          const summary = path && before && after && await isWorkspaceGitRoot(path)
+            ? await summarizeTurnFiles(path, { before, after }).catch(() => null) : null
+          return { key, label, summary }
+        })))
+      }
+      return Response.json({ repositories }, { headers })
+    }
     if (!root) return Response.json(errorDiff('session has no workspace'), { headers })
     const combined = session?.combinedWorktree
-    const checkout = combined?.checkouts.find(entry => entry.key === (repository || ''))
-    const path = combined
-      ? (checkout ? await openCombinedRepository(combined, checkout) : repository ? null : root)
-      : repository ? await resolveProjectRepository(root, repository) : root
+    const path = await reviewRepositoryPath(root, session, repository || '')
     if (!path) return Response.json({ error: 'This project repository is unavailable.' }, { status: 404, headers })
 
     const turns = reviewTurns(session, repository || '')
@@ -1273,7 +1297,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context))?$/u.exec(url.pathname)
+      const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files))?$/u.exec(url.pathname)
       if (request.method === 'GET' && diffRoute) {
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const id = Number(diffRoute[1])
@@ -1380,6 +1404,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return new Response(null, { status: 307, headers: { location: '/settings/general' + url.search } })
       if (url.pathname === '/' || url.pathname.startsWith('/s/') || settings) {
         const workspaceUrl = settings ? new URL(workspaceReturn(url.searchParams.get('from')), url.origin) : url
+        const pageHeaders = { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
         const canLaunchWorkspaceEditor = canUseHostPrivileges(request, url)
           && (!remote || isLoopbackHost(srv?.requestIP(request)?.address ?? ''))
         // The socket URL embedded in the page depends on both host and scheme.
@@ -1387,7 +1412,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const cached = renderCache.get(cacheKey)
         if (cached !== undefined) {
           return new Response(cached, {
-            headers: { 'content-type': 'text/html; charset=utf-8', 'x-render-cache': 'hit' },
+            headers: { ...pageHeaders, 'x-render-cache': 'hit' },
           })
         }
         const sessionId = workspaceUrl.pathname.startsWith('/s/')
@@ -1419,7 +1444,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }
 
           return new Response(html, {
-            headers: { 'content-type': 'text/html; charset=utf-8', 'x-render-cache': 'miss' },
+            headers: { ...pageHeaders, 'x-render-cache': 'miss' },
           })
         }).catch((error: unknown) => {
           // A template error must not take the socket down with it.

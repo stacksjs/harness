@@ -1,9 +1,84 @@
-import type { WorkspaceDiff, WorkspaceReviewMode, WorkspaceReviewOptions } from './diff'
+import type { TurnFileSummary, WorkspaceDiff, WorkspaceReviewMode, WorkspaceReviewOptions } from './diff'
 import type { ProjectRepository } from './project-repositories'
 
 interface ProjectReviewOptions extends WorkspaceReviewOptions {
   repositories: ProjectRepository[]
   hasProjectRepository: boolean
+}
+
+export interface TurnFileRepository {
+  key: string
+  label: string
+  summary: TurnFileSummary | null
+}
+
+/** Load each nearby turn once and serialize requests while scrolling past older turns. */
+export function observeTurnFiles(root: HTMLElement, sessionId: number, show: (turnId: string, result: TurnFileRepository[] | null) => void) {
+  const selector = '[data-turn-file-review]:not([data-turn-file-review=""])'
+  const active = new AbortController()
+  const pending = new Set<string>()
+  const loaded = new Set<string>()
+  let loading = false
+
+  async function load(turnId: string): Promise<void> {
+    if (active.signal.aborted || loaded.has(turnId) || !/^\d+$/u.test(turnId)) return
+    pending.add(turnId)
+    if (loading) return
+    loading = true
+    for (const id of pending) {
+      try {
+        const response = await fetch(`/s/${sessionId}/diff/turn-files?target=${id}`, { cache: 'no-store', signal: active.signal })
+        const result = await response.json() as { repositories?: TurnFileRepository[] }
+        if (!response.ok || !Array.isArray(result.repositories)) throw new Error('Recorded changes unavailable')
+        if (active.signal.aborted) break
+        if (result.repositories.every(repo => repo.summary)) loaded.add(id)
+        show(id, result.repositories)
+      }
+      catch {
+        if (!active.signal.aborted) show(id, null)
+      }
+      pending.delete(id)
+    }
+    loading = false
+  }
+
+  const visibility = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue
+      visibility.unobserve(entry.target)
+      const turnId = entry.target.getAttribute('data-turn-file-review')
+      if (turnId) void load(turnId)
+    }
+  }, { root, rootMargin: '120px 0px' })
+  const visit = (node: Node, update: (element: Element) => void) => {
+    if (!(node instanceof Element)) return
+    if (node.matches(selector)) update(node)
+    node.querySelectorAll(selector).forEach(update)
+  }
+  const observe = (element: Element) => visibility.observe(element)
+  const changes = new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === 'attributes' && record.target instanceof Element) {
+        if (record.target.matches(selector)) observe(record.target)
+        else visibility.unobserve(record.target)
+      }
+      else {
+        record.removedNodes.forEach(node => visit(node, element => visibility.unobserve(element)))
+        record.addedNodes.forEach(node => visit(node, observe))
+      }
+    }
+  })
+  visit(root, observe)
+  changes.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-turn-file-review'] })
+  return {
+    load,
+    dispose() {
+      active.abort()
+      pending.clear()
+      changes.disconnect()
+      visibility.disconnect()
+    },
+  }
 }
 
 export async function loadWorkspaceDiffContext(sessionId: number, file: string, object: string,
