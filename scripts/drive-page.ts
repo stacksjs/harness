@@ -5646,10 +5646,16 @@ check('the provider default does not take a numbered model slot',
 for (const [width, height] of workspaceViewports) {
   await savedDraftPage.setViewportSize({ width, height })
   await savedDraftPage.waitForFunction(() => {
-    const option = document.querySelector('[data-draft-model-option][aria-keyshortcuts]')
+    const dialog = document.querySelector('[data-draft-model-dialog][open]')
+    const frame = dialog?.getBoundingClientRect()
+    const done = dialog?.querySelector('[data-draft-model-footer] button')?.getBoundingClientRect()
+    const option = dialog?.querySelector('[data-draft-model-option][aria-keyshortcuts]')
     const badge = option?.querySelector('[data-model-jump]')?.getBoundingClientRect()
     const bounds = option?.getBoundingClientRect()
-    return Boolean(bounds && badge && badge.right <= bounds.right + 1 && bounds.right <= innerWidth + 1)
+    return Boolean(frame && done && bounds && badge
+      && frame.left >= 0 && frame.right <= innerWidth + 1
+      && done.left >= frame.left && done.right <= frame.right && done.bottom <= frame.bottom
+      && badge.right <= bounds.right + 1 && bounds.right <= frame.right)
   })
   check(`the model shortcuts fit at ${width}×${height}`, true)
   await capture(`workspace-model-jump-${width}x${height}`, savedDraftPage)

@@ -389,8 +389,10 @@ const RESPONSIVE_SHELL = `
 [data-model-picker-trigger] { color: inherit; }
 [data-model-picker-trigger]:hover, [data-model-picker-trigger][aria-expanded="true"] { background: var(--workspace-hover); }
 [data-draft-model-dialog] {
-  position: fixed; inset: auto; top: var(--draft-picker-top, 8px); left: var(--draft-picker-left, 8px);
-  width: min(37rem, var(--draft-picker-available-width, calc(100% - 16px))); height: min(23rem, calc(var(--draft-picker-viewport, 100dvh) - 16px));
+  --draft-picker-width: min(37rem, calc(100vw - 16px), var(--draft-picker-available-width, 37rem));
+  position: fixed; inset: auto; top: var(--draft-picker-top, 8px);
+  left: clamp(8px, var(--draft-picker-left, 8px), calc(100vw - var(--draft-picker-width) - 8px));
+  width: var(--draft-picker-width); height: min(23rem, calc(var(--draft-picker-viewport, 100dvh) - 16px));
   max-width: none; max-height: none; padding: 0; margin: 0; overflow: hidden;
   color: inherit; background: var(--workspace-surface); border: 1px solid var(--workspace-line);
   border-radius: 12px; box-shadow: 0 15px 45px rgb(11 18 33 / 23%); font-size: 13px;
