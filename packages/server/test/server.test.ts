@@ -353,8 +353,13 @@ describe('harness serve — HTTP', () => {
       expect((await fetch(endpoint, { headers: headers(paired.token) })).status).toBe(403)
       expect((await fetch(endpoint, { method: 'POST', headers: headers(paired.token) })).status).toBe(403)
       const page = `${base}/?workspace=${workspaceId}`
-      expect(await (await fetch(page, { headers: headers(access.localToken) })).text()).toContain('data-header-editor')
-      expect(await (await fetch(page, { headers: headers(paired.token) })).text()).not.toContain('aria-label="Open workspace in editor"')
+      const previousCwd = process.cwd()
+      process.chdir(join(import.meta.dir, '../../..'))
+      try {
+        expect(await (await fetch(page, { headers: headers(access.localToken) })).text()).toContain('aria-label="Open workspace in editor"')
+        expect(await (await fetch(page, { headers: headers(paired.token) })).text()).not.toContain('aria-label="Open workspace in editor"')
+      }
+      finally { process.chdir(previousCwd) }
     }
     finally { remote.stop() }
   })
