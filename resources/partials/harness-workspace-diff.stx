@@ -66,12 +66,19 @@
       <ul data-diff-files class="list-none">
         <template :for="file in diffDisplayFiles()" :key="file.path">
           <li :data-diff-file="file.path">
+            <div data-diff-file-heading>
             <button type="button" data-diff-file-toggle :aria-expanded="file.open ? 'true' : 'false'" :title="file.path" @click="toggleDiffFile(file)">
               <span class="shrink-0 size-4" :class="file.open ? 'i-hugeicons-arrow-down-01' : 'i-hugeicons-arrow-right-01'" aria-hidden="true"></span>
               <span data-diff-file-kind :data-status="file.status" :text="file.status"></span>
               <span class="min-w-0 font-mono truncate" :text="file.path"></span>
               <span class="shrink-0 ml-auto font-mono text-[11px]" :text="file.status === 'untracked' ? '' : '+' + file.insertions + ' −' + file.deletions"></span>
             </button>
+            @if(workspaceEditorAllowed)
+              <button type="button" data-diff-file-editor :hidden="file.status === 'deleted'" class="harness-icon-button" :aria-label="'Open ' + file.path + ' in editor'" title="Open working file in editor" aria-haspopup="dialog" @click="chooseWorkspaceEditor($event, file.path)">
+                <span class="size-4 i-hugeicons-source-code" aria-hidden="true"></span>
+              </button>
+            @endif
+            </div>
             <template :if="file.open">
               <div data-diff-file-content>
                 <p data-diff-empty-patch :hidden="file.rows.length > 0" :text="file.status === 'untracked' ? 'Untracked file' : 'No text patch available.'"></p>
@@ -137,5 +144,8 @@
       <p role="status" hidden :hidden="!diffLineNotice()" :text="diffLineNotice()"></p>
     </div>
     <button type="button" :hidden="!diffLineSelection()" @click="copyDiffLineLink">Copy line link</button>
+    @if(workspaceEditorAllowed)
+      <button type="button" :hidden="diffLineSelection()?.side !== 'after' || (diffReviewMode() !== 'session' && diffReviewMode() !== 'uncommitted')" @click="chooseDiffEditor($event)" aria-haspopup="dialog">Open line in editor</button>
+    @endif
   </footer>
 </section>

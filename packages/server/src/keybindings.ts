@@ -75,6 +75,12 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     chord: 'Mod+F',
   },
   {
+    id: 'editor.open',
+    label: 'Open workspace in editor',
+    description: 'Open the current workspace in the preferred editor.',
+    chord: 'Mod+O',
+  },
+  {
     id: 'thread.startWithoutProject',
     label: 'Start without a project',
     description: 'Open a scratch thread with no project attached.',

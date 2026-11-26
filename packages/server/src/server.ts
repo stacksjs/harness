@@ -32,6 +32,7 @@ import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfPro
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
 import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
+import { respondWorkspaceEditor } from './workspace-editors'
 import { createWorkspaceFileSearch } from './workspace-file-search'
 import { respondWorkspaceFile } from './workspace-files'
 import { threadSidebarLayout } from './thread-sidebar'
@@ -372,6 +373,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return isLoopbackHost(url.hostname)
       && (origin === null || origin === url.origin)
       && (!access || access.authenticate(request).deviceId === 'local')
+  }
+
+  function workspaceFileRoot(params: URLSearchParams): string | null {
+    const sessionId = params.get('session')
+    const session = sessionId === null ? undefined : engine.current.sessions.get(Number(sessionId))
+    const workspaceId = sessionId === null ? Number(params.get('workspace')) : session?.workspaceId
+    const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
+    if (!workspace?.trusted || workspace.scratch) return null
+    return session ? defaultWorkspacePath(engine.current, session.id) : workspace.path
   }
 
   function reviewTurns(session: SessionState | undefined): WorkspaceReviewTurn[] {
@@ -1242,16 +1252,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       const asset = respondStxAsset(url.pathname) ?? assetCache.respond(url.pathname)
       if (asset) return asset
 
+      if (url.pathname === '/workspace-editor') {
+        const headers = { 'cache-control': 'private, no-store' }
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv?.requestIP(request)?.address ?? ''))
+          return Response.json({ error: 'Open the workspace on the Harness host to launch an editor.' }, { status: 403, headers })
+        if (request.method !== 'GET' && request.method !== 'POST')
+          return new Response(null, { status: 405, headers: { ...headers, allow: 'GET, POST' } })
+        const root = workspaceFileRoot(url.searchParams)
+        if (!root) return Response.json({ error: 'Open a trusted workspace to launch an editor.' }, { status: 404, headers })
+        return respondWorkspaceEditor(root, url, request.method)
+      }
+
       if (request.method === 'GET' && /^\/workspace-files\/(?:search|tree|preview|content|download)$/u.test(url.pathname)) {
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const headers = { 'cache-control': 'private, no-store' }
-        const sessionId = url.searchParams.get('session')
-        const session = sessionId === null ? undefined : engine.current.sessions.get(Number(sessionId))
-        const workspaceId = sessionId === null ? Number(url.searchParams.get('workspace')) : session?.workspaceId
-        const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
-        if (!workspace?.trusted || workspace.scratch)
-          return Response.json({ error: 'Workspace files are unavailable.' }, { status: 404, headers })
-        const root = session ? defaultWorkspacePath(engine.current, session.id) : workspace.path
+        const root = workspaceFileRoot(url.searchParams)
         if (!root) return Response.json({ error: 'Workspace files are unavailable.' }, { status: 404, headers })
         const response = url.pathname === '/workspace-files/search'
           ? searchWorkspaceFiles(root, url.searchParams.get('q') ?? '', url.searchParams.get('refresh') === '1')
@@ -1313,8 +1328,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return new Response(null, { status: 307, headers: { location: '/settings/general' + url.search } })
       if (url.pathname === '/' || url.pathname.startsWith('/s/') || settings) {
         const workspaceUrl = settings ? new URL(workspaceReturn(url.searchParams.get('from')), url.origin) : url
+        const canLaunchWorkspaceEditor = canUseHostPrivileges(request, url)
+          && (!remote || isLoopbackHost(srv?.requestIP(request)?.address ?? ''))
         // The socket URL embedded in the page depends on both host and scheme.
-        const cacheKey = `${url.pathname}${url.search}|${url.origin}|${stateRev}`
+        const cacheKey = `${url.pathname}${url.search}|${url.origin}|${stateRev}|${canLaunchWorkspaceEditor}`
         const cached = renderCache.get(cacheKey)
         if (cached !== undefined) {
           return new Response(cached, {
@@ -1336,6 +1353,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,
           remoteEnabled: access !== null,
+          canLaunchWorkspaceEditor,
         })).then((html) => {
           if (html === null) return new Response('view not found', { status: 404 })
 

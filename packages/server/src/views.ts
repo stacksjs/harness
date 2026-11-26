@@ -52,6 +52,7 @@ export interface ViewProps {
   devices: Array<{ id: string, name: string, pairedAt: number }>
   /** Whether this server accepts paired devices, which gates the pairing UI. */
   remoteEnabled: boolean
+  canLaunchWorkspaceEditor: boolean
   settingsSection: SettingsSection | null
   settingsSections: typeof settingsSections
   /**
@@ -115,6 +116,7 @@ export function viewProps(state: HarnessState, options: {
   serverUrl: string
   codecUrl?: string
   remoteEnabled?: boolean
+  canLaunchWorkspaceEditor?: boolean
   settingsSection?: SettingsSection
 }): ViewProps {
   const profiles = [...state.profiles.values()].map((profile) => {
@@ -177,6 +179,7 @@ export function viewProps(state: HarnessState, options: {
       pairedAt: device.pairedAt,
     })),
     remoteEnabled: options.remoteEnabled === true,
+    canLaunchWorkspaceEditor: options.canLaunchWorkspaceEditor === true,
     settingsSection: options.settingsSection ?? null,
     settingsSections,
     hostSettings: { ...state.settings },

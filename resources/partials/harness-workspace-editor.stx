@@ -1,0 +1,28 @@
+<dialog data-workspace-editor ref="workspaceEditorDialog" aria-labelledby="workspace-editor-title" aria-describedby="workspace-editor-target" @cancel.prevent="closeWorkspaceEditor" @close="finishWorkspaceEditorClose" @keydown="editorChooserKeydown" @click.self="closeWorkspaceEditor">
+  <div class="p-3">
+    <header class="flex gap-2 items-start justify-between px-1">
+      <div class="min-w-0">
+        <h2 id="workspace-editor-title" class="font-semibold text-sm">Open in editor</h2>
+        <p id="workspace-editor-target" class="font-mono text-xs truncate opacity-75" :title="editorTarget()?.label || ''" :text="(editorTarget()?.label || '') + (editorTarget()?.line ? ':' + editorTarget().line : '')"></p>
+      </div>
+      <button type="button" class="harness-icon-button" aria-label="Close editor chooser" title="Close" @click="closeWorkspaceEditor">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </header>
+    <p role="status" class="px-1 py-2 text-xs" hidden :hidden="!editorBusy()" :text="editorChoices().length ? 'Opening editor…' : 'Finding editors…'"></p>
+    <p role="status" class="px-1 py-2 text-xs" hidden :hidden="!editorError()" :text="editorError()"></p>
+    <p class="px-1 py-2 text-xs" hidden :hidden="editorBusy() || editorChoices().length || editorError()">No editors found on the Harness host.</p>
+    <ul class="mt-2 list-none" aria-label="Available editors">
+      <template :for="choice in editorChoices()" :key="choice.id">
+        <li>
+          <button type="button" data-workspace-editor-choice :disabled="editorBusy()" @click="launchWorkspaceEditor(choice)">
+            <span class="shrink-0 size-4" :class="choice.id === 'file-manager' ? 'i-hugeicons-folder-01' : 'i-hugeicons-source-code'" aria-hidden="true"></span>
+            <span class="flex-1" :text="choice.label"></span>
+            <span class="text-[11px] opacity-75" :hidden="choice.id !== preferredEditor()">Preferred</span>
+          </button>
+        </li>
+      </template>
+    </ul>
+  </div>
+</dialog>
+<p class="sr-only" role="status" :text="editorAnnouncement()"></p>

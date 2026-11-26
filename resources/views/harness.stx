@@ -125,6 +125,7 @@ const activeWorkspace = activeSession && !activeScratchSession
   : draftProject
 export const workspaceName = activeWorkspace?.name
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
+export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
 export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
 export const profileProjects = Object.fromEntries(profiles.map(profile => {
   const projects = profile.workspaces || []
@@ -302,6 +303,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         @if(hasWorkspaceFiles)
           <button type="button" data-header-files ref="workspaceFilesToggle" @click="toggleWorkspaceFiles" aria-label="Workspace files" title="Files" aria-controls="harness-workspace-files" :aria-expanded="workspaceFilesOpen() ? 'true' : 'false'" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-folder-01" aria-hidden="true"></span>
+          </button>
+        @endif
+        @if(workspaceEditorAllowed)
+          <button type="button" data-header-editor ref="workspaceEditorHeader" @click="chooseWorkspaceEditor($event)" aria-label="Open workspace in editor" title="Open in editor" aria-haspopup="dialog" :aria-keyshortcuts="shortcutKeys('editor.open')" class="harness-icon-button">
+            <span class="size-4 i-hugeicons-source-code" aria-hidden="true"></span>
           </button>
         @endif
         @if(activeWorkspaceId)
@@ -796,6 +802,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
             <span class="inline-block size-4 i-hugeicons-folder-01" aria-hidden="true"></span><span>Files</span>
           </button>
         @endif
+        @if(workspaceEditorAllowed)
+          <button type="button" data-workspace-editor-menu @click="chooseWorkspaceEditor($event)" aria-haspopup="dialog" :aria-keyshortcuts="shortcutKeys('editor.open')">
+            <span class="size-4 i-hugeicons-source-code" aria-hidden="true"></span><span>Open in editor</span>
+          </button>
+        @endif
         @if(activeWorkspaceId)
           <button type="button" data-terminal-toggle class="terminal-toggle" @click="toggleTerminal" aria-label="Toggle terminal" :title="terminalShortcutTitle('terminal.toggle')" :aria-keyshortcuts="shortcutKeys('terminal.toggle')" aria-controls="harness-terminal" aria-expanded="false" :aria-expanded="termOpen() ? 'true' : 'false'">
             <span class="inline-block size-4 i-hugeicons-command-line" aria-hidden="true"></span>
@@ -829,6 +840,10 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     @endif
     </div>
   </main>
+
+  @if(workspaceEditorAllowed)
+    @include('../partials/harness-workspace-editor')
+  @endif
 
   @if(activeSession)
     @include('../partials/harness-thread-actions')
@@ -1976,6 +1991,15 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   const workspaceFileSource = useRef('workspaceFileSourceBox')
   const workspaceFileHeading = useRef('workspaceFileHeadingBox')
   const workspaceFilesToggle = useRef('workspaceFilesToggle')
+  const workspaceEditorHeader = useRef('workspaceEditorHeader')
+  const workspaceEditorDialog = useRef('workspaceEditorDialog')
+  const preferredEditor = useLocalStorage('harness.workspace-editor.v1', '')
+  const editorTarget = state(null)
+  const editorChoices = state([])
+  const editorBusy = state(false)
+  const editorError = state('')
+  const editorAnnouncement = state('')
+  let editorTrigger = null
   const workspaceActionsToggle = useRef('workspaceActionsToggleBox')
   const sidebarRef = useRef('sidebarBox')
   const sidebarToggleRef = useRef('sidebarToggleBox')
@@ -3647,6 +3671,106 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   let workspaceFilesController = null
   let workspaceFilesTrigger = null
 
+  async function workspaceEditorRequest(method, params = {}) {
+    const scope = sessionId ? { session: String(sessionId) } : { workspace: String(draftProject.id) }
+    const response = await fetch('/workspace-editor?' + new URLSearchParams({ ...scope, ...params }), { method })
+    if (response.status === 204) return null
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error || 'Could not reach the editor on the Harness host.')
+    return result
+  }
+
+  async function chooseWorkspaceEditor(event, path = '', line = 0, usePreferred = false) {
+    const dialog = workspaceEditorDialog.current
+    if (!workspaceEditorAllowed || !dialog || dialog.open || editorBusy()) return
+    const trigger = event?.currentTarget || dialog.ownerDocument.activeElement
+    editorTrigger = trigger?.hasAttribute?.('data-workspace-editor-menu') ? workspaceActionsToggle.current : trigger
+    workspaceActionsOpen.set(false)
+    const target = { path, line, label: path || workspaceName || 'Workspace' }
+    editorTarget.set(target)
+    editorError.set('')
+    editorAnnouncement.set('')
+    editorChoices.set([])
+    positionWorkspaceEditor(dialog)
+    dialog.showModal()
+    editorBusy.set(true)
+    let choices = []
+    try {
+      const result = await workspaceEditorRequest('GET')
+      if (editorTarget() !== target || !dialog.open) return
+      choices = result.choices
+      editorChoices.set(choices)
+    }
+    catch (error) {
+      if (editorTarget() === target) editorError.set(error.message || 'Could not find editors on the Harness host.')
+    }
+    finally { editorBusy.set(false) }
+    await nextTick()
+    if (editorTarget() !== target || !dialog.open || !usePreferred) return
+    const preferred = choices.find(choice => choice.id === preferredEditor())
+      || choices.find(choice => choice.id !== 'file-manager')
+    if (preferred) await launchWorkspaceEditor(preferred)
+  }
+
+  function positionWorkspaceEditor(dialog) {
+    const opener = editorTrigger?.closest?.('button') || workspaceEditorHeader.current
+    const box = opener?.getBoundingClientRect()
+    if (!box?.width) return
+    const { clientWidth, clientHeight } = dialog.ownerDocument.documentElement
+    const width = Math.min(360, clientWidth - 24)
+    const above = box.bottom + 220 > clientHeight && box.top > clientHeight / 2
+    dialog.style.setProperty('--editor-inline', `${Math.max(12, Math.min(clientWidth - width - 12, box.right - width))}px`)
+    dialog.style.setProperty('--editor-edge', `${above ? clientHeight - box.top + 6 : box.bottom + 6}px`)
+    dialog.dataset.editorEdge = above ? 'above' : 'below'
+  }
+
+  useEventListener('resize', () => {
+    const dialog = workspaceEditorDialog.current
+    if (dialog?.open) positionWorkspaceEditor(dialog)
+  })
+
+  async function launchWorkspaceEditor(choice) {
+    const target = editorTarget()
+    if (!target || editorBusy()) return
+    editorBusy.set(true)
+    editorError.set('')
+    try {
+      await workspaceEditorRequest('POST', { editor: choice.id, path: target.path, line: String(target.line) })
+      preferredEditor.set(choice.id)
+      editorAnnouncement.set('Sent to ' + choice.label + '.')
+      closeWorkspaceEditor()
+    }
+    catch (error) { editorError.set(error.message || 'Could not open the editor.') }
+    finally { editorBusy.set(false) }
+  }
+
+  function closeWorkspaceEditor() {
+    workspaceEditorDialog.current?.close()
+  }
+
+  function editorChooserKeydown(event) {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    closeWorkspaceEditor()
+  }
+
+  function finishWorkspaceEditorClose() {
+    editorTarget.set(null)
+    const trigger = editorTrigger
+    editorTrigger = null
+    void nextTick(() => {
+      const target = [trigger, workspaceEditorHeader.current, workspaceActionsToggle.current].find(element => element?.getClientRects?.().length)
+      target?.focus({ preventScroll: true })
+    })
+  }
+
+  function chooseDiffEditor(event) {
+    const line = diffLineSelection()
+    const live = diffReviewMode() === 'session' || diffReviewMode() === 'uncommitted'
+    if (live && line?.side === 'after') void chooseWorkspaceEditor(event, line.path, line.line)
+  }
+
   async function loadWorkspaceFiles() {
     if (!workspaceFilesController && hasWorkspaceFiles && codecUrl) {
       workspaceFilesTools = await import(codecUrl)
@@ -4869,6 +4993,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
       startWithoutProject()
       return
     }
+    if (command === 'editor.open' && workspaceEditorAllowed && !event.repeat) {
+      event.preventDefault()
+      void chooseWorkspaceEditor(null, '', 0, true)
+      return
+    }
     if (command !== 'terminal.toggle') return
     event.preventDefault()
     toggleTerminal()
@@ -4884,7 +5013,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
 
   function threadUndoBlocked() {
     return projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open
-      || threadActionsDialog.current?.open
+      || threadActionsDialog.current?.open || workspaceEditorDialog.current?.open
   }
 
   function termKeydown(tab, event) {
