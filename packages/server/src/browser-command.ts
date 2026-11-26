@@ -8,8 +8,14 @@ class CommandConnectionError extends Error {
   }
 }
 
+interface BrowserCommandReceipt {
+  seqs: number[]
+  threadUndo?: ThreadUndoOffer
+  undoResult?: ThreadUndoResult
+}
+
 /** Share the session socket when possible and wait for this command's own acknowledgement. */
-export function sendBrowserCommand(url: string, envelope: CommandEnvelope, existing?: WebSocket): Promise<{ threadUndo?: ThreadUndoOffer, undoResult?: ThreadUndoResult }> {
+export function sendBrowserCommand(url: string, envelope: CommandEnvelope, existing?: WebSocket): Promise<BrowserCommandReceipt> {
   const socket = existing?.readyState === WebSocket.OPEN ? existing : new WebSocket(url)
   const openedHere = socket !== existing
   if (openedHere) socket.binaryType = 'arraybuffer'
@@ -17,7 +23,7 @@ export function sendBrowserCommand(url: string, envelope: CommandEnvelope, exist
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => finish(new CommandConnectionError('The server did not confirm the request. Try again.')), 8000)
 
-    function finish(error?: Error, threadUndo?: ThreadUndoOffer, undoResult?: ThreadUndoResult): void {
+    function finish(error?: Error, receipt?: BrowserCommandReceipt): void {
       clearTimeout(timer)
       socket.removeEventListener('open', send)
       socket.removeEventListener('message', onMessage)
@@ -25,7 +31,7 @@ export function sendBrowserCommand(url: string, envelope: CommandEnvelope, exist
       socket.removeEventListener('error', onClose)
       if (openedHere) socket.close()
       if (error) reject(error)
-      else resolve({ threadUndo, undoResult })
+      else resolve(receipt ?? { seqs: [] })
     }
 
     function send(): void {
@@ -39,7 +45,7 @@ export function sendBrowserCommand(url: string, envelope: CommandEnvelope, exist
 
     function onMessage(event: MessageEvent): void {
       if (!(event.data instanceof ArrayBuffer)) return
-      let frame: { t?: string, id?: string, message?: string, threadUndo?: ThreadUndoOffer, undoResult?: ThreadUndoResult } | null
+      let frame: ({ t?: string, id?: string, message?: string } & Partial<BrowserCommandReceipt>) | null
       try {
         frame = decode(new Uint8Array(event.data)) as typeof frame
       }
@@ -47,7 +53,7 @@ export function sendBrowserCommand(url: string, envelope: CommandEnvelope, exist
         return
       }
       if (frame?.id !== envelope.id) return
-      if (frame.t === 'dispatched') finish(undefined, frame.threadUndo, frame.undoResult)
+      if (frame.t === 'dispatched') finish(undefined, { seqs: frame.seqs ?? [], threadUndo: frame.threadUndo, undoResult: frame.undoResult })
       else if (frame.t === 'rejected') finish(new Error(frame.message ?? 'The server rejected the request.'))
     }
 

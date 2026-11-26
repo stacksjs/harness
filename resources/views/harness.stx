@@ -49,6 +49,7 @@ const pendingApproval = initialApprovals[0]
 // they are what a single swipe can reveal, so the common gesture never lands
 // on an empty panel; anything further away fills in on arrival.
 const activeSpaceIndex = Math.max(0, profiles.findIndex(profile => String(profile.id) === String(activeProfile)))
+export const sidebarProjectTemplateItems = [{ id: 'compose', label: 'New thread', icon: 'i-hugeicons-pencil-edit-02', href: '/?workspace=0' }]
 
 // id -> tint, for the native titlebar. The web sidebar gets the tint through
 // `<Sidebar :spaces>`; the window chrome around it is ours to paint. Reaches
@@ -69,29 +70,16 @@ export const spaces = profiles.map((profile, index) => ({
 }))
 
 function threadSections(profile) {
-  const sessionsById = new Map((profile.sessions || []).map(session => [session.id, session]))
-  const projectsById = new Map((profile.workspaces || []).map(workspace => [workspace.id, workspace]))
   return (profile.sidebar || []).map(section => {
-    const rows = section.rows.map(row => toItem(sessionsById.get(row.id)))
-    const project = projectsById.get(section.workspaceId)
+    const rows = section.rows.map(row => ({ id: String(row.id), label: row.title, icon: row.icon, href: `/s/${row.id}` }))
     return {
       id: section.id,
-      label: project?.name || section.label,
-      items: project
-        ? [{ id: 'compose-' + project.id, label: 'New thread', icon: 'i-hugeicons-pencil-edit-02', href: `/?workspace=${project.id}` }, ...rows]
+      label: section.label,
+      items: section.workspaceId
+        ? [{ ...sidebarProjectTemplateItems[0], id: 'compose-' + section.workspaceId, href: `/?workspace=${section.workspaceId}` }, ...rows]
         : rows,
     }
   })
-}
-
-function toItem(session) {
-  const waiting = session.state === 'awaiting-approval' || session.state === 'awaiting-input'
-  return {
-    id: String(session.id),
-    label: session.title,
-    icon: waiting ? 'i-hugeicons-help-circle' : session.state === 'running' ? 'i-hugeicons-loading-03' : 'i-hugeicons-message-01',
-    href: `/s/${session.id}`,
-  }
 }
 
 export const initialNavigation = activeSession?.navigation || {}
@@ -210,6 +198,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </button>
     </template>
     @if(hasProfiles)
+      <template data-live-sidebar-row>
+        <SidebarItem theme="arc" id="0" href="/s/0" icon="i-hugeicons-message-01" />
+      </template>
+      <template data-live-sidebar-project>
+        <SidebarSection theme="arc" id="project" label="Project" :items="sidebarProjectTemplateItems" />
+      </template>
       <Sidebar
         :spaces="spaces"
         :space="activeProfile"
@@ -1645,6 +1639,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const arrangementStatus = state('')
   const arrangementError = state('')
   let cancelArrangementDrag = () => {}
+  let arrangementFocus = null
 
   function arrangementReady() {
     return Boolean(sessionOnline() && arrangementLayout() && !arrangementBusy())
@@ -1685,6 +1680,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function finishThreadArrangement() {
     cancelArrangementDrag()
+    arrangementFocus = null
     arrangementOpen.set(false)
     arrangementLayout.set(null)
     watchSidebarOrder()
@@ -1719,26 +1715,39 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return options
   }
 
+  function restoreArrangementFocus() {
+    const pending = arrangementFocus
+    if (!pending || arrangementBusy()) return
+    const seen = arrangementLayout()?.some(section => section.rows.some(row => row.id === pending.id && row.seq >= pending.seq))
+    if (pending.seq && !seen) return
+    arrangementFocus = null
+    void nextTick(() => requestAnimationFrame(() => {
+      const dialog = threadArrangement.current
+      if (!dialog?.open) return
+      const grip = dialog.querySelector(`[data-arrangement-row][data-item-id="${pending.id}"] [data-arrangement-grip]`)
+      if (grip && !grip.closest('[hidden]')) grip.focus({ preventScroll: true })
+      else grip?.closest('[data-arrangement-section]')?.querySelector('button[data-arrangement-header]')?.focus({ preventScroll: true })
+    }))
+  }
+
   async function saveArrangement(id, intent, restoreFocus = false) {
     if (!arrangementReady()) return
     arrangementBusy.set(true)
     arrangementError.set('')
     arrangementStatus.set('')
     try {
-      await sendThreadOrganization({ sessionId: id, action: 'drop', ...intent })
+      const receipt = await sendThreadOrganization({ sessionId: id, action: 'drop', ...intent })
+      if (restoreFocus && arrangementOpen()) arrangementFocus = { id, seq: receipt.seqs.at(-1) ?? 0 }
       arrangementChoice.set(null)
       arrangementStatus.set('Thread position saved.')
     }
-    catch (error) { arrangementError.set(error.message) }
+    catch (error) {
+      if (restoreFocus && arrangementOpen()) arrangementFocus = { id, seq: 0 }
+      arrangementError.set(error.message)
+    }
     finally {
       arrangementBusy.set(false)
-      if (restoreFocus) void nextTick(() => requestAnimationFrame(() => {
-        const dialog = threadArrangement.current
-        if (!dialog?.open) return
-        const grip = dialog.querySelector(`[data-arrangement-row][data-item-id="${id}"] [data-arrangement-grip]`)
-        if (grip && !grip.closest('[hidden]')) grip.focus({ preventScroll: true })
-        else dialog.querySelector('[data-arrangement-section][data-section-id^="settled-"] button[data-arrangement-header]')?.focus({ preventScroll: true })
-      }))
+      restoreArrangementFocus()
     }
   }
 
@@ -1825,9 +1834,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function sendThreadOrganization(command) {
     const commandId = newCommandId()
     const undoBatch = threadUndoBatch()
-    const { threadUndo: offer } = await sendCommand({
+    const receipt = await sendCommand({
       ...command, type: 'session.organize', undoScope: threadUndoScope(), ...(undoBatch && { undoBatch }),
     }, commandId)
+    const { threadUndo: offer } = receipt
     if (offer && offer.sourceCommandId !== threadUndo()?.sourceCommandId) threadUndoShortcutClaimed.set(true)
     storeThreadUndo(offer)
     if (offer?.sourceCommandId === commandId && draftUndo().length) {
@@ -1835,6 +1845,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const expiresAt = Date.now() + offer.remainingMs
       draftUndo.update(groups => groups.map(group => ({ ...group, expiresAt })))
     }
+    return receipt
   }
 
   async function undoThreadAction() {
@@ -5829,7 +5840,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       root: sidebar,
       arrangement: threadArrangement.current,
       onLayout(profileId, layout) {
-        if (arrangementOpen() && profileId === Number(providerProfileId)) arrangementLayout.set(layout)
+        if (!arrangementOpen() || profileId !== Number(providerProfileId)) return
+        arrangementLayout.set(layout)
+        restoreArrangementFocus()
       },
       async save(sessionId, intent, fromArrangement) {
         if (fromArrangement) {
