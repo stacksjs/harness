@@ -1,0 +1,51 @@
+<section id="harness-browser-preview" data-browser-pane ref="browserPreviewPaneBox" aria-labelledby="browser-preview-title" hidden :hidden="!browserPreviewOpen()">
+  <header class="flex gap-1 items-center px-2 py-1">
+    <h2 id="browser-preview-title" class="sr-only">Browser</h2>
+    <div data-preview-tabs class="flex-1 min-w-0" role="group" aria-label="Browser tabs">
+      <template :for="tab in browserPreviewTabs()" :key="tab.id">
+        <div data-preview-tab :data-active="activePreviewTab()?.id === tab.id">
+          <button type="button" :aria-current="activePreviewTab()?.id === tab.id ? 'page' : null" :data-preview-select="tab.id" :title="previewTabLabel(tab)" @click="selectPreviewTab(tab.id)" class="min-w-0 truncate" :text="previewTabLabel(tab)"></button>
+          <button type="button" class="harness-icon-button" :aria-label="'Close tab: ' + previewTabLabel(tab)" @click="closePreviewTab(tab.id)" title="Close tab">
+            <span class="size-3 i-hugeicons-cancel-01" aria-hidden="true"></span>
+          </button>
+        </div>
+      </template>
+    </div>
+    <button type="button" class="harness-icon-button" aria-label="New browser tab" title="New tab" :disabled="!browserPreviewTools() || browserPreviewTabs().length >= browserPreviewTools().MAX_PREVIEW_TABS" @click="addPreviewTab">
+      <span class="size-4 i-hugeicons-add-01" aria-hidden="true"></span>
+    </button>
+    <button type="button" class="harness-icon-button" aria-label="Close browser pane" title="Close browser" @click="closeBrowserPreview()">
+      <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+    </button>
+  </header>
+  <form data-preview-address class="flex gap-1 items-center px-2 py-1" @submit.prevent="openPreviewAddress">
+    <button type="button" class="harness-icon-button" aria-label="Browser back" title="Back" :disabled="!activePreviewTab()?.index" @click="stepPreviewHistory(-1)">
+      <span class="size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>
+    </button>
+    <button type="button" class="harness-icon-button" aria-label="Browser forward" title="Forward" :disabled="!activePreviewTab() || activePreviewTab().index >= activePreviewTab().history.length - 1" @click="stepPreviewHistory(1)">
+      <span class="size-4 i-hugeicons-arrow-right-01" aria-hidden="true"></span>
+    </button>
+    <button type="button" class="harness-icon-button" aria-label="Reload preview" title="Reload" :disabled="!activePreviewUrl()" @click="reloadBrowserPreview">
+      <span class="size-4 i-hugeicons-refresh" aria-hidden="true"></span>
+    </button>
+    <input type="text" inputmode="url" ref="browserPreviewAddressBox" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Preview address" placeholder="Enter a URL" :value="previewAddressDraft()" @input="previewAddressDraft.set($event.currentTarget.value)" @keydown="guardPreviewComposition" class="flex-1 px-2 min-w-0 rounded-md">
+    <button type="submit" class="harness-icon-button" aria-label="Open preview address" title="Go" :disabled="!browserPreviewTools() || !previewAddressDraft().trim()">
+      <span class="size-4 i-hugeicons-arrow-right-02" aria-hidden="true"></span>
+    </button>
+    <a class="harness-icon-button" aria-label="Open preview in browser" title="Open externally" hidden :hidden="!activePreviewUrl()" :href="activePreviewUrl() || null" target="_blank" rel="noopener noreferrer">
+      <span class="size-4 i-hugeicons-link-square-02" aria-hidden="true"></span>
+    </a>
+  </form>
+  <p role="alert" data-preview-error class="px-3 py-2 text-red-700 text-xs dark:text-red-300" hidden :hidden="!previewError()" :text="previewError()"></p>
+  <div data-preview-documents class="relative flex-1 min-h-0 min-w-0">
+    <div data-preview-empty class="grid absolute inset-0 gap-1 place-content-center px-4 text-center" :hidden="Boolean(activePreviewUrl())">
+      <p class="font-medium text-sm">New tab</p>
+      <p class="text-neutral-600 text-xs dark:text-neutral-400">Enter a website or local development server address.</p>
+    </div>
+    <template :for="tab in browserPreviewTabs()" :key="tab.id">
+      <template :if="tab.history[tab.index]">
+        <iframe :data-preview-frame="tab.id" :title="'Preview of ' + previewTabLabel(tab)" :src="tab.history[tab.index]" :hidden="activePreviewTab()?.id !== tab.id" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+      </template>
+    </template>
+  </div>
+</section>

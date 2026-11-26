@@ -1404,6 +1404,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return new Response(null, { status: 307, headers: { location: '/settings/general' + url.search } })
       if (url.pathname === '/' || url.pathname.startsWith('/s/') || settings) {
         const workspaceUrl = settings ? new URL(workspaceReturn(url.searchParams.get('from')), url.origin) : url
+        const pageHeaders = { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
         const canLaunchWorkspaceEditor = canUseHostPrivileges(request, url)
           && (!remote || isLoopbackHost(srv?.requestIP(request)?.address ?? ''))
         // The socket URL embedded in the page depends on both host and scheme.
@@ -1411,7 +1412,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const cached = renderCache.get(cacheKey)
         if (cached !== undefined) {
           return new Response(cached, {
-            headers: { 'content-type': 'text/html; charset=utf-8', 'x-render-cache': 'hit' },
+            headers: { ...pageHeaders, 'x-render-cache': 'hit' },
           })
         }
         const sessionId = workspaceUrl.pathname.startsWith('/s/')
@@ -1443,7 +1444,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }
 
           return new Response(html, {
-            headers: { 'content-type': 'text/html; charset=utf-8', 'x-render-cache': 'miss' },
+            headers: { ...pageHeaders, 'x-render-cache': 'miss' },
           })
         }).catch((error: unknown) => {
           // A template error must not take the socket down with it.

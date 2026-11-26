@@ -253,7 +253,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     @pointercancel="cancelSidebarResize"
   ></div>
 
-  <main data-workspace-layout data-details-open="true" :data-details-open="workspaceDetailsOpen()" :data-diff-open="diffOpen()" :data-files-open="workspaceFilesOpen()" :inert="!desktopSidebar() && sidebarOpen()" class="flex-1 min-w-0">
+  <main data-workspace-layout data-details-open="true" :data-details-open="workspaceDetailsOpen()" :data-diff-open="diffOpen()" :data-files-open="workspaceFilesOpen()" :data-preview-open="browserPreviewOpen()" :inert="!desktopSidebar() && sidebarOpen()" class="flex-1 min-w-0">
     <header data-workspace-header class="flex relative gap-3 items-center shrink-0 px-4">
       <button type="button" data-sidebar-toggle class="harness-icon-button" ref="sidebarToggleBox" @click="toggleSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
         <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
@@ -330,7 +330,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           </button>
         @endif
         @if(draftProject || activeSession || draftWithoutProject)
-          <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" title="Workspace tools" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="(wideWorkspace() ? workspaceDetailsOpen() && !workspaceFilesOpen() && !diffOpen() : workspaceActionsOpen()) ? 'true' : 'false'" class="harness-icon-button">
+          <button type="button" data-header-preview ref="browserPreviewToggleBox" @click="toggleBrowserPreview" aria-label="Open workspace browser" title="Browser" aria-controls="harness-browser-preview" :aria-expanded="browserPreviewOpen() ? 'true' : 'false'" class="harness-icon-button">
+            <span class="size-4 i-hugeicons-globe-02" aria-hidden="true"></span>
+          </button>
+          <button type="button" data-workspace-actions-toggle ref="workspaceActionsToggleBox" @click="toggleWorkspaceActions" aria-label="Workspace actions" title="Workspace tools" aria-controls="harness-workspace-actions" aria-expanded="false" :aria-expanded="(wideWorkspace() ? workspaceDetailsOpen() && !workspaceFilesOpen() && !diffOpen() && !browserPreviewOpen() : workspaceActionsOpen()) ? 'true' : 'false'" class="harness-icon-button">
             <span data-workspace-tools-icon hidden :hidden="!wideWorkspace()" class="size-4 i-hugeicons-sidebar-right" aria-hidden="true"></span>
             <span data-workspace-menu-icon :hidden="wideWorkspace()" class="size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
           </button>
@@ -889,6 +892,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <span>Terminal</span>
           </button>
         @endif
+        <button type="button" data-preview-toggle @click="toggleBrowserPreview" aria-controls="harness-browser-preview" :aria-expanded="browserPreviewOpen() ? 'true' : 'false'">
+          <span class="inline-block size-4 i-hugeicons-globe-02" aria-hidden="true"></span><span>Browser</span>
+        </button>
         @if(activeScratchSession)
           <button type="button" data-promote-scratch @click="promoteScratchProject" :disabled="projectBusy()" class="px-2 h-8 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15">Turn into project</button>
         @endif
@@ -912,6 +918,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         @if(hasWorkspaceFiles)
           @include('../partials/harness-workspace-files')
         @endif
+        @include('../partials/harness-browser-preview')
       </aside>
     @endif
     </div>
@@ -2068,6 +2075,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     showContextWindow.set(event.currentTarget.checked)
   }
   const wideWorkspace = useMediaQuery('(min-width: 75rem)')
+  const browserPreviewOpen = state(false)
+  const browserPreviewTools = state(null)
+  const storedBrowserPreview = useLocalStorage(`harness.browser-preview.v1:${activeProfile || 0}:${promptScope}`, null, { listenToStorageChanges: false })
+  const browserPreview = state(null)
+  const browserPreviewTabs = derived(() => browserPreview()?.tabs || [])
+  const activePreviewTab = derived(() => browserPreviewTabs().find(tab => tab.id === browserPreview()?.active))
+  const activePreviewUrl = derived(() => activePreviewTab()?.history[activePreviewTab().index] || '')
+  const previewAddressDraft = state('')
+  const previewError = state('')
+  const browserPreviewPane = useRef('browserPreviewPaneBox')
+  const browserPreviewAddress = useRef('browserPreviewAddressBox')
+  const browserPreviewToggle = useRef('browserPreviewToggleBox')
+  let browserPreviewTrigger = null
   const diffClose = useRef('diffCloseBox')
   const changesPane = useRef('changesPane')
   const workspaceFilesOpen = state(false)
@@ -2418,6 +2438,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     sidebarDrag = null
   }
   function toggleWorkspaceActions() {
+    if (browserPreviewOpen()) closeBrowserPreview(false)
     if (!wideWorkspace()) {
       if (workspaceFilesOpen()) closeWorkspaceFiles(false)
       workspaceActionsOpen.update(open => !open)
@@ -2441,6 +2462,97 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (!workspaceActionsOpen()) return
     workspaceActionsOpen.set(false)
     workspaceActionsToggle.current?.focus()
+  }
+
+  async function toggleBrowserPreview(event) {
+    if (browserPreviewOpen()) { closeBrowserPreview(); return }
+    browserPreviewTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
+    workspaceActionsOpen.set(false)
+    if (workspaceFilesOpen()) closeWorkspaceFiles(false)
+    diffOpen.set(false)
+    diffTrigger = null
+    browserPreviewOpen.set(true)
+    previewError.set('')
+    try {
+      if (!browserPreviewTools()) browserPreviewTools.set(await import(codecUrl))
+      if (!browserPreview()) browserPreview.set(browserPreviewTools().restoreBrowserPreview(storedBrowserPreview(), browserPreviewPane.current?.ownerDocument.location.origin))
+      previewAddressDraft.set(activePreviewUrl())
+    }
+    catch { previewError.set('Could not load the browser pane. Close it and try again.') }
+    void nextTick(() => { if (browserPreviewOpen()) browserPreviewAddress.current?.focus() })
+  }
+
+  function closeBrowserPreview(restoreFocus = true) {
+    browserPreviewOpen.set(false)
+    const trigger = browserPreviewTrigger
+    browserPreviewTrigger = null
+    if (restoreFocus) void nextTick(() => [trigger, browserPreviewToggle.current, workspaceActionsToggle.current].find(element => element?.getClientRects().length)?.focus())
+  }
+
+  function previewTabLabel(tab) {
+    const address = tab.history[tab.index]
+    if (!address) return 'New tab'
+    const url = new URL(address)
+    return url.pathname === '/' ? url.host : url.host + url.pathname
+  }
+
+  function setBrowserPreview(tabs, active) {
+    const next = { tabs, active }
+    browserPreview.set(next)
+    storedBrowserPreview.set(next)
+    previewAddressDraft.set(activePreviewUrl())
+    previewError.set('')
+  }
+
+  function selectPreviewTab(id) {
+    setBrowserPreview(browserPreviewTabs(), id)
+  }
+
+  function addPreviewTab() {
+    const tabs = browserPreviewTabs()
+    if (tabs.length >= browserPreviewTools().MAX_PREVIEW_TABS) return
+    let id = 1
+    while (tabs.some(tab => tab.id === id)) id++
+    setBrowserPreview([...tabs, { id, history: [], index: 0 }], id)
+    void nextTick(() => browserPreviewAddress.current?.focus())
+  }
+
+  function closePreviewTab(id) {
+    const tabs = browserPreviewTabs()
+    const remaining = tabs.filter(tab => tab.id !== id)
+    const closedIndex = tabs.findIndex(tab => tab.id === id)
+    const replacement = remaining[Math.min(closedIndex, remaining.length - 1)]?.id
+    const active = activePreviewTab()?.id === id ? replacement : activePreviewTab()?.id
+    setBrowserPreview(remaining.length ? remaining : [{ id: 1, history: [], index: 0 }], active || 1)
+    void nextTick(() => browserPreviewAddress.current?.focus())
+  }
+
+  function guardPreviewComposition(event) {
+    if (event.key === 'Enter' && (event.isComposing || event.keyCode === 229)) event.preventDefault()
+  }
+
+  function openPreviewAddress() {
+    const tab = activePreviewTab()
+    const origin = browserPreviewPane.current?.ownerDocument.location.origin
+    if (!tab || !origin || !browserPreviewTools()) return
+    const result = browserPreviewTools().previewAddress(previewAddressDraft(), origin)
+    if (result.error) { previewError.set(result.error); return }
+    browserPreviewAddress.current?.blur()
+    if (result.url === activePreviewUrl()) { reloadBrowserPreview(); return }
+    const next = browserPreviewTools().navigatePreviewTab(tab, result.url)
+    setBrowserPreview(browserPreviewTabs().map(entry => entry.id === tab.id ? next : entry), tab.id)
+  }
+
+  function stepPreviewHistory(direction) {
+    const tab = activePreviewTab()
+    if (!tab || !tab.history[tab.index + direction]) return
+    setBrowserPreview(browserPreviewTabs().map(entry => entry.id === tab.id ? { ...tab, index: tab.index + direction } : entry), tab.id)
+  }
+
+  function reloadBrowserPreview() {
+    previewError.set('')
+    previewAddressDraft.set(activePreviewUrl())
+    browserPreviewTools()?.reloadPreviewFrame(browserPreviewPane.current, activePreviewTab()?.id)
   }
 
   // The "name this profile" form. Replaces window.prompt: the name arrives
@@ -3976,6 +4088,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   async function toggleWorkspaceFiles(event) {
     if (workspaceFilesOpen()) { closeWorkspaceFiles(); return }
+    if (browserPreviewOpen()) closeBrowserPreview(false)
     workspaceFilesTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
     workspaceActionsOpen.set(false)
     diffOpen.set(false)
@@ -4117,6 +4230,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     diffTrigger = trigger
     closeWorkspaceActions()
     if (workspaceFilesOpen()) closeWorkspaceFiles(false)
+    if (browserPreviewOpen()) closeBrowserPreview(false)
     diffOpen.set(true)
     void nextTick(() => diffClose.current?.focus())
   }
@@ -5198,6 +5312,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function toggleTerminal(event) {
     // No workspace, no shell to open.
     if (!sessionId || !Number(activeWorkspaceId)) return
+    if (!wideWorkspace() && browserPreviewOpen()) closeBrowserPreview(false)
     if (!wideWorkspace() && workspaceFilesOpen()) {
       closeWorkspaceFiles(false)
       if (termOpen()) {
@@ -5284,6 +5399,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       else if (workspaceFilesOpen()) {
         event.preventDefault()
         closeWorkspaceFiles()
+      }
+      else if (browserPreviewOpen()) {
+        event.preventDefault()
+        closeBrowserPreview()
       }
       else if (diffOpen()) {
         event.preventDefault()
