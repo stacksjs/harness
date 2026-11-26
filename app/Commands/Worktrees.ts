@@ -1,6 +1,6 @@
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
-import { worktree } from '@harness/server'
+import { releaseWorktrees, worktree, worktreesOfProfile } from '@harness/server'
 import { boot } from '../Support/engine'
 
 /**
@@ -28,6 +28,16 @@ export default function (cli: CLI) {
     .command('harness:worktrees', 'List the worktrees harness has created')
     .action(async () => {
       let found = 0
+      const { current } = await boot()
+      for (const profile of current.profiles.values()) {
+        for (const entry of worktreesOfProfile(current, profile.id)) {
+          if (!entry.combined) continue
+          const { branch, checkouts } = entry.combined
+          const status = current.sessions.get(entry.sessionId)?.combinedWorktree ? 'ready' : 'reserved'
+          console.log(`  session ${entry.sessionId} ${branch} · ${checkouts.length} repositories · ${status}`)
+          found++
+        }
+      }
 
       for (const repository of await repositories()) {
         const entries = (await worktree.list(repository)).filter(entry => entry.sessionId !== null)
@@ -64,6 +74,20 @@ export default function (cli: CLI) {
     .command('harness:worktrees:remove <sessionId>', "Release a session's worktree, keeping its branch")
     .action(async (sessionId: string) => {
       const id = Number(sessionId)
+      const { current } = await boot()
+      const session = current.sessions.get(id)
+      const profileId = session ? current.workspaces.get(session.workspaceId)?.profileId : undefined
+      const combined = profileId === undefined ? undefined
+        : worktreesOfProfile(current, profileId).find(entry => entry.sessionId === id && entry.combined)
+      if (combined) {
+        const [result] = await releaseWorktrees([combined])
+        if (!result?.removed) {
+          console.error(`Could not fully remove ${combined.path}. Inspect the remaining checkout files.`)
+          process.exit(1)
+        }
+        console.log(`released ${result.path}. The repository branches remain available`)
+        return
+      }
 
       for (const repository of await repositories()) {
         const entry = (await worktree.list(repository)).find(w => w.sessionId === id)

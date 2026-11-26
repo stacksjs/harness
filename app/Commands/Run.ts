@@ -1,4 +1,4 @@
-import type { DriverKind } from '@harness/contract'
+import type { DriverKind, WorktreeSelection } from '@harness/contract'
 import type { CLI } from '@stacksjs/types'
 import process from 'node:process'
 import type { HarnessClient } from '@harness/client'
@@ -29,8 +29,27 @@ export default function (cli: CLI) {
     .option('--driver [kind]', 'Agent to run the turn (claude, codex, ...)', { default: 'claude' })
     .option('--provider-instance [id]', 'Named account ID from the workspace profile')
     .option('--model [model]', "Model override; omit to use the provider's default")
-    .option('--isolate', 'Run in a git worktree of its own, on its own branch', { default: false })
-    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string, isolate?: boolean, providerInstance?: string }) => {
+    .option('--isolate', 'Run in a Git worktree on its own branch', { default: false })
+    .option('--base <branch>', 'Base branch for the isolated checkout')
+    .option('--repositories <json>', 'Project-relative repository keys as a JSON array')
+    .action(async (prompt: string, options: { url: string, profile: string, path: string, yes: boolean, driver: string, model?: string, isolate?: boolean, providerInstance?: string, base?: string, repositories?: string }) => {
+      let selection: WorktreeSelection | undefined
+      if (options.base || options.repositories !== undefined) {
+        if (!options.isolate) {
+          console.error('Use --isolate when choosing a base branch or project repositories.')
+          process.exit(ExitCode.FatalError)
+        }
+        try {
+          const repositories: unknown = options.repositories === undefined ? undefined : JSON.parse(options.repositories)
+          if (repositories !== undefined && (!Array.isArray(repositories) || repositories.some(key => typeof key !== 'string' || !key)))
+            throw new Error('Invalid repository keys')
+          selection = { baseBranch: options.base, repositories }
+        }
+        catch {
+          console.error('Pass project-relative repository keys as a JSON array, such as ["api","packages/web"].')
+          process.exit(ExitCode.FatalError)
+        }
+      }
       const providerInstanceId = options.providerInstance === undefined ? undefined : Number(options.providerInstance)
       if (providerInstanceId !== undefined && (!Number.isSafeInteger(providerInstanceId) || providerInstanceId <= 0)) {
         console.error('Enter a positive provider instance ID.')
@@ -85,6 +104,7 @@ export default function (cli: CLI) {
         ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
         ...(options.model ? { model: options.model } : {}),
         ...(options.isolate ? { isolate: true } : {}),
+        ...(selection && { worktree: selection }),
       })
       const sessionId = derivedId(sessionCmd)
       client.subscribe(sessionId)
