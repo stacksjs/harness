@@ -21,7 +21,7 @@ import type { HarnessState } from '@harness/engine'
 import { claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, isTurnActive, reduce, SqliteStore } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
-import { workspaceDiff } from './diff'
+import { workspaceDiff, workspaceDiffRevision } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { buildClientCodec } from './client-bundle'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
@@ -1071,23 +1071,28 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      // What the agent changed on disk. Fetched on demand rather than rendered
-      // into the page: reading a repository costs a subprocess, and most page
-      // loads never open the diff.
+      // Rebuild a visible diff when its comparison changes. A client that
+      // already has this Git revision needs only the cheap HEAD check.
       if (url.pathname.startsWith('/s/') && url.pathname.endsWith('/diff')) {
         const id = Number(url.pathname.slice(3, -'/diff'.length)) || 0
         const path = options.workspacePath
           ? options.workspacePath(engine.current, id)
           : defaultWorkspacePath(engine.current, id)
-        if (!path) return Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'session has no workspace' })
+        const headers = { 'cache-control': 'private, no-store' }
+        if (!path) return Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'session has no workspace' }, { headers })
         // The session's earliest checkpoint is its baseline: taken before the
         // first turn ran, so diffing against it answers "what did this session
         // change" rather than "what is uncommitted here".
         const baseline = engine.current.sessions.get(id)?.checkpoints[0]?.vcsRef
-        return workspaceDiff(path, baseline)
-          .then(diff => Response.json(diff))
+        return workspaceDiffRevision(path, baseline)
+          .then(async (revision) => {
+            if (url.searchParams.get('knownRevision') === revision)
+              return new Response(null, { status: 204, headers })
+            const diff = await workspaceDiff(path, baseline)
+            return Response.json({ ...diff, revision }, { headers })
+          })
           // A diff that cannot be read must not take the page down with it.
-          .catch(() => Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'could not read the workspace' }))
+          .catch(() => Response.json({ isRepository: false, scope: 'working-tree', files: [], patch: '', error: 'could not read the workspace' }, { headers }))
       }
 
       // Shared page assets. Checked before the page routes because their

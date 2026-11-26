@@ -741,7 +741,7 @@ export const initialInputActivity = liveTurn?.inputRequests || []
         </button>
       </div>
       <div data-diff-body>
-        <div data-diff-status class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
+        <div data-diff-status role="status" class="text-[12px] opacity-60" :text="diffStatus()">Loading…</div>
         <ul data-diff-files class="mb-2 list-none">
           <template :for="file in diffFiles" :key="file.path">
             <li class="flex gap-[8px] items-center py-[1px] text-[12px]" :data-diff-file="file.path">
@@ -1173,10 +1173,11 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // read it through their own `:data-tool-state` binding, loop rows through
   // theirs — because tools finish out of order and a row is found by id.
   const toolResults = state({})
-  // The diff panel's three regions. Filled by loadDiff, rendered by bindings.
   const diffStatus = state('Loading…')
   const diffFiles = state([])
   const diffPatch = state('')
+  const changesWatcher = state(null)
+  const changesVisibility = useDocumentVisibility()
 
   const sessionId = Number(activeSessionId) || 0
   const workspaceBranch = state(sessionBranch)
@@ -2866,42 +2867,28 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     navigate(`/?profile=${encodeURIComponent(id)}`)
   }, { target: document })
 
-  // The diff panel: what the agent changed on disk, which is what a transcript
-  // cannot tell you. Fetched on open and on demand, never polled — a repository
-  // read is a subprocess, and a transcript nobody is reviewing should not pay
-  // for one every few seconds.
-  async function loadDiff() {
-    batch(() => {
-      diffStatus.set('Loading…')
-      diffFiles.set([])
-      diffPatch.set('')
-    })
-
-    let diff
-    try {
-      diff = await (await fetch(`/s/${sessionId}/diff`)).json()
-    }
-    catch {
-      diffStatus.set('Could not read the workspace.')
-      return
-    }
-
-    if (diff.error) { diffStatus.set(diff.error); return }
-    if (!diff.isRepository) { diffStatus.set('This workspace is not a git repository.'); return }
-    if (diff.files.length === 0) { diffStatus.set('No uncommitted changes.'); return }
-
-    // Which comparison this is, said plainly: a count is easy to over-trust,
-    // and "what this session changed" and "what is uncommitted here" are
-    // different claims.
+  function showWorkspaceChanges(diff) {
+    const files = diff.error ? [] : diff.files
     const count = `${diff.files.length} changed file${diff.files.length === 1 ? '' : 's'}`
+    const scope = diff.scope === 'session' ? 'since this session started' : 'in the working tree'
+    const insertions = files.reduce((total, file) => total + file.insertions, 0)
+    const deletions = files.reduce((total, file) => total + file.deletions, 0)
+    const status = diff.error ? diff.error
+      : !diff.isRepository ? 'This workspace is not a git repository.'
+      : files.length ? `${count} ${scope} · +${insertions} −${deletions}`
+      : diff.scope === 'session' ? 'No changes since this session started.' : 'No uncommitted changes.'
     batch(() => {
-      diffStatus.set(diff.scope === 'session'
-        ? `${count} since this session started`
-        : `${count} in the working tree`)
-      diffFiles.set(diff.files)
-      diffPatch.set(diff.patch)
+      diffStatus.set(status)
+      diffFiles.set(files)
+      diffPatch.set(diff.error ? '' : diff.patch)
     })
   }
+
+  effect(() => {
+    const watchChanges = changesWatcher()
+    if (sessionId && watchChanges && diffOpen() && changesVisibility() === 'visible')
+      return watchChanges(sessionId, showWorkspaceChanges, () => diffStatus.set('Could not refresh changes.'))
+  })
 
   let diffTrigger = null
 
@@ -2917,7 +2904,6 @@ export const initialInputActivity = liveTurn?.inputRequests || []
     closeWorkspaceActions()
     diffOpen.set(true)
     void nextTick(() => diffClose.current?.focus())
-    if (sessionId) loadDiff()
   }
 
   // ── The live wire ─────────────────────────────────────────────────────
@@ -3743,7 +3729,8 @@ export const initialInputActivity = liveTurn?.inputRequests || []
   // rather than top-level await: a client script's body is emitted inside a
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter } = await import(codecUrl)
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, Terminal, toHtml, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges } = await import(codecUrl)
+    changesWatcher.set(watchWorkspaceChanges)
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
     questionForm.set(createQuestionForm({

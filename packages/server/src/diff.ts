@@ -195,6 +195,12 @@ async function filesAgainst(workspacePath: string, baseline: string, now: string
 /** Largest patch sent to the page. Beyond this the browser is the bottleneck. */
 export const MAX_PATCH_BYTES = 512 * 1024
 
+/** The comparison inputs that can change without reopening the Changes pane. */
+export async function workspaceDiffRevision(workspacePath: string, baseline?: string): Promise<string> {
+  const head = await git(workspacePath, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+  return Bun.hash(JSON.stringify([workspacePath, baseline ?? '', head.ok ? head.out.trim() : ''])).toString(36)
+}
+
 /** Read the workspace's uncommitted changes. */
 export async function workspaceDiff(workspacePath: string, baseline?: string): Promise<WorkspaceDiff> {
   const inside = await git(workspacePath, ['rev-parse', '--is-inside-work-tree'])

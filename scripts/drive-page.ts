@@ -2576,6 +2576,59 @@ check('the Claude fork resumes its own native conversation with an unmodified pr
   && claudeForkTurns.at(-1)?.requireResume === true
   && harness.engine.current.sessions.get(derivedId(claudeForkSource))?.turns.length === 2)
 
+// A commit from the terminal clears working-tree changes without reopening the pane.
+const ledgerRepo = join(driveRoot, 'terminal-ledger')
+mkdirSync(ledgerRepo)
+writeFileSync(join(ledgerRepo, 'ledger.txt'), 'Ledger\n')
+execSync('git init -q && git add ledger.txt && git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm Initial', { cwd: ledgerRepo })
+writeFileSync(join(ledgerRepo, 'ledger.txt'), 'Ledger\nSigned\n')
+const ledgerWorkspace = 'commit-from-terminal-workspace'
+const ledgerThread = 'commit-from-terminal-thread'
+const ledgerProfile = 'commit-from-terminal-profile'
+await harness.engine.dispatch({ id: ledgerProfile, at: Date.now(), command: { type: 'profile.create', name: 'Terminal review' } })
+await harness.engine.dispatch({ id: ledgerWorkspace, at: Date.now(), command: { type: 'workspace.add', profileId: derivedId(ledgerProfile), path: ledgerRepo } })
+await harness.engine.dispatch({ id: `${ledgerWorkspace}-trust`, at: Date.now(), command: { type: 'workspace.trust', workspaceId: derivedId(ledgerWorkspace), trusted: true } })
+await harness.engine.dispatch({ id: ledgerThread, at: Date.now(), command: { type: 'session.create', workspaceId: derivedId(ledgerWorkspace), driverKind: 'claude' } })
+const ledgerPath = `/s/${derivedId(ledgerThread)}`
+await page.setViewportSize({ width: 1440, height: 900 })
+await page.goto(new URL(ledgerPath, baseUrl).href)
+let ledgerReads = 0
+page.on('request', (request) => {
+  if (new URL(request.url()).pathname === `${ledgerPath}/diff`) ledgerReads++
+})
+const unchangedLedger = page.waitForResponse(response => new URL(response.url()).pathname === `${ledgerPath}/diff` && response.status() === 204)
+await headerChanges.click()
+const ledgerChanges = page.locator('[data-diff-status]')
+await ledgerChanges.getByText('1 changed file in the working tree · +1 −0', { exact: true }).waitFor()
+await headerTerminal.click()
+await waitForTerminalLine('Harness test terminal')
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`changes-before-terminal-commit-${width}`)
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+}
+check('visible Changes checks an unchanged Git revision without rebuilding its patch',
+  (await unchangedLedger).headers()['cache-control'] === 'private, no-store')
+await terminalHost.focus()
+await page.keyboard.type('git add ledger.txt && git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm Signed-ledger')
+await page.keyboard.press('Enter')
+await ledgerChanges.getByText('No uncommitted changes.', { exact: true }).waitFor()
+check('a terminal Git commit automatically updates the open Changes totals',
+  await page.locator('[data-diff-file]').count() === 0
+  && execFileSync('git', ['log', '-1', '--format=%s'], { cwd: ledgerRepo, encoding: 'utf8' }).trim() === 'Signed-ledger')
+if (screenshotDir) {
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`changes-after-terminal-commit-${width}`)
+  }
+}
+await page.getByRole('button', { name: 'Close changes' }).click()
+const readsAfterClose = ledgerReads
+await page.waitForTimeout(2300)
+check('closing Changes stops Git revision checks', ledgerReads === readsAfterClose)
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()
