@@ -21,6 +21,7 @@ import { join, sep } from 'node:path'
 import process from 'node:process'
 import { chromium, webkit } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
+import { PREVIEW_THREAD_ENV } from '../packages/drivers/src/index'
 import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/index'
 
@@ -298,6 +299,11 @@ function importProjectFixture(workspace: string, name: string) {
   execFileSync('git', ['pull', '-q', '--ff-only', 'fixture-upstream', 'review/fixture'], { cwd: join(workspace, 'api') })
 }
 
+const providerPreviewScript = join(driveRoot, 'provider-preview.ts')
+const providerPreviewPort = join(driveRoot, 'provider-preview-port')
+let providerPreviewProcess: Bun.Subprocess | undefined
+const providerPreviewPrompt = 'Start the provider preview fixture.'
+
 const driver: Driver = {
   kind: 'claude',
   async probe() { return { status: 'ready' } },
@@ -306,6 +312,19 @@ const driver: Driver = {
     return {
       ...instance,
       async *startTurn(input) {
+        if (input.text === providerPreviewPrompt) {
+          if (!config.previewOwner) throw new Error('Preview fixture did not get a thread tag')
+          // Mirror a provider launching a separate command, with a shell that
+          // can reap the listener on normal completion and test failure.
+          const wrapper = 'trap \'kill "$child" 2>/dev/null\' TERM INT EXIT; "$@" & child=$!; wait "$child"'
+          providerPreviewProcess = Bun.spawn(['/bin/sh', '-c', wrapper, 'provider-fixture', process.execPath, '--config=/dev/null', providerPreviewScript], {
+            env: { ...process.env, [PREVIEW_THREAD_ENV]: config.previewOwner },
+            stdout: 'ignore', stderr: 'inherit',
+          })
+          yield { type: 'assistant-delta', text: 'Started the development server.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          return
+        }
         if (input.text === 'Import upstream changes without making edits.') {
           importProjectFixture(config.workspacePath, 'imported-only.txt')
           yield { type: 'assistant-delta', text: 'Upstream changes were imported without local edits.' }
@@ -3858,8 +3877,45 @@ try {
   check('the discovered server disappears when its terminal command exits', true)
   await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
   await headerTerminal.click()
+
+  writeFileSync(providerPreviewScript, `const site = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('<h1>Provider development server</h1>', { headers: { 'content-type': 'text/html' } }) })\nawait Bun.write(${JSON.stringify(providerPreviewPort)}, String(site.port))\n`)
+  const providerThread = 'provider-preview-thread'
+  const providerSession = derivedId(providerThread)
+  await harness.engine.dispatch({
+    id: providerThread,
+    at: Date.now(),
+    command: { type: 'session.create', workspaceId: derivedId(ledgerWorkspace), driverKind: 'claude' },
+  })
+  const providerPath = `/s/${providerSession}`
+  await page.goto(new URL(providerPath, baseUrl).href)
+  const providerComposer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await providerComposer.fill(providerPreviewPrompt)
+  await providerComposer.press('Enter')
+  await page.getByText('Started the development server.', { exact: true }).waitFor()
+  await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
+  for (let attempt = 0; attempt < 100 && !existsSync(providerPreviewPort); attempt++) await Bun.sleep(50)
+  const providerAddress = `http://127.0.0.1:${readFileSync(providerPreviewPort, 'utf8')}/`
+  await previewTrigger.click()
+  const providerCard = browserPane.locator(`[data-preview-server="${providerAddress}"]`)
+  await providerCard.waitFor()
+  const sibling = await page.request.get(`${baseUrl}${ledgerPath}/preview-servers`)
+  check('a settled provider’s development listener appears without a terminal and stays with its thread',
+    !await terminalHost.isVisible() && sibling.ok() && (await sibling.json()).servers.length === 0)
+  for (const [width, height] of workspaceViewports) {
+    await page.setViewportSize({ width, height })
+    await capture(`workspace-browser-provider-server-${width}x${height}`)
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await providerCard.click()
+  await activeFrame.getByRole('heading', { name: 'Provider development server' }).waitFor()
+  check('the provider’s discovered server opens in the Browser pane', true)
+  await page.goto(new URL(ledgerPath, baseUrl).href)
 }
-finally { previewSite.stop(true) }
+finally {
+  providerPreviewProcess?.kill()
+  await providerPreviewProcess?.exited
+  previewSite.stop(true)
+}
 let ledgerReads = 0
 page.on('request', (request) => {
   if (new URL(request.url()).pathname === `${ledgerPath}/diff`) ledgerReads++
