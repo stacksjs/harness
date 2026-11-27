@@ -6201,6 +6201,24 @@ try {
     readFileSync(fixturePath, 'utf8') === 'Upstream review note\n' && !existsSync(join(linkDestination, 'review.txt')))
   await clonePage.waitForLoadState('networkidle')
 
+  const publishRemote = join(driveRoot, 'sync-publish.git')
+  execFileSync('git', ['init', '--bare', '-q', publishRemote])
+  fixtureGit('remote', 'add', 'publish', publishRemote)
+  fixtureGit('config', 'branch.' + syncBranch + '.pushRemote', 'publish')
+  const upstreamHead = fixtureGit('rev-parse', '@{upstream}')
+  writeFileSync(fixturePath, 'Publishing review note\n')
+  fixtureGit('commit', '-qam', 'Publishing review note')
+  await openPush.click()
+  await pushDialog.getByText('publish/' + syncBranch, { exact: true }).waitFor()
+  await capture('workspace-sync-push-separate-remote-360x800', clonePage)
+  await pushDialog.getByRole('button', { name: 'Push', exact: true }).click()
+  await clonePage.getByText('Pushed to publish/' + syncBranch + '.', { exact: true }).waitFor()
+  check('a separately configured push publishes only to the reviewed publishing remote',
+    execFileSync('git', ['--git-dir', publishRemote, 'rev-parse', 'refs/heads/' + syncBranch], { encoding: 'utf8' }).trim() === fixtureGit('rev-parse', 'HEAD')
+    && execFileSync('git', ['--git-dir', syncRemote, 'rev-parse', 'refs/heads/' + syncBranch], { encoding: 'utf8' }).trim() === upstreamHead
+    && fixtureGit('rev-parse', '--abbrev-ref', '@{upstream}') === 'origin/' + syncBranch)
+  await clonePage.waitForLoadState('networkidle')
+
 }
 finally {
   delayGit = false
