@@ -1663,6 +1663,91 @@ describe('harness serve — HTTP', () => {
     expect((await send(refreshed.revision, [1])).status).toBe(409)
   }, 20_000)
 
+  it('commits reviewed working files without replacing unrelated staged content', async () => {
+    const project = join(dir, 'working-commit')
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(['git', '--literal-pathspecs', '-C', project, ...args])
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    mkdirSync(project)
+    git('init', '-qb', 'main')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('config', 'user.name', 'Fixture Author')
+    const picked = 'notes [draft].txt'
+    writeFileSync(join(project, '.gitignore'), 'ignored.txt\n')
+    writeFileSync(join(project, 'ignored.txt'), 'Ignored throughout\n')
+    writeFileSync(join(project, picked), 'Original\n')
+    writeFileSync(join(project, 'staged.txt'), 'Original staged companion\n')
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    await dispatch('working-commit-project', { type: 'workspace.register', path: realpathSync(project), trusted: true })
+    const workspaceId = derivedId('working-commit-project')
+    await dispatch('working-commit-thread', { type: 'session.create', workspaceId, driverKind: 'claude' })
+    const staged = `http://127.0.0.1:${port}/s/${derivedId('working-commit-thread')}/git/commit`
+    const route = staged + '?scope=working'
+    const read = () => fetch(route).then(response => response.json())
+    const send = (revision: string, message: string, excluded: number[] = [], address = route) => fetch(address, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ revision, message, excluded }),
+    })
+    const ambientIndex = join(dir, 'unrelated-index')
+    writeFileSync(ambientIndex, 'Unrelated index marker')
+    const inheritedIndex = process.env.GIT_INDEX_FILE
+    process.env.GIT_INDEX_FILE = ambientIndex
+    try {
+      const first = await read()
+      expect(first).toMatchObject({ branch: 'main', problem: null, files: ['.gitignore', picked, 'staged.txt'] })
+      expect((await send(first.revision, 'First commit')).status).toBe(201)
+      expect(readFileSync(ambientIndex, 'utf8')).toBe('Unrelated index marker')
+    }
+    finally {
+      if (inheritedIndex === undefined) delete process.env.GIT_INDEX_FILE
+      else process.env.GIT_INDEX_FILE = inheritedIndex
+    }
+    expect(git('status', '--short')).toBe('')
+    const original = git('rev-parse', 'HEAD')
+
+    writeFileSync(join(project, picked), 'Old staged version\n')
+    writeFileSync(join(project, 'staged.txt'), 'Keep staged\n')
+    git('add', '--', picked, 'staged.txt')
+    writeFileSync(join(project, picked), 'Initial working version\n')
+    writeFileSync(join(project, 'new.txt'), 'Selected untracked file\n')
+    const realIndex = join(project, '.git', 'index')
+    const before = readFileSync(realIndex)
+    const preview = await read()
+    expect(preview.files).toEqual(['new.txt', picked, 'staged.txt'])
+    expect(readFileSync(realIndex)).toEqual(before)
+    expect((await send(preview.revision, 'Wrong scope', [2], staged)).status).toBe(409)
+    writeFileSync(join(project, picked), 'Updated working version\n')
+    expect((await send(preview.revision, 'Stale working content', [2])).status).toBe(409)
+    const refreshed = await read()
+    const hook = join(project, '.git', 'hooks', 'pre-commit')
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    expect((await send(refreshed.revision, 'Hook will reject', [2])).status).toBe(503)
+    expect(readFileSync(realIndex)).toEqual(before)
+    expect(git('rev-parse', 'HEAD')).toBe(original)
+    rmSync(hook)
+
+    const accepted = await send(refreshed.revision, 'Reviewed working version', [2])
+    expect(accepted.status).toBe(201)
+    expect(await accepted.json()).toEqual({ commit: git('rev-parse', 'HEAD') })
+    expect(git('show', `HEAD:${picked}`)).toBe('Updated working version')
+    expect(git('show', 'HEAD:new.txt')).toBe('Selected untracked file')
+    expect(git('diff', '--cached', '--name-only')).toBe('staged.txt')
+    expect(git('show', ':staged.txt')).toBe('Keep staged')
+    expect(git('diff', '--name-only')).toBe('')
+    expect((await send(refreshed.revision, 'Replay', [2])).status).toBe(409)
+
+    writeFileSync(join(project, picked), 'Another working update\n')
+    const concurrent = await read()
+    writeFileSync(hook, '#!/bin/sh\nunset GIT_INDEX_FILE\nprintf "Concurrent stage\\n" > other.txt\ngit add -- other.txt\n', { mode: 0o755 })
+    const committed = await send(concurrent.revision, 'A concurrent stage', [concurrent.files.indexOf('staged.txt')])
+    expect(committed.status).toBe(201)
+    expect(await committed.json()).toMatchObject({ commit: git('rev-parse', 'HEAD'), warning: expect.stringContaining('Review the Git index') })
+    expect(git('show', ':other.txt')).toBe('Concurrent stage')
+    expect(git('show', ':staged.txt')).toBe('Keep staged')
+  }, 30_000)
+
   it('publishes and fast-forwards the selected branch through its configured remote', async () => {
     const remote = join(dir, 'remote.git')
     const project = join(dir, 'project')

@@ -39,7 +39,7 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
-import { createStagedCommit, prepareStagedCommit, readRepositorySubmission, RepositoryCommitError } from './repository-commit'
+import { createRepositoryCommit, prepareRepositoryCommit, readRepositorySubmission, RepositoryCommitError } from './repository-commit'
 import { readRepositoryStatus } from './repository-status'
 import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
@@ -548,11 +548,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (request.method !== 'GET' && (readingChecks || request.method !== 'POST'))
       return new Response(null, { status: 405, headers })
     const key = url.searchParams.get('repository') ?? ''
+    const scope = action === 'commit' ? url.searchParams.get('scope') ?? 'staged' : 'staged'
+    if (scope !== 'staged' && scope !== 'working') return respond({ error: 'Choose a valid commit scope.' }, 400)
     const submitted = request.method === 'POST'
     const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
     const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request, action === 'commit') : null
     if (submitted && (!input && !pullInput || action === 'commit' && !input?.message))
-      return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the staged review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
+      return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
 
     const session = engine.current.sessions.get(sessionId)
     const workspace = session && engine.current.workspaces.get(session.workspaceId)
@@ -568,7 +570,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return respond({ error: 'This repository is unavailable in the thread’s checkout.' }, 404)
     if (!readingChecks && repositoryActions.has(repository)) return respond({ error: 'A Git action is already running in this repository.' }, 409)
     if (submitted) repositoryActions.add(repository)
-    if (submitted || action === 'pull-request' || readingChecks) extendTimeout()
+    if (submitted || action === 'pull-request' || readingChecks || scope === 'working') extendTimeout()
 
     const authorize = () => {
       const current = engine.current.sessions.get(sessionId)
@@ -610,17 +612,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return respond({ ...result, linked }, result.existing ? 200 : 201)
       }
       const review = action === 'commit'
-        ? { kind: 'commit' as const, ...await prepareStagedCommit(repository, !submitted) }
+        ? { kind: 'commit' as const, ...await prepareRepositoryCommit(repository, scope, !submitted) }
         : { kind: 'sync' as const, action, preview: await repositorySyncPreview(repository, action) }
       const { preview } = review
       if (!input) return respond(preview)
       if (preview.problem) return respond({ error: preview.problem }, 409)
       if (preview.revision !== input.revision)
-        return respond({ error: action === 'commit' ? 'The branch or staged files changed. Review the updated files before committing.'
+        return respond({ error: action === 'commit' ? (scope === 'staged' ? 'The branch or staged files changed. Review the updated files before committing.'
+          : 'The branch, working tree, or staged files changed. Refresh the review before committing.')
           : 'The branch or remote changed. Review the Git action again.' }, 409)
       if (!authorize())
         return respond({ error: 'The checkout changed or a turn is still active. Wait for it to finish and try again.' }, 409)
-      if (review.kind === 'commit') return respond({ commit: await createStagedCommit(repository, input.message, review, input.excluded, authorize) }, 201)
+      if (review.kind === 'commit') return respond(await createRepositoryCommit(repository, input.message, review, input.excluded, authorize), 201)
       return respond(await syncRepository(repository, review.action, review.preview, authorize))
     }
     catch (error) {
@@ -629,7 +632,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (readingChecks) return respond({ error: 'Could not read checks from GitHub. Try again.' }, 503)
       return respond({ error: action === 'commit' ? (input
         ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'
-        : 'Git could not read the staged changes.')
+        : scope === 'staged' ? 'Git could not read the staged changes.' : 'Git could not read the working-tree changes.')
         : 'Git could not complete this action. Check the remote, connection, and Git credentials, then review the branch.' }, 503)
     }
     finally { if (submitted) repositoryActions.delete(repository) }

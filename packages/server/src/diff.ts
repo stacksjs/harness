@@ -28,6 +28,7 @@ import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { snapshotTree } from './checkpoint'
 import { parseWorkspacePatch } from './diff-patch'
+import { workspaceGitEnvironment } from './git-environment'
 import { listTurnAuthoredPaths } from './turn-attribution'
 
 export interface FileChange {
@@ -69,7 +70,7 @@ function git(cwd: string, args: string[], limit = Infinity, stdin?: string): Pro
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn('git', args, { cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'] })
+      child = spawn('git', args, { cwd, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'], env: workspaceGitEnvironment() })
     }
     catch {
       return resolve({ ok: false, out: '' })

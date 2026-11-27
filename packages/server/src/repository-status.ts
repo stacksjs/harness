@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { workspaceGitEnvironment } from './git-environment'
 
 const exec = promisify(execFile)
 
@@ -58,7 +59,7 @@ export async function readRepositoryStatus(path: string): Promise<RepositoryStat
   try {
     const { stdout } = await exec('git', [
       '--no-optional-locks', '-C', path, 'status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all',
-    ], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
+    ], { timeout: 5000, maxBuffer: 4 * 1024 * 1024, env: workspaceGitEnvironment() })
     return parseRepositoryStatus(stdout)
   }
   catch { return null }

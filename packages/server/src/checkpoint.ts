@@ -35,6 +35,7 @@ import { spawn } from 'node:child_process'
 import { lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { workspaceGitEnvironment } from './git-environment'
 
 export interface CaptureResult {
   /** The commit holding the snapshot, or null when nothing could be captured. */
@@ -58,13 +59,10 @@ function git(cwd: string, args: string[], env?: Record<string, string>, input?: 
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
-      const gitEnv = { ...process.env, ...env }
-      for (const key of ['GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_PREFIX', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete gitEnv[key]
-      if (!env?.GIT_INDEX_FILE) delete gitEnv.GIT_INDEX_FILE
       child = spawn('git', args, {
         cwd,
         stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'],
-        env: gitEnv,
+        env: workspaceGitEnvironment(env),
       })
     }
     catch {
@@ -87,13 +85,13 @@ function git(cwd: string, args: string[], env?: Record<string, string>, input?: 
   })
 }
 
-async function withTemporaryIndex<T>(run: (env: Record<string, string>) => Promise<T>): Promise<T> {
+export async function withTemporaryIndex<T>(run: (env: { GIT_INDEX_FILE: string }) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'harness-index-'))
   try {
     return await run({ GIT_INDEX_FILE: join(dir, 'index') })
   }
   finally {
-    await rm(dir, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -107,10 +105,10 @@ async function withTemporaryIndex<T>(run: (env: Record<string, string>) => Promi
  *
  * Built in a temporary index, so nothing the user owns moves.
  */
-export async function snapshotTree(workspacePath: string, excluded: string[] = [], sourceIndex?: Uint8Array): Promise<string | null> {
+export async function snapshotTree(workspacePath: string, excluded: string[] = [], sourceIndex?: Uint8Array, base: string | null = 'HEAD'): Promise<string | null> {
   return withTemporaryIndex(async (env) => {
     if (sourceIndex) await writeFile(env.GIT_INDEX_FILE!, sourceIndex)
-    else if (!(await git(workspacePath, ['read-tree', 'HEAD'], env)).ok) return null
+    else if (!(await git(workspacePath, ['read-tree', base ?? '--empty'], env)).ok) return null
 
     const paths = excluded.length ? ['--', '.', ...excluded.map(path => `:(exclude,literal)${path}`)] : []
     if (!(await git(workspacePath, ['add', '-A', ...paths], env)).ok) return null
@@ -287,7 +285,7 @@ interface RewindTarget {
   indexRecovery?: { ref: string, object: string }
 }
 
-async function readIndex(path: string): Promise<Buffer | null> {
+export async function readIndex(path: string): Promise<Buffer | null> {
   try { return await readFile(path) }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -296,7 +294,7 @@ async function readIndex(path: string): Promise<Buffer | null> {
 }
 
 /** Git honours the adjacent lock. Check the bytes again while holding it. */
-async function replaceIndex(path: string, expected: Buffer | null, next: Buffer | null): Promise<boolean> {
+export async function replaceIndex(path: string, expected: Buffer | null, next: Buffer | null): Promise<boolean> {
   const lock = `${path}.lock`
   const handle = await open(lock, 'wx').catch(() => null)
   if (!handle) return false
