@@ -563,11 +563,15 @@ const RESPONSIVE_SHELL = `
   [data-pr-lifecycle-panel] { position-anchor: --pr-lifecycle; inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 13rem)); inset-inline-end: clamp(12px, anchor(end), calc(100vw - var(--pr-action-width) - 12px)); }
   [data-pr-close-trigger] { anchor-name: --pr-lifecycle-close; }
   [data-pr-close-confirmation] { position-anchor: --pr-lifecycle-close; }
+  [data-pr-revert-trigger] { anchor-name: --pr-lifecycle-revert; }
+  [data-pr-revert-confirmation] { position-anchor: --pr-lifecycle-revert; inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 16rem)); }
 }
 [data-pr-lifecycle-action] { min-height: 36px; width: 100%; padding: 8px; text-align: start; border-radius: 4px; cursor: pointer; }
 [data-pr-lifecycle-action]:hover { background: var(--workspace-hover); }
 [data-pr-close-trigger], [data-pr-close-confirm] { color: var(--workspace-removed-text); }
 [data-pr-close-confirmation] { padding: 10px; gap: 8px; }
+[data-pr-revert-confirmation] { --pr-action-width: min(17rem, calc(100vw - 32px)); max-block-size: min(15rem, calc(100dvh - 24px)); padding: 10px; gap: 8px; font-size: 13px; overflow-wrap: anywhere; }
+[data-pr-revert-confirm] { color: var(--workspace-accent); }
 :is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) { --pr-action-width: min(17rem, calc(100vw - 32px)); max-block-size: min(18rem, calc(100dvh - 24px)); padding: 10px; gap: 8px; }
 [data-pr-branch-update-panel] { max-block-size: min(21rem, calc(100dvh - 24px)); }
 [data-pr-merge-trigger] { anchor-name: --pr-merge; }

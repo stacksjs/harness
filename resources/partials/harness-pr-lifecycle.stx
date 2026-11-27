@@ -27,6 +27,8 @@
           @foreach(selected.lifecycle.actions as item)
             @if(item.action === 'close')
               <button type="button" popovertarget="pr-close-confirmation" data-pr-lifecycle-action data-pr-close-trigger>{{ item.label }}</button>
+            @elseif(item.action === 'revert')
+              <button type="button" popovertarget="pr-revert-confirmation" data-pr-lifecycle-action data-pr-revert-trigger>{{ item.label }}</button>
             @else
               <button type="submit" name="action" value="{{ item.action }}" data-pr-lifecycle-action>{{ item.label }}</button>
             @endif
@@ -40,6 +42,17 @@
           <div data-pr-review-actions>
             <button type="button" popovertarget="pr-close-confirmation" popovertargetaction="hide" data-pr-button>Cancel</button>
             <button type="submit" name="action" value="close" data-pr-button data-pr-close-confirm>Confirm close</button>
+          </div>
+        </form>
+      @endif
+      @if(selected.lifecycle.actions.some(item => item.action === 'revert'))
+        <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-revert-title" id="pr-revert-confirmation" data-pr-revert-confirmation data-pr-lifecycle-panel popover>
+          @include('./harness-pr-lifecycle-fields')
+          <p id="pr-revert-title"><strong>Open a revert pull request?</strong></p>
+          <p>GitHub will open a pull request against <code>{{ selected.baseRef }}</code> to reverse #{{ selected.number }}.</p>
+          <div data-pr-review-actions>
+            <button type="button" popovertarget="pr-revert-confirmation" popovertargetaction="hide" data-pr-button>Cancel</button>
+            <button type="submit" name="action" value="revert" data-pr-button data-pr-revert-confirm>Create revert PR</button>
           </div>
         </form>
       @endif

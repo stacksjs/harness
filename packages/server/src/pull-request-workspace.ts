@@ -10,6 +10,7 @@ import { placeReviewConversations, readReviewCommentPage, readReviewConversation
 import { findPullRequestThread } from './pull-request-links'
 import { availableLifecycleActions, behindBase, branchUpdateMethods, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
+import { revertWorkspacePullRequest } from './pull-request-revert'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
@@ -421,7 +422,8 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(token)) return null
   const merging = isMergeAction(action)
   const updatingBranch = action === 'update-branch'
-  const scopedBranch = merging || updatingBranch
+  const reverting = action === 'revert'
+  const scopedBranch = merging || updatingBranch || reverting
   const baseBranch = scopedBranch ? values.get('baseBranch') ?? '' : ''
   const methodValue = values.get('method')
   const method = mergeMethod(methodValue)
@@ -430,12 +432,19 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
     || (scopedBranch && (!baseBranch || baseBranch.length > 1024 || /\p{Cc}/u.test(baseBranch)))) return null
   const tab = tabs.find(value => query.get('tab') === value) ?? 'summary'
   const params = reviewReturnParams(query, profile, selection.url, tab)
-  const finish = (result: 'updated' | keyof typeof lifecycleMessages, confirmedAction: LifecycleAction | 'confirmed' = action) => {
+  const finish = (result: 'updated' | keyof typeof lifecycleMessages, confirmedAction: LifecycleAction | 'confirmed' = action, newPull?: number) => {
     const message = result === 'updated' ? lifecycleSuccess(confirmedAction) : lifecycleMessages[result]
     const fallback: PullRequestLifecycleDraft | undefined = result === 'pending'
       ? { action, revision, token, head, base, baseBranch, method, viewer, message }
       : undefined
-    const target = new URLSearchParams(params)
+    const target = newPull === undefined ? new URLSearchParams(params)
+      : reviewReturnParams(query, profile, `https://github.com/${selection.repository}/pull/${newPull}`, 'summary')
+    if (newPull !== undefined) {
+      target.set('state', 'open')
+      target.delete('q')
+      target.delete('detailPage')
+      target.delete('page')
+    }
     if (result === 'updated') {
       if (updatingBranch) for (const key of ['reviewLine', 'reviewStart', 'reviewHead', 'reviewBase']) target.delete(key)
       target.set('lifecycleResult', confirmedAction)
@@ -456,6 +465,14 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
     const before = await read()
     if (!before) return finish('unavailable')
     if (before.viewer.id !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
+    if (reverting) {
+      if (before.state !== 'MERGED' || before.baseRefName !== baseBranch || before.baseRefOid !== base || before.headRefOid !== head)
+        return finish('changed')
+      const canStart = revision === lifecycleRevision(before) && availableLifecycleActions(before).includes('revert')
+      const result = await revertWorkspacePullRequest(repository.path, repository.name, before, canStart, receipts, signal, credential)
+      if (typeof result === 'number') return finish('updated', 'revert', result)
+      return result === 'confirmed' ? finish('updated', 'confirmed') : finish(result)
+    }
     // Reloading a still-behind PR keeps the same receipt for an update of these exact commits.
     const branchReceipt = ['pr-branch-update', profile, repository.workspace.id, key, before.id, viewer, head, base, baseBranch]
     const receiptToken = updatingBranch ? createHash('sha256').update(JSON.stringify(branchReceipt)).digest('hex') : token

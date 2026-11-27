@@ -6715,6 +6715,29 @@ try {
     check('merge recovery retains the chosen method and never submits a second GitHub mutation',
       pullState().mergeWrites.length === 1 && pullState().mergeWrites[0].input.mergeMethod === 'SQUASH'
       && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible() && await actions.isHidden())
+
+    github.configureRevert('unconfirmed')
+    await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    const revert = lifecycleMenu.getByRole('button', { name: 'Revert changes', exact: true })
+    const revertPanel = clonePage.getByRole('form', { name: 'Open a revert pull request?', exact: true })
+    await actions.press('Enter')
+    await revert.press('Enter')
+    await revertPanel.waitFor()
+    await capture('pull-requests-revert-confirmation-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('Escape closes the revert confirmation and returns focus without writing',
+      await revertPanel.isHidden() && await revert.evaluate(element => document.activeElement === element)
+      && pullState().revertWrites === undefined)
+    await revert.press('Enter')
+    await revertPanel.getByRole('button', { name: 'Create revert PR', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.configureRevert('normal')
+    await checkLifecycle.click()
+    await lifecycleStatus('Revert pull request opened on GitHub.').waitFor()
+    check('revert recovery opens the new PR without replacing or reopening the merged source',
+      pullState().revertWrites.length === 1 && Boolean(pullState().pulls[0].merged_at)
+      && new URL(clonePage.url()).searchParams.get('selectedUrl') === pullState().pulls[1].html_url
+      && await clonePage.locator('strong[data-pr-state="Open"]').isVisible())
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

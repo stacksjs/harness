@@ -1520,6 +1520,75 @@ describe('harness serve — HTTP', () => {
     }
   }, 60_000)
 
+  it.skipIf(process.platform === 'win32')('recovers a GitHub revert PR after restart using the original actor and intent', async () => {
+    const { project, cli, local, base, url, readState } = seedPullRequestLifecycle('Review the report changes', false)
+    const fixture = readState()
+    Object.assign(fixture.pulls[0], { state: 'closed', merged_at: '2026-11-01T18:00:00Z' })
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const previousCwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-revert-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const summary = () => host + '/pull-requests?' + new URLSearchParams({ state: 'merged', selectedUrl: url })
+      const readForm = () => pullRequestLifecycleForm(summary())
+      const revert = (form: Awaited<ReturnType<typeof readForm>>, overrides: Record<string, string> = {}, accept = 'application/json') =>
+        fetch(new URL(form.endpoint.pathname + form.endpoint.search, host), {
+          method: 'POST', redirect: 'manual', headers: { accept, origin: host, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ ...form.values, action: 'revert', ...overrides }),
+        })
+      cli.configureRevert('normal')
+      cli.configureMerge('ready')
+      const form = await readForm()
+      expect(form.html).toContain('Open a revert pull request?')
+      expect(form.html).toContain('to reverse #1')
+      expect((await revert(form, { base: 'e'.repeat(40) })).status).toBe(409)
+      expect((await revert(form, { baseBranch: 'another-branch' })).status).toBe(409)
+      expect((await revert(form, { revision: 'c'.repeat(64) })).status).toBe(409)
+      cli.configureMerge('readonly')
+      expect(await fetch(summary()).then(response => response.text())).not.toContain('data-pr-revert-trigger')
+      expect((await revert(form)).status).toBe(403)
+      cli.configureMerge('ready')
+      cli.configureRevert('denied')
+      const denied = await revert(form)
+      expect(denied.status).toBe(403)
+      expect(await denied.text()).not.toContain('Private revert')
+      cli.configureRevert('unavailable')
+      expect((await revert(form)).status).toBe(503)
+      expect(readState().revertWrites).toBeUndefined()
+      cli.configureRevert('unconfirmed')
+      expect((await revert(form)).status).toBe(202)
+      const refreshed = await readForm()
+      expect(refreshed.values.intent).not.toBe(form.values.intent)
+      expect((await revert(refreshed)).status).toBe(202)
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      cli.configureRevert('wrong-author')
+      expect((await revert(form)).status).toBe(202)
+      cli.configureRevert('paged')
+      const recovered = await revert(form, {}, 'text/html')
+      expect(recovered.status).toBe(303)
+      const location = new URL(recovered.headers.get('location')!, host)
+      expect(location.searchParams.get('selectedUrl')).toBe(url.replace(/1$/u, '2'))
+      expect(location.searchParams.get('state')).toBe('open')
+      const html = await fetch(location).then(response => response.text())
+      expect(html).toContain('Revert pull request opened on GitHub.')
+      expect(html).toContain('data-pr-state="Open"')
+      expect((await revert(await readForm())).status).toBe(200)
+      expect(readState().revertWrites).toHaveLength(1)
+      expect(readState().pulls[0]).toMatchObject({ state: 'closed', head: { sha: local }, base: { sha: base } })
+    }
+    finally {
+      process.chdir(previousCwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
+
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')
     mkdirSync(project)

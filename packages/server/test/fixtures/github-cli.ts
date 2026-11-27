@@ -47,6 +47,10 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     Object.assign(previous.pulls[0], { branchBehind, branchMode })
     writeFileSync(state, JSON.stringify(previous))
   }
+  const configureRevert = (revertMode: 'normal' | 'denied' | 'unavailable' | 'unconfirmed' | 'wrong-author' | 'paged') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, revertMode }))
+  }
   const revealLifecycle = () => {
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     const { invisibleLifecycle, ...shown } = previous
@@ -136,6 +140,37 @@ if (url.pathname === '/graphql' && method === 'POST') {
     reply(200, { data: { [marked ? 'markFileAsViewed' : 'unmarkFileAsViewed']: { clientMutationId: null } } })
   }
   const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
+  const revertCandidate = pull => ({
+    id: 'fixture-pull-' + pull.number, number: pull.number, baseRefName: pull.base.ref, body: pull.body,
+    author: { id: pull.authorId }, repository: { nameWithOwner: pull.base.repo.full_name },
+  })
+  if (query.includes('query HarnessFindPullRequestRevert')) {
+    if (state.revertMode === 'unavailable') reply(200, { errors: [{ message: 'Private revert lookup diagnostics' }] })
+    const source = state.pulls.find(pull => 'fixture-pull-' + pull.number === variables.id)
+    const previousPage = state.revertMode === 'paged' && !variables.before
+    const nodes = previousPage || state.revertMode === 'unconfirmed' ? [] : state.pulls.filter(pull => pull.reverts === source?.number)
+      .map((pull) => ({ source: revertCandidate(state.revertMode === 'wrong-author' ? { ...pull, authorId: 'different-github-account' } : pull) }))
+    reply(200, { data: { viewer, node: !source ? null : { id: variables.id, timelineItems: {
+      nodes, pageInfo: { hasPreviousPage: previousPage, startCursor: previousPage ? 'previous-revert-page' : null },
+    } } } })
+  }
+  if (query.includes('mutation HarnessRevertPullRequest')) {
+    const input = variables.input
+    const source = state.pulls.find(pull => 'fixture-pull-' + pull.number === input?.pullRequestId)
+    if (!source?.merged_at || !process.env.GH_TOKEN || state.revertMode === 'denied')
+      reply(200, { errors: [{ type: 'FORBIDDEN', message: 'Private revert mutation diagnostics' }] })
+    const number = state.pulls.length + 1
+    const pull = { ...source, number, state: 'open', merged_at: null, title: 'Revert "' + source.title + '"',
+      html_url: 'https://github.com/' + source.base.repo.full_name + '/pull/' + number, body: input.body,
+      reverts: source.number, authorId: viewer.id, head: { ...source.head, ref: 'revert-' + source.number, sha: 'f'.repeat(40) } }
+    state.revertWrites = [...(state.revertWrites ?? []), input]
+    state.pulls.push(pull)
+    writeFileSync(stateFile, JSON.stringify(state))
+    if (state.revertMode === 'unconfirmed') process.exit(1)
+    reply(200, { data: { revertPullRequest: {
+      clientMutationId: input.clientMutationId, pullRequest: { id: input.pullRequestId }, revertPullRequest: revertCandidate(pull),
+    } } })
+  }
   if (query.includes('mutation HarnessSetPullRequestLifecycle')) {
     const id = variables.input?.pullRequestId ?? variables.input?.id ?? variables.id
     const pull = state.pulls.find(pull => 'fixture-pull-' + pull.number === id)
@@ -238,6 +273,8 @@ if (url.pathname === '/graphql' && method === 'POST') {
       mergeable: pull.branchMode === 'conflict' ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: state.mergeMode === 'blocked' ? 'BLOCKED' : 'CLEAN',
       baseRef: missing ? { compare: null } : { compare: { behindBy: pull.branchBehind } },
       viewerCanUpdateBranch: pull.branchMode === 'normal' && pull.branchBehind > 0,
+      revertUrl: state.revertMode && pull.merged_at ? pull.html_url + '/revert' : null,
+      mergeCommit: pull.merged_at ? { oid: 'd'.repeat(40) } : null,
       isMergeQueueEnabled: state.mergeMode === 'queue', mergeQueueEntry: pull.queueEntry ? { id: pull.queueEntry } : null,
       autoMergeRequest: pull.autoMergeMethod ? { mergeMethod: pull.autoMergeMethod } : null,
       viewerCanEnableAutoMerge: state.mergeMode === 'blocked', viewerCanDisableAutoMerge: Boolean(pull.autoMergeMethod),
@@ -361,5 +398,5 @@ if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
   return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages,
-    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle, configureMerge, configureBranchUpdate }
+    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle, configureMerge, configureBranchUpdate, configureRevert }
 }
