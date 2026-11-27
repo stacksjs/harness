@@ -145,7 +145,7 @@ export type EventPayload =
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number, skipped?: string[] }
   | { type: 'checkpoint.restore-failed', checkpointId: number, message: string }
   /** Only the settings that actually changed, for the same reason as below. */
-  | { type: 'settings.updated', changes: Partial<HostSettings> }
+  | { type: 'settings.updated', changes: Partial<HostSettings>, workspaceId?: number, inherit?: Array<keyof HostSettings> }
   | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
   /**
    * Only the fields that changed. Absent means "leave it alone", which is what

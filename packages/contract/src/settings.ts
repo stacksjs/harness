@@ -118,6 +118,52 @@ export function hostSettings(): HostSettings {
 }
 
 /**
+ * What one project answers differently from the host it runs on.
+ *
+ * Only the keys a project actually pins are here, and an absent key does not
+ * mean "the default": it means "whatever the host says now". Pin the agent for
+ * one project and a later change to the host default leaves that project
+ * alone, while every project that pinned nothing follows along.
+ */
+export type ProjectSettings = Partial<HostSettings>
+
+const SETTING_KEYS = Object.keys(defaultHostSettings) as Array<keyof HostSettings>
+
+/** The settings in force for a project: its own answers over the host's. */
+export function effectiveSettings(host: HostSettings, project?: ProjectSettings): HostSettings {
+  return { ...host, ...project }
+}
+
+/**
+ * The settings keys of this build, from a list a client sent or an older log
+ * holds. Same reasoning as `acceptedSettings`: a key this build has retired is
+ * dropped rather than carried into the projection.
+ */
+export function acceptedSettingKeys(value: unknown): Array<keyof HostSettings> {
+  return Array.isArray(value) ? SETTING_KEYS.filter(key => value.includes(key)) : []
+}
+
+/**
+ * Only the accepted changes that differ from what this project already pins.
+ *
+ * Deliberately not compared against the effective settings. Choosing the agent
+ * the host happens to default to is still worth recording, because it pins
+ * that agent for this project against a later change to the host default.
+ */
+export function projectSettingsDelta(current: ProjectSettings, changes: unknown): Partial<HostSettings> {
+  const accepted = acceptedSettings(changes)
+  const delta: Partial<HostSettings> = {}
+  for (const [key, value] of Object.entries(accepted) as Array<[keyof HostSettings, never]>) {
+    const held = current[key]
+    const unchanged = key === 'snoozePresets'
+      ? held !== undefined && sameSnoozePresets(held as readonly SnoozePreset[], value)
+      : held === value
+    if (!unchanged) delta[key] = value
+  }
+  return delta
+}
+
+/**
  * The subset of `changes` this build accepts.
  *
  * Unknown keys and unusable values are dropped rather than rejected wholesale,
