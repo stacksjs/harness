@@ -93,7 +93,7 @@ const name = parts.slice(2, 4).join('/')
 const repo = state.repositories[name]
 
 function reply(status, body) {
-  process.stdout.write('HTTP/2.0 ' + status + ' Fixture\\r\\ncontent-type: application/json\\r\\n\\r\\n' + JSON.stringify(body))
+  process.stdout.write('HTTP/2.0 ' + status + ' Fixture\\r\\ncontent-type: application/json\\r\\n\\r\\n' + (body === undefined ? '' : JSON.stringify(body)))
   process.exit(status < 300 ? 0 : 1)
 }
 
@@ -377,6 +377,16 @@ if (url.pathname === '/search/issues') {
   reply(200, { items: state.pulls.filter(pull => pull.base.repo.full_name === selected && pull.title.toLowerCase().includes(title.toLowerCase())) })
 }
 if (!repo) reply(404, {})
+if (method === 'POST' && parts[4] === 'actions' && parts[5] === 'runs' && parts[7] === 'approve') {
+  const run = state.workflowRuns?.find(run => run.id === Number(parts[6]))
+  if (!run) reply(404, {})
+  if (run.status === 'action_required' || run.conclusion === 'action_required') {
+    Object.assign(run, { status: 'queued', conclusion: null })
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(204)
+  }
+  reply(409, { message: 'This workflow run has already been approved.' })
+}
 if (parts.length === 4) reply(200, { full_name: name, default_branch: 'main', parent: repo.parent && { full_name: repo.parent } })
 if (parts[4] === 'branches') {
   const sha = head(repo, decodeURIComponent(parts[5]))

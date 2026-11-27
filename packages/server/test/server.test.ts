@@ -8,6 +8,7 @@ import { Terminal } from '@harness/ansi'
 import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
 import { ProjectScripts } from '../src/project-scripts'
+import { repositoryGitHubRequest } from '../src/repository-pull-request'
 import { serve } from '../src/server'
 import { fixtureGitHubCli } from './fixtures/github-cli'
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from './fixtures/git-http'
@@ -437,6 +438,24 @@ function url(): string {
 }
 
 describe('harness serve — HTTP', () => {
+  it.skipIf(process.platform === 'win32')('accepts an empty response after GitHub approves a workflow run', async () => {
+    const { project, cli, readState } = seedPullRequestLifecycle('Check the report workflow', false)
+    const fixture = readState()
+    fixture.workflowRuns = [{ id: 41, status: 'completed', conclusion: 'action_required' }]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      const approve = () => repositoryGitHubRequest(project, 'repos/fixture/notebook/actions/runs/41/approve', {})
+      expect(await approve()).toEqual({ status: 204, body: null, hasNextPage: false })
+      expect(readState().workflowRuns).toEqual([{ id: 41, status: 'queued', conclusion: null }])
+      expect((await approve()).status).toBe(409)
+    }
+    finally {
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  })
   it('reports health with the hydrated projection', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`)
     expect(response.status).toBe(200)

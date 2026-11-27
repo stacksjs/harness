@@ -52,8 +52,9 @@ export async function repositoryGitHubRequest(path: string, endpoint: string, pa
   const json = /\r?\n\r?\n/u.exec(output)
   if (!status || !json)
     throw new RepositoryPullRequestError('Could not connect to GitHub. Check the host connection and gh auth status.')
+  const responseBody = output.slice(json.index + json[0].length)
   let body: unknown
-  try { body = JSON.parse(output.slice(json.index + json[0].length)) }
+  try { body = status === 204 && !responseBody.trim() ? null : JSON.parse(responseBody) }
   catch { throw new RepositoryPullRequestError('GitHub returned an unreadable response. Try again.') }
   if (status === 401) throw new RepositoryPullRequestError('GitHub authentication expired. Run gh auth login on this host.', status)
   if (status === 403) throw new RepositoryPullRequestError('GitHub refused this request. Check the account’s repository permissions or try again after its rate limit resets.', status)
