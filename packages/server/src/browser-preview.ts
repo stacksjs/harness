@@ -49,6 +49,11 @@ export function previewAddress(input: string, owner: string): { url: string } | 
   catch { return { error: 'Enter a valid website address.' } }
 }
 
+export function terminalPreviewAddress(address: string, owner: string): string | null {
+  const result = previewAddress(address, owner)
+  return 'url' in result && loopback(new URL(result.url).hostname) ? result.url : null
+}
+
 export function restoreBrowserPreview(value: unknown, owner: string): BrowserPreview {
   if (typeof value === 'object' && value !== null && 'tabs' in value && Array.isArray(value.tabs)) {
     const tabs: PreviewTab[] = []

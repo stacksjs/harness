@@ -1412,6 +1412,8 @@ const TERMINAL_PANEL = `
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #d7dae0; white-space: pre;
 }
+[data-terminal-link] { color: #a8c6ff; text-decoration: underline; text-underline-offset: 2px; }
+[data-terminal-link]:focus-visible { outline: 1px solid #a8c6ff; outline-offset: 1px; }
 [data-terminal-actions] {
   position: fixed; inset: auto; margin: 0; padding: 4px; min-inline-size: 152px;
   max-inline-size: calc(100vw - 16px); max-block-size: calc(100dvh - 16px); overflow-y: auto;

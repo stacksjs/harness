@@ -1,4 +1,5 @@
 import { Terminal, toHtml } from '@harness/ansi'
+import { terminalPreviewAddress } from './browser-preview'
 
 export interface TerminalTab {
   key: string
@@ -139,10 +140,12 @@ export function createTerminalDock(options: TerminalDockOptions) {
       const viewport = host(pane.tab.key)
       const screen = viewport?.querySelector<HTMLElement>('[data-terminal-screen]')
       if (!viewport || !screen) return
-      // Replacing the rendered rows would collapse a native text selection.
-      pane.selectionDeferred = Boolean(selection(screen))
+      // Replacing the rows would collapse a native selection or move the
+      // keyboard away from the terminal link the user is inspecting.
+      const focused = screen.ownerDocument.activeElement
+      pane.selectionDeferred = Boolean(selection(screen) || (screen.contains(focused) && focused?.matches('[data-terminal-link]')))
       if (pane.selectionDeferred) return
-      screen.innerHTML = toHtml(pane.model.snapshot())
+      screen.innerHTML = toHtml(pane.model.snapshot(), true)
       if (pane.following || pane.model.onAltScreen) viewport.scrollTop = viewport.scrollHeight
     })
   }
@@ -358,6 +361,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
 
   return {
     show, receive, onOffline, close, keydown,
+    previewAddress: terminalPreviewAddress,
     selectedText, selectAll,
     visibleText(key: string) {
       const viewport = host(key)

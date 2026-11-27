@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { navigatePreviewTab, previewAddress, restoreBrowserPreview } from '../src/browser-preview'
+import { navigatePreviewTab, previewAddress, restoreBrowserPreview, terminalPreviewAddress } from '../src/browser-preview'
 
 const local = 'http://localhost:3973'
 
@@ -24,6 +24,13 @@ describe('workspace browser addresses', () => {
     expect(previewAddress('localhost:5173', remote)).toHaveProperty('error')
     expect(previewAddress('http://dev.example.test', remote)).toHaveProperty('error')
     expect(previewAddress('https://dev.example.test', remote)).toEqual({ url: 'https://dev.example.test/' })
+  })
+
+  it('offers an in-app terminal destination only for another reachable local origin', () => {
+    expect(terminalPreviewAddress('http://127.0.0.1:5173/fixture', local)).toBe('http://127.0.0.1:5173/fixture')
+    expect(terminalPreviewAddress('http://127.0.0.1:3973/', local)).toBeNull()
+    expect(terminalPreviewAddress('http://127.0.0.1:5173/', 'https://harness.example.test')).toBeNull()
+    expect(terminalPreviewAddress('https://example.test/', local)).toBeNull()
   })
 
   it('revalidates saved addresses and repairs an invalid selected tab', () => {

@@ -956,7 +956,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <p data-terminal-error role="alert" hidden :hidden="!terminalStates()[pane.key]?.error" :text="terminalStates()[pane.key]?.error || ''" class="px-3 py-2 text-red-300 text-sm"></p>
           <div role="group" :data-terminal-host="pane.key" :aria-label="(terminalStates()[pane.key]?.shell || 'Terminal') + ' ' + pane.number + ' input and output'"
             @focus="focusTerminalInput(pane.key)" @blur="blurTerminalInput($event)" @keydown="termKeydown(pane, $event)" @paste="pasteTerminalEvent(pane.key, $event)"
-            @contextmenu="openTerminalActions(pane.key, $event)"
+            @contextmenu="openTerminalActions(pane.key, $event)" @click="openTerminalLink" @focusout="terminalController()?.selectionChanged()"
             @scroll="terminalController()?.track(pane.key, $event)" tabindex="0" class="terminal-host">
             <span data-term-metric aria-hidden="true" class="term-metric">0123456789</span>
             <div data-terminal-screen></div>
@@ -7884,6 +7884,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function termKeydown(tab, event) {
+    if (event.target?.closest?.('[data-terminal-link]')) return
     if ((event.ctrlKey && event.shiftKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'c') {
       const text = terminalController()?.selectedText(tab.key)
       if (text) {
@@ -7902,6 +7903,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     event.preventDefault()
     event.stopPropagation()
     if (!event.repeat) runTerminalShortcut(command)
+  }
+
+  async function openTerminalLink(event) {
+    const link = event.target?.closest?.('[data-terminal-link]')
+    if (!link || !previewDiscoveryAllowed || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    const url = terminalController()?.previewAddress(link.href, link.ownerDocument.location.origin)
+    if (!url) return
+    event.preventDefault()
+    await showBrowserPreview(event)
+    if (!browserPreviewTools() || !browserPreviewOpen()) return
+    openDiscoveredPreview({ url })
   }
 
   function runTerminalShortcut(command) {
