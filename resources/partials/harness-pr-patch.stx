@@ -8,7 +8,7 @@
         @if(row.before)
           <a id="{{ lineId(file, 'L', row.before) }}" href="#{{ lineId(file, 'L', row.before) }}" data-pr-line="L"
             aria-label="Before line {{ row.before }}"
-            @if(file.lineSelection?.line === lineId(file, 'L', row.before)) autofocus aria-current="location" tabindex="0"
+            @if(file.lineSelection?.line === lineId(file, 'L', row.before)) @if(!viewedAnchor && !conversationAnchor) autofocus@endif aria-current="location" tabindex="0"
             @elseif(!file.lineSelection && row.position === file.firstLine) tabindex="0"@else tabindex="-1"@endif>{{ row.before }}</a>
         @else
           <span></span>
@@ -16,7 +16,7 @@
         @if(row.after)
           <a id="{{ lineId(file, 'R', row.after) }}" href="#{{ lineId(file, 'R', row.after) }}" data-pr-line="R"
             aria-label="After line {{ row.after }}"
-            @if(file.lineSelection?.line === lineId(file, 'R', row.after)) autofocus aria-current="location" tabindex="0"
+            @if(file.lineSelection?.line === lineId(file, 'R', row.after)) @if(!viewedAnchor && !conversationAnchor) autofocus@endif aria-current="location" tabindex="0"
             @elseif(!file.lineSelection && row.position === file.firstLine && !row.before) tabindex="0"@else tabindex="-1"@endif>{{ row.after }}</a>
         @else
           <span></span>

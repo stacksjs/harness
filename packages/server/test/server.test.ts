@@ -933,6 +933,20 @@ describe('harness serve — HTTP', () => {
       expect(linePage).toMatch(/data-pr-file-patch\s+open/u)
       expect(linePage.match(/data-selected>/gu)).toHaveLength(3)
       expect(linePage).toMatch(/aria-label="After line 2"\s+autofocus aria-current="location"/u)
+      const nativeViewedAction = linePage.match(/<form method="post" action="([^"]+)" data-pr-viewed-form/u)?.[1]
+      expect(nativeViewedAction).toBeDefined()
+      const nativeViewed = await fetch(new URL(nativeViewedAction!.replaceAll('&amp;', '&'), host), {
+        method: 'POST', redirect: 'manual',
+        headers: { origin: host, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ path: 'report.txt', head: local, viewer: 'fixture-viewer', viewed: 'false' }),
+      })
+      expect(nativeViewed.status).toBe(303)
+      const afterViewed = new URL(nativeViewed.headers.get('location')!, host)
+      expect(afterViewed.searchParams.get('reviewLine')).toBe(lineAnchor)
+      expect(afterViewed.searchParams.get('reviewBase')).toBe(base)
+      const restoredRange = await fetch(afterViewed).then(response => response.text())
+      expect(restoredRange.match(/data-selected>/gu)).toHaveLength(3)
+      expect(restoredRange.match(/\sautofocus(?=[\s>])/gu)).toHaveLength(1)
       lineLink.searchParams.set('reviewHead', '3'.repeat(40))
       const staleLine = await fetch(lineLink).then(response => response.text())
       expect(staleLine).toContain('The pull request comparison changed. Select a line in the current diff.')

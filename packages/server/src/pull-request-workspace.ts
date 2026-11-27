@@ -147,10 +147,11 @@ function commentView(query: URLSearchParams) {
   return { anchor: query.get('conversation'), scope: query.get('commentScope'), window }
 }
 
-function carryCommentView(from: URLSearchParams, to: URLSearchParams) {
-  for (const key of commentViewKeys) {
-    const value = reviewCommentCursor(from.get(key))
-    if (value) to.set(key, value)
+function carryReviewView(from: URLSearchParams, to: URLSearchParams) {
+  for (const key of [...commentViewKeys, 'reviewLine', 'reviewStart', 'reviewHead', 'reviewBase']) {
+    const raw = from.get(key)
+    const value = reviewCommentCursor(raw)
+    if (value || (key === 'reviewBase' && raw === '')) to.set(key, value ?? '')
   }
 }
 
@@ -303,7 +304,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const commentsBase = detailsHref('code', detailPage)
   const reviewAction = (action: string) => {
     const actionParams = new URLSearchParams(commentsBase.split('?')[1])
-    carryCommentView(query, actionParams)
+    carryReviewView(query, actionParams)
     return '/pull-requests/' + action + '?' + actionParams
   }
   const marks = (row: Pull) => ({ ...row, selected: row.url.toLowerCase() === selectedUrl.toLowerCase(), href: href({ selectedUrl: row.url }) })
@@ -339,7 +340,7 @@ function reviewReturnParams(query: URLSearchParams, profile: number, url: string
     const value = query.get(key)
     if (value && value.length <= 512) params.set(key, value)
   }
-  carryCommentView(query, params)
+  carryReviewView(query, params)
   return params
 }
 
