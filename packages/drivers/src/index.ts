@@ -10,6 +10,7 @@ export type { ConformanceCase, ConformanceReport } from './conformance'
 export { PREVIEW_THREAD_ENV } from './preview-owner'
 export { driverKinds, registry, resolveDriver } from './registry'
 export type {
+  CommitMessageInput,
   Driver,
   DriverConfig,
   ForkInput,

@@ -39,7 +39,7 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
-import { createRepositoryCommit, prepareRepositoryCommit, readRepositorySubmission, RepositoryCommitError, sameRepositoryCommitFiles } from './repository-commit'
+import { CommitGenerationError, createRepositoryCommit, generatedCommitMessage, prepareRepositoryCommit, readRepositorySubmission, RepositoryCommitError, reviewedCommitPatch, sameRepositoryCommitFiles, verifyRepositoryCommit } from './repository-commit'
 import { planRepositoryBranch, reconcileRepositoryBranch, startRepositoryBranch } from './repository-feature-branch'
 import { readRepositoryStatus } from './repository-status'
 import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
@@ -540,6 +540,16 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const repositoryActions = new Set<string>()
   type RepositoryAction = 'commit' | 'pull-request' | 'pull-request-checks' | RepositorySyncAction
 
+  function commitGenerator(session: SessionState, profileId: number, root: string) {
+    const driver = resolveDriver(session.driverKind)
+    if (!driver?.generateCommitMessage) return null
+    const launch = session.providerInstanceId === undefined ? {}
+      : savedProviders.find(session.providerInstanceId, profileId, session.driverKind, root)
+    if (!launch) return null
+    const key = createHash('sha256').update(JSON.stringify([session.driverKind, session.providerInstanceId, session.model, launch])).digest('hex')
+    return { key, launch, run: driver.generateCommitMessage }
+  }
+
   async function resolveRepositoryBranch(session: SessionState, attempt: GitBranchAttempt, live: boolean): Promise<boolean> {
     const trusted = () => engine.current.workspaces.get(session.workspaceId)?.trusted === true
     if (!trusted()) throw new RepositoryCommitError('Trust this workspace to recover the Git branch action.')
@@ -581,7 +591,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const submitted = request.method === 'POST'
     const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
     const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request, action === 'commit') : null
-    if (submitted && (!input && !pullInput || action === 'commit' && !input?.message))
+    if (submitted && (!input && !pullInput || action === 'commit' && !input?.message && !input?.generate))
       return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
     if (input?.newBranch && scope !== 'working') return respond({ error: 'Choose working-tree changes to commit on a new branch.' }, 400)
 
@@ -655,7 +665,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         ? { kind: 'commit' as const, ...await prepareRepositoryCommit(repository, scope, !submitted) }
         : { kind: 'sync' as const, action, preview: await repositorySyncPreview(repository, action) }
       const { preview } = review
-      if (!input) return respond(preview)
+      if (!input) {
+        const generator = review.kind === 'commit' ? commitGenerator(session, workspace.profileId, root) : null
+        return respond(generator ? { ...preview, generation: generator.key } : preview)
+      }
       if (preview.problem) return respond({ error: preview.problem }, 409)
       if (preview.revision !== input.revision)
         return respond({ error: action === 'commit' ? (scope === 'staged' ? 'The branch or staged files changed. Review the updated files before committing.'
@@ -664,12 +677,45 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (!authorize())
         return respond({ error: 'The checkout changed or a turn is still active. Wait for it to finish and try again.' }, 409)
       if (review.kind === 'commit') {
-        if (!input.newBranch) return respond(await createRepositoryCommit(repository, input.message, review, input.excluded, authorize), 201)
-        if (!review.head || !review.preview.branch)
+        const { head, preview: { branch } } = review
+        if (input.newBranch && (!head || !branch))
           return respond({ error: 'Create the first commit before starting a new branch.' }, 409)
         if (input.excluded.some(index => index >= review.entries.length) || new Set(input.excluded).size === review.entries.length)
           return respond({ error: 'Refresh the review and include at least one file.' }, 409)
-        const newBranch = await planRepositoryBranch(repository, key, review.preview.branch, review.head, input.message)
+        let message = input.message
+        let branchSuggestion: string | undefined
+        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
+        const generationCurrent = () => {
+          const current = engine.current.sessions.get(sessionId)
+          return Boolean(current && commitGenerator(current, workspace.profileId, root)?.key === input.generate)
+        }
+        const canCommit = () => authorize() && (!input.generate || (!signal.aborted && generationCurrent()))
+        if (input.generate) {
+          const generator = commitGenerator(session, workspace.profileId, root)
+          if (!generator || generator.key !== input.generate)
+            return respond({ error: 'The thread’s provider changed. Refresh the review before generating a message.' }, 409)
+          const patch = await reviewedCommitPatch(repository, review, input.excluded)
+          await verifyRepositoryCommit(repository, review, canCommit)
+          let output: unknown
+          try {
+            const config = await providerLaunchConfig(chatGptCredentials, generator.launch)
+            signal.throwIfAborted()
+            output = await generator.run({ ...config, workspacePath: root, model: session.model || undefined },
+              { patch, includeBranch: input.newBranch, signal })
+            signal.throwIfAborted()
+          }
+          catch {
+            throw new CommitGenerationError(signal.aborted ? 'Commit message generation timed out or was interrupted. Try again or enter a message.'
+              : 'Could not generate a commit message. Check the thread’s provider connection, try again, or enter a message.')
+          }
+          const generated = generatedCommitMessage(output, input.newBranch)
+          message = generated.message
+          branchSuggestion = generated.branch
+          await verifyRepositoryCommit(repository, review, canCommit)
+        }
+        if (!input.newBranch || !head || !branch)
+          return respond(await createRepositoryCommit(repository, message, review, input.excluded, canCommit), 201)
+        const newBranch = await planRepositoryBranch(repository, key, branch, head, message, branchSuggestion)
         const started = await engine.dispatchInternal({
           id: 'git_branch_started_' + newBranch.id, at: Date.now(),
           command: { type: 'thread.git-branch.begin', sessionId, attempt: newBranch },
@@ -678,11 +724,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         let commit: Awaited<ReturnType<typeof createRepositoryCommit>> | undefined
         let switched = false
         try {
-          await startRepositoryBranch(newBranch, authorize)
+          await startRepositoryBranch(newBranch, canCommit)
           const onBranch = await prepareRepositoryCommit(repository, scope)
           if (onBranch.preview.branch !== newBranch.to || onBranch.preview.problem || !sameRepositoryCommitFiles(review, onBranch))
             throw new RepositoryCommitError('The checkout or selected files changed. Refresh the review before committing.')
-          commit = await createRepositoryCommit(repository, input.message, onBranch, input.excluded, authorize)
+          commit = await createRepositoryCommit(repository, message, onBranch, input.excluded, canCommit)
         }
         finally {
           switched = await resolveRepositoryBranch(session, newBranch, true).catch(() => false)
@@ -694,6 +740,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return respond(await syncRepository(repository, review.action, review.preview, authorize))
     }
     catch (error) {
+      if (error instanceof CommitGenerationError) return respond({ error: error.message, generationFailed: true }, 503)
       if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError
         || error instanceof RepositoryCommitError || error instanceof InvalidCommand)
         return respond({ error: error.message }, 409)

@@ -23,6 +23,7 @@ import { join, resolve } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type { ClaudeHistoryRequest, ClaudeHistoryResult } from './claude-history-worker'
 import { claudeEnvironment } from './account-environment'
+import { generateClaudeCommitMessage } from './commit-message'
 import { PREVIEW_THREAD_ENV } from './preview-owner'
 import { EventQueue } from './event-queue'
 import { toolInputQuestions } from './input-questions'
@@ -531,6 +532,7 @@ export function translate(message: SDKMessage): ProviderEvent[] {
 
 export const ClaudeDriver: Driver = {
   kind: 'claude',
+  generateCommitMessage: generateClaudeCommitMessage,
 
   /** Read the same Claude account used by the SDK without sending a prompt. */
   async probe(config: DriverConfig): Promise<ProbeResult> {

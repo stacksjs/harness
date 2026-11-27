@@ -9,8 +9,8 @@ function creationMessage(attempt: GitBranchAttempt) {
   return 'harness: prepare feature branch ' + attempt.id
 }
 
-export async function planRepositoryBranch(path: string, repositoryKey: string, from: string, base: string, message: string): Promise<GitBranchAttempt> {
-  const subject = message.split(/\r?\n/u, 1)[0] ?? ''
+export async function planRepositoryBranch(path: string, repositoryKey: string, from: string, base: string, message: string, suggestion?: string): Promise<GitBranchAttempt> {
+  const subject = suggestion || (message.split(/\r?\n/u, 1)[0] ?? '')
   const fragment = subject.normalize('NFKD').replace(/[\u0300-\u036f'"`]/gu, '').toLowerCase()
     .replace(/^[./\s_-]+|[./\s_-]+$/gu, '').replace(/[^a-z0-9/_-]+/gu, '-')
     .replace(/\/{2,}/gu, '/').replace(/-{2,}/gu, '-').replace(/^[./_-]+|[./_-]+$/gu, '')

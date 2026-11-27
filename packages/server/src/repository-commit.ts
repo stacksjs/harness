@@ -33,7 +33,21 @@ export async function gitOperationInProgress(path: string) {
 }
 
 export class RepositoryCommitError extends Error {}
+export class CommitGenerationError extends Error {}
 export type RepositoryCommitScope = 'staged' | 'working'
+
+export function generatedCommitMessage(value: unknown, includeBranch: boolean): { message: string, branch?: string } {
+  const invalid = () => new CommitGenerationError('The provider returned an invalid commit message. Try again or enter a message.')
+  if (!value || typeof value !== 'object') throw invalid()
+  const { subject, body, branch } = value as Record<string, unknown>
+  if (typeof subject !== 'string' || !subject.trim() || /[\r\n\0]/u.test(subject)
+    || typeof body !== 'string' || body.includes('\0')
+    || (includeBranch && (typeof branch !== 'string' || !branch.trim() || /[\r\n\0]/u.test(branch) || branch.length > 256)))
+    throw invalid()
+  const message = [subject.trim(), body.trim()].filter(Boolean).join('\n\n')
+  if (Buffer.byteLength(message) > 4096) throw invalid()
+  return { message, ...(includeBranch && typeof branch === 'string' && { branch: branch.trim() }) }
+}
 
 interface StagedEntry {
   path: Buffer
@@ -135,6 +149,43 @@ export function sameRepositoryCommitFiles(before: PreparedCommit, after: Prepare
     && indexEntries(before.entries).equals(indexEntries(after.entries))
 }
 
+function withSelectedCommitIndex<T>(path: string, prepared: PreparedCommit, excluded: number[],
+  run: (index: string, entries: StagedEntry[], paths: Buffer, comparison: string[]) => Promise<T>) {
+  if (excluded.some(index => index >= prepared.entries.length)) throw new RepositoryCommitError('Refresh the review and select the files again.')
+  const omitted = new Set(excluded)
+  const entries = prepared.entries.filter((_, index) => !omitted.has(index))
+  if (entries.length === 0) throw new RepositoryCommitError('Include at least one file.')
+  return withTemporaryIndex(async (environment) => {
+    const index = environment.GIT_INDEX_FILE
+    await repositoryGit(path, ['read-tree', prepared.head ?? '--empty'], 5000, index)
+    await writeSelectedIndex(path, index, entries)
+    const expectedPaths = Buffer.concat(entries.flatMap(entry => [entry.path, pathTerminator]))
+    const comparison = ['--cached', ...(prepared.base ? [prepared.base] : [])]
+    const paths = await commitDiff(path, comparison, ['--name-only'], index)
+    if (!paths.equals(expectedPaths))
+      throw new RepositoryCommitError('These files depend on one another. Review the selection and include the related paths.')
+    return run(index, entries, expectedPaths, comparison)
+  })
+}
+
+export function reviewedCommitPatch(path: string, prepared: PreparedCommit, excluded: number[]) {
+  return withSelectedCommitIndex(path, prepared, excluded, async (index, _entries, _paths, comparison) => {
+    const { stdout } = await repositoryGit(path, ['diff', ...comparison, '--no-ext-diff', '--no-textconv', '--no-color',
+      '--no-renames', '--stat', '--patch', '--'], 5000, index).catch((error) => {
+      if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && typeof error.stdout === 'string')
+        return { stdout: error.stdout }
+      throw error
+    })
+    return stdout.length > 50_000 ? stdout.slice(0, 50_000) + '\n[Patch truncated]' : stdout
+  })
+}
+
+export async function verifyRepositoryCommit(path: string, prepared: PreparedCommit, authorize: () => boolean) {
+  const latest = await prepareRepositoryCommit(path, prepared.scope)
+  if (!authorize() || latest.preview.problem || latest.preview.revision !== prepared.preview.revision)
+    throw new RepositoryCommitError('The checkout or selected files changed. Refresh the review before committing.')
+}
+
 async function prepareIndexUpdate(path: string, base: string, tree: string, before: Buffer | null,
   staged: Buffer, selected: Set<string>, index: string, pathspec: string) {
   if (before) await writeFile(index, before)
@@ -149,26 +200,14 @@ async function prepareIndexUpdate(path: string, base: string, tree: string, befo
 
 export async function createRepositoryCommit(path: string, message: string, prepared: PreparedCommit, excluded: number[], authorize: () => boolean) {
   if (prepared.scope === 'staged' && excluded.length === 0) {
+    await verifyRepositoryCommit(path, prepared, authorize)
     await repositoryGit(path, ['commit', '--quiet', '--message', message], 45_000)
     return { commit: (await repositoryGit(path, ['rev-parse', '--verify', 'HEAD'])).stdout.trim() }
   }
-  const omitted = new Set(excluded)
-  if (excluded.some(index => index >= prepared.entries.length)) throw new RepositoryCommitError('Refresh the review and select the files again.')
-  const entries = prepared.entries.filter((_, index) => !omitted.has(index))
-  if (entries.length === 0) throw new RepositoryCommitError('Include at least one file.')
   const working = prepared.scope === 'working' && prepared.base !== null ? prepared.base : null
   const realIndex = working ? (await repositoryGit(path, ['rev-parse', '--path-format=absolute', '--git-path', 'index'])).stdout.trimEnd() : null
   const before = realIndex ? await readIndex(realIndex) : null
-  return withTemporaryIndex(async (environment) => {
-    const index = environment.GIT_INDEX_FILE
-    await repositoryGit(path, ['read-tree', prepared.head ?? '--empty'], 5000, index)
-    await writeSelectedIndex(path, index, entries)
-    const expectedPaths = Buffer.concat(entries.flatMap(entry => [entry.path, pathTerminator]))
-    const comparison = ['--cached', ...(prepared.base ? [prepared.base] : [])]
-    const paths = await commitDiff(path, comparison, ['--name-only'], index)
-    if (!paths.equals(expectedPaths))
-      throw new RepositoryCommitError('These files depend on one another. Review the selection and include the related paths.')
-
+  return withSelectedCommitIndex(path, prepared, excluded, async (index, entries, expectedPaths) => {
     // Compute the new index before committing. A path replacement must leave
     // unrelated staged changes intact, even if Git's pathspec matches children.
     const reconciled = `${index}-reconciled`
@@ -181,9 +220,7 @@ export async function createRepositoryCommit(path: string, message: string, prep
       await writeFile(pathspec, expectedPaths)
       next = await prepareIndexUpdate(path, working, tree, before, prepared.staged, selected, reconciled, pathspec)
     }
-    const latest = await prepareRepositoryCommit(path, prepared.scope)
-    if (!authorize() || latest.preview.problem || latest.preview.revision !== prepared.preview.revision)
-      throw new RepositoryCommitError('The checkout or selected files changed. Refresh the review before committing.')
+    await verifyRepositoryCommit(path, prepared, authorize)
 
     await repositoryGit(path, ['commit', '--quiet', '--message', message], 45_000, index)
     const commit = (await repositoryGit(path, ['rev-parse', '--verify', `refs/heads/${prepared.preview.branch}`])).stdout.trim()
@@ -244,8 +281,10 @@ export async function readRepositorySubmission(request: Request, commit: boolean
   const message = typeof value?.message === 'string' ? value.message.trim() : ''
   const excluded = commit && value?.excluded !== undefined ? value.excluded : []
   const newBranch = commit ? value?.newBranch ?? false : false
+  const generate = commit ? value?.generate ?? null : null
   return typeof revision === 'string' && /^[0-9a-f]{64}$/u.test(revision)
     && Array.isArray(excluded) && excluded.every(index => Number.isSafeInteger(index) && index >= 0)
-    && typeof newBranch === 'boolean' && Buffer.byteLength(message) <= 4096 && !message.includes('\0')
-    ? { revision, message, excluded, newBranch } : null
+    && typeof newBranch === 'boolean' && (generate === null || (typeof generate === 'string' && /^[0-9a-f]{64}$/u.test(generate) && !message))
+    && Buffer.byteLength(message) <= 4096 && !message.includes('\0')
+    ? { revision, message, excluded, newBranch, generate } : null
 }

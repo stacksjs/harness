@@ -181,4 +181,12 @@ export interface Driver {
   /** Is the CLI installed, authenticated, and what version? */
   probe: (config: DriverConfig, options?: { includeModels?: boolean }) => Promise<ProbeResult>
   create: (config: DriverConfig) => Promise<ProviderInstance>
+  /** Generate structured text from a reviewed patch in a separate, ephemeral process. */
+  generateCommitMessage?: (config: DriverConfig, input: CommitMessageInput) => Promise<unknown>
+}
+
+export interface CommitMessageInput {
+  patch: string
+  includeBranch: boolean
+  signal: AbortSignal
 }

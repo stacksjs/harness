@@ -1835,6 +1835,82 @@ describe('harness serve — HTTP', () => {
     expect(git(project, 'rev-parse', 'HEAD')).toBe(intent.base)
   }, 30_000)
 
+  it('generates a commit from the reviewed patch and preserves Git on provider failure or stale files', async () => {
+    fixtureGitRepository(dir)
+    const project = realpathSync(join(dir, 'seed'))
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(['git', '-C', project, ...args])
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    const main = git('rev-parse', 'HEAD')
+    const databasePath = join(dir, 'test.sqlite')
+    let generation: 'fail' | 'stale' | 'ok' = 'fail'
+    const patches: string[] = []
+    harness.stop()
+    harness = await serve({ port: 0, databasePath, resolveDriver: kind => kind === 'codex' ? {
+      kind,
+      async probe() { return { status: 'ready' } },
+      async create() { throw new Error('Generation must not start a conversation.') },
+      async generateCommitMessage(config, input) {
+        patches.push(input.patch)
+        expect(config.model).toBe('fixture-model')
+        expect(config.home).toBe(join(project, 'account'))
+        expect(config.binaryPath).toBe('fixture-codex')
+        expect(input.includeBranch).toBe(true)
+        if (generation === 'fail') throw new Error('Internal provider output must not reach the client.')
+        if (generation === 'stale') writeFileSync(join(project, 'README.md'), 'Newer working content\n')
+        return { subject: 'Generated commit', body: 'Generated body', branch: 'feature/suggested-name' }
+      },
+    } : null })
+    port = harness.server.port
+    const workspace = derivedId('generate-commit-workspace')
+    const thread = derivedId('generate-commit-thread')
+    await harness.engine.dispatch({ id: 'generate-commit-workspace', at: 1, command: { type: 'workspace.register', path: project, trusted: true } })
+    const profile = harness.engine.current.workspaces.get(workspace)!.profileId
+    using db = new Database(databasePath)
+    db.exec('CREATE TABLE provider_instances (id INTEGER, profile_id INTEGER, driver_kind TEXT, binary_path TEXT, resolved_home TEXT, config TEXT)')
+    db.query("INSERT INTO provider_instances VALUES (42, ?, 'codex', 'fixture-codex', 'account', '{}')").run(profile)
+    await harness.engine.dispatch({ id: 'generate-commit-thread', at: 2, command: {
+      type: 'session.create', workspaceId: workspace, driverKind: 'codex', providerInstanceId: 42, model: 'fixture-model',
+    } })
+    const route = `http://127.0.0.1:${port}/s/${thread}/git/commit?scope=working`
+    writeFileSync(join(project, 'README.md'), 'Reviewed working content\n')
+    writeFileSync(join(project, 'excluded.txt'), 'EXCLUDED_FIXTURE_CONTENT\n')
+    git('add', '--', 'excluded.txt')
+    const read = () => fetch(route).then(response => response.json())
+    const send = (review: { revision: string, generation: string, files: string[] }, key = review.generation) => fetch(route, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ revision: review.revision, generate: key, newBranch: true, excluded: [review.files.indexOf('excluded.txt')] }),
+    })
+    const review = await read()
+    expect((await send(review, '0'.repeat(64))).status).toBe(409)
+    expect(patches).toHaveLength(0)
+    const failed = await send(review)
+    expect(failed.status).toBe(503)
+    expect(await failed.json()).toEqual({
+      error: 'Could not generate a commit message. Check the thread’s provider connection, try again, or enter a message.',
+      generationFailed: true,
+    })
+    expect(git('rev-parse', 'HEAD')).toBe(main)
+    expect(git('branch', '--list')).toBe('* main')
+    generation = 'stale'
+    expect((await send(review)).status).toBe(409)
+    expect(git('branch', '--list')).toBe('* main')
+    generation = 'ok'
+    const committed = await send(await read())
+    expect(committed.status).toBe(201)
+    expect(await committed.json()).toMatchObject({ branch: 'feature/suggested-name', commit: git('rev-parse', 'HEAD') })
+    expect(git('log', '-1', '--format=%B')).toBe('Generated commit\n\nGenerated body')
+    expect(git('rev-parse', 'main')).toBe(main)
+    expect(git('show', 'HEAD:README.md')).toBe('Newer working content')
+    expect(git('diff', '--cached', '--name-only')).toBe('excluded.txt')
+    expect(patches).toHaveLength(3)
+    expect(patches.every(patch => patch.includes('README.md') && !patch.includes('excluded.txt') && !patch.includes('EXCLUDED_FIXTURE_CONTENT'))).toBe(true)
+  }, 30_000)
+
   it('publishes and fast-forwards the selected branch through its configured remote', async () => {
     const remote = join(dir, 'remote.git')
     const project = join(dir, 'project')
