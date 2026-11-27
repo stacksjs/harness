@@ -1,21 +1,33 @@
-<section id="pr-reviewers" data-pr-reviewers aria-labelledby="pr-requested-reviewers-title">
+<section id="pr-reviewers" data-pr-reviewers aria-labelledby="pr-reviewers-title">
   <div data-pr-reviewer-heading>
-    <h3 id="pr-requested-reviewers-title">Requested reviewers</h3>
+    <h3 id="pr-reviewers-title">Reviewers</h3>
     @if(selected.canEditReviewers && !reviewerEditor && !reviewerDraft)
       <a href="{{ reviewersHref }}" data-pr-button>Change reviewers</a>
     @endif
   </div>
-  @if(selected.requestedReviewers.length)
+  @if(selected.reviewDecision)
+    <p data-pr-review-decision>GitHub review status <strong>{{ selected.reviewDecision }}</strong></p>
+  @endif
+  @if(selected.reviewers.length)
     <ul data-pr-reviewer-list>
-      @foreach(selected.requestedReviewers as reviewer)
+      @foreach(selected.reviewers as reviewer)
         <li>
-          {{ reviewer.name }}
+          <span>{{ reviewer.name }}</span>
           @if(reviewer.team)<small>Team</small>@endif
+          @if(reviewer.outcome)
+            <span data-pr-review-outcome="{{ reviewer.outcome.state }}" @if(reviewer.outcome.commit) title="{{ reviewer.outcome.label }}. Reviewed commit {{ reviewer.outcome.commit.slice(0, 7) }}" @endif>{{ reviewer.outcome.label }}</span>
+          @elseif(reviewer.submitted)
+            <small>{{ reviewer.submitted }}</small>
+          @endif
+          @if(reviewer.requested)<small>{{ reviewer.outcome || reviewer.submitted ? 'Review requested again' : 'Review requested' }}</small>@endif
         </li>
       @endforeach
     </ul>
-  @else
-    <p>No review requests.</p>
+  @elseif(!selected.reviewOutcomesNotice)
+    <p>No reviewers yet.</p>
+  @endif
+  @if(selected.reviewOutcomesNotice)
+    <p role="status">{{ selected.reviewOutcomesNotice }}</p>
   @endif
   @if(reviewerError || reviewersNotice)
     <p role="status">{{ reviewerError || reviewersNotice }}</p>

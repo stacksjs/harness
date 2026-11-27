@@ -453,7 +453,7 @@ describe('harness serve — HTTP', () => {
         command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
       const detail = 'http://127.0.0.1:' + port + '/pull-requests?' + new URLSearchParams({ selectedUrl: url })
       const summary = await fetch(detail).then(response => response.text())
-      expect(summary).toContain('Requested reviewers')
+      expect(summary).toContain('id="pr-reviewers-title">Reviewers')
       expect(summary.match(/@requested-reviewer/gu)).toHaveLength(1)
       expect(summary).toContain('@quality-check[bot]')
       expect(summary).toContain('@fixture/release-review')
@@ -461,7 +461,85 @@ describe('harness serve — HTTP', () => {
       fixture.pulls[0].requested_reviewers = []
       fixture.pulls[0].requested_teams = []
       writeFileSync(cli.state, JSON.stringify(fixture))
-      expect(await fetch(detail).then(response => response.text())).not.toContain('Requested reviewers')
+      expect(await fetch(detail).then(response => response.text())).not.toContain('id="pr-reviewers-title">Reviewers')
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+      rmSync(project, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('shows latest GitHub review outcomes for the displayed head and retains pending reviewers during read failures', async () => {
+    const { project, cli, local, base, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
+    const fixture = readState()
+    const verdict = (id: number, login: string | null, state: string, timestamp: string, commit: string | null = local) =>
+      ({ id, user: login && { login }, state, submitted_at: timestamp, commit_id: commit })
+    fixture.pulls[0].requested_reviewers = [{ login: 'Release-Reviewer' }]
+    fixture.pulls[0].requested_teams = [{ slug: 'shipping-team' }]
+    fixture.pulls[0].reviewDecision = 'CHANGES_REQUESTED'
+    fixture.pulls[0].latestReviews = [
+      { state: 'COMMENTED', author: { __typename: 'Bot', login: 'quality-bot' } },
+      { state: 'COMMENTED', isMinimized: true, author: { login: 'minimized-reviewer' } },
+      { state: 'DISMISSED', author: { login: 'dismissed-approver' } },
+    ]
+    fixture.reviewOutcomePages = [[
+      verdict(1, 'dismissed-approver', 'APPROVED', '2026-11-01T12:00:00Z'),
+      verdict(2, 'release-reviewer', 'APPROVED', '2026-11-01T13:00:00Z'),
+      verdict(3, 'older-approval', 'APPROVED', '2026-11-01T13:00:00Z', base),
+      verdict(4, 'waiting-user', 'PENDING', '2026-11-01T13:00:00Z'),
+    ], [
+      verdict(5, 'dismissed-approver', 'DISMISSED', '2026-11-01T14:00:00Z'),
+      verdict(6, 'Release-Reviewer', 'COMMENTED', '2026-11-01T14:00:00Z'),
+      verdict(8, 'requested-corrections', 'CHANGES_REQUESTED', '2026-11-01T09:00:00-05:00'),
+      verdict(7, 'requested-corrections', 'APPROVED', '2026-11-01T14:00:00Z'),
+      verdict(9, null, 'APPROVED', '2026-11-01T14:01:00Z', null),
+    ]]
+    fixture.reviewDismissed = [{ event: 'review_dismissed', actor: { login: 'maintainer' }, created_at: '2026-11-01T14:02:00Z' }]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'review-outcomes-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const detail = 'http://127.0.0.1:' + port + '/pull-requests?' + new URLSearchParams({ selectedUrl: url })
+      const section = async () => (await fetch(detail).then(response => response.text())).match(/<section id="pr-reviewers"[\s\S]*?<\/section>/u)?.[0] ?? ''
+      const summary = await section()
+      expect(summary).toContain('GitHub review status <strong>Changes requested</strong>')
+      expect(summary.match(/@Release-Reviewer/gu)).toHaveLength(1)
+      expect(summary).toContain('Review requested again')
+      expect(summary).toContain('Approved on an earlier commit')
+      expect(summary).toMatch(/@requested-corrections[\s\S]*?data-pr-review-outcome="changes-requested"/u)
+      expect(summary).toContain('Unknown reviewer')
+      expect(summary).toContain('Commit unavailable')
+      expect(summary).toMatch(/@dismissed-approver\s*<\/span>\s*<small>Review dismissed<\/small>/u)
+      expect(summary).toMatch(/@quality-bot\[bot\]\s*<\/span>\s*<small>Commented<\/small>/u)
+      expect(summary).not.toMatch(/minimized-reviewer|waiting-user/u)
+      expect(await fetch(detail + '&tab=timeline').then(response => response.text())).toContain('Dismissed a review')
+
+      fixture.pulls[0].head.sha = 'd'.repeat(40)
+      fixture.pulls[0].reviewDecision = 'REVIEW_REQUIRED'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const afterPush = await section()
+      expect(afterPush).toContain('GitHub review status <strong>Review required</strong>')
+      expect(afterPush).toContain('Changes requested on an earlier commit')
+
+      fixture.reviewOutcomeReadFailure = 2
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const failed = await section()
+      expect(failed).toContain('Could not load review outcomes from GitHub.')
+      expect(failed).toContain('@Release-Reviewer')
+      expect(failed).toContain('@fixture/shipping-team')
+      expect(failed).not.toMatch(/older-approval|Private review history diagnostics/u)
+      delete fixture.reviewOutcomeReadFailure
+      fixture.reviewOutcomePages = [...fixture.reviewOutcomePages, ...Array.from({ length: 9 }, () => [])]
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const truncated = await section()
+      expect(truncated).toContain('Open the pull request on GitHub to see its full review history.')
+      expect(truncated).not.toContain('@older-approval')
     }
     finally {
       process.chdir(cwd)

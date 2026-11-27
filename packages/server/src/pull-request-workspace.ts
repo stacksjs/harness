@@ -2,6 +2,7 @@ import type { HarnessState, WorkspaceState } from '@harness/engine'
 import type { ReviewComment, ReviewCommentWindow } from './pull-request-conversations'
 import type { LifecycleAction, LifecycleSnapshot, MergeMethod } from './pull-request-lifecycle'
 import type { PullRequestLabel } from './pull-request-labels'
+import type { PendingReviewer } from './pull-request-review-outcomes'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { isWorkspaceGitRoot } from './diff'
@@ -13,6 +14,7 @@ import { findPullRequestThread } from './pull-request-links'
 import { availableLifecycleActions, behindBase, branchUpdateMethods, deletableSourceBranch, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
 import { applyPullRequestLabelChanges, parseLabelSelection, pullRequestLabels, readPullRequestLabelEditor } from './pull-request-labels'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
+import { mergePullRequestReviewers, pullRequestReviewDecision, pullRequestReviewParticipation, readPullRequestReviewOutcomes } from './pull-request-review-outcomes'
 import { applyPullRequestReviewerChanges, parseReviewerSelection, readPullRequestReviewerEditor, reviewerOptions } from './pull-request-reviewers'
 import { revertWorkspacePullRequest } from './pull-request-revert'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
@@ -24,10 +26,9 @@ import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-req
 import { approveWorkspaceWorkflows, parseWorkflowRunSelection, readWorkflowApprovals, workflowApprovalHead, workflowApprovalRevision, workflowRunSelection } from './pull-request-workflow-approvals'
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
-type RequestedReviewer = { name: string, team: boolean }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
   updated: string, created: string, head: string, headRef: string, baseRef: string, baseSha: string, description: string, labels: PullRequestLabel[],
-  requestedReviewers: RequestedReviewer[], additions?: number, deletions?: number, changedFiles?: number }
+  requestedReviewers: PendingReviewer[], additions?: number, deletions?: number, changedFiles?: number }
 type GitHubPull = { html_url?: string, number?: number, title?: string, body?: string | null, user?: { login?: string },
   state?: string, draft?: boolean, merged_at?: string | null, pull_request?: { merged_at?: string | null }, updated_at?: string, created_at?: string,
   head?: { sha?: string, ref?: string }, base?: { ref?: string, sha?: string }, additions?: number, deletions?: number, changed_files?: number,
@@ -47,10 +48,10 @@ function integer(value: string | null) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0
 }
 
-function requestedReviewers(pull: GitHubPull, organization: string): RequestedReviewer[] {
+function requestedReviewers(pull: GitHubPull, organization: string): PendingReviewer[] {
   const people = Array.isArray(pull.requested_reviewers) ? pull.requested_reviewers : []
   const teams = Array.isArray(pull.requested_teams) ? pull.requested_teams : []
-  const reviewers = new Map<string, RequestedReviewer>()
+  const reviewers = new Map<string, PendingReviewer>()
   for (const { login } of people.filter(person => person && typeof person === 'object')) {
     if (typeof login === 'string' && /^[\w-]{1,100}(?:\[bot\])?$/u.test(login))
       reviewers.set(login.toLowerCase(), { name: '@' + login, team: false })
@@ -128,7 +129,7 @@ async function listRepository(repository: Repository, state: ListState, search: 
   return { rows: items.flatMap(item => readPull(item, repository.name) ?? []), more: reply.hasNextPage }
 }
 
-const activityLabels: Record<string, string> = { commented: 'Commented', reviewed: 'Reviewed', closed: 'Closed the request',
+const activityLabels: Record<string, string> = { commented: 'Commented', reviewed: 'Reviewed', review_dismissed: 'Dismissed a review', closed: 'Closed the request',
   reopened: 'Reopened the request', merged: 'Merged the request', 'ready_for_review': 'Marked ready for review', 'convert_to_draft': 'Converted to draft' }
 const reviewLabels: Record<string, string> = { approved: 'Approved', changes_requested: 'Requested changes', dismissed: 'Dismissed review' }
 
@@ -308,9 +309,10 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const tabData = tab === 'timeline' ? readActivity(selectionRepo, data, detailPage, signal)
       : tab === 'code' ? readFiles(selectionRepo, data, detailPage, signal, query)
         : readRepositoryPullRequestChecks(selectionRepo.path, { ...selection, repositoryKey: '' }, signal)
-    const [extra, current] = await Promise.all([
+    const [extra, current, reviewHistory] = await Promise.all([
       tabData.catch(error => ({ error: message(error) })),
-      readPullRequestLifecycle(selectionRepo.path, selectionRepo.name, data.number, signal, credential).catch(() => null),
+      readPullRequestLifecycle(selectionRepo.path, selectionRepo.name, data.number, signal, credential, tab === 'summary').catch(() => null),
+      tab === 'summary' ? readPullRequestReviewOutcomes(selectionRepo.path, selectionRepo.name, data.number, data.head, signal, credential).catch(() => null) : undefined,
     ])
     const result = 'checks' in extra ? extra.head === data.head
       ? { checks: extra.checks, truncated: extra.truncated }
@@ -351,8 +353,16 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const reviewerEditor = editingReviewers && canEditReviewers && credential && current
       ? await reviewReviewerEditor(selectionRepo, data.number, current, profile, credential, signal).catch(() => null)
       : null
+    const reviewHeadChanged = Boolean(current && current.headRefOid !== data.head)
+    const reviewers = mergePullRequestReviewers(data.requestedReviewers, pullRequestReviewParticipation(lifecycle && current?.latestReviews?.nodes),
+      reviewHeadChanged ? [] : reviewHistory?.outcomes ?? [])
+    const reviewDecision = tab === 'summary' && lifecycle ? pullRequestReviewDecision(current?.reviewDecision) : ''
+    const reviewOutcomesNotice = tab !== 'summary' ? ''
+      : reviewHeadChanged ? 'The pull request changed while loading reviews. Refresh to see its current review outcomes.'
+        : !reviewHistory ? 'Could not load review outcomes from GitHub.'
+          : reviewHistory.truncated ? 'Open the pull request on GitHub to see its full review history.' : ''
     return { ...data, lifecycle, approvalRuns, workflowApproval, canEditLabels, labelEditor, labelEditorUnavailable: editingLabels && canEditLabels && !labelEditor,
-      canEditReviewers, reviewerEditor, reviewerEditorUnavailable: editingReviewers && canEditReviewers && !reviewerEditor,
+      reviewers, reviewDecision, reviewOutcomesNotice, canEditReviewers, reviewerEditor, reviewerEditorUnavailable: editingReviewers && canEditReviewers && !reviewerEditor,
       thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
       startHref: '/new?' + new URLSearchParams({ pr: data.url, profile: String(profile) }), ...result }
   })().catch(error => ({ error: message(error) })) : Promise.resolve(null)

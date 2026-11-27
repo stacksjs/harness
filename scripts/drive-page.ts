@@ -6826,6 +6826,22 @@ try {
     labelState.pulls[1].requested_reviewers = [person, bot]
     labelState.pulls[1].requested_teams = [team]
     labelState.pulls[1].reviewerNodes = [person, bot, team]
+    const verdict = (id: number, login: string, state: string, commit: string) =>
+      ({ id, user: { login }, state, commit_id: commit, submitted_at: '2026-11-01T14:00:00Z' })
+    const reviewedHead = labelState.pulls[1].head.sha
+    labelState.pulls[1].reviewDecision = 'REVIEW_REQUIRED'
+    labelState.pulls[1].latestReviews = [
+      { state: 'COMMENTED', author: { login: 'release-commenter' } },
+      { state: 'DISMISSED', author: { login: 'dismissed-reviewer' } },
+    ]
+    labelState.reviewOutcomePages = [[
+      verdict(101, person.login, 'APPROVED', 'd'.repeat(40)),
+      verdict(102, 'dismissed-reviewer', 'APPROVED', reviewedHead),
+    ], [
+      verdict(103, 'dismissed-reviewer', 'DISMISSED', reviewedHead),
+      verdict(104, 'release-approver', 'APPROVED', reviewedHead),
+      verdict(105, person.login, 'COMMENTED', reviewedHead),
+    ]]
     labelState.reviewerPeople = [person, candidate]
     labelState.reviewerPageSize = 1
     labelState.labelPages = [[oldLabel, concurrentLabel], [reportLabel]]
@@ -6833,14 +6849,22 @@ try {
     writeFileSync(github.state, JSON.stringify(labelState))
     await clonePage.goto(workflowUrl.href, { waitUntil: 'domcontentloaded' })
     const changeLabels = clonePage.getByRole('link', { name: 'Change labels', exact: true })
-    const reviewers = clonePage.getByRole('region', { name: 'Requested reviewers', exact: true })
+    const reviewers = clonePage.getByRole('region', { name: 'Reviewers', exact: true })
     await reviewers.waitFor()
-    check('the Summary shows pending people, bot, and team reviewers before labels',
-      await reviewers.getByRole('listitem').count() === 3
+    check('the Summary joins pending people, bots, teams, and completed outcomes before labels',
+      await reviewers.getByRole('listitem').count() === 6
       && await reviewers.getByText('@accessibility-reviewer', { exact: true }).isVisible()
       && await reviewers.getByText('@review-check[bot]', { exact: true }).isVisible()
       && await reviewers.getByText('Team', { exact: true }).isVisible()
       && await reviewers.evaluate(section => section.nextElementSibling?.hasAttribute('data-pr-label-section') === true))
+    check('the Summary distinguishes branch policy, current approvals, older approvals, and dismissed reviews',
+      await reviewers.getByText('Review required', { exact: true }).isVisible()
+      && await reviewers.getByText('Approved on an earlier commit', { exact: true }).isVisible()
+      && await reviewers.getByText('Approved', { exact: true }).isVisible()
+      && await reviewers.getByText('Review requested again', { exact: true }).isVisible()
+      && await reviewers.getByRole('listitem').filter({ hasText: '@dismissed-reviewer' }).getByText('Review dismissed', { exact: true }).isVisible()
+      && await reviewers.getByRole('listitem').filter({ hasText: '@release-commenter' }).getByText('Commented', { exact: true }).isVisible()
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth === innerWidth))
     await capture('pull-requests-reviewers-390x844', clonePage)
     const changeReviewers = clonePage.getByRole('link', { name: 'Change reviewers', exact: true })
     const picker = clonePage.getByRole('form', { name: 'Change reviewers', exact: true })

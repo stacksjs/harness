@@ -624,7 +624,9 @@ const RESPONSIVE_SHELL = `
 [data-pr-reviewer-search] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 [data-pr-reviewer-search] label { flex: 1 1 10rem; min-inline-size: 0; }
 [data-pr-reviewer-list] { display: flex; flex-wrap: wrap; gap: 6px 12px; }
-[data-pr-reviewer-list] li { min-inline-size: 0; overflow-wrap: anywhere; }
+[data-pr-reviewer-list] li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; min-inline-size: 0; overflow-wrap: anywhere; }
+[data-pr-review-decision] strong { margin-inline-start: 4px; }
+[data-pr-review-outcome] { border: 1px solid var(--workspace-line); border-radius: 6px; padding-inline: 4px; font-size: 11px; }
 :is([data-pr-reviewer-list], [data-pr-reviewer-option]) small { margin-inline-start: 3px; opacity: .75; }
 [data-pr-labels] { display: flex; flex-wrap: wrap; gap: 6px; }
 [data-pr-labels] li { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 8px; border: 1px solid var(--workspace-line); border-radius: 12px; font-size: 12px; overflow-wrap: anywhere; }

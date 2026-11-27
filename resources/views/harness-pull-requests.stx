@@ -895,7 +895,7 @@ const matchingLabelIds = derived(() => {
           </nav>
           <div data-pr-detail-content>
           @if(tab === 'summary')
-            @if(selected.requestedReviewers.length || selected.canEditReviewers || reviewerEditor || reviewerDraft || reviewerError || reviewersNotice)
+            @if(selected.reviewers.length || selected.reviewDecision || selected.reviewOutcomesNotice || selected.canEditReviewers || reviewerEditor || reviewerDraft || reviewerError || reviewersNotice)
               @include('../partials/harness-pr-reviewers')
             @endif
             @if(selected.labels.length || selected.canEditLabels || labelsNotice || labelError)

@@ -337,6 +337,8 @@ if (url.pathname === '/graphql' && method === 'POST') {
       rebaseMergeAllowed: state.mergeMethods?.includes('REBASE'), pullRequest: pull ? {
       id: 'fixture-pull-' + pull.number, number: pull.number, state: pull.merged_at ? 'MERGED' : pull.state.toUpperCase(),
       isDraft: pull.draft, headRefOid: pull.head.sha, baseRefOid: pull.base.sha, updatedAt: pull.updated_at,
+      reviewDecision: pull.reviewDecision,
+      latestReviews: pull.latestReviews && { nodes: pull.latestReviews },
       baseRefName: pull.base.ref, viewerCanUpdate: state.lifecycleMode !== 'readonly',
       mergeable: pull.branchMode === 'conflict' ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: state.mergeMode === 'blocked' ? 'BLOCKED' : 'CLEAN',
       baseRef: missing ? { compare: null } : { compare: { behindBy: pull.branchBehind } },
@@ -505,11 +507,21 @@ if (parts[4] === 'issues' && parts[6] === 'timeline' && detail) reply(200, [
   { id: 5, event: 'commented', user: { login: 'fixture-reviewer' }, created_at: '2026-11-01T13:00:00Z', body: 'Check the **export**. <script>globalThis.__pr_html = true</script>' },
   { id: 3, event: 'reviewed', user: { login: 'fixture-approver' }, state: 'approved', submitted_at: '2026-11-01T14:00:00Z' },
   ...(state.inlineReviews ?? []).filter(review => review.pull === detail.number).map(review => ({ ...review, event: 'reviewed' })),
+  ...(state.reviewDismissed ?? []),
 ])
 if (parts[4] !== 'pulls') reply(404, {})
 if (parts[6] === 'reviews') {
-  if (!detail || !process.env.GH_TOKEN) reply(404, {})
-  if (method === 'GET') reply(200, (state.inlineReviews ?? []).filter(review => review.pull === detail.number))
+  if (!detail) reply(404, {})
+  if (method === 'GET') {
+    const page = Number(url.searchParams.get('page')) || 1
+    if (state.reviewOutcomeReadFailure === page) reply(503, { message: 'Private review history diagnostics' })
+    const inline = (state.inlineReviews ?? []).filter(review => review.pull === detail.number)
+    if (!state.reviewOutcomePages) reply(200, inline)
+    const pages = state.reviewOutcomePages
+    const next = page < pages.length ? 'Link: <https://api.github.com' + url.pathname + '?page=' + (page+1) + '>; rel="next"\\r\\n' : ''
+    reply(200, [...(pages[page-1] ?? []), ...(next ? [] : inline)], next)
+  }
+  if (!process.env.GH_TOKEN) reply(404, {})
   const input = JSON.parse(await Bun.stdin.text())
   state.reviewRequests = (state.reviewRequests || 0) + 1
   const statuses = { COMMENT: 'COMMENTED', APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED' }

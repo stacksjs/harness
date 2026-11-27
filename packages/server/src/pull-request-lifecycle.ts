@@ -3,7 +3,7 @@ import { RepositoryPullRequestError, repositoryGitHubRequest } from './repositor
 
 const sha = /^[0-9a-f]{40}$/u
 export const sourceRepositoryFields = 'id nameWithOwner isArchived viewerPermission defaultBranchRef { name }'
-const fields = `id number state isDraft headRefOid baseRefOid baseRefName updatedAt viewerCanUpdate
+const fields = `id number state isDraft headRefOid baseRefOid baseRefName updatedAt viewerCanUpdate reviewDecision
   mergeable mergeStateStatus isMergeQueueEnabled mergeQueueEntry { id } autoMergeRequest { mergeMethod }
   viewerCanEnableAutoMerge viewerCanDisableAutoMerge viewerCanUpdateBranch
   revertUrl mergeCommit { oid }
@@ -34,6 +34,8 @@ type Pull = {
   baseRefName: string
   updatedAt: string
   viewerCanUpdate: boolean
+  reviewDecision?: string | null
+  latestReviews?: { nodes?: unknown[] } | null
   mergeable?: string
   mergeStateStatus?: string
   isMergeQueueEnabled?: boolean
@@ -117,14 +119,17 @@ type ReadReply = {
   } }
 }
 
-export async function readPullRequestLifecycle(path: string, repository: string, number: number, signal: AbortSignal, credential?: string): Promise<LifecycleSnapshot | null> {
+export async function readPullRequestLifecycle(path: string, repository: string, number: number, signal: AbortSignal, credential?: string,
+  includeReviewers = false): Promise<LifecycleSnapshot | null> {
   const [owner, name] = repository.split('/')
   const reply = await repositoryGitHubRequest(path, 'graphql', {
     query: `query HarnessPullRequestLifecycle($owner: String!, $name: String!, $number: Int!, $headRef: String!) {
       viewer { id login }
       repository(owner: $owner, name: $name) {
         nameWithOwner isArchived viewerPermission mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed
-        pullRequest(number: $number) { ${fields} }
+        pullRequest(number: $number) { ${fields}
+          ${includeReviewers ? 'latestReviews(first: 100) { nodes { state isMinimized author { __typename login } } }' : ''}
+        }
       }
     }`,
     variables: { owner, name, number, headRef: `refs/pull/${number}/head` },
