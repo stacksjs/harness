@@ -21,7 +21,7 @@ export async function readPullRequestSubmission(request: Request) {
   return { revision, baseRef, title, body, draft }
 }
 
-async function github(path: string, endpoint: string, payload?: object): Promise<GitHubReply> {
+export async function repositoryGitHubRequest(path: string, endpoint: string, payload?: object, signal?: AbortSignal): Promise<GitHubReply> {
   if (!Bun.which('gh')) throw new RepositoryPullRequestError('Install the GitHub CLI on this host, then run gh auth login.')
   const child = Bun.spawn([
     'gh', 'api', '--hostname', 'github.com', '--include', '--method', payload ? 'POST' : 'GET',
@@ -30,7 +30,7 @@ async function github(path: string, endpoint: string, payload?: object): Promise
     cwd: path,
     env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_DEBUG: '', NO_COLOR: '1' },
     stdin: payload ? new Blob([JSON.stringify(payload)]) : 'ignore',
-    stdout: 'pipe', stderr: 'ignore', timeout: 15_000,
+    stdout: 'pipe', stderr: 'ignore', timeout: 15_000, signal,
   })
   const [output] = await Promise.all([new Response(child.stdout).text(), child.exited])
   const status = Number(/^HTTP\/\S+ (\d{3})\b/u.exec(output)?.[1])
@@ -58,7 +58,7 @@ async function configuredGitHubRepository(path: string, remote: string, forPush:
 }
 
 async function githubRepository(path: string, name: string) {
-  const reply = await github(path, 'repos/' + name)
+  const reply = await repositoryGitHubRequest(path, 'repos/' + name)
   const data = reply.body as GitHubRepository | null
   if (reply.status !== 200 || data?.full_name?.toLowerCase() !== name.toLowerCase() || typeof data.default_branch !== 'string')
     throw new RepositoryPullRequestError('GitHub could not read ' + name + '. Check which account is signed in on this host.')
@@ -67,7 +67,7 @@ async function githubRepository(path: string, name: string) {
 }
 
 async function githubBranch(path: string, repository: string, branch: string) {
-  const reply = await github(path, 'repos/' + repository + '/branches/' + encodeURIComponent(branch))
+  const reply = await repositoryGitHubRequest(path, 'repos/' + repository + '/branches/' + encodeURIComponent(branch))
   const data = reply.body as { commit?: { sha?: unknown } } | null
   if (reply.status === 404) return null
   if (reply.status !== 200 || typeof data?.commit?.sha !== 'string' || !/^[0-9a-f]{40}$/u.test(data.commit.sha))
@@ -87,7 +87,7 @@ function pullRequestResult(value: unknown, repository: string, headRepository: s
 async function findOpenPullRequest(path: string, repository: string, headRepository: string, headRef: string, baseRef: string) {
   const owner = headRepository.split('/')[0]
   const query = new URLSearchParams({ state: 'open', head: owner + ':' + headRef, base: baseRef, per_page: '30' })
-  const reply = await github(path, 'repos/' + repository + '/pulls?' + query)
+  const reply = await repositoryGitHubRequest(path, 'repos/' + repository + '/pulls?' + query)
   if (reply.status !== 200 || !Array.isArray(reply.body))
     throw new RepositoryPullRequestError('GitHub could not check for an existing pull request.')
   for (const item of reply.body) {
@@ -121,7 +121,7 @@ export async function prepareRepositoryPullRequest(path: string, selectedBase?: 
   if (selectedBase && !await repositoryGit(path, ['check-ref-format', 'refs/heads/' + selectedBase]).then(() => true, () => false))
     throw new RepositoryPullRequestError('Enter a valid base branch name.')
   const headRef = push.ref.slice('refs/heads/'.length)
-  const identity = await github(path, 'user')
+  const identity = await repositoryGitHubRequest(path, 'user')
   const actor = (identity.body as { login?: unknown } | null)?.login
   if (identity.status !== 200 || typeof actor !== 'string')
     throw new RepositoryPullRequestError('Run gh auth login on this host before creating a pull request.')
@@ -171,7 +171,7 @@ export async function openRepositoryPullRequest(path: string, prepared: Awaited<
   // forge. Resolve it by exact base, head and repository before another write.
   let response: GitHubReply | undefined
   let failure: unknown
-  try { response = await github(path, 'repos/' + repository + '/pulls', payload) }
+  try { response = await repositoryGitHubRequest(path, 'repos/' + repository + '/pulls', payload) }
   catch (error) { failure = error }
   let pullRequest = response?.status === 201 ? pullRequestResult(response.body, repository, headRepository, headRef, baseRef) : null
   const created = Boolean(pullRequest)

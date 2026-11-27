@@ -10,6 +10,10 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     writeFileSync(state, JSON.stringify({ repositories, pulls: [], posts: 0, ...previous, mode }))
   }
   configure('normal', true)
+  const configureChecks = (pages: object[][], mode: 'normal' | 'unreadable' | 'head-changed' = 'normal') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, checkPages: pages, checkMode: mode }))
+  }
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bun
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -35,6 +39,21 @@ function head(repository, branch) {
 }
 
 if (url.pathname === '/user') reply(200, { login: 'fixture-user' })
+if (url.pathname === '/graphql' && method === 'POST') {
+  const { variables } = JSON.parse(await Bun.stdin.text())
+  const name = variables.owner + '/' + variables.name
+  const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (!pull || state.checkMode === 'unreadable') reply(200, { errors: [{ message: 'Private forge diagnostics must not leak' }] })
+  const index = Number(variables.cursor ?? 0)
+  const nodes = state.checkPages?.[index] ?? []
+  const hasNextPage = index + 1 < (state.checkPages?.length ?? 0)
+  const sha = index > 0 && state.checkMode === 'head-changed' ? 'f'.repeat(40) : pull.head.sha
+  const statusCheckRollup = nodes.length || hasNextPage ? { contexts: { nodes, pageInfo: { hasNextPage, endCursor: String(index + 1) } } } : null
+  reply(200, { data: { repository: { pullRequest: {
+    title: pull.title, state: 'OPEN', isDraft: pull.draft, headRefOid: sha, commits: { nodes: [{ commit: { oid: sha, statusCheckRollup } }] },
+  } } } })
+}
+
 if (!repo) reply(404, {})
 if (parts.length === 4) reply(200, { full_name: name, default_branch: 'main', parent: repo.parent && { full_name: repo.parent } })
 if (parts[4] === 'branches') {
@@ -66,5 +85,5 @@ writeFileSync(stateFile, JSON.stringify(state))
 if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
-  return { bin, state, configure }
+  return { bin, state, configure, configureChecks }
 }

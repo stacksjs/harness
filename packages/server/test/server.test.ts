@@ -830,6 +830,8 @@ describe('harness serve — HTTP', () => {
         headRepository: 'fixture/notebook-fork', headRef: 'review/export', baseRef: 'main',
         publish: true, problem: null, existing: null, title: 'Add a report' })
       expect(await get('?base=missing')).toMatchObject({ problem: 'GitHub could not find the selected base branch.' })
+      const checksRoute = route + '-checks'
+      expect((await fetch(checksRoute)).status).toBe(404)
       expect(readState().posts).toBe(0)
       expect(git(fork, 'for-each-ref', 'refs/heads/review/export')).toBe('')
       expect((await post(preview.revision, 'https://other.example')).status).toBe(403)
@@ -863,6 +865,37 @@ describe('harness serve — HTTP', () => {
       const links = [{ repository: 'fixture/notebook', repositoryKey: '', number: 1 }]
       expect(harness.engine.current.sessions.get(sessionId)?.linkedPullRequests).toEqual(links)
       expect(harness.engine.current.sessions.get(sessionId)?.pullRequest).toBeUndefined()
+      const pages = [[
+        { __typename: 'CheckRun', id: '1', name: 'Integration', status: 'COMPLETED', conclusion: 'TIMED_OUT', detailsUrl: 'https://ci.example.com/build' },
+        { __typename: 'StatusContext', id: '2', context: 'Upload', state: 'PENDING', description: 'Upload queued', targetUrl: 'https://user:secret@ci.example.com/build' },
+      ], [
+        { __typename: 'CheckRun', id: '3', name: 'Lint', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        { __typename: 'StatusContext', id: '4', context: 'Policy', state: 'EXPECTED', targetUrl: 'javascript:alert(0)' },
+      ]]
+      cli.configureChecks(pages)
+      const checks = await fetch(checksRoute + '?number=999&owner=attacker')
+      expect(checks.status).toBe(200)
+      expect(checks.headers.get('cache-control')).toBe('private, no-store')
+      expect(await checks.json()).toEqual({ title: 'Review the report', state: 'OPEN', draft: true, head: local, truncated: false, checks: [
+        { id: '1', name: 'Integration', status: 'failed', url: 'https://ci.example.com/build' },
+        { id: '2', name: 'Upload', status: 'pending', description: 'Upload queued' },
+        { id: '3', name: 'Lint', status: 'passed' },
+        { id: '4', name: 'Policy', status: 'pending' },
+      ] })
+      expect((await fetch(checksRoute, { method: 'POST' })).status).toBe(405)
+      expect((await fetch(checksRoute, { headers: { origin: 'https://other.example' } })).status).toBe(403)
+      expect((await fetch(checksRoute + '?repository=..')).status).toBe(404)
+      cli.configureChecks(pages, 'head-changed')
+      const stale = await fetch(checksRoute)
+      expect(stale.status).toBe(409)
+      expect(await stale.json()).toEqual({ error: 'The pull request head could not be confirmed. Refresh checks and try again.' })
+      cli.configureChecks(pages, 'unreadable')
+      const unreadable = await fetch(checksRoute)
+      expect(unreadable.status).toBe(409)
+      expect(await unreadable.text()).not.toContain('Private forge diagnostics')
+      cli.configureChecks([])
+      expect(await fetch(checksRoute).then(response => response.json())).toMatchObject({ checks: [], head: local })
+      expect(readState().posts).toBe(2)
       expect(git(project, 'status', '--porcelain')).toBe('')
 
       harness.stop()

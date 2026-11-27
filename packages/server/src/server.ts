@@ -42,6 +42,7 @@ import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
 import { createStagedCommit, readRepositorySubmission, stagedCommitPreview } from './repository-commit'
 import { readRepositoryStatus } from './repository-status'
 import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
+import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
 import { RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
 import type { RepositorySyncAction } from './repository-sync'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -531,14 +532,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   const repositoryActions = new Set<string>()
+  type RepositoryAction = 'commit' | 'pull-request' | 'pull-request-checks' | RepositorySyncAction
 
-  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: 'commit' | 'pull-request' | RepositorySyncAction, extendTimeout: () => void): Promise<Response> {
+  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: RepositoryAction, extendTimeout: () => void): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
     const respond = (body: object, status = 200) => Response.json(body, { headers, status })
     const site = request.headers.get('sec-fetch-site')
     if (site === 'cross-site' || site === 'same-site' || !canUseHostPrivileges(request, url))
       return new Response(null, { status: 403, headers })
-    if (!['GET', 'POST'].includes(request.method)) return new Response(null, { status: 405, headers })
+    const readingChecks = action === 'pull-request-checks'
+    if (request.method !== 'GET' && (readingChecks || request.method !== 'POST'))
+      return new Response(null, { status: 405, headers })
     const key = url.searchParams.get('repository') ?? ''
     const submitted = request.method === 'POST'
     const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
@@ -548,7 +552,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
     const session = engine.current.sessions.get(sessionId)
     const workspace = session && engine.current.workspaces.get(session.workspaceId)
-    if (!session || !workspace?.trusted || workspace.scratch || session.navigation?.archivedAt
+    if (!session || !workspace?.trusted || workspace.scratch || (!readingChecks && session.navigation?.archivedAt)
       || (session.isolate && !session.worktreePath))
       return respond({ error: 'This thread needs an available, trusted checkout.' }, 404)
     const worktree = session.worktreePath
@@ -558,9 +562,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const repository = await reviewRepositoryPath(root, session, key).then(path => path && realpath(path)).catch(() => null)
     if (!repository || !await isWorkspaceGitRoot(repository))
       return respond({ error: 'This repository is unavailable in the thread’s checkout.' }, 404)
-    if (repositoryActions.has(repository)) return respond({ error: 'A Git action is already running in this repository.' }, 409)
+    if (!readingChecks && repositoryActions.has(repository)) return respond({ error: 'A Git action is already running in this repository.' }, 409)
     if (submitted) repositoryActions.add(repository)
-    if (submitted || action === 'pull-request') extendTimeout()
+    if (submitted || action === 'pull-request' || readingChecks) extendTimeout()
 
     const authorize = () => {
       const current = engine.current.sessions.get(sessionId)
@@ -571,6 +575,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     try {
+      if (readingChecks) {
+        const link = (thread: SessionState) => thread.linkedPullRequests?.findLast(pull => pull.repositoryKey === key)
+          ?? (thread.pullRequest?.repositoryKey === key ? thread.pullRequest : undefined)
+        const pull = link(session)
+        if (!pull) return respond({ error: 'There is no pull request linked to this repository.' }, 404)
+        const checks = await readRepositoryPullRequestChecks(repository, pull, request.signal)
+        const current = engine.current.sessions.get(sessionId)
+        if (closing || current?.worktreePath !== worktree || current.workspaceId !== workspace.id || link(current) !== pull
+          || !engine.current.workspaces.get(workspace.id)?.trusted)
+          return respond({ error: 'The linked checkout changed. Open its checks again.' }, 409)
+        return respond(checks)
+      }
       if (action === 'pull-request') {
         const base = pullInput?.baseRef ?? url.searchParams.get('base') ?? undefined
         if (base !== undefined && Buffer.byteLength(base) > 1024) return respond({ error: 'The base branch name is too long.' }, 400)
@@ -602,6 +618,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
     catch (error) {
       if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError) return respond({ error: error.message }, 409)
+      if (readingChecks) return respond({ error: 'Could not read checks from GitHub. Try again.' }, 503)
       return respond({ error: action === 'commit' ? (input
         ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'
         : 'Git could not read the staged changes.')
@@ -1693,10 +1710,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      const gitRoute = /^\/s\/([1-9]\d*)\/git\/(commit|pull|push|pull-request)$/u.exec(url.pathname)
+      const gitRoute = /^\/s\/([1-9]\d*)\/git\/(commit|pull|push|pull-request|pull-request-checks)$/u.exec(url.pathname)
       if (gitRoute) {
         if (!isLoopbackHost(srv.requestIP(request)?.address ?? '')) return new Response(null, { status: 403 })
-        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as 'commit' | 'pull-request' | RepositorySyncAction, () => srv.timeout(request, 150))
+        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as RepositoryAction, () => srv.timeout(request, 150))
       }
 
       const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files|status))?$/u.exec(url.pathname)
