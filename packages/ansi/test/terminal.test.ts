@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { toHtml } from '../src/html'
 import { stripAnsi, Terminal } from '../src/terminal'
 
 /**
@@ -26,6 +27,41 @@ it('restores output, the alternate buffer, and an unfinished escape sequence', (
   expect(restored.onAltScreen).toBe(false)
   expect(restored.toText()).toBe('earlier\nworking\n%')
   expect(restored.shellActivity.lastExitStatus).toBe(7)
+})
+
+it('preserves OSC 8 links across SGR, reconnect, wrapping, and saved scrollback', () => {
+  const options = { cols: 16, rows: 2, scrollback: 10 }
+  const first = new Terminal(options)
+  first.write('\x1b]8;id=one;https://example.test/a?q=1&')
+  const second = Terminal.fromCheckpoint(first.checkpoint(), options)
+  second.write('z=2\x1b\\linked \x1b[31mcolored\x1b[0m label\x1b]8;;\x07\r\nplain')
+  expect(second.viewport().flat().find(cell => cell.ch === 'p')?.style.link).toBeUndefined()
+  const saved = new Terminal(options)
+  expect(saved.restoreHistory(second.saveHistory())).toBe(true)
+  const html = toHtml(saved.snapshot(), true)
+  expect(html).toContain('href="https://example.test/a?q=1&amp;z=2"')
+  expect(html).toContain('colored')
+  expect(html).toContain('target="_blank" rel="noopener noreferrer"')
+  expect(toHtml(saved.snapshot())).not.toContain('<a ')
+})
+
+it('does not turn an unsupported or oversized OSC 8 target into a link', () => {
+  const t = new Terminal({ cols: 100, rows: 3 })
+  t.write('\x1b]8;;data:text/plain,link\x07inert\x1b]8;;\x07 ')
+  t.write('\x1b]8;;https://account:secret@example.test\x07blocked\x1b]8;;\x07 ')
+  t.write('\x1b]8;;https://example.test/' + 'a'.repeat(4300))
+  const restored = Terminal.fromCheckpoint(t.checkpoint())
+  restored.write('\x07long\x1b]8;;\x07')
+  expect(restored.toText()).toBe('inert blocked long')
+  expect(toHtml(restored.snapshot(), true)).not.toContain('<a ')
+})
+
+it('recognizes printed web addresses across ANSI spans and leaves nearby punctuation as text', () => {
+  const t = new Terminal({ cols: 120, rows: 3 })
+  t.write('🌲 (ht\x1b[31mtps://example.test/a_(b)?one=1&two=2\x1b[0m).')
+  const html = toHtml(t.snapshot(), true)
+  expect(html).toContain('🌲 (<a data-terminal-link href="https://example.test/a_(b)?one=1&amp;two=2"')
+  expect(html).toContain('&amp;two=2</span></a>).')
 })
 
 it('loads old main-screen rows without reviving the previous shell’s modes', () => {

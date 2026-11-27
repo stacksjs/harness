@@ -9,6 +9,7 @@
  */
 
 import type { Cell, Style } from './terminal'
+import { terminalUrlRanges, terminalWebUrl } from './links'
 
 const ESCAPES: Record<string, string> = {
   '&': '&amp;',
@@ -92,23 +93,51 @@ function openSpan(style: Style): string {
  * the container is expected to be `white-space: pre` and monospace, which is
  * what keeps a grid a grid.
  */
-export function toHtml(rows: Cell[][]): string {
+export function toHtml(rows: Cell[][], links = false): string {
   const lines: string[] = []
   for (const row of rows) {
+    const text = links && row.some(cell => cell.ch === ':') ? row.map(cell => cell.ch).join('') : ''
+    // The grid can wrap a URL at its right edge. Without a terminator on this
+    // row, there is no complete inferred target. Explicit links carry theirs.
+    const ranges = text ? terminalUrlRanges(text).filter(range => range.end < text.length) : []
     let line = ''
     let open = ''
     let key = ''
+    let style: Style | undefined
+    let explicitLink: string | null = null
+    let activeLink: string | null = null
+    let textOffset = 0
+    let rangeIndex = 0
     for (const cell of row) {
-      const cellKey = styleKey(cell.style)
-      if (cellKey !== key) {
+      const styleChanged = style !== cell.style
+      if (links && styleChanged) explicitLink = cell.style.link ? terminalWebUrl(cell.style.link) : null
+      while (ranges[rangeIndex] && ranges[rangeIndex]!.end <= textOffset) rangeIndex++
+      const range = ranges[rangeIndex]
+      const link = explicitLink ?? (range && range.start <= textOffset ? range.url : null)
+      const linkChanged = link !== activeLink
+      if (linkChanged) {
         if (open) line += '</span>'
-        open = openSpan(cell.style)
-        line += open
-        key = cellKey
+        if (activeLink) line += '</a>'
+        if (link) line += `<a data-terminal-link href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">`
+        activeLink = link
+        open = ''
+        key = ''
+      }
+      if (styleChanged || linkChanged) {
+        style = cell.style
+        const cellKey = styleKey(style)
+        if (cellKey !== key) {
+          if (open) line += '</span>'
+          open = openSpan(style)
+          line += open
+          key = cellKey
+        }
       }
       line += escapeHtml(cell.ch)
+      textOffset += cell.ch.length
     }
     if (open) line += '</span>'
+    if (activeLink) line += '</a>'
     lines.push(line.replace(/ +$/, ''))
   }
   return lines.join('\n')

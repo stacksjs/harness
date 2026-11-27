@@ -16,6 +16,8 @@
  * width, and tab stops other than every 8 columns.
  */
 
+import { MAX_TERMINAL_URL, terminalWebUrl } from './links'
+
 /** One cell's appearance. Shared by reference; never mutated after creation. */
 export interface Style {
   /** `null` = default; 0-255 = indexed; '#rrggbb' = truecolor. */
@@ -27,6 +29,7 @@ export interface Style {
   underline: boolean
   inverse: boolean
   strike: boolean
+  link?: string
 }
 
 export interface Cell {
@@ -80,6 +83,7 @@ function validHistoryStyle(value: unknown): boolean {
   const style = value as Record<string, unknown>
   return validHistoryColor(style.fg) && validHistoryColor(style.bg)
     && ['bold', 'dim', 'italic', 'underline', 'inverse', 'strike'].every(key => typeof style[key] === 'boolean')
+    && (style.link === undefined || (typeof style.link === 'string' && terminalWebUrl(style.link) === style.link))
 }
 
 function validHistoryRow(value: unknown): value is PackedRow {
@@ -150,6 +154,7 @@ export class Terminal {
   private csiPrivate = false
   private oscEscape = false
   private oscData = ''
+  private oscOverflow = false
   private bracketedPaste = false
   private shellPhase: ShellPhase = 'unavailable'
   private lastExitStatus: number | null = null
@@ -206,6 +211,7 @@ export class Terminal {
       x: this.x, y: this.y, cursor: this.savedCursor, style: this.style, wrap: this.pendingWrap,
       main: this.savedMain && { ...this.savedMain, grid: this.savedMain.grid.map(packRow) },
       parser: this.state, csi: this.csiParams, csiPrivate: this.csiPrivate, osc: this.oscData, oscEscape: this.oscEscape,
+      ...(this.oscOverflow && { oscOverflow: true }),
       bracketedPaste: this.bracketedPaste, shellPhase: this.shellPhase, lastExitStatus: this.lastExitStatus,
     }
   }
@@ -225,6 +231,7 @@ export class Terminal {
     terminal.csiPrivate = checkpoint.csiPrivate
     terminal.oscData = checkpoint.osc
     terminal.oscEscape = checkpoint.oscEscape
+    terminal.oscOverflow = checkpoint.oscOverflow === true
     terminal.bracketedPaste = checkpoint.bracketedPaste
     terminal.shellPhase = checkpoint.shellPhase
     terminal.lastExitStatus = checkpoint.lastExitStatus
@@ -333,6 +340,7 @@ export class Terminal {
           this.state = ParseState.Osc
           this.oscEscape = false
           this.oscData = ''
+          this.oscOverflow = false
         }
         else if (ch === '(' || ch === ')') {
           this.state = ParseState.Charset
@@ -370,21 +378,36 @@ export class Terminal {
       case ParseState.Osc:
         if (ch === '\x07' || (this.oscEscape && ch === '\\')) {
           this.state = ParseState.Ground
-          this.applyShellMarker()
+          if (this.oscData.startsWith('8;')) this.applyHyperlink()
+          else if (!this.oscOverflow) this.applyShellMarker()
         }
         else if (ch === '\x1b') {
           this.oscEscape = true
         }
         else {
-          // Keep just enough bytes for OSC 133. Discard the rest of long
-          // titles and other operating system commands.
-          if (this.oscData.length < 32) this.oscData += (this.oscEscape ? '\x1b' : '') + ch
+          // OSC 8 needs room for its target. Other commands keep the small
+          // OSC 133 budget. An incomplete target must never become a link.
+          const limit = this.oscData.startsWith('8;') ? MAX_TERMINAL_URL + 128 : 32
+          const payload = (this.oscEscape ? '\x1b' : '') + ch
+          if (this.oscData.length + payload.length <= limit && !this.oscOverflow) this.oscData += payload
+          else this.oscOverflow = true
           this.oscEscape = false
         }
         return
 
       case ParseState.Charset:
         this.state = ParseState.Ground
+    }
+  }
+
+  private applyHyperlink(): void {
+    const separator = this.oscData.indexOf(';', 2)
+    const link = separator < 0 || this.oscOverflow ? null : terminalWebUrl(this.oscData.slice(separator + 1))
+    if (link) this.style = Object.freeze({ ...this.style, link })
+    else if (this.style.link !== undefined) {
+      const style = { ...this.style }
+      delete style.link
+      this.style = Object.freeze(style)
     }
   }
 
