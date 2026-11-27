@@ -4067,6 +4067,22 @@ try {
   await wrappedLink.waitFor()
   check('reattaching to the live terminal preserves the wrapped link', await wrappedLink.getAttribute('href') === wrappedUrl)
   await wrappedLink.focus()
+  const phoneSize = page.viewportSize()!
+  const narrowLinkRows = await wrappedLink.evaluate(element => [...element.getClientRects()].filter(rect => rect.width > 0).length)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.waitForFunction(({ url, segments }) => {
+    const link = document.activeElement
+    return link?.getAttribute('href') === url
+      && [...link.getClientRects()].filter(rect => rect.width > 0).length < segments
+  }, { url: wrappedUrl, segments: narrowLinkRows })
+  await capture('workspace-terminal-reflow-wide')
+  await page.setViewportSize(phoneSize)
+  await page.waitForFunction(({ url, segments }) => {
+    const link = document.activeElement
+    return link?.getAttribute('href') === url
+      && [...link.getClientRects()].filter(rect => rect.width > 0).length === segments
+  }, { url: wrappedUrl, segments: narrowLinkRows })
+  check('the live terminal reflows the URL while preserving keyboard focus', true)
   await capture('workspace-terminal-wrapped-url-phone')
   const continuation = await wrappedLink.evaluate((element) => {
     const rows = [...element.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0)
@@ -4079,6 +4095,11 @@ try {
   await activeFrame.getByRole('heading', { name: 'Wrapped destination reached' }).waitFor()
   check('activating a continuation row opens the full wrapped URL', true)
   await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
+  await terminalHost.focus()
+  await page.keyboard.type("printf '%s\\n' 'reflow-terminal-ready'")
+  await page.keyboard.press('Enter')
+  await waitForTerminalLine('reflow-terminal-ready')
+  check('the original shell accepts commands after reflow and preview', true)
   await page.setViewportSize({ width: 1440, height: 900 })
   await terminalHost.focus()
   await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${ownedPreviewScript}"`)
