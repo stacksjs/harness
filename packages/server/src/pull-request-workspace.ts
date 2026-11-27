@@ -13,6 +13,7 @@ import { findPullRequestThread } from './pull-request-links'
 import { availableLifecycleActions, behindBase, branchUpdateMethods, deletableSourceBranch, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
 import { applyPullRequestLabelChanges, parseLabelSelection, pullRequestLabels, readPullRequestLabelEditor } from './pull-request-labels'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
+import { applyPullRequestReviewerChanges, parseReviewerSelection, readPullRequestReviewerEditor, reviewerOptions } from './pull-request-reviewers'
 import { revertWorkspacePullRequest } from './pull-request-revert'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -299,7 +300,8 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   let nextPage = false
   const detail = selection && selectionRepo ? (async () => {
     const editingLabels = tab === 'summary' && query.get('labels') === 'edit'
-    const credential = editingLabels ? await repositoryGitHubCredential(selectionRepo.path, signal).catch(() => undefined) : undefined
+    const editingReviewers = tab === 'summary' && query.get('reviewers') === 'edit'
+    const credential = editingLabels || editingReviewers ? await repositoryGitHubCredential(selectionRepo.path, signal).catch(() => undefined) : undefined
     const reply = await repositoryGitHubRequest(selectionRepo.path, `repos/${selectionRepo.name}/pulls/${selection.number}`, undefined, signal, credential)
     const data = reply.status === 200 ? readPull(reply.body, selectionRepo.name) : null
     if (!data || data.number !== selection.number) throw new RepositoryPullRequestError('This pull request is unavailable to the GitHub account on this host.')
@@ -345,7 +347,12 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
       : null
     const labelEditor = labelReview && current && lifecycle ? { ...labelReview, viewer: current.viewer.id, intent: crypto.randomUUID(),
       revision: labelReviewRevision(profile, selectionRepo.workspace.id, selectionRepo.name, current.id, current.viewer.id, labelReview.scope) } : null
+    const canEditReviewers = tab === 'summary' && Boolean(lifecycle && current?.canRequestReviewers)
+    const reviewerEditor = editingReviewers && canEditReviewers && credential && current
+      ? await reviewReviewerEditor(selectionRepo, data.number, current, profile, credential, signal).catch(() => null)
+      : null
     return { ...data, lifecycle, approvalRuns, workflowApproval, canEditLabels, labelEditor, labelEditorUnavailable: editingLabels && canEditLabels && !labelEditor,
+      canEditReviewers, reviewerEditor, reviewerEditorUnavailable: editingReviewers && canEditReviewers && !reviewerEditor,
       thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
       startHref: '/new?' + new URLSearchParams({ pr: data.url, profile: String(profile) }), ...result }
   })().catch(error => ({ error: message(error) })) : Promise.resolve(null)
@@ -406,6 +413,9 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     labelsHref: href({ selectedUrl, tab: 'summary', labels: 'edit' }) + '#pr-labels',
     labelsEndpoint: detailsHref('summary').replace('/pull-requests?', '/pull-requests/labels?'),
     labelsNotice: query.get('labelsResult') === 'updated' ? 'Labels updated on GitHub.' : '',
+    reviewersHref: href({ selectedUrl, tab: 'summary', reviewers: 'edit' }) + '#pr-reviewers',
+    reviewersEndpoint: detailsHref('summary').replace('/pull-requests?', '/pull-requests/reviewers?') + '#pr-reviewers',
+    reviewersNotice: query.get('reviewersResult') === 'updated' ? 'Review requests updated on GitHub.' : '',
     commentsBase,
     commentsAction: commentsBase.replace('/pull-requests?', '/pull-requests/comments?'),
   }
@@ -435,6 +445,80 @@ async function readReviewSubmission(state: HarnessState, query: URLSearchParams,
 async function reviewRepository(state: HarnessState, profile: number, repository: string, signal: AbortSignal) {
   const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
   return (await trustedRepositories(workspaces, signal)).get(repository.toLowerCase())
+}
+
+function reviewerRevision(profile: number, repository: Repository, current: LifecycleSnapshot, intent: string, scope: string) {
+  return createHash('sha256').update(JSON.stringify(['pr-reviewers', profile, repository.workspace.id,
+    repository.name.toLowerCase(), current.id, current.viewer.id, intent, scope])).digest('hex')
+}
+
+function reviewerContext(repository: Repository, number: number, current: LifecycleSnapshot, credential: string, signal: AbortSignal) {
+  return { path: repository.path, repository: repository.name, number, pullId: current.id, credential, signal }
+}
+
+async function reviewReviewerEditor(repository: Repository, number: number, current: LifecycleSnapshot, profile: number, credential: string, signal: AbortSignal,
+  search = '', staged: NonNullable<ReturnType<typeof parseReviewerSelection>>['changes'] = [], intent: string = crypto.randomUUID()) {
+  const review = await readPullRequestReviewerEditor(reviewerContext(repository, number, current, credential, signal), search, staged)
+  return review ? { ...review, viewer: current.viewer.id, head: current.headRefOid, intent,
+    revision: reviewerRevision(profile, repository, current, intent, review.scope) } : null
+}
+
+export type PullRequestReviewerEditor = NonNullable<Awaited<ReturnType<typeof reviewReviewerEditor>>>
+export type PullRequestReviewerDraft = { viewer: string, head: string, intent: string, scope: string, revision: string, checked: string[] }
+
+const reviewerMessages = {
+  updated: 'Review requests updated on GitHub.',
+  confirmed: 'GitHub already confirmed the earlier review requests.',
+  search: '',
+  denied: 'This GitHub account cannot change review requests.',
+  changed: 'The pull request, account, or reviewed people changed. Open Change reviewers to review again.',
+  unavailable: 'Could not load reviewers from GitHub. Try again.',
+  refused: 'GitHub refused a review request change. Open Change reviewers to review current access.',
+  pending: 'GitHub has yet to confirm every reviewed change.',
+}
+
+export async function updateWorkspacePullRequestReviewers(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
+  receipts: PullRequestReplyReceipts) {
+  const submission = await readReviewSubmission(state, query, request, 650_000)
+  if (!submission) return null
+  const { profile, selection, values, head, viewer } = submission
+  const scope = values.get('scope') ?? ''
+  const revision = values.get('revision') ?? ''
+  const intent = values.get('intent') ?? ''
+  const operation = values.get('operation') ?? 'save'
+  const selected = parseReviewerSelection(scope, values.getAll('reviewer'))
+  if (!selected || !['search', 'save'].includes(operation) || !/^[0-9a-f]{64}$/u.test(revision)
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(intent)) return null
+  const params = reviewReturnParams(query, profile, selection.url, 'summary')
+  const finish = (result: keyof typeof reviewerMessages, editor?: PullRequestReviewerEditor) => {
+    const target = new URLSearchParams(params)
+    if (result === 'updated' || result === 'confirmed') target.set('reviewersResult', 'updated')
+    const fallback: PullRequestReviewerDraft | undefined = result === 'pending'
+      ? { viewer, head, intent, scope, revision, checked: selected.checked } : undefined
+    return { result, message: reviewerMessages[result], params, fallback, editor, location: '/pull-requests?' + target + '#pr-reviewers' }
+  }
+  try {
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
+    if (!repository || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const current = await readPullRequestLifecycle(repository.path, repository.name, selection.number, signal, credential)
+    if (!current) return finish('unavailable')
+    if (current.viewer.id !== viewer || revision !== reviewerRevision(profile, repository, current, intent, scope)) return finish('changed')
+    if (!current.canRequestReviewers) return finish('denied')
+    if (operation === 'search') {
+      if (receipts.inspect(intent, revision)) return finish('changed')
+      const search = (values.get('query') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
+      const editor = await reviewReviewerEditor(repository, selection.number, current, profile, credential, signal, search, selected.changes, intent).catch(() => null)
+      return editor ? finish('search', editor) : finish('unavailable', { scope, intent, revision, viewer, head, search, more: false, matches: -1,
+        options: reviewerOptions(selected.rows, repository.name, new Set(selected.checked)) })
+    }
+    const fingerprint = createHash('sha256').update(JSON.stringify(['pr-reviewer-changes', revision, selected.checked])).digest('hex')
+    const result = await applyPullRequestReviewerChanges({ ...reviewerContext(repository, selection.number, current, credential, signal), receipts,
+      trusted: () => Boolean(stillTrusted(state, repository.workspace)),
+    }, selected.changes, intent, fingerprint)
+    return finish(result)
+  }
+  catch { return finish('unavailable') }
 }
 
 function labelReviewRevision(profile: number, workspace: number, repository: string, pull: string, viewer: string, scope: string) {

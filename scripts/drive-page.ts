@@ -6818,11 +6818,18 @@ try {
     const oldLabel = { id: 11, name: 'Legacy/needs review', color: 'aa2222', archived_at: '2026-11-10T15:00:00Z' }
     const reportLabel = { id: 31, name: 'Report & analysis', color: '298265', description: 'Check the exported CSV' }
     const concurrentLabel = { id: 41, name: 'Accessibility', color: 'cc5599' }
+    const person = { id: 'user:accessibility', __typename: 'User', login: 'accessibility-reviewer' }
+    const bot = { id: 'bot:review-check', __typename: 'Bot', login: 'review-check[bot]' }
+    const team = { id: 'team:docs', __typename: 'Team', slug: 'docs-and-release-reviewers', name: 'Docs and release reviewers' }
+    const candidate = { id: 'user:dorian', __typename: 'User', login: 'dorian', name: 'Dorian Reviewer' }
     labelState.pulls[1].labels = [oldLabel]
-    labelState.pulls[1].requested_reviewers = [{ login: 'accessibility-reviewer' }, { login: 'review-check[bot]' }]
-    labelState.pulls[1].requested_teams = [{ slug: 'docs-and-release-reviewers' }]
+    labelState.pulls[1].requested_reviewers = [person, bot]
+    labelState.pulls[1].requested_teams = [team]
+    labelState.pulls[1].reviewerNodes = [person, bot, team]
+    labelState.reviewerPeople = [person, candidate]
+    labelState.reviewerPageSize = 1
     labelState.labelPages = [[oldLabel, concurrentLabel], [reportLabel]]
-    labelState.labelPermission = 'TRIAGE'
+    labelState.labelPermission = 'WRITE'
     writeFileSync(github.state, JSON.stringify(labelState))
     await clonePage.goto(workflowUrl.href, { waitUntil: 'domcontentloaded' })
     const changeLabels = clonePage.getByRole('link', { name: 'Change labels', exact: true })
@@ -6835,6 +6842,40 @@ try {
       && await reviewers.getByText('Team', { exact: true }).isVisible()
       && await reviewers.evaluate(section => section.nextElementSibling?.hasAttribute('data-pr-label-section') === true))
     await capture('pull-requests-reviewers-390x844', clonePage)
+    const changeReviewers = clonePage.getByRole('link', { name: 'Change reviewers', exact: true })
+    const picker = clonePage.getByRole('form', { name: 'Change reviewers', exact: true })
+    const docsTeam = picker.getByRole('checkbox', { name: /docs-and-release-reviewers/u })
+    const searchReviewers = picker.getByRole('searchbox', { name: 'Search reviewers' })
+    const dorian = picker.getByRole('checkbox', { name: /Dorian Reviewer/u })
+    await changeReviewers.click()
+    await docsTeam.uncheck()
+    await searchReviewers.fill('dorian')
+    await searchReviewers.press('Enter')
+    await dorian.waitFor()
+    check('GitHub reviewer search reaches beyond the first page and retains the staged withdrawal',
+      !(await docsTeam.isChecked()) && pullState().reviewerWrites === undefined)
+    await capture('pull-requests-reviewer-picker-390x844', clonePage)
+    await picker.getByRole('link', { name: 'Cancel', exact: true }).click()
+    await changeReviewers.click()
+    check('canceling reviewer edits leaves the existing team requested', await docsTeam.isChecked() && pullState().reviewerWrites === undefined)
+    await docsTeam.uncheck()
+    await searchReviewers.fill('dorian')
+    await picker.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await dorian.check()
+    const reviewInterrupted = pullState()
+    reviewInterrupted.reviewerDropResponse = team.id
+    writeFileSync(github.state, JSON.stringify(reviewInterrupted))
+    await picker.getByRole('button', { name: 'Save reviewers', exact: true }).click()
+    await clonePage.getByRole('button', { name: 'Check GitHub and finish', exact: true }).click()
+    await reviewers.getByRole('status').filter({ hasText: 'Review requests updated on GitHub.' }).waitFor()
+    const reviewed = pullState()
+    check('reviewer recovery issues only the reviewed team withdrawal and person request',
+      JSON.stringify(reviewed.reviewerWrites.map(([, method, id]: [number, string, string]) => [method, id])) === '[["DELETE","team:docs"],["POST","user:dorian"]]'
+      && await reviewers.getByText('@dorian', { exact: true }).isVisible())
+    reviewed.labelPermission = 'TRIAGE'
+    writeFileSync(github.state, JSON.stringify(reviewed))
+    await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    check('triage still edits labels and hides repository-write review requests', await changeLabels.isVisible() && await changeReviewers.isHidden())
     const labelEditor = clonePage.getByRole('form', { name: 'Change labels', exact: true })
     const labelSearch = labelEditor.getByRole('searchbox', { name: 'Search labels', exact: true })
     const legacyLabel = labelEditor.getByRole('checkbox', { name: /Legacy\/needs review/u })

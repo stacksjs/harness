@@ -58,8 +58,8 @@ import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
 import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
-import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLabels, updateWorkspacePullRequestLifecycle, updateWorkspaceReviewConversation } from './pull-request-workspace'
-import type { PullRequestLabelDraft, PullRequestLifecycleDraft, PullRequestReplyDraft } from './pull-request-workspace'
+import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLabels, updateWorkspacePullRequestLifecycle, updateWorkspacePullRequestReviewers, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import type { PullRequestLabelDraft, PullRequestLifecycleDraft, PullRequestReplyDraft, PullRequestReviewerDraft, PullRequestReviewerEditor } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -1912,7 +1912,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels'].includes(url.pathname)) {
+      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels', '/pull-requests/reviewers'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
@@ -1931,6 +1931,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           lifecycleError?: string
           labelDraft?: PullRequestLabelDraft
           labelError?: string
+          reviewerDraft?: PullRequestReviewerDraft
+          reviewerEditor?: PullRequestReviewerEditor
+          reviewerError?: string
         }) => {
           try {
             const view = await pullRequestWorkspace(engine.current, query, signal)
@@ -1960,6 +1963,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
               if (acceptsJson) return Response.json({ result, message, location }, { status: statuses[result], headers: jsonHeaders })
               if (statuses[result] === 200) return new Response(null, { status: 303, headers: { ...headers, location } })
               return render(params, statuses[result], { labelDraft: fallback, labelError: message })
+            })
+          }
+          if (url.pathname === '/pull-requests/reviewers') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            const jsonHeaders = { ...headers, 'content-type': 'application/json' }
+            return updateWorkspacePullRequestReviewers(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) {
+                const message = 'Invalid reviewer selection. Open Change reviewers and try again.'
+                return acceptsJson ? Response.json({ message }, { status: 400, headers: jsonHeaders }) : new Response(message, { status: 400, headers })
+              }
+              const { result, message, location, params, fallback, editor } = submission
+              const statuses = { updated: 200, confirmed: 200, search: 200, pending: 202, denied: 403, changed: 409, refused: 422, unavailable: 503 }
+              if (acceptsJson) return Response.json({ result, message, location, ...(editor && { editor }) }, { status: statuses[result], headers: jsonHeaders })
+              if (result === 'updated' || result === 'confirmed') return new Response(null, { status: 303, headers: { ...headers, location } })
+              return render(params, statuses[result], { reviewerDraft: fallback, reviewerEditor: editor, reviewerError: message })
             })
           }
           if (url.pathname === '/pull-requests/lifecycle') {

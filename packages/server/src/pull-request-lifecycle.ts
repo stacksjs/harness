@@ -55,6 +55,7 @@ type Pull = {
 export type LifecycleSnapshot = Pull & {
   viewer: { id: string, login: string }
   canTriage: boolean
+  canRequestReviewers: boolean
   branch: { behind: number | null, canUpdate: boolean }
   merge: {
     canWrite: boolean
@@ -146,7 +147,7 @@ export async function readPullRequestLifecycle(path: string, repository: string,
   const count = errors.length ? undefined : pull.baseRef?.compare?.behindBy
   const branch = { behind: typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : null,
     canUpdate: repo.isArchived === false && pull.viewerCanUpdateBranch === true && Boolean(pull.baseRefName) }
-  return { ...pull, viewer, branch, canTriage: repo.isArchived === false && triagePermissions.has(repo.viewerPermission ?? ''),
+  return { ...pull, viewer, branch, canTriage: repo.isArchived === false && triagePermissions.has(repo.viewerPermission ?? ''), canRequestReviewers: canWrite,
     viewerCanUpdate: !repo.isArchived && pull.viewerCanUpdate === true, merge: {
     canWrite: canWrite && typeof pull.baseRefName === 'string' && Boolean(pull.baseRefName),
     methods,

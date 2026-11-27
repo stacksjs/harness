@@ -300,6 +300,27 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query HarnessReviewerIdentities')) {
+    if (!process.env.GH_TOKEN) reply(403, {})
+    reply(200, { data: { nodes: variables.ids.map(id => state.reviewerPeople?.find(person => person.id === id) ?? null) } })
+  }
+  if (query.includes('query HarnessReviewerCandidates')) {
+    if (!process.env.GH_TOKEN || !pull) reply(403, {})
+    if (state.reviewerHiddenRead) {
+      delete state.reviewerHiddenRead
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
+    if (state.reviewerSearchFailure && variables.search) reply(503, {})
+    const search = (variables.search ?? '').toLowerCase()
+    const people = (state.reviewerPeople ?? []).filter(person => (person.login + ' ' + (person.name ?? '')).toLowerCase().includes(search))
+    const size = state.reviewerPageSize ?? 100
+    reply(200, { data: { repository: {
+      assignableUsers: { nodes: people.slice(0, size), pageInfo: { hasNextPage: people.length > size } },
+      pullRequest: { id: 'fixture-pull-' + pull.number, author: pull.user,
+        reviewRequests: { nodes: (pull.reviewerNodes ?? []).map(requestedReviewer => ({ requestedReviewer })), pageInfo: { hasNextPage: false } } },
+    } } })
+  }
   if (query.includes('query HarnessPullRequestWorkflowHeads')) {
     const nodes = state.pulls.filter(pull => pull.base.repo.full_name === name && pull.head.ref === variables.branch)
       .map(pull => ({ id: 'fixture-pull-' + pull.number, number: pull.number, headRefOid: pull.head.sha,
@@ -424,6 +445,28 @@ if (parts[4] === 'branches') {
 }
 const pulls = state.pulls.filter(pull => pull.base.repo.full_name === name)
 const detail = pulls.find(pull => pull.number === Number(parts[5]))
+if (parts[4] === 'pulls' && parts[6] === 'requested_reviewers' && detail) {
+  if (!process.env.GH_TOKEN || state.reviewerDenied) reply(403, { message: 'Private reviewer diagnostics' })
+  const request = method === 'POST'
+  const body = JSON.parse(await Bun.stdin.text())
+  const name = body.team_reviewers?.[0] ?? body.reviewers?.[0]
+  const initial = detail.reviewerNodes ?? []
+  const person = (request ? state.reviewerPeople : initial)?.find(candidate =>
+    body.team_reviewers ? candidate.slug === name : candidate.login === name)
+  if (!person || (body.team_reviewers ?? body.reviewers).length !== 1 || person.login === detail.user?.login) reply(422, {})
+  state.reviewerWrites = [...(state.reviewerWrites ?? []), [detail.number, method, person.id]]
+  detail.reviewerNodes = request ? [...initial.filter(row => row.id !== person.id), person] : initial.filter(row => row.id !== person.id)
+  detail.requested_reviewers = detail.reviewerNodes.filter(row => row.__typename !== 'Team')
+  detail.requested_teams = detail.reviewerNodes.filter(row => row.__typename === 'Team')
+  if (state.reviewerDropResponse === person.id) {
+    delete state.reviewerDropResponse
+    state.reviewerHiddenRead = true
+    writeFileSync(stateFile, JSON.stringify(state))
+    process.exit(1)
+  }
+  writeFileSync(stateFile, JSON.stringify(state))
+  reply(request ? 201 : 200, detail)
+}
 if (parts[4] === 'labels' && method === 'GET') {
   const page = Number(url.searchParams.get('page')) || 1
   const pages = state.labelPages

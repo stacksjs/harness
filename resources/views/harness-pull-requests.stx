@@ -66,6 +66,12 @@ export const labelsNotice = $props.labelsNotice
 export const labelDraft = $props.labelDraft
 export const labelError = $props.labelError
 export const labelOptions = selected?.labelEditor?.labels || []
+export const reviewersHref = $props.reviewersHref
+export const reviewersEndpoint = $props.reviewersEndpoint
+export const reviewersNotice = $props.reviewersNotice
+export const reviewerEditor = $props.reviewerEditor || selected?.reviewerEditor
+export const reviewerDraft = $props.reviewerDraft
+export const reviewerError = $props.reviewerError
 export const lifecycleNotice = $props.lifecycleNotice
 export const lifecycleError = $props.lifecycleError
 export const lifecyclePending = $props.lifecycleDraft || null
@@ -889,18 +895,8 @@ const matchingLabelIds = derived(() => {
           </nav>
           <div data-pr-detail-content>
           @if(tab === 'summary')
-            @if(selected.requestedReviewers.length)
-              <section data-pr-reviewers aria-labelledby="pr-requested-reviewers-title">
-                <h3 id="pr-requested-reviewers-title">Requested reviewers</h3>
-                <ul data-pr-reviewer-list>
-                  @foreach(selected.requestedReviewers as reviewer)
-                    <li>
-                      {{ reviewer.name }}
-                      @if(reviewer.team)<small>Team</small>@endif
-                    </li>
-                  @endforeach
-                </ul>
-              </section>
+            @if(selected.requestedReviewers.length || selected.canEditReviewers || reviewerEditor || reviewerDraft || reviewerError || reviewersNotice)
+              @include('../partials/harness-pr-reviewers')
             @endif
             @if(selected.labels.length || selected.canEditLabels || labelsNotice || labelError)
               @include('../partials/harness-pr-labels')

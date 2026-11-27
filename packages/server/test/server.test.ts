@@ -471,6 +471,114 @@ describe('harness serve — HTTP', () => {
     }
   })
 
+  it.skipIf(process.platform === 'win32')('searches and changes reviewed GitHub reviewers with durable recovery', async () => {
+    const { project, cli, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
+    const team = { id: 'team:release', __typename: 'Team', slug: 'release', name: 'Release review' }
+    const bot = { id: 'bot:checks', __typename: 'Bot', login: 'checks[bot]' }
+    const person = { id: 'user:1', __typename: 'User', login: 'alix', name: 'Alix Example' }
+    const next = { id: 'user:2', __typename: 'User', login: 'dorian', name: 'Dorian Reviewer' }
+    const other = { id: 'user:3', __typename: 'User', login: 'sam' }
+    const fixture = readState()
+    fixture.labelPermission = 'WRITE'
+    fixture.reviewerPeople = [{ ...person, id: 'user:author', login: 'fixture-user' }, person, next, other]
+    fixture.reviewerPageSize = 2
+    fixture.pulls[0].reviewerNodes = [team, bot]
+    fixture.pulls[0].requested_reviewers = [bot]
+    fixture.pulls[0].requested_teams = [team]
+    fixture.pulls.push({ ...fixture.pulls[0], number: 2, html_url: url.replace(/1$/u, '2'), reviewerNodes: [], requested_reviewers: [], requested_teams: [] })
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'reviewer-picker-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const address = () => host + '/pull-requests?' + new URLSearchParams({ selectedUrl: url, reviewers: 'edit' })
+      const first = await pullRequestLifecycleForm(address(), 'pr-reviewer-editor-title')
+      expect(first.html).toContain('More people match on GitHub.')
+      expect(first.html).toContain('Alix Example')
+      expect(first.html).not.toContain('Dorian Reviewer')
+      const values = Object.fromEntries(Object.entries(first.values).map(([key, value]) => [key,
+        value.replaceAll('&quot;', '"').replaceAll('&#34;', '"').replaceAll('&amp;', '&')]))
+      expect(JSON.parse(values.scope!)).toHaveLength(3)
+      const post = (fields: Record<string, string>, ids: string[], options: { search?: string, origin?: string, target?: string, accept?: string } = {}) => {
+        const endpoint = new URL(first.endpoint.pathname + first.endpoint.search, host)
+        if (options.target) endpoint.searchParams.set('selectedUrl', options.target)
+        const body = new URLSearchParams(fields)
+        for (const id of ids) body.append('reviewer', id)
+        if (options.search) {
+          body.set('operation', 'search')
+          body.set('query', options.search)
+        }
+        return fetch(endpoint, { method: 'POST', redirect: 'manual', headers: {
+          accept: options.accept ?? 'application/json', origin: options.origin ?? host, 'content-type': 'application/x-www-form-urlencoded',
+        }, body })
+      }
+      const staged = [person.id, bot.id]
+      expect((await post(values, staged, { origin: 'https://elsewhere.invalid' })).status).toBe(403)
+      expect((await post(values, [...staged, 'unknown'])).status).toBe(400)
+      expect((await post(values, staged, { target: url.replace(/1$/u, '2') })).status).toBe(409)
+      fixture.labelPermission = 'TRIAGE'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await post(values, staged)).status).toBe(403)
+      expect(await fetch(address()).then(response => response.text())).not.toContain('Save reviewers')
+
+      fixture.labelPermission = 'WRITE'
+      fixture.reviewerSearchFailure = true
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const failedSearch = await post(values, staged, { search: next.login })
+      expect(failedSearch.status).toBe(503)
+      expect(await failedSearch.json()).toMatchObject({ editor: { search: next.login,
+        options: expect.arrayContaining([expect.objectContaining({ id: person.id, checked: true, display: '@alix' })]) } })
+      fixture.reviewerSearchFailure = false
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const searched = await post(values, staged, { search: next.login })
+      expect(searched.status).toBe(200)
+      const found = await searched.json() as { editor: Record<string, string> & { options: { id: string, checked: boolean }[] } }
+      expect(found.editor.options.map(({ id, checked }) => [id, checked])).toEqual([[bot.id, true], [team.id, false], [person.id, true], [next.id, false]])
+      const { head, viewer, intent, scope, revision } = found.editor
+      const revised = { head, viewer, intent, scope, revision }
+      expect(readState().reviewerWrites).toBeUndefined()
+
+      fixture.reviewerPeople[2] = { ...next, login: 'new-login' }
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await post(revised, [...staged, next.id])).status).toBe(409)
+      expect(readState().reviewerWrites).toBeUndefined()
+      fixture.reviewerPeople[2] = next
+      fixture.pulls[0].reviewerNodes.push(other)
+      fixture.pulls[0].requested_reviewers.push(other)
+      fixture.reviewerDropResponse = person.id
+      writeFileSync(cli.state, JSON.stringify(fixture))
+
+      const partial = await post(revised, [...staged, next.id], { accept: 'text/html' })
+      expect(partial.status).toBe(202)
+      expect(await partial.text()).toContain('Check GitHub and finish')
+      expect(readState().reviewerWrites).toEqual([[1, 'DELETE', team.id], [1, 'POST', person.id]])
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      const resumed = await post(revised, [...staged, next.id], { accept: 'text/html' })
+      expect(resumed.status).toBe(303)
+      const saved = await fetch(new URL(resumed.headers.get('location')!, host)).then(response => response.text())
+      expect(saved).toContain('Review requests updated on GitHub.')
+      expect(saved).toContain('@sam')
+      expect(saved).not.toContain('@fixture/release')
+      const done = readState()
+      expect(done.pulls[0].reviewerNodes.map(({ id }: { id: string }) => id)).toEqual([bot.id, other.id, person.id, next.id])
+      done.pulls[0].reviewerNodes = [bot, other]
+      writeFileSync(cli.state, JSON.stringify(done))
+      expect(await (await post(revised, [...staged, next.id])).json()).toMatchObject({ result: 'confirmed' })
+      expect(readState().reviewerWrites).toEqual([[1, 'DELETE', team.id], [1, 'POST', person.id], [1, 'POST', next.id]])
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 60_000)
+
   it.skipIf(process.platform === 'win32')('applies the reviewed pull request label changes and recovers a partial save across restarts', async () => {
     const { project, cli, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
     const old = { id: 11, name: 'legacy/needs review', color: 'aa2222', archived_at: '2026-11-10T15:00:00Z' }
