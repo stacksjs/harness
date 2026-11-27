@@ -6672,6 +6672,28 @@ try {
     await actions.click()
     await lifecycleMenu.getByRole('button', { name: 'Ready for review', exact: true }).click()
     await lifecycleStatus('Pull request is ready for review.').waitFor()
+    github.configureBranchUpdate(1)
+    await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    const branchTrigger = clonePage.getByRole('button', { name: 'Update branch', exact: true })
+    const branchPanel = clonePage.getByRole('form', { name: 'Update pull request branch', exact: true })
+    await branchTrigger.press('Enter')
+    await branchPanel.waitFor()
+    await capture('pull-requests-update-branch-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('the branch update panel returns focus to the branch control without writing',
+      await branchPanel.isHidden()
+      && await branchTrigger.evaluate(element => element === document.activeElement)
+      && pullState().branchWrites === undefined)
+    await branchTrigger.press('Enter')
+    await branchPanel.getByRole('radio', { name: 'Update with rebase' }).check()
+    github.configureLifecycle('lost-response')
+    await branchPanel.getByRole('button', { name: 'Confirm update', exact: true }).click()
+    await lifecycleStatus('Branch is up to date with the reviewed base.').waitFor()
+    github.configureLifecycle('normal')
+    check('updating the branch reloads Code without carrying the old diff anchor',
+      pullState().branchWrites.length === 1 && pullState().branchWrites[0].updateMethod === 'REBASE'
+      && new URL(clonePage.url()).searchParams.get('tab') === 'code'
+      && !new URL(clonePage.url()).searchParams.has('reviewLine') && await branchTrigger.isHidden())
     const mergeTrigger = clonePage.getByRole('button', { name: 'Merge pull request', exact: true })
     const mergeConfirmation = clonePage.getByRole('form', { name: 'Merge pull request', exact: true })
     await mergeTrigger.press('Enter')

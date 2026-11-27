@@ -812,7 +812,12 @@ async function sendReviewReply(event) {
               @if(headLabel)<code title="{{ selected.head }}">Head {{ headLabel }}</code>@endif
             </p>
             @if(selected.headRef && selected.baseRef)
-              <p data-pr-branches><code>{{ selected.baseRef }}</code><span aria-label="receives changes from">←</span><code>{{ selected.headRef }}</code></p>
+              <div data-pr-branches>
+                <code>{{ selected.baseRef }}</code><span aria-label="receives changes from">←</span><code>{{ selected.headRef }}</code>
+                @if(selected.lifecycle?.branchUpdate)
+                  @include('../partials/harness-pr-branch-update')
+                @endif
+              </div>
             @endif
             <div data-pr-detail-actions>
               @if(selected.thread)

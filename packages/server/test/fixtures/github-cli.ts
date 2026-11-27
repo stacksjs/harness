@@ -42,6 +42,11 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, mergeMode, mergeMethods }))
   }
+  const configureBranchUpdate = (branchBehind: number, branchMode: 'normal' | 'readonly' | 'conflict' | 'missing-ref' = 'normal') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    Object.assign(previous.pulls[0], { branchBehind, branchMode })
+    writeFileSync(state, JSON.stringify(previous))
+  }
   const revealLifecycle = () => {
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     const { invisibleLifecycle, ...shown } = previous
@@ -135,12 +140,18 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const id = variables.input?.pullRequestId ?? variables.input?.id ?? variables.id
     const pull = state.pulls.find(pull => 'fixture-pull-' + pull.number === id)
     const mutation = ['markPullRequestReadyForReview', 'convertPullRequestToDraft', 'closePullRequest', 'reopenPullRequest',
-      'mergePullRequest', 'enablePullRequestAutoMerge', 'disablePullRequestAutoMerge', 'enqueuePullRequest', 'dequeuePullRequest'].find(key => query.includes(' ' + key + '('))
+      'mergePullRequest', 'enablePullRequestAutoMerge', 'disablePullRequestAutoMerge', 'enqueuePullRequest', 'dequeuePullRequest', 'updatePullRequestBranch'].find(key => query.includes(' ' + key + '('))
     if (!pull || !mutation || !process.env.GH_TOKEN || state.lifecycleMode === 'denied')
       reply(200, { errors: [{ type: 'FORBIDDEN', message: 'Private lifecycle diagnostics' }] })
     if (state.lifecycleMode === 'refused')
       reply(200, { errors: [{ type: 'UNPROCESSABLE', message: 'Private lifecycle diagnostics' }] })
-    if (variables.input) {
+    if (mutation === 'updatePullRequestBranch') {
+      const input = variables.input
+      if (pull.branchMode !== 'normal' || pull.branchBehind <= 0 || input?.expectedHeadOid !== pull.head.sha
+        || !['MERGE', 'REBASE'].includes(input?.updateMethod)) reply(200, { errors: [{ type: 'UNPROCESSABLE' }] })
+      state.branchWrites = [...(state.branchWrites ?? []), input]
+    }
+    else if (variables.input) {
       const { expectedHeadOid, mergeMethod } = variables.input
       const guarded = ['mergePullRequest', 'enablePullRequestAutoMerge', 'enqueuePullRequest'].includes(mutation)
       const needsMethod = ['mergePullRequest', 'enablePullRequestAutoMerge'].includes(mutation)
@@ -164,6 +175,10 @@ if (url.pathname === '/graphql' && method === 'POST') {
     if (mutation === 'disablePullRequestAutoMerge') updated.autoMergeMethod = null
     if (mutation === 'enqueuePullRequest') updated.queueEntry = 'fixture-queue-' + pull.number
     if (mutation === 'dequeuePullRequest') updated.queueEntry = null
+    if (mutation === 'updatePullRequestBranch') {
+      updated.head = { ...pull.head, sha: 'f'.repeat(40) }
+      updated.branchBehind = 0
+    }
     if (state.lifecycleMode === 'unconfirmed') state.invisibleLifecycle = updated
     else Object.assign(pull, updated)
     writeFileSync(stateFile, JSON.stringify(state))
@@ -211,14 +226,18 @@ if (url.pathname === '/graphql' && method === 'POST') {
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
   if (query.includes('query HarnessPullRequestLifecycle')) {
     const enabled = Boolean(state.mergeMode)
-    reply(200, { data: { viewer, repository: { nameWithOwner: name, isArchived: state.lifecycleMode === 'archived',
+    const missing = pull?.branchMode === 'missing-ref'
+    reply(200, { ...(missing && { errors: [{ path: ['repository', 'pullRequest', 'baseRef', 'compare'], type: 'NOT_FOUND' }] }),
+      data: { viewer, repository: { nameWithOwner: name, isArchived: state.lifecycleMode === 'archived',
       viewerPermission: enabled && state.mergeMode !== 'readonly' ? 'WRITE' : 'READ', autoMergeAllowed: enabled,
       mergeCommitAllowed: state.mergeMethods?.includes('MERGE'), squashMergeAllowed: state.mergeMethods?.includes('SQUASH'),
       rebaseMergeAllowed: state.mergeMethods?.includes('REBASE'), pullRequest: pull ? {
       id: 'fixture-pull-' + pull.number, number: pull.number, state: pull.merged_at ? 'MERGED' : pull.state.toUpperCase(),
       isDraft: pull.draft, headRefOid: pull.head.sha, baseRefOid: pull.base.sha, updatedAt: pull.updated_at,
       baseRefName: pull.base.ref, viewerCanUpdate: state.lifecycleMode !== 'readonly',
-      mergeable: 'MERGEABLE', mergeStateStatus: state.mergeMode === 'blocked' ? 'BLOCKED' : 'CLEAN',
+      mergeable: pull.branchMode === 'conflict' ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: state.mergeMode === 'blocked' ? 'BLOCKED' : 'CLEAN',
+      baseRef: missing ? { compare: null } : { compare: { behindBy: pull.branchBehind } },
+      viewerCanUpdateBranch: pull.branchMode === 'normal' && pull.branchBehind > 0,
       isMergeQueueEnabled: state.mergeMode === 'queue', mergeQueueEntry: pull.queueEntry ? { id: pull.queueEntry } : null,
       autoMergeRequest: pull.autoMergeMethod ? { mergeMethod: pull.autoMergeMethod } : null,
       viewerCanEnableAutoMerge: state.mergeMode === 'blocked', viewerCanDisableAutoMerge: Boolean(pull.autoMergeMethod),
@@ -342,5 +361,5 @@ if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
   return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages,
-    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle, configureMerge }
+    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle, configureMerge, configureBranchUpdate }
 }

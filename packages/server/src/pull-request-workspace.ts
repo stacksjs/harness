@@ -8,7 +8,7 @@ import { resolveProjectRepository, scanProjectRepositories } from './project-rep
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
 import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewLineSelection, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
 import { findPullRequestThread } from './pull-request-links'
-import { availableLifecycleActions, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
+import { availableLifecycleActions, behindBase, branchUpdateMethods, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -291,11 +291,13 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
       : current?.state === 'CLOSED' ? 'Closed' : 'Merged'
     const actions = current ? availableLifecycleActions(current) : []
     const mergeAction = current?.baseRefName === data.baseRef ? actions.find(isMergeAction) : undefined
+    const behind = current?.baseRefName === data.baseRef && current ? behindBase(current) : null
     const lifecycle = current && current.headRefOid === data.head && current.baseRefOid === data.baseSha && currentStatus === data.status
       ? { viewer: current.viewer, revision: lifecycleRevision(current), token: crypto.randomUUID(),
           mergeStatus: current.state !== 'OPEN' ? '' : current.mergeQueueEntry?.id ? 'In merge queue' : current.autoMergeRequest ? 'Auto-merge enabled' : '',
           methods: current.merge.methods.map(value => ({ value, label: mergeMethods[value] })),
-          actions: actions.filter(action => !isMergeAction(action)).map(action => ({ action, label: lifecycleActions[action].label })),
+          actions: actions.filter(action => action !== 'update-branch' && !isMergeAction(action)).map(action => ({ action, label: lifecycleActions[action].label })),
+          branchUpdate: behind === null ? null : { behind, canUpdate: actions.includes('update-branch'), methods: branchUpdateMethods },
           mergeAction: mergeAction ? { action: mergeAction, label: lifecycleActions[mergeAction].label, chooseMethod: takesMergeMethod(mergeAction) } : null }
       : null
     return { ...data, lifecycle, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
@@ -418,11 +420,14 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
   if (!action || !/^[0-9a-f]{40}$/u.test(base) || !/^[0-9a-f]{64}$/u.test(revision)
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(token)) return null
   const merging = isMergeAction(action)
-  const baseBranch = merging ? values.get('baseBranch') ?? '' : ''
+  const updatingBranch = action === 'update-branch'
+  const scopedBranch = merging || updatingBranch
+  const baseBranch = scopedBranch ? values.get('baseBranch') ?? '' : ''
   const methodValue = values.get('method')
   const method = mergeMethod(methodValue)
-  if ((takesMergeMethod(action) ? !method : Boolean(methodValue))
-    || (merging && (!baseBranch || baseBranch.length > 1024 || /\p{Cc}/u.test(baseBranch)))) return null
+  if ((takesMergeMethod(action) || updatingBranch ? !method : Boolean(methodValue))
+    || (updatingBranch && !branchUpdateMethods.some(option => option.value === method))
+    || (scopedBranch && (!baseBranch || baseBranch.length > 1024 || /\p{Cc}/u.test(baseBranch)))) return null
   const tab = tabs.find(value => query.get('tab') === value) ?? 'summary'
   const params = reviewReturnParams(query, profile, selection.url, tab)
   const finish = (result: 'updated' | keyof typeof lifecycleMessages, confirmedAction: LifecycleAction | 'confirmed' = action) => {
@@ -431,11 +436,14 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
       ? { action, revision, token, head, base, baseBranch, method, viewer, message }
       : undefined
     const target = new URLSearchParams(params)
-    if (result === 'updated') target.set('lifecycleResult', confirmedAction)
+    if (result === 'updated') {
+      if (updatingBranch) for (const key of ['reviewLine', 'reviewStart', 'reviewHead', 'reviewBase']) target.delete(key)
+      target.set('lifecycleResult', confirmedAction)
+    }
     return { result, message, fallback, params, location: '/pull-requests?' + target + '#pr-lifecycle' }
   }
-  const reach = (pull: LifecycleSnapshot) => lifecycleTargetReached(pull, action, method)
-  const confirm = (pull: LifecycleSnapshot) => finish('updated', !reach(pull) ? 'confirmed' : pull.state === 'MERGED' ? 'merge' : action)
+  const reach = (pull: LifecycleSnapshot) => lifecycleTargetReached(pull, action, method, head)
+  const confirm = (pull: LifecycleSnapshot) => finish('updated', !reach(pull) ? 'confirmed' : merging && pull.state === 'MERGED' ? 'merge' : action)
   const key = selection.repository.toLowerCase() + '#' + selection.number
   if (lifecycleWrites.has(key)) return finish('busy')
   lifecycleWrites.add(key)
@@ -448,28 +456,32 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
     const before = await read()
     if (!before) return finish('unavailable')
     if (before.viewer.id !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
-    const fingerprint = createHash('sha256').update(JSON.stringify(['lifecycle', profile, repository.workspace.id, key,
-      before.id, viewer, action, revision, head, base, ...(merging ? [baseBranch, method] : [])])).digest('hex')
-    const result = receipts.inspect(token, fingerprint)
-    const sameTarget = (pull: LifecycleSnapshot) => pull.headRefOid === head && (merging ? pull.baseRefName === baseBranch : pull.baseRefOid === base)
+    // Reloading a still-behind PR keeps the same receipt for an update of these exact commits.
+    const branchReceipt = ['pr-branch-update', profile, repository.workspace.id, key, before.id, viewer, head, base, baseBranch]
+    const receiptToken = updatingBranch ? createHash('sha256').update(JSON.stringify(branchReceipt)).digest('hex') : token
+    const fingerprint = createHash('sha256').update(JSON.stringify(updatingBranch ? [...branchReceipt, method]
+      : ['lifecycle', profile, repository.workspace.id, key, before.id, viewer, action, revision, head, base, ...(merging ? [baseBranch, method] : [])])).digest('hex')
+    const result = receipts.inspect(receiptToken, fingerprint)
+    const sameTarget = (pull: LifecycleSnapshot) => updatingBranch ? pull.baseRefName === baseBranch && pull.baseRefOid === base
+      : pull.headRefOid === head && (merging ? pull.baseRefName === baseBranch : pull.baseRefOid === base)
     if (result === 'confirmed') return sameTarget(before) ? confirm(before) : finish('updated', 'confirmed')
     if (result === 'conflict' || !sameTarget(before)) return finish('changed')
     if (result === 'pending') {
       if (!reach(before)) return finish('pending')
-      receipts.confirm(token, fingerprint)
+      receipts.confirm(receiptToken, fingerprint)
       return confirm(before)
     }
-    if (!(merging ? before.merge.canWrite : before.viewerCanUpdate)) return finish('denied')
-    if (before.baseRefOid !== base || revision !== lifecycleRevision(before) || !availableLifecycleActions(before).includes(action)
-      || (method && !before.merge.methods.includes(method))) return finish('changed')
-    const claimed = receipts.claim(token, fingerprint, true)
+    if (!(updatingBranch ? before.branch.canUpdate : merging ? before.merge.canWrite : before.viewerCanUpdate)) return finish('denied')
+    if (before.headRefOid !== head || before.baseRefOid !== base || revision !== lifecycleRevision(before) || !availableLifecycleActions(before).includes(action)
+      || (merging && method && !before.merge.methods.includes(method))) return finish('changed')
+    const claimed = receipts.claim(receiptToken, fingerprint, true)
     if (claimed === 'confirmed') return confirm(before)
     if (claimed === 'conflict') return finish('changed')
     if (claimed !== 'claimed') return finish('pending')
     attempted = true
     const write = await writePullRequestLifecycle(repository.path, before, action, method, signal, credential)
     if (write === 'denied' || write === 'refused') {
-      receipts.reject(token, fingerprint)
+      receipts.reject(receiptToken, fingerprint)
       return finish(write)
     }
     const after = await read()
@@ -477,7 +489,7 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
     if (after.viewer.id !== viewer || after.id !== before.id || !sameTarget(after)
       || !stillTrusted(state, repository.workspace)) return finish('changed')
     if (!reach(after)) return finish('pending')
-    receipts.confirm(token, fingerprint)
+    receipts.confirm(receiptToken, fingerprint)
     return confirm(after)
   }
   catch { return finish(attempted ? 'pending' : 'unavailable') }

@@ -552,6 +552,8 @@ const RESPONSIVE_SHELL = `
 [data-pr-detail-heading] h2 { font-size: clamp(18px, 1.75vw, 23px); line-height: 1.35; font-weight: 700; letter-spacing: -.015em; }
 [data-pr-detail-meta], [data-pr-branches], [data-pr-detail-actions] { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-block: 7px; }
 [data-pr-branches], [data-pr-detail-actions] { font-size: 12px; }
+[data-pr-branches] code { min-width: 0; overflow-wrap: anywhere; }
+[data-pr-branch-behind] { color: var(--workspace-accent); }
 [data-pr-detail-actions] a:not([data-pr-button]), [data-pr-pagination] a { color: var(--workspace-accent); text-decoration: underline; }
 [data-pr-lifecycle] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-inline-start: auto; scroll-margin-block: 10px; }
 [data-pr-lifecycle-trigger] { gap: 6px; anchor-name: --pr-lifecycle; }
@@ -566,24 +568,31 @@ const RESPONSIVE_SHELL = `
 [data-pr-lifecycle-action]:hover { background: var(--workspace-hover); }
 [data-pr-close-trigger], [data-pr-close-confirm] { color: var(--workspace-removed-text); }
 [data-pr-close-confirmation] { padding: 10px; gap: 8px; }
-[data-pr-merge-confirmation] { --pr-action-width: min(17rem, calc(100vw - 32px)); max-block-size: min(18rem, calc(100dvh - 24px)); padding: 10px; gap: 8px; }
+:is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) { --pr-action-width: min(17rem, calc(100vw - 32px)); max-block-size: min(18rem, calc(100dvh - 24px)); padding: 10px; gap: 8px; }
+[data-pr-branch-update-panel] { max-block-size: min(21rem, calc(100dvh - 24px)); }
 [data-pr-merge-trigger] { anchor-name: --pr-merge; }
+[data-pr-branch-update-trigger] { anchor-name: --pr-branch-update; }
 [data-pr-detail-actions] [data-pr-merge-trigger] { color: var(--workspace-accent); border-color: currentColor; font-weight: 650; }
 @supports (top: anchor(bottom)) {
-  [data-pr-merge-confirmation] { position-anchor: --pr-merge; inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 19rem)); }
+  :is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) { inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 19rem)); }
+  [data-pr-merge-confirmation] { position-anchor: --pr-merge; }
+  [data-pr-branch-update-panel] { position-anchor: --pr-branch-update; inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 22rem)); }
 }
 [data-pr-merge-target], [data-pr-merge-status] { font-size: 12px; }
 [data-pr-merge-target] { display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; }
-[data-pr-merge-confirmation] fieldset { padding: 4px 0 0; min-width: 0; }
-[data-pr-merge-confirmation] legend { font-size: 12px; }
-[data-pr-merge-confirmation] label { display: flex; align-items: center; gap: 8px; min-height: 32px; padding-inline: 4px; cursor: pointer; }
-[data-pr-merge-confirmation] label:hover { background: var(--workspace-hover); }
+[data-pr-branch-update-target] { display: grid; gap: 4px; }
+[data-pr-branch-update-target] > div { display: grid; grid-template-columns: 4em minmax(0, 1fr); column-gap: 4px; }
+[data-pr-branch-update-target] dd { margin: 0; min-width: 0; }
+:is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) fieldset { padding: 4px 0 0; min-width: 0; }
+:is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) legend { font-size: 12px; }
+:is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) label { display: flex; align-items: center; gap: 8px; min-height: 32px; padding-inline: 4px; cursor: pointer; }
+:is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) label:hover { background: var(--workspace-hover); }
 [data-pr-merge-confirm] { color: var(--workspace-accent); }
 [data-pr-lifecycle-action]:focus-visible, [data-pr-close-confirm]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
 [data-pr-lifecycle-message] { margin-block: 8px; font-size: 13px; }
 @media (max-width: 759px) {
   [data-pr-lifecycle-action] { min-height: 44px; }
-  [data-pr-merge-confirmation] label { min-height: 44px; }
+  :is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) label { min-height: 44px; }
 }
 [data-pr-tabs] { display: flex; padding-inline: clamp(12px, 2vw, 26px); gap: 16px; border-block: 1px solid var(--workspace-line); }
 [data-pr-tabs] a { display: inline-flex; align-items: center; min-height: 42px; color: inherit; font-size: 13px; }

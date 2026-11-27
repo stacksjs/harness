@@ -55,6 +55,27 @@ async function pullRequestLifecycleForm(view: string) {
   return { endpoint: new URL(form[1]!.replaceAll('&amp;', '&'), view), values, html }
 }
 
+function seedPullRequestLifecycle(title: string, draft: boolean) {
+  const project = join(dir, 'pr-project')
+  mkdirSync(project)
+  const repository = 'fixture/notebook'
+  const url = 'https://github.com/' + repository + '/pull/1'
+  for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repository]]) {
+    const result = Bun.spawnSync(['git', ...args], { cwd: project })
+    if (!result.success) throw new Error(result.stderr.toString())
+  }
+  const cli = fixtureGitHubCli(dir, { [repository]: { bare: join(project, '.git') } })
+  const local = 'a'.repeat(40)
+  const base = 'b'.repeat(40)
+  const readState = () => JSON.parse(readFileSync(cli.state, 'utf8'))
+  const state = readState()
+  state.pulls.push({ number: 1, html_url: url, title, state: 'open', draft,
+    updated_at: '2026-11-01T17:00:00Z', user: { login: 'fixture-user' },
+    head: { sha: local, ref: 'report' }, base: { ref: 'main', sha: base, repo: { full_name: repository } } })
+  writeFileSync(cli.state, JSON.stringify(state))
+  return { project, cli, local, base, url, readState }
+}
+
 /** A tiny CBOR websocket client, since that is exactly what a real one is. */
 class TestClient {
   private socket: WebSocket
@@ -1345,23 +1366,7 @@ describe('harness serve — HTTP', () => {
   }, 60_000)
 
   it.skipIf(process.platform === 'win32')('confirms authorized GitHub merges, queue changes, and interrupted writes', async () => {
-    const project = join(dir, 'merge-project')
-    mkdirSync(project)
-    const repository = 'fixture/notebook'
-    const url = 'https://github.com/' + repository + '/pull/1'
-    for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repository]]) {
-      const result = Bun.spawnSync(['git', ...args], { cwd: project })
-      if (!result.success) throw new Error(result.stderr.toString())
-    }
-    const cli = fixtureGitHubCli(dir, { [repository]: { bare: join(project, '.git') } })
-    const local = 'a'.repeat(40)
-    const base = 'b'.repeat(40)
-    const readState = () => JSON.parse(readFileSync(cli.state, 'utf8'))
-    const state = readState()
-    state.pulls.push({ number: 1, html_url: url, title: 'Merge the reviewed report', state: 'open', draft: true,
-      updated_at: '2026-11-01T17:00:00Z', user: { login: 'fixture-user' },
-      head: { sha: local, ref: 'report' }, base: { ref: 'main', sha: base, repo: { full_name: repository } } })
-    writeFileSync(cli.state, JSON.stringify(state))
+    const { project, cli, local, url, readState } = seedPullRequestLifecycle('Merge the reviewed report', true)
     const path = process.env.PATH
     const previousCwd = process.cwd()
     process.env.PATH = cli.bin + delimiter + path
@@ -1434,6 +1439,79 @@ describe('harness serve — HTTP', () => {
         { mutation: 'dequeuePullRequest', input: { id: 'fixture-pull-1' } },
         { mutation: 'mergePullRequest', input: { pullRequestId: 'fixture-pull-1', expectedHeadOid: local, mergeMethod: 'SQUASH' } },
       ])
+    }
+    finally {
+      process.chdir(previousCwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 60_000)
+
+  it.skipIf(process.platform === 'win32')('updates a behind GitHub branch once and refreshes the reviewed head', async () => {
+    const { project, cli, local, base, url, readState } = seedPullRequestLifecycle('Update the report branch', false)
+    const path = process.env.PATH
+    const previousCwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-update-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const readForm = () => pullRequestLifecycleForm(host + '/pull-requests?' + new URLSearchParams({ selectedUrl: url, sort: 'oldest' }))
+      const update = (form: Awaited<ReturnType<typeof readForm>>, overrides: Record<string, string> = {}, accept = 'application/json') => {
+        const endpoint = new URL(form.endpoint.pathname + form.endpoint.search, host)
+        if (accept === 'text/html') {
+          endpoint.searchParams.set('tab', 'code')
+          endpoint.searchParams.set('reviewHead', local)
+          endpoint.searchParams.set('reviewBase', base)
+          endpoint.searchParams.set('reviewLine', 'old-review-range')
+        }
+        return fetch(endpoint, {
+          method: 'POST', redirect: 'manual', headers: { accept, origin: host, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ ...form.values, action: 'update-branch', method: 'REBASE', ...overrides }),
+        })
+      }
+      cli.configureBranchUpdate(2, 'readonly')
+      const reader = await readForm()
+      expect(reader.html).toContain('2 commits behind')
+      expect(reader.html).not.toContain('data-pr-branch-update-trigger')
+      expect((await update(reader)).status).toBe(403)
+      cli.configureBranchUpdate(2, 'conflict')
+      expect((await readForm()).html).not.toContain('commits behind')
+      cli.configureBranchUpdate(2, 'missing-ref')
+      expect((await readForm()).html).toContain('Convert to draft')
+      cli.configureBranchUpdate(1)
+      const form = await readForm()
+      expect(form.html).toContain('1 commit behind')
+      expect(form.html).toContain('Update with merge')
+      expect(form.html).toContain('Update with rebase')
+      expect((await update(form, { method: 'SQUASH' })).status).toBe(400)
+      expect((await update(form, { head: 'e'.repeat(40) })).status).toBe(409)
+      expect((await update(form, { baseBranch: 'stale-base' })).status).toBe(409)
+      expect((await update(form, { base: 'e'.repeat(40) })).status).toBe(409)
+      cli.configureLifecycle('unconfirmed')
+      const pending = await update(form)
+      expect(pending.status).toBe(202)
+      const refreshedForm = await readForm()
+      expect(refreshedForm.values.intent).not.toBe(form.values.intent)
+      expect((await update(refreshedForm)).status).toBe(202)
+      expect((await update(refreshedForm, { method: 'MERGE' })).status).toBe(409)
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      expect((await update(form)).status).toBe(202)
+      cli.revealLifecycle()
+      const updated = await update(form, {}, 'text/html')
+      expect(updated.status).toBe(303)
+      const location = new URL(updated.headers.get('location')!, host)
+      expect(location.searchParams.get('tab')).toBe('code')
+      expect(location.searchParams.get('sort')).toBe('oldest')
+      expect(location.searchParams.has('reviewLine')).toBe(false)
+      expect((await update(form)).status).toBe(200)
+      const latest = await readForm()
+      expect(latest.html).toContain('ffffffff')
+      expect(latest.html).not.toContain('data-pr-branch-update-trigger')
+      expect(readState().branchWrites).toEqual([{ pullRequestId: 'fixture-pull-1', expectedHeadOid: local, updateMethod: 'REBASE' }])
     }
     finally {
       process.chdir(previousCwd)
