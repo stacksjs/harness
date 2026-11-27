@@ -1,4 +1,12 @@
 <div data-pr-results-fragment>
+  @if(clippedRestoration)
+    <p role="status" data-pr-filter-feedback>The pull request list grew. Showing the starting page.</p>
+  @endif
+  @if(restoreRetry)
+    <p role="status" data-pr-filter-feedback>Some loaded pages could not be restored.
+      <a href="{{ restoreRetry }}" data-pr-restore>Retry loaded pages</a>
+    </p>
+  @endif
   @if(incompleteSearch)
     <p role="status" data-pr-filter-feedback>GitHub returned partial results. Refresh to retry the search.</p>
   @endif
@@ -77,10 +85,10 @@
   @elseif(!failures.length)
     <p data-pr-empty>No pull requests match these filters.</p>
   @endif
-  @if(pageBack || pageNext)
+  @if(pageBack || pageNext || through > page)
     <nav data-pr-pagination data-pr-result-pages aria-label="Pull request pages">
       @if(pageBack)<a href="{{ pageBack }}">Previous page</a>@endif
-      <span>Page {{ page }}</span>
+      <span>@if(through > page)Pages {{ page }} to {{ through }}@else Page {{ page }}@endif</span>
       @if(pageNext)<a href="{{ pageNext }}" data-pr-next data-pr-button>Load more pull requests</a>@endif
       <span data-pr-page-status role="status"></span>
     </nav>

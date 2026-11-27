@@ -47,6 +47,7 @@ export const repositoryFilter = $props.repository
 export const filter = $props.filter
 export const pageBack = $props.pageBack
 export const page = $props.page
+export const through = $props.through
 export const pageNext = $props.pageNext
 export const listHref = $props.listHref
 export const detailPage = $props.detailPage
@@ -842,7 +843,7 @@ onMount(() => {
         shown.value = result.draft
       }
       refreshSavedPrViews()
-    }, value => prSearchPending.set(value), message => prSearchStatus.set(message))
+    }, value => prSearchPending.set(value), message => prSearchStatus.set(message), @json({ page, through }))
   }
   savedPrStore = pullRequestViewStore(browser)
   refreshSavedPrViews()
@@ -853,7 +854,10 @@ useEventListener('storage', event => {
   if (event.key === PULL_REQUEST_VIEWS_KEY || event.key === null) refreshSavedPrViews()
 })
 useEventListener('pageshow', refreshSavedPrViews)
-useEventListener('pagehide', () => livePrSearch?.cancel())
+useEventListener('pagehide', () => {
+  livePrSearch?.savePosition()
+  livePrSearch?.cancel()
+})
 useEventListener('pointerdown', event => {
   for (const menu of [savedPrViewsMenu.current, prFiltersMenu.current]) {
     if (menu?.open && !menu.contains(event.target)) menu.open = false
@@ -996,7 +1000,7 @@ function closeSavedPrEditor() {
   savedPrViewsTrigger.current?.focus()
 }
 </script>
-<main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
+<main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100" @click="livePrSearch?.rememberNavigation($event)">
   <header data-pr-workspace-header>
     <a href="{{ backHref }}" data-pr-back>
       <span class="inline-block size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>Workspace
@@ -1004,7 +1008,7 @@ function closeSavedPrEditor() {
     <h1>Pull requests</h1>
   </header>
   <div data-pr-workspace-columns data-detail="{{ hasDetail }}">
-    <section aria-label="Pull request list" data-pr-workspace-list>
+    <section aria-label="Pull request list" data-pr-workspace-list @scroll="livePrSearch?.listScrolled()">
       <form method="get" action="/pull-requests" data-pr-filters @submit="livePrSearch?.submit($event)">
         @foreach(listSelectionFields as pair)
           <input type="hidden" name="{{ pair[0] }}" value="{{ pair[1] }}">
@@ -1213,7 +1217,7 @@ function closeSavedPrEditor() {
           @if(selected?.title)
             <span data-pr-detail-repo>{{ selected.repository }} <span data-pr-number>#{{ selected.number }}</span></span>
           @endif
-          <h2 id="pr-detail-title">{{ detailTitle }}</h2>
+          <h2 id="pr-detail-title" tabindex="-1">{{ detailTitle }}</h2>
           @if(selected?.title)
             <p data-pr-detail-meta>
               <strong data-pr-state="{{ selected.status }}">{{ selected.status }}</strong>
