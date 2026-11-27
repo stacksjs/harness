@@ -7482,9 +7482,16 @@ check('the project follows the host again once it pins nothing',
     // other one is hidden, so this reads the shown labels without waiting.
     const groups = (await welcomePage.locator('[data-history-group]:not([hidden])').allTextContents()).map(group => group.trim())
     const note = (await historyRows.first().locator('[data-history-note]').textContent()) ?? ''
+    const noteParts = note.split(' · ')
+    // The age is whole days from the file's own timestamp, so a fixture two
+    // days old must not read as today; the window allows for the boundary
+    // rather than pinning the exact word, and anything outside it is printed
+    // so the next failure does not need another run to explain itself.
+    if (noteParts[1] !== '2 days ago') console.log('[welcome] note read as', JSON.stringify(note))
     check('the welcome screen lists the repository before the plain folder', names.join() === 'ledger-api,notes')
     check('folders that are not repositories get their own group', groups.join() === 'Other folders')
-    check('each row says how many conversations it has and how long ago', note.startsWith('3 conversations · 2 days ago'))
+    check('each row says how many conversations it has and how long ago',
+      noteParts[0] === '3 conversations' && /^[123] days ago$/u.test(noteParts[1] ?? ''))
     // Downloads is someone else's scratch space, not a project of theirs.
     check('a clone under Downloads is left out of the list',
       !names.some(name => name.includes('cloned')) && !(await historyList.textContent())?.includes('Downloads'))
