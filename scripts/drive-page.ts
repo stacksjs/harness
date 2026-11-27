@@ -877,13 +877,21 @@ try {
   check('closing the touch keyboard restores terminal scrollback focus', !await enter.isVisible()
     && await touch.locator('[data-terminal-host]').evaluate(element => element === document.activeElement))
   await keyboard.tap()
-  await touch.setViewportSize({ width: 390, height: 510 })
+  await touch.evaluate(() => {
+    const view = window.visualViewport!
+    Object.defineProperty(view, 'height', { configurable: true, value: 510 })
+    view.dispatchEvent(new Event('resize'))
+  })
   await touch.locator('[data-terminal-keyboard-visible="true"]').waitFor()
   check('touch terminal keeps the keys and output inside the keyboard viewport', await enter.evaluate(element =>
     element.getBoundingClientRect().bottom <= (element.ownerDocument.defaultView?.visualViewport?.height ?? 0) + 1)
     && await screen.isVisible() && !await touch.locator('[data-composer]').isVisible())
   await capture('terminal-touch-keyboard-short-viewport', touch)
-  await touch.setViewportSize({ width: 390, height: 844 })
+  await touch.evaluate(() => {
+    const view = window.visualViewport!
+    Reflect.deleteProperty(view, 'height')
+    view.dispatchEvent(new Event('resize'))
+  })
   await enter.waitFor({ state: 'hidden' })
   check('dismissing the system keyboard restores the thread composer', await touch.locator('[data-composer]').isVisible())
 }

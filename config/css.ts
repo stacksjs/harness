@@ -1368,7 +1368,6 @@ const TERMINAL_PANEL = `
   position: absolute; inset: 10px 10px auto auto; width: 2px; height: 2px;
   opacity: 0; pointer-events: none; font-size: 16px;
 }
-[data-harness-shell][data-terminal-keyboard-visible="true"] { height: var(--terminal-keyboard-viewport); }
 [data-terminal-keyboard-visible="true"] [data-workspace-lane]:has(> [data-terminal]) > :not([data-terminal]),
 [data-terminal-keyboard-visible="true"] [data-terminal-resize] { display: none; }
 [data-terminal-keyboard-visible="true"] .terminal-panel { flex: 1 1 0; }
