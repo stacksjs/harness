@@ -270,6 +270,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
       else {
         pane.id = frame.termId
         if (typeof frame.openPreview === 'string') options.openPreview?.(frame.openPreview)
+        if (pane.model) pane.layoutChanged = true
         pane.model = frame.checkpoint ? Terminal.fromCheckpoint(frame.checkpoint, terminalHistory)
           : new Terminal({ cols: frame.cols, rows: frame.rows, ...terminalHistory })
         status(pane, { busy: false, reconnecting: false, exited: false, activity: '', shell: frame.shell === 'den' ? 'Den terminal' : 'Terminal' })
