@@ -6715,6 +6715,65 @@ try {
     check('merge recovery retains the chosen method and never submits a second GitHub mutation',
       pullState().mergeWrites.length === 1 && pullState().mergeWrites[0].input.mergeMethod === 'SQUASH'
       && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible() && await actions.isHidden())
+
+    const mergedPullUrl = clonePage.url()
+    github.configureRevert('unconfirmed')
+    await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    const revert = lifecycleMenu.getByRole('button', { name: 'Revert changes', exact: true })
+    const revertPanel = clonePage.getByRole('form', { name: 'Open a revert pull request?', exact: true })
+    await actions.press('Enter')
+    await revert.press('Enter')
+    await revertPanel.waitFor()
+    await capture('pull-requests-revert-confirmation-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('Escape closes the revert confirmation and returns focus without writing',
+      await revertPanel.isHidden() && await revert.evaluate(element => document.activeElement === element)
+      && pullState().revertWrites === undefined)
+    await revert.press('Enter')
+    await revertPanel.getByRole('button', { name: 'Create revert PR', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.configureRevert('normal')
+    await checkLifecycle.click()
+    await lifecycleStatus('Revert pull request opened on GitHub.').waitFor()
+    check('revert recovery opens the new PR without replacing or reopening the merged source',
+      pullState().revertWrites.length === 1 && Boolean(pullState().pulls[0].merged_at)
+      && new URL(clonePage.url()).searchParams.get('selectedUrl') === pullState().pulls[1].html_url
+      && await clonePage.locator('strong[data-pr-state="Open"]').isVisible())
+
+    github.configureBranchDeletion({ mode: 'lost-response' })
+    await clonePage.goto(mergedPullUrl, { waitUntil: 'domcontentloaded' })
+    await clonePage.getByRole('link', { name: 'Summary', exact: true }).click()
+    const deleteBranch = lifecycleMenu.getByRole('button', { name: 'Delete branch', exact: true })
+    const deleteBranchPanel = clonePage.getByRole('dialog', { name: 'Delete remote branch?', exact: true })
+    await actions.press('Enter')
+    await deleteBranch.press('Enter')
+    await deleteBranchPanel.waitFor()
+    await capture('pull-requests-delete-branch-390x844', clonePage)
+    const focusesCancel = await deleteBranchPanel.getByRole('button', { name: 'Cancel', exact: true })
+      .evaluate(element => element === document.activeElement)
+    const modal = await deleteBranchPanel.evaluate(element => element.matches(':modal'))
+    await clonePage.keyboard.press('Escape')
+    await clonePage.waitForFunction(() => document.activeElement?.matches('[data-pr-delete-branch-trigger], [data-pr-lifecycle-trigger]'))
+    check('deleting a branch focuses Cancel and Escape returns focus without writing', focusesCancel
+      && modal && await deleteBranchPanel.isHidden() && pullState().deleteBranchWrites === undefined)
+    if (!await deleteBranch.isVisible()) await actions.press('Enter')
+    await deleteBranch.evaluate((element) => {
+      Reflect.deleteProperty(HTMLButtonElement.prototype, 'commandForElement')
+      element.removeAttribute('command')
+    })
+    await deleteBranch.press('Enter')
+    await deleteBranchPanel.waitFor()
+    check('older WebViews can open the modal from the pull request summary', await deleteBranchPanel.evaluate(element => element.matches(':modal')))
+    await deleteBranchPanel.getByRole('button', { name: 'Delete branch', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.configureBranchDeletion({ mode: 'normal' })
+    await checkLifecycle.click()
+    await lifecycleStatus('Branch deleted on GitHub.').waitFor()
+    await actions.press('Enter')
+    check('branch deletion recovers the remote result without a second write and keeps the merged PR selected',
+      pullState().deleteBranchWrites.length === 1 && pullState().branchDeletion.target === null
+      && await deleteBranch.isHidden() && await revert.isVisible()
+      && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible())
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

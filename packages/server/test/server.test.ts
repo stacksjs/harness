@@ -8,6 +8,7 @@ import { Terminal } from '@harness/ansi'
 import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
 import { ProjectScripts } from '../src/project-scripts'
+import { repositoryGitHubRequest } from '../src/repository-pull-request'
 import { serve } from '../src/server'
 import { fixtureGitHubCli } from './fixtures/github-cli'
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from './fixtures/git-http'
@@ -45,12 +46,13 @@ function prepareDatabase(path: string): void {
   db.close()
 }
 
-async function pullRequestLifecycleForm(view: string) {
+async function pullRequestLifecycleForm(view: string, label: 'Update pull request' | 'pr-delete-branch-title' = 'Update pull request') {
   const html = await fetch(view).then(response => response.text())
-  const form = html.match(/<form method="post" action="([^"]+)" aria-label="Update pull request"[^>]*>([\s\S]*?)<\/form>/u)
+  const forms = [...html.matchAll(/<form method="post" action="([^"]+)" (aria-label|aria-labelledby)="([^"]+)"[^>]*>([\s\S]*?)<\/form>/gu)]
+  const form = forms.find(candidate => candidate[3] === label)
   if (!form) throw new Error('Missing pull request lifecycle form')
   const values = Object.fromEntries(
-    [...form[2]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
+    [...form[4]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
   )
   return { endpoint: new URL(form[1]!.replaceAll('&amp;', '&'), view), values, html }
 }
@@ -436,6 +438,75 @@ function url(): string {
 }
 
 describe('harness serve — HTTP', () => {
+  it.skipIf(process.platform === 'win32')('accepts an empty response after GitHub approves a workflow run', async () => {
+    const { project, cli, readState } = seedPullRequestLifecycle('Check the report workflow', false)
+    const fixture = readState()
+    fixture.workflowRuns = [{ id: 41, status: 'completed', conclusion: 'action_required' }]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      const approve = () => repositoryGitHubRequest(project, 'repos/fixture/notebook/actions/runs/41/approve', {})
+      expect(await approve()).toEqual({ status: 204, body: null, hasNextPage: false })
+      expect(readState().workflowRuns).toEqual([{ id: 41, status: 'queued', conclusion: null }])
+      expect((await approve()).status).toBe(409)
+    }
+    finally {
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('shows only GitHub workflows awaiting approval for the exact fork head', async () => {
+    const { project, cli, local, url, readState } = seedPullRequestLifecycle('Check the report workflow', false)
+    const fixture = readState()
+    const fork = { full_name: 'contributor/notebook', node_id: 'fixture-repo:contributor/notebook' }
+    fixture.pulls[0].head.repo = fork
+    const run = { id: 41, run_attempt: 1, name: 'Check report on Linux', event: 'pull_request',
+      status: 'completed', conclusion: 'action_required', head_branch: 'report', head_sha: local,
+      repository: { full_name: 'fixture/notebook' }, head_repository: fork, pull_requests: [] }
+    fixture.workflowRuns = [
+      run,
+      { ...run, id: 42, name: 'Wrong fork', head_repository: { full_name: 'other/notebook' } },
+      { ...run, id: 43, name: 'Wrong commit', head_sha: 'e'.repeat(40) },
+      { ...run, id: 44, name: 'Different pull request', pull_requests: [{ number: 2 }] },
+      { ...run, id: 45, name: 'Wrong event', event: 'push' },
+      { ...run, id: 46, name: 'Already running', status: 'in_progress', conclusion: null },
+      { ...run, id: 47, name: 'Replaced fork', head_repository: { ...fork, node_id: 'replaced-fork-id' } },
+    ]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-workflow-approval-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const summary = 'http://127.0.0.1:' + port + '/pull-requests?' + new URLSearchParams({ selectedUrl: url })
+      const read = () => fetch(summary).then(response => response.text())
+      const html = await read()
+      expect(html).toContain('1 workflow awaiting approval')
+      expect(html).toContain('Check report on Linux')
+      expect(html).toContain('https://github.com/fixture/notebook/actions/runs/41')
+      expect(html).not.toMatch(/Wrong fork|Wrong commit|Different pull request|Wrong event|Already running|Replaced fork|No checks reported/u)
+
+      fixture.pulls.push({ ...fixture.pulls[0], number: 2, html_url: url.replace(/1$/u, '2') })
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const ambiguous = await read()
+      expect(ambiguous).toContain('GitHub could not confirm which workflows are awaiting approval')
+      expect(ambiguous).not.toContain('Check report on Linux')
+
+      fixture.pulls[0].head = { ...fixture.pulls[0].head, repo: { full_name: 'fixture/notebook' } }
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const sameRepository = await read()
+      expect(sameRepository).not.toMatch(/workflow awaiting approval|workflows are awaiting approval/u)
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
   it('reports health with the hydrated projection', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`)
     expect(response.status).toBe(200)
@@ -1519,6 +1590,170 @@ describe('harness serve — HTTP', () => {
       else process.env.PATH = path
     }
   }, 60_000)
+
+  it.skipIf(process.platform === 'win32')('recovers a GitHub revert PR after restart using the original actor and intent', async () => {
+    const { project, cli, local, base, url, readState } = seedPullRequestLifecycle('Review the report changes', false)
+    const fixture = readState()
+    Object.assign(fixture.pulls[0], { state: 'closed', merged_at: '2026-11-01T18:00:00Z' })
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const previousCwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-revert-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const summary = () => host + '/pull-requests?' + new URLSearchParams({ state: 'merged', selectedUrl: url })
+      const readForm = () => pullRequestLifecycleForm(summary())
+      const revert = (form: Awaited<ReturnType<typeof readForm>>, overrides: Record<string, string> = {}, accept = 'application/json') =>
+        fetch(new URL(form.endpoint.pathname + form.endpoint.search, host), {
+          method: 'POST', redirect: 'manual', headers: { accept, origin: host, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ ...form.values, action: 'revert', ...overrides }),
+        })
+      cli.configureRevert('normal')
+      cli.configureMerge('ready')
+      const form = await readForm()
+      expect(form.html).toContain('Open a revert pull request?')
+      expect(form.html).toContain('to reverse #1')
+      expect((await revert(form, { base: 'e'.repeat(40) })).status).toBe(409)
+      expect((await revert(form, { baseBranch: 'another-branch' })).status).toBe(409)
+      expect((await revert(form, { revision: 'c'.repeat(64) })).status).toBe(409)
+      cli.configureMerge('readonly')
+      expect(await fetch(summary()).then(response => response.text())).not.toContain('data-pr-revert-trigger')
+      expect((await revert(form)).status).toBe(403)
+      cli.configureMerge('ready')
+      cli.configureRevert('denied')
+      const denied = await revert(form)
+      expect(denied.status).toBe(403)
+      expect(await denied.text()).not.toContain('Private revert')
+      cli.configureRevert('unavailable')
+      expect((await revert(form)).status).toBe(503)
+      expect(readState().revertWrites).toBeUndefined()
+      cli.configureRevert('unconfirmed')
+      expect((await revert(form)).status).toBe(202)
+      const refreshed = await readForm()
+      expect(refreshed.values.intent).not.toBe(form.values.intent)
+      expect((await revert(refreshed)).status).toBe(202)
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      cli.configureRevert('wrong-author')
+      expect((await revert(form)).status).toBe(202)
+      cli.configureRevert('paged')
+      const recovered = await revert(form, {}, 'text/html')
+      expect(recovered.status).toBe(303)
+      const location = new URL(recovered.headers.get('location')!, host)
+      expect(location.searchParams.get('selectedUrl')).toBe(url.replace(/1$/u, '2'))
+      expect(location.searchParams.get('state')).toBe('open')
+      const html = await fetch(location).then(response => response.text())
+      expect(html).toContain('Revert pull request opened on GitHub.')
+      expect(html).toContain('data-pr-state="Open"')
+      expect((await revert(await readForm())).status).toBe(200)
+      expect(readState().revertWrites).toHaveLength(1)
+      expect(readState().pulls[0]).toMatchObject({ state: 'closed', head: { sha: local }, base: { sha: base } })
+    }
+    finally {
+      process.chdir(previousCwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
+
+  it.skipIf(process.platform === 'win32')('deletes only the reviewed GitHub source ref and recovers a lost reply without deleting a recreated branch', async () => {
+    const { project, cli, local, base, url, readState } = seedPullRequestLifecycle('Review the report changes', false)
+    const setPull = (properties: object) => {
+      const fixture = readState()
+      Object.assign(fixture.pulls[0], properties)
+      writeFileSync(cli.state, JSON.stringify(fixture))
+    }
+    setPull({ state: 'closed' })
+    cli.configureBranchDeletion({ repository: 'fixture-fork/notebook' })
+    const path = process.env.PATH
+    const previousCwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-delete-branch-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const summary = () => host + '/pull-requests?' + new URLSearchParams({ state: 'closed', selectedUrl: url })
+      const readForm = () => pullRequestLifecycleForm(summary(), 'pr-delete-branch-title')
+      const remove = (form: Awaited<ReturnType<typeof readForm>>, overrides: Record<string, string> = {}, accept = 'application/json') =>
+        fetch(new URL(form.endpoint.pathname + form.endpoint.search, host), {
+          method: 'POST', redirect: 'manual', headers: { accept, origin: host, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ ...form.values, action: 'delete-branch', ...overrides }),
+        })
+      const hidden = async () => expect(await fetch(summary()).then(response => response.text())).not.toContain('data-pr-delete-branch-trigger')
+      const form = await readForm()
+      expect(form.html).toContain('Remove <code>report</code> from <strong>fixture-fork/notebook</strong> on GitHub.')
+      expect(form.values.sourceRepositoryId).toBe('fixture-repo:fixture-fork/notebook')
+      expect((await remove(form, { sourceRepositoryId: 'fixture-repo:fixture/notebook' })).status).toBe(409)
+      expect((await remove(form, { sourceBranch: 'another-branch' })).status).toBe(409)
+      expect((await remove(form, { base: 'c'.repeat(40) })).status).toBe(409)
+      expect((await remove(form, { viewer: 'another-viewer' })).status).toBe(409)
+      setPull({ state: 'open' })
+      await hidden()
+      expect((await remove(form)).status).toBe(409)
+      setPull({ state: 'closed' })
+      cli.configureBranchDeletion({ mode: 'readonly' })
+      await hidden()
+      expect((await remove(form)).status).toBe(403)
+      cli.configureBranchDeletion({ mode: 'normal', defaultBranch: 'report' })
+      await hidden()
+      expect((await remove(form)).status).toBe(403)
+      cli.configureBranchDeletion({ defaultBranch: 'main', protected: true })
+      await hidden()
+      expect((await remove(form)).status).toBe(409)
+      cli.configureBranchDeletion({ protected: false, stacked: true })
+      await hidden()
+      expect((await remove(form)).status).toBe(409)
+      cli.configureBranchDeletion({ stacked: false, target: 'e'.repeat(40) })
+      const moved = await remove(form)
+      expect(moved.status).toBe(409)
+      expect(await moved.json()).toMatchObject({ result: 'branch-changed' })
+      cli.configureBranchDeletion({ target: local, mode: 'denied' })
+      const denied = await remove(form)
+      expect(denied.status).toBe(403)
+      expect(await denied.text()).not.toContain('Private branch deletion')
+      expect(readState().deleteBranchWrites).toBeUndefined()
+
+      cli.configureBranchDeletion({ mode: 'lost-response' })
+      const pending = await remove(form, {}, 'text/html')
+      expect(pending.status).toBe(202)
+      expect(await pending.text()).toContain('Check GitHub again')
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      cli.configureBranchDeletion({ mode: 'normal' })
+      const recovered = await remove(form, {}, 'text/html')
+      expect(recovered.status).toBe(303)
+      expect(recovered.headers.get('location')).toContain('lifecycleResult=delete-branch')
+      await hidden()
+      cli.configureBranchDeletion({ target: local })
+      expect(await (await remove(await readForm())).json()).toMatchObject({ message: 'GitHub already confirmed the earlier update.' })
+      expect(readState().branchDeletion.target).toBe(local)
+      expect(readState().deleteBranchWrites).toEqual([{ repositoryId: 'fixture-repo:fixture-fork/notebook', clientMutationId: expect.any(String),
+        refUpdates: [{ name: 'refs/heads/report', beforeOid: local, afterOid: '0'.repeat(40) }] }])
+
+      const newHead = 'f'.repeat(40)
+      setPull({ merged_at: '2026-11-01T18:00:00Z', head: { sha: newHead, ref: 'report' } })
+      cli.configureBranchDeletion({ target: newHead, mode: 'moved-on-write' })
+      const revised = await readForm()
+      const racing = await remove(revised)
+      expect(racing.status).toBe(409)
+      expect(await racing.json()).toMatchObject({ result: 'branch-changed' })
+      expect(readState().branchDeletion.target).toBe('e'.repeat(40))
+      expect((await remove(revised)).status).toBe(409)
+      expect(readState().deleteBranchWrites).toHaveLength(2)
+      expect(readState().pulls[0]).toMatchObject({ state: 'closed', head: { sha: newHead }, base: { ref: 'main', sha: base } })
+    }
+    finally {
+      process.chdir(previousCwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
 
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')

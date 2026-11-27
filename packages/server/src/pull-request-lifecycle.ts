@@ -2,14 +2,27 @@ import { createHash } from 'node:crypto'
 import { RepositoryPullRequestError, repositoryGitHubRequest } from './repository-pull-request'
 
 const sha = /^[0-9a-f]{40}$/u
+export const sourceRepositoryFields = 'id nameWithOwner isArchived viewerPermission defaultBranchRef { name }'
 const fields = `id number state isDraft headRefOid baseRefOid baseRefName updatedAt viewerCanUpdate
   mergeable mergeStateStatus isMergeQueueEnabled mergeQueueEntry { id } autoMergeRequest { mergeMethod }
   viewerCanEnableAutoMerge viewerCanDisableAutoMerge viewerCanUpdateBranch
+  revertUrl mergeCommit { oid }
+  viewerCanDeleteHeadRef headRefName headRef { target { oid } branchProtectionRule { id allowsDeletions lockBranch } }
+  headRepository { ${sourceRepositoryFields} }
+  stack { id } stackEntry { id }
   baseRef { compare(headRef: $headRef) { behindBy } }`
 const status = ['OPEN', 'CLOSED', 'MERGED'] as const
 const mergeableStates = new Set(['CLEAN', 'HAS_HOOKS', 'UNSTABLE'])
 const writePermissions = new Set(['WRITE', 'MAINTAIN', 'ADMIN'])
 type PullState = typeof status[number]
+export type SourceRepository = {
+  id?: string
+  nameWithOwner?: string
+  isArchived?: boolean
+  viewerPermission?: string
+  defaultBranchRef?: { name?: string } | null
+}
+export type SourceRef = { target?: { oid?: string } | null, branchProtectionRule?: { id?: string, allowsDeletions?: boolean, lockBranch?: boolean } | null }
 type Pull = {
   id: string
   number: number
@@ -28,6 +41,14 @@ type Pull = {
   viewerCanEnableAutoMerge?: boolean
   viewerCanDisableAutoMerge?: boolean
   viewerCanUpdateBranch?: boolean
+  revertUrl?: string | null
+  mergeCommit?: { oid?: string } | null
+  viewerCanDeleteHeadRef?: boolean
+  headRefName?: string
+  headRef?: SourceRef | null
+  headRepository?: SourceRepository | null
+  stack?: { id?: string } | null
+  stackEntry?: { id?: string } | null
   baseRef?: { compare?: { behindBy?: number } | null } | null
 }
 export type LifecycleSnapshot = Pull & {
@@ -60,6 +81,8 @@ export const lifecycleActions = {
   enqueue: { label: 'Join merge queue', success: 'Pull request added to the merge queue.', mutation: 'enqueuePullRequest' },
   dequeue: { label: 'Leave merge queue', success: 'Pull request removed from the merge queue.', mutation: 'dequeuePullRequest' },
   'update-branch': { label: 'Update branch', success: 'Branch is up to date with the reviewed base.', mutation: 'updatePullRequestBranch' },
+  revert: { label: 'Revert changes', success: 'Revert pull request opened on GitHub.', mutation: 'revertPullRequest' },
+  'delete-branch': { label: 'Delete branch', success: 'Branch deleted on GitHub.', mutation: 'updateRefs' },
 }
 
 export type LifecycleAction = keyof typeof lifecycleActions
@@ -131,7 +154,12 @@ export async function readPullRequestLifecycle(path: string, repository: string,
 export function lifecycleRevision(pull: LifecycleSnapshot) {
   return createHash('sha256').update(JSON.stringify([pull.id, pull.viewer.id, pull.state, pull.isDraft, pull.headRefOid,
     pull.baseRefOid, pull.updatedAt, pull.baseRefName, pull.mergeStateStatus, pull.mergeable, pull.isMergeQueueEnabled,
-    pull.mergeQueueEntry?.id, pull.autoMergeRequest?.mergeMethod, pull.merge, pull.branch])).digest('hex')
+    pull.mergeQueueEntry?.id, pull.autoMergeRequest?.mergeMethod, pull.merge, pull.branch,
+    pull.revertUrl, pull.mergeCommit?.oid, pull.headRefName, pull.headRef?.target?.oid,
+    pull.headRef?.branchProtectionRule?.id, pull.headRef?.branchProtectionRule?.allowsDeletions, pull.headRef?.branchProtectionRule?.lockBranch,
+    pull.headRepository?.id, pull.headRepository?.nameWithOwner, pull.headRepository?.isArchived,
+    pull.headRepository?.viewerPermission, pull.headRepository?.defaultBranchRef?.name, pull.viewerCanDeleteHeadRef,
+    pull.stack?.id, pull.stackEntry?.id])).digest('hex')
 }
 
 export function behindBase(pull: LifecycleSnapshot) {
@@ -140,9 +168,35 @@ export function behindBase(pull: LifecycleSnapshot) {
     : null
 }
 
+export function canDeleteSourceBranch(repository: SourceRepository, branch: string) {
+  const defaultBranch = repository.defaultBranchRef?.name
+  return repository.isArchived === false && writePermissions.has(repository.viewerPermission ?? '')
+    && Boolean(defaultBranch) && defaultBranch !== branch
+}
+
+export function allowsRefDeletion(ref: SourceRef) {
+  const rule = ref.branchProtectionRule
+  return rule === null || (rule?.allowsDeletions === true && rule.lockBranch === false)
+}
+
+export function deletableSourceBranch(pull: LifecycleSnapshot) {
+  const repository = pull.headRepository
+  const branch = pull.headRefName
+  if (pull.state === 'OPEN' || pull.viewerCanDeleteHeadRef !== true || pull.stack || pull.stackEntry
+    || !branch || branch === pull.baseRefName || !repository?.id || !repository.nameWithOwner
+    || !canDeleteSourceBranch(repository, branch) || pull.headRef?.target?.oid !== pull.headRefOid
+    || !allowsRefDeletion(pull.headRef)) return null
+  return { name: branch, repositoryId: repository.id, repository: repository.nameWithOwner }
+}
+
 export function availableLifecycleActions(pull: LifecycleSnapshot): LifecycleAction[] {
-  if (pull.state === 'MERGED') return []
-  if (pull.state === 'CLOSED') return pull.viewerCanUpdate ? ['reopen'] : []
+  if (pull.state !== 'OPEN') {
+    const actions: LifecycleAction[] = []
+    if (pull.state === 'MERGED' && pull.merge.canWrite && pull.revertUrl && sha.test(pull.mergeCommit?.oid ?? '')) actions.push('revert')
+    if (pull.state === 'CLOSED' && pull.viewerCanUpdate) actions.push('reopen')
+    if (deletableSourceBranch(pull)) actions.push('delete-branch')
+    return actions
+  }
   const actions: LifecycleAction[] = pull.viewerCanUpdate ? [pull.isDraft ? 'ready' : 'draft'] : []
   if (pull.branch.canUpdate && behindBase(pull) !== null) actions.push('update-branch')
   if (pull.merge.canWrite) {
@@ -185,7 +239,7 @@ const lifecycleInputType = {
   'update-branch': 'UpdatePullRequestBranchInput',
 } as const
 
-export async function writePullRequestLifecycle(path: string, pull: LifecycleSnapshot, action: LifecycleAction, method: MergeMethod | null,
+export async function writePullRequestLifecycle(path: string, pull: LifecycleSnapshot, action: Exclude<LifecycleAction, 'revert' | 'delete-branch'>, method: MergeMethod | null,
   signal: AbortSignal, credential: string) {
   const { mutation } = lifecycleActions[action]
   const inputType = Object.hasOwn(lifecycleInputType, action) ? lifecycleInputType[action as keyof typeof lifecycleInputType] : null
@@ -197,18 +251,24 @@ export async function writePullRequestLifecycle(path: string, pull: LifecycleSna
     ...(action === 'merge' || action === 'enqueue' || action === 'enable-auto-merge' ? { expectedHeadOid: pull.headRefOid } : {}),
     ...(method && { mergeMethod: method }),
   }
+  const write = await requestPullRequestMutation(path, {
+    query: `mutation HarnessSetPullRequestLifecycle(${parameters}) { ${mutation}(input: ${argument}) { __typename } }`,
+    variables: inputType ? { input: payload } : { id: pull.id },
+  }, signal, credential)
+  return typeof write === 'string' ? write : 'unconfirmed'
+}
+
+export async function requestPullRequestMutation<T = unknown>(path: string, payload: object, signal: AbortSignal, credential: string): Promise<'denied' | 'refused' | { data?: T }> {
   try {
-    const reply = await repositoryGitHubRequest(path, 'graphql', {
-      query: `mutation HarnessSetPullRequestLifecycle(${parameters}) { ${mutation}(input: ${argument}) { __typename } }`,
-      variables: inputType ? { input: payload } : { id: pull.id },
-    }, signal, credential)
-    const errors = (reply.body as { errors?: { type?: string }[] } | null)?.errors
+    const reply = await repositoryGitHubRequest(path, 'graphql', payload, signal, credential)
+    const body = reply.body as { data?: T, errors?: { type?: string }[] } | null
+    const errors = body?.errors
     if (reply.status === 200 && errors?.length && errors.every(error => error.type === 'FORBIDDEN')) return 'denied'
     if (reply.status === 422 || (reply.status === 200 && errors?.length && errors.every(error => error.type === 'UNPROCESSABLE'))) return 'refused'
+    if (reply.status === 200 && !errors?.length) return { data: body?.data }
   }
   catch (error) {
     if (error instanceof RepositoryPullRequestError && (error.status === 401 || error.status === 403)) return 'denied'
   }
-  // The caller confirms the resulting state independently, including after a lost response.
-  return 'unconfirmed'
+  return {}
 }

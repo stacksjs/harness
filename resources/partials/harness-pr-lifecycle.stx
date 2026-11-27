@@ -9,6 +9,10 @@
         <input type="hidden" name="viewer" value="{{ lifecyclePending.viewer }}">
         <input type="hidden" name="revision" value="{{ lifecyclePending.revision }}">
         <input type="hidden" name="intent" value="{{ lifecyclePending.token }}">
+        @if(lifecyclePending.sourceBranch)
+          <input type="hidden" name="sourceBranch" value="{{ lifecyclePending.sourceBranch }}">
+          <input type="hidden" name="sourceRepositoryId" value="{{ lifecyclePending.sourceRepositoryId }}">
+        @endif
         @if(lifecyclePending.method)
           <input type="hidden" name="method" value="{{ lifecyclePending.method }}">
         @endif
@@ -22,16 +26,39 @@
         <button type="button" popovertarget="pr-lifecycle-menu" data-pr-button data-pr-lifecycle-trigger aria-label="Pull request actions">
           Actions <span class="inline-block size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
         </button>
-        <form method="post" action="{{ lifecycleEndpoint }}" aria-label="Update pull request" id="pr-lifecycle-menu" data-pr-lifecycle-menu data-pr-lifecycle-panel popover>
-          @include('./harness-pr-lifecycle-fields')
-          @foreach(selected.lifecycle.actions as item)
-            @if(item.action === 'close')
-              <button type="button" popovertarget="pr-close-confirmation" data-pr-lifecycle-action data-pr-close-trigger>{{ item.label }}</button>
-            @else
-              <button type="submit" name="action" value="{{ item.action }}" data-pr-lifecycle-action>{{ item.label }}</button>
-            @endif
-          @endforeach
-        </form>
+        <div id="pr-lifecycle-menu" data-pr-lifecycle-menu data-pr-lifecycle-panel popover>
+          <form method="post" action="{{ lifecycleEndpoint }}" aria-label="Update pull request">
+            @include('./harness-pr-lifecycle-fields')
+            @foreach(selected.lifecycle.actions as item)
+              @if(item.action === 'close')
+                <button type="button" popovertarget="pr-close-confirmation" data-pr-lifecycle-action data-pr-close-trigger>{{ item.label }}</button>
+              @elseif(item.action === 'revert')
+                <button type="button" popovertarget="pr-revert-confirmation" data-pr-lifecycle-action data-pr-revert-trigger>{{ item.label }}</button>
+              @elseif(item.action === 'delete-branch')
+                <button type="button" commandfor="pr-delete-branch-dialog" command="show-modal" ref="deleteBranchTrigger" data-pr-lifecycle-action data-pr-delete-branch-trigger
+                  aria-haspopup="dialog" @click="openDeleteBranchDialog">{{ item.label }}</button>
+              @else
+                <button type="submit" name="action" value="{{ item.action }}" data-pr-lifecycle-action>{{ item.label }}</button>
+              @endif
+            @endforeach
+          </form>
+          @if(selected.lifecycle.branchToDelete)
+            <dialog id="pr-delete-branch-dialog" data-pr-delete-branch-dialog ref="deleteBranchDialog" aria-labelledby="pr-delete-branch-title"
+              aria-describedby="pr-delete-branch-description">
+              <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-delete-branch-title">
+                @include('./harness-pr-lifecycle-fields')
+                <input type="hidden" name="sourceBranch" value="{{ selected.lifecycle.branchToDelete.name }}">
+                <input type="hidden" name="sourceRepositoryId" value="{{ selected.lifecycle.branchToDelete.repositoryId }}">
+                <h3 id="pr-delete-branch-title">Delete remote branch?</h3>
+                <p id="pr-delete-branch-description">Remove <code>{{ selected.lifecycle.branchToDelete.name }}</code> from <strong>{{ selected.lifecycle.branchToDelete.repository }}</strong> on GitHub.</p>
+                <div data-pr-review-actions>
+                  <button type="submit" formmethod="dialog" data-pr-button autofocus>Cancel</button>
+                  <button type="submit" name="action" value="delete-branch" data-pr-button data-pr-delete-branch-confirm>Delete branch</button>
+                </div>
+              </form>
+            </dialog>
+          @endif
+        </div>
       @endif
       @if(selected.lifecycle.actions.some(item => item.action === 'close'))
         <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-close-title" id="pr-close-confirmation" data-pr-close-confirmation data-pr-lifecycle-panel popover>
@@ -40,6 +67,17 @@
           <div data-pr-review-actions>
             <button type="button" popovertarget="pr-close-confirmation" popovertargetaction="hide" data-pr-button>Cancel</button>
             <button type="submit" name="action" value="close" data-pr-button data-pr-close-confirm>Confirm close</button>
+          </div>
+        </form>
+      @endif
+      @if(selected.lifecycle.actions.some(item => item.action === 'revert'))
+        <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-revert-title" id="pr-revert-confirmation" data-pr-revert-confirmation data-pr-lifecycle-panel popover>
+          @include('./harness-pr-lifecycle-fields')
+          <p id="pr-revert-title"><strong>Open a revert pull request?</strong></p>
+          <p>GitHub will open a pull request against <code>{{ selected.baseRef }}</code> to reverse #{{ selected.number }}.</p>
+          <div data-pr-review-actions>
+            <button type="button" popovertarget="pr-revert-confirmation" popovertargetaction="hide" data-pr-button>Cancel</button>
+            <button type="submit" name="action" value="revert" data-pr-button data-pr-revert-confirm>Create revert PR</button>
           </div>
         </form>
       @endif

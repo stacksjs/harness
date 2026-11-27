@@ -47,6 +47,15 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     Object.assign(previous.pulls[0], { branchBehind, branchMode })
     writeFileSync(state, JSON.stringify(previous))
   }
+  const configureRevert = (revertMode: 'normal' | 'denied' | 'unavailable' | 'unconfirmed' | 'wrong-author' | 'paged') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, revertMode }))
+  }
+  const configureBranchDeletion = (settings: { mode?: 'normal' | 'readonly' | 'denied' | 'lost-response' | 'moved-on-write',
+    repository?: string, target?: string | null, defaultBranch?: string, protected?: boolean, stacked?: boolean } = {}) => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, branchDeletion: { ...previous.branchDeletion, ...settings } }))
+  }
   const revealLifecycle = () => {
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     const { invisibleLifecycle, ...shown } = previous
@@ -84,7 +93,7 @@ const name = parts.slice(2, 4).join('/')
 const repo = state.repositories[name]
 
 function reply(status, body) {
-  process.stdout.write('HTTP/2.0 ' + status + ' Fixture\\r\\ncontent-type: application/json\\r\\n\\r\\n' + JSON.stringify(body))
+  process.stdout.write('HTTP/2.0 ' + status + ' Fixture\\r\\ncontent-type: application/json\\r\\n\\r\\n' + (body === undefined ? '' : JSON.stringify(body)))
   process.exit(status < 300 ? 0 : 1)
 }
 
@@ -136,6 +145,73 @@ if (url.pathname === '/graphql' && method === 'POST') {
     reply(200, { data: { [marked ? 'markFileAsViewed' : 'unmarkFileAsViewed']: { clientMutationId: null } } })
   }
   const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
+  const branchDeletion = state.branchDeletion
+  const branchPull = state.pulls[0]
+  const sourceRepository = branchDeletion && branchPull ? {
+    id: 'fixture-repo:' + (branchDeletion.repository ?? branchPull.base.repo.full_name),
+    nameWithOwner: branchDeletion.repository ?? branchPull.base.repo.full_name, isArchived: false,
+    viewerPermission: branchDeletion.mode === 'readonly' ? 'READ' : 'WRITE',
+    defaultBranchRef: { name: branchDeletion.defaultBranch ?? 'main' },
+  } : null
+  const branchRefName = sourceRepository ? 'refs/heads/' + branchPull.head.ref : null
+  const sourceTarget = sourceRepository ? (branchDeletion.target === undefined ? branchPull.head.sha : branchDeletion.target) : null
+  const sourceRef = sourceTarget ? { name: branchPull.head.ref, prefix: 'refs/heads/', target: { oid: sourceTarget },
+    branchProtectionRule: branchDeletion?.protected ? { id: 'fixture-protection' } : null } : null
+  if (query.includes('query HarnessReadPullRequestSourceBranch')) {
+    if (!sourceRepository || !process.env.GH_TOKEN || sourceRepository.id !== variables.id || branchRefName !== variables.ref)
+      reply(400, {})
+    if (branchDeletion.mode === 'lost-response' && sourceTarget === null) process.exit(1)
+    reply(200, { data: { viewer, node: { ...sourceRepository, ref: sourceRef } } })
+  }
+  if (query.includes('mutation HarnessDeletePullRequestBranch')) {
+    const input = variables.input
+    const updates = input?.refUpdates
+    const update = updates?.[0]
+    if (!sourceRepository || !process.env.GH_TOKEN || sourceRepository.id !== input?.repositoryId || updates?.length !== 1
+      || update.name !== branchRefName || update.afterOid !== '0'.repeat(40)) reply(400, {})
+    if (branchDeletion.mode === 'denied') reply(200, { errors: [{ type: 'FORBIDDEN', message: 'Private branch deletion diagnostics' }] })
+    state.deleteBranchWrites = [...(state.deleteBranchWrites ?? []), input]
+    if (branchDeletion.mode === 'moved-on-write') branchDeletion.target = 'e'.repeat(40)
+    if (update.beforeOid !== (branchDeletion.target === undefined ? sourceTarget : branchDeletion.target)) {
+      writeFileSync(stateFile, JSON.stringify(state))
+      reply(200, { errors: [{ message: 'Private stale ref diagnostics' }] })
+    }
+    branchDeletion.target = null
+    writeFileSync(stateFile, JSON.stringify(state))
+    if (branchDeletion.mode === 'lost-response') process.exit(1)
+    reply(200, { data: { updateRefs: { clientMutationId: input.clientMutationId } } })
+  }
+  const revertCandidate = pull => ({
+    id: 'fixture-pull-' + pull.number, number: pull.number, baseRefName: pull.base.ref, body: pull.body,
+    author: { id: pull.authorId }, repository: { nameWithOwner: pull.base.repo.full_name },
+  })
+  if (query.includes('query HarnessFindPullRequestRevert')) {
+    if (state.revertMode === 'unavailable') reply(200, { errors: [{ message: 'Private revert lookup diagnostics' }] })
+    const source = state.pulls.find(pull => 'fixture-pull-' + pull.number === variables.id)
+    const previousPage = state.revertMode === 'paged' && !variables.before
+    const nodes = previousPage || state.revertMode === 'unconfirmed' ? [] : state.pulls.filter(pull => pull.reverts === source?.number)
+      .map((pull) => ({ source: revertCandidate(state.revertMode === 'wrong-author' ? { ...pull, authorId: 'different-github-account' } : pull) }))
+    reply(200, { data: { viewer, node: !source ? null : { id: variables.id, timelineItems: {
+      nodes, pageInfo: { hasPreviousPage: previousPage, startCursor: previousPage ? 'previous-revert-page' : null },
+    } } } })
+  }
+  if (query.includes('mutation HarnessRevertPullRequest')) {
+    const input = variables.input
+    const source = state.pulls.find(pull => 'fixture-pull-' + pull.number === input?.pullRequestId)
+    if (!source?.merged_at || !process.env.GH_TOKEN || state.revertMode === 'denied')
+      reply(200, { errors: [{ type: 'FORBIDDEN', message: 'Private revert mutation diagnostics' }] })
+    const number = state.pulls.length + 1
+    const pull = { ...source, number, state: 'open', merged_at: null, title: 'Revert "' + source.title + '"',
+      html_url: 'https://github.com/' + source.base.repo.full_name + '/pull/' + number, body: input.body,
+      reverts: source.number, authorId: viewer.id, head: { ...source.head, ref: 'revert-' + source.number, sha: 'f'.repeat(40) } }
+    state.revertWrites = [...(state.revertWrites ?? []), input]
+    state.pulls.push(pull)
+    writeFileSync(stateFile, JSON.stringify(state))
+    if (state.revertMode === 'unconfirmed') process.exit(1)
+    reply(200, { data: { revertPullRequest: {
+      clientMutationId: input.clientMutationId, pullRequest: { id: input.pullRequestId }, revertPullRequest: revertCandidate(pull),
+    } } })
+  }
   if (query.includes('mutation HarnessSetPullRequestLifecycle')) {
     const id = variables.input?.pullRequestId ?? variables.input?.id ?? variables.id
     const pull = state.pulls.find(pull => 'fixture-pull-' + pull.number === id)
@@ -224,6 +300,12 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query HarnessPullRequestWorkflowHeads')) {
+    const nodes = state.pulls.filter(pull => pull.base.repo.full_name === name && pull.head.ref === variables.branch)
+      .map(pull => ({ id: 'fixture-pull-' + pull.number, number: pull.number, headRefOid: pull.head.sha,
+        headRepository: { id: 'fixture-repo:' + (pull.head.repo?.full_name ?? name), nameWithOwner: pull.head.repo?.full_name ?? name } }))
+    reply(200, { data: { viewer, repository: { nameWithOwner: name, pullRequests: { nodes, pageInfo: { hasNextPage: false } } } } })
+  }
   if (query.includes('query HarnessPullRequestLifecycle')) {
     const enabled = Boolean(state.mergeMode)
     const missing = pull?.branchMode === 'missing-ref'
@@ -238,6 +320,12 @@ if (url.pathname === '/graphql' && method === 'POST') {
       mergeable: pull.branchMode === 'conflict' ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: state.mergeMode === 'blocked' ? 'BLOCKED' : 'CLEAN',
       baseRef: missing ? { compare: null } : { compare: { behindBy: pull.branchBehind } },
       viewerCanUpdateBranch: pull.branchMode === 'normal' && pull.branchBehind > 0,
+      revertUrl: state.revertMode && pull.merged_at ? pull.html_url + '/revert' : null,
+      mergeCommit: pull.merged_at ? { oid: 'd'.repeat(40) } : null,
+      ...(pull === branchPull && branchDeletion && { viewerCanDeleteHeadRef: Boolean(sourceRef), headRefName: pull.head.ref,
+        headRef: sourceRef, headRepository: sourceRepository, stack: branchDeletion.stacked ? { id: 'fixture-stack' } : null }),
+      ...(pull.head.repo?.full_name && !branchDeletion && { headRefName: pull.head.ref,
+        headRepository: { id: 'fixture-repo:' + pull.head.repo.full_name, nameWithOwner: pull.head.repo.full_name } }),
       isMergeQueueEnabled: state.mergeMode === 'queue', mergeQueueEntry: pull.queueEntry ? { id: pull.queueEntry } : null,
       autoMergeRequest: pull.autoMergeMethod ? { mergeMethod: pull.autoMergeMethod } : null,
       viewerCanEnableAutoMerge: state.mergeMode === 'blocked', viewerCanDisableAutoMerge: Boolean(pull.autoMergeMethod),
@@ -297,6 +385,18 @@ if (url.pathname === '/search/issues') {
   reply(200, { items: state.pulls.filter(pull => pull.base.repo.full_name === selected && pull.title.toLowerCase().includes(title.toLowerCase())) })
 }
 if (!repo) reply(404, {})
+if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs')
+  reply(200, { workflow_runs: state.workflowRuns ?? [] })
+if (method === 'POST' && parts[4] === 'actions' && parts[5] === 'runs' && parts[7] === 'approve') {
+  const run = state.workflowRuns?.find(run => run.id === Number(parts[6]))
+  if (!run) reply(404, {})
+  if (run.status === 'action_required' || run.conclusion === 'action_required') {
+    Object.assign(run, { status: 'queued', conclusion: null })
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(204)
+  }
+  reply(409, { message: 'This workflow run has already been approved.' })
+}
 if (parts.length === 4) reply(200, { full_name: name, default_branch: 'main', parent: repo.parent && { full_name: repo.parent } })
 if (parts[4] === 'branches') {
   const sha = head(repo, decodeURIComponent(parts[5]))
@@ -361,5 +461,6 @@ if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
   return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages,
-    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle, configureMerge, configureBranchUpdate }
+    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle, configureMerge, configureBranchUpdate,
+    configureRevert, configureBranchDeletion }
 }
