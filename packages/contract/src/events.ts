@@ -37,6 +37,13 @@ export interface WorktreeSelection {
   baseBranch?: string
 }
 
+export interface PullRequestCheckout {
+  repository: string
+  number: number
+  repositoryKey: string
+  commit: string
+}
+
 export interface CombinedWorktreeIntent {
   repository: string
   path: string
@@ -78,7 +85,7 @@ export interface ForkSource {
 }
 
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, worktree?: WorktreeSelection, forkFrom?: ForkSource }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, worktree?: WorktreeSelection, forkFrom?: ForkSource, pullRequest?: PullRequestCheckout }
   | { type: 'session.stopped' }
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation>, undo?: ThreadUndoRecord, undoScope?: ThreadUndoScopeUpdate }
   | { type: 'session.failed', message: string }

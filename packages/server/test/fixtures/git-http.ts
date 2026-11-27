@@ -18,6 +18,19 @@ export function fixtureGitRepository(root: string) {
   return { remote, bare }
 }
 
+export function fixturePullRequest(root: string, number: number): string {
+  const cwd = join(root, 'seed')
+  const target = join(root, 'repositories', 'notebook.git')
+  const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  git('switch', '-qc', 'pull-request-' + number)
+  writeFileSync(join(cwd, 'review.txt'), 'Only in the pull request\n')
+  git('add', '--', 'review.txt')
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Review change')
+  git('push', '-q', '--', target, 'HEAD:refs/pull/' + number + '/head')
+  git('--git-dir', target, 'update-server-info')
+  return git('rev-parse', 'HEAD')
+}
+
 export function serveFixtureGit(root: string, beforeRead?: () => Promise<void>) {
   return Bun.serve({
     hostname: '127.0.0.1', port: 0,

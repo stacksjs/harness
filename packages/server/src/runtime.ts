@@ -680,6 +680,13 @@ export class ProviderRuntime {
     return available
   }
 
+  async preparePullRequestWorktree(sessionId: number): Promise<boolean> {
+    const session = this.options.engine.current.sessions.get(sessionId)
+    if (!session?.pullRequest || session.navigation?.archivedAt
+      || !this.options.engine.current.workspaces.get(session.workspaceId)?.trusted) return false
+    return this.ensureWorktree(sessionId, true, true)
+  }
+
   private async ensureWorktree(sessionId: number, allowProjectCommands: boolean, restoreMissing: boolean): Promise<boolean> {
     const pending = this.worktreeCreations.get(sessionId)
     if (pending) return pending.result
@@ -736,8 +743,12 @@ export class ProviderRuntime {
           return true
         }
         const fork = session.fork && engine.current.sessions.get(session.fork.sessionId)?.combinedWorktree
-        const proposed = await planCombinedWorktree(repository, this.options.combinedWorktreesDirectory, sessionId, session.worktree, fork)
-          ?? await worktree.plan(repository, sessionId, crypto.randomUUID(), session.worktree?.baseBranch)
+        const combined = await planCombinedWorktree(repository, this.options.combinedWorktreesDirectory, sessionId, session.worktree, fork, session.pullRequest)
+        if (!combined && session.pullRequest?.repositoryKey)
+          throw new Error('The pull request repository is no longer available in this project.')
+        const proposed = combined ?? await worktree.plan(repository, sessionId, crypto.randomUUID(), session.worktree?.baseBranch, session.pullRequest?.commit)
+        if ('reason' in proposed && session.pullRequest)
+          throw new Error('The confirmed pull request commit is unavailable in its project repository.')
         if ('reason' in proposed) {
           if (proposed.reason === 'not-a-repository' || proposed.reason === 'no-commits') {
             if (session.worktree) throw new Error('Create at least one Git commit in the project before starting a worktree.')

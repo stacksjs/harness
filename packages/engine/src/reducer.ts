@@ -621,6 +621,28 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       return events
     }
 
+    case 'thread.pull-request.create': {
+      const workspace = state.workspaces.get(command.workspaceId)
+      if (!workspace?.trusted || workspace.scratch)
+        throw new InvalidCommand('Trust the project before checking out this pull request.')
+      const sessionId = derivedId(commandId)
+      if (state.sessions.has(sessionId)) throw new InvalidCommand('This session ID is already in use.')
+      const { pullRequest } = command
+      return [{
+        sessionId,
+        commandId,
+        at,
+        payload: {
+          type: 'session.created',
+          workspaceId: workspace.id,
+          driverKind: state.settings.defaultDriver,
+          isolate: true,
+          worktree: { repositories: pullRequest.repositoryKey ? [pullRequest.repositoryKey] : [] },
+          pullRequest,
+        },
+      }]
+    }
+
     case 'session.create': {
       const workspace = state.workspaces.get(command.workspaceId)
       if (!workspace)

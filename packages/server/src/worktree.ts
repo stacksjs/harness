@@ -89,6 +89,11 @@ async function commitAt(path: string, ref: string): Promise<string | null> {
   return result.ok ? result.out.trim() : null
 }
 
+export async function checkoutAtCommit(path: string, commit: string): Promise<string | null> {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit)) return null
+  return await commitAt(path, commit) === commit ? commit : null
+}
+
 /** Resolve an explicit branch, then the repository's configured or usual default. */
 export async function checkoutBase(path: string, requested?: string, defaultBranch = false): Promise<string | null> {
   if (requested && requested !== 'HEAD') {
@@ -113,7 +118,7 @@ export async function checkoutBase(path: string, requested?: string, defaultBran
 }
 
 /** Resolve a stable base and a checkout path before any Git mutation. */
-export async function plan(workspacePath: string, sessionId: number, reservation?: string, baseBranch?: string): Promise<CheckoutIntent | { reason: NonNullable<WorktreeResult['reason']> }> {
+export async function plan(workspacePath: string, sessionId: number, reservation?: string, baseBranch?: string, commit?: string): Promise<CheckoutIntent | { reason: NonNullable<WorktreeResult['reason']> }> {
   const inside = await git(workspacePath, ['rev-parse', '--is-inside-work-tree'])
   if (!inside.ok || inside.out.trim() !== 'true')
     return { reason: 'not-a-repository' }
@@ -122,7 +127,9 @@ export async function plan(workspacePath: string, sessionId: number, reservation
   // `worktree add` on one fails with a message about an invalid reference.
   // A composer selection with an empty field asks for the default branch.
   // Older commands may omit the selection entirely and still branch from HEAD.
-  const base = await checkoutBase(workspacePath, baseBranch, baseBranch !== undefined)
+  const base = commit
+    ? await checkoutAtCommit(workspacePath, commit)
+    : await checkoutBase(workspacePath, baseBranch, baseBranch !== undefined)
   if (!base) return { reason: 'no-commits' }
 
   // The repository's own git directory, resolved rather than assumed: in a

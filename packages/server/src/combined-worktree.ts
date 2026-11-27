@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { isWorkspaceGitRoot } from './diff'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import type { WorktreeOpenMode } from './worktree'
-import { branchFor, checkoutBase, includesCheckoutBase, isCleanForLayoutRemoval, openReserved, release, remove } from './worktree'
+import { branchFor, checkoutAtCommit, checkoutBase, includesCheckoutBase, isCleanForLayoutRemoval, openReserved, release, remove } from './worktree'
 import { clearWorktreeLayoutReceipts, runWorktreeLayout, worktreeLayoutOutcome } from './worktree-layout'
 
 type Checkout = CombinedWorktreeIntent['checkouts'][number]
@@ -35,7 +35,7 @@ async function sharedLinks(source: string, target: string, excluded: string[]): 
 }
 
 export async function planCombinedWorktree(source: string, storage: string, sessionId: number, selection?: WorktreeSelection,
-  fork?: CombinedWorktreeIntent): Promise<CombinedWorktreeIntent | null> {
+  fork?: CombinedWorktreeIntent, pinned?: { repositoryKey: string, commit: string }): Promise<CombinedWorktreeIntent | null> {
   const repository = await realpath(source).catch(() => null)
   if (!repository) return null
   const layout = fork ? null : await projectWorktreeLayout(repository)
@@ -50,7 +50,9 @@ export async function planCombinedWorktree(source: string, storage: string, sess
   const branch = branchFor(sessionId)
   const checkouts: Checkout[] = []
   if (await isWorkspaceGitRoot(repository)) {
-    const base = await checkoutBase(repository, fork ? 'HEAD' : selection?.baseBranch, !fork)
+    const base = pinned?.repositoryKey === ''
+      ? await checkoutAtCommit(repository, pinned.commit)
+      : await checkoutBase(repository, fork ? 'HEAD' : selection?.baseBranch, !fork)
     if (base) checkouts.push({ key: '', label: 'Project root', repository, path, branch, base })
   }
   for (const key of requested) {
@@ -60,16 +62,20 @@ export async function planCombinedWorktree(source: string, storage: string, sess
       : repo && await resolveProjectRepository(repository, key)
     if (!repo || !original || !await isWorkspaceGitRoot(original))
       throw new Error('A selected project repository is unavailable. Check Git and the project folders.')
-    const base = await checkoutBase(original, fork ? 'HEAD' : selection?.baseBranch, !fork)
+    const base = pinned?.repositoryKey === key
+      ? await checkoutAtCommit(original, pinned.commit)
+      : await checkoutBase(original, fork ? 'HEAD' : selection?.baseBranch, !fork)
     if (base) checkouts.push({ key, label: repo.label, repository: original, path: join(path, key), branch, base })
   }
+  if (pinned && !checkouts.some(checkout => checkout.key === pinned.repositoryKey && checkout.base === pinned.commit))
+    throw new Error('The confirmed pull request commit is unavailable in its project repository.')
   checkouts.sort((a, b) => a.path.length - b.path.length)
   const links = layout || checkouts.some(checkout => !checkout.key) ? []
     : fork ? fork.links.map(link => ({ source: link.source, path: join(path, relative(fork.path, link.path)) }))
       : await sharedLinks(repository, path, [storagePath, ...discovered.map(repo => join(repository, repo.key))])
   return {
     repository, path, branch, checkouts, links,
-    ...(layout && { layout: { fingerprint: layout.fingerprint, baseBranch: selection?.baseBranch } }),
+    ...(layout && { layout: { fingerprint: layout.fingerprint, baseBranch: pinned?.commit ?? selection?.baseBranch } }),
   }
 }
 

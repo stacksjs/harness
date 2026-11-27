@@ -7,8 +7,9 @@ import { Database } from 'bun:sqlite'
 import { Terminal } from '@harness/ansi'
 import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
+import { ProjectScripts } from '../src/project-scripts'
 import { serve } from '../src/server'
-import { fixtureGitRepository, serveFixtureGit } from './fixtures/git-http'
+import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from './fixtures/git-http'
 
 let dir: string
 let harness: HarnessServer
@@ -231,6 +232,130 @@ describe('repository cloning', () => {
     }
     finally { remote.stop() }
   })
+})
+
+describe('pull request links', () => {
+  it.skipIf(process.platform === 'win32')('fetches a pinned PR after confirmation and reopens it after restart', async () => {
+    const fixture = fixtureGitRepository(dir)
+    const commit = fixturePullRequest(dir, 7)
+    const project = join(dir, 'project')
+    const repository = join(project, 'api')
+    mkdirSync(project)
+    const runGit = (cwd: string, ...args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd })
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    runGit(dir, 'clone', '-q', '--', fixture.bare, repository)
+    runGit(repository, 'remote', 'add', 'upstream', 'https://github.com/fixture/notebook.git')
+    const sourceHead = runGit(repository, 'rev-parse', 'HEAD')
+    const entered = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    let reads = 0
+    const git = serveFixtureGit(fixture.remote, () => { reads++; entered.resolve(); return resume.promise })
+    const restore = new Map<string, string | undefined>()
+    function gitEnv(key: string, value: string) {
+      restore.set(key, process.env[key])
+      process.env[key] = value
+    }
+    const index = Number(process.env.GIT_CONFIG_COUNT) || 0
+    gitEnv('GIT_CONFIG_COUNT', String(index + 1))
+    gitEnv('GIT_CONFIG_KEY_' + index, 'url.http://127.0.0.1:' + git.port + '/notebook.git.insteadOf')
+    gitEnv('GIT_CONFIG_VALUE_' + index, 'https://github.com/fixture/notebook.git')
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    const endpoint = (number = 7, workspace?: number) => {
+      const params = new URLSearchParams({ pr: 'Fixture/Notebook/' + number })
+      if (workspace) params.set('workspace', String(workspace))
+      return 'http://127.0.0.1:' + port + '/prompt-link/pull-request?' + params
+    }
+    const post = (workspace: number, number?: number) => fetch(endpoint(number, workspace), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+    })
+    let pending: Promise<Response> | undefined
+    try {
+      await dispatch('pr-profile', { type: 'profile.create', name: 'PR fixture' })
+      await dispatch('pr-project', { type: 'workspace.add', profileId: derivedId('pr-profile'), path: realpathSync(project) })
+      const workspace = derivedId('pr-project')
+      expect(await (await fetch(endpoint())).json()).toMatchObject({ project: null })
+      expect((await post(workspace)).status).toBe(409)
+      await dispatch('pr-project-trust', { type: 'workspace.trust', workspaceId: workspace, trusted: true })
+      const scripts = new ProjectScripts(join(dir, 'test.sqlite'))
+      try {
+        scripts.save(workspace, {
+          name: 'PR fixture setup', command: "printf 'configured setup\\n' >> setup.txt",
+          runOnWorktreeCreate: true, waitForSetup: true, previewUrl: '', stopOnSettle: false, autoOpenPreview: false,
+        })
+      }
+      finally { scripts.close() }
+      expect(await (await fetch(endpoint())).json()).toMatchObject({ project: { id: workspace }, canCheckOut: true })
+      expect(reads).toBe(0)
+      expect(harness.engine.current.sessions.size).toBe(0)
+      const stale = await fetch(endpoint(7, workspace) + '&session=1234', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+      })
+      expect(stale.status).toBe(409)
+      expect(reads).toBe(0)
+      const foreign = await fetch(endpoint(7, workspace), {
+        method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://example.invalid' },
+      })
+      expect(foreign.status).toBe(403)
+      pending = post(workspace)
+      expect(await Promise.race([entered.promise.then(() => true), Bun.sleep(3000).then(() => false)])).toBe(true)
+      expect((await post(workspace)).status).toBe(409)
+      resume.resolve()
+      const response = await pending
+      expect(response.status).toBe(201)
+      const { sessionId } = await response.json()
+      const deadline = Date.now() + 8000
+      while (!harness.engine.current.sessions.get(sessionId)?.worktreePath && Date.now() < deadline) await Bun.sleep(20)
+      const thread = harness.engine.current.sessions.get(sessionId)!
+      expect(thread).toMatchObject({
+        workspaceId: workspace, isolate: true, providerSessionId: '', turns: [],
+        pullRequest: { repository: 'Fixture/Notebook', repositoryKey: 'api', commit, number: 7 },
+      })
+      expect(runGit(join(thread.worktreePath, 'api'), 'rev-parse', 'HEAD')).toBe(commit)
+      expect(readFileSync(join(thread.worktreePath, 'api', 'review.txt'), 'utf8')).toBe('Only in the pull request\n')
+      const setupUrl = 'http://127.0.0.1:' + port + '/s/' + sessionId + '/project-setup'
+      let setup
+      do {
+        setup = await (await fetch(setupUrl)).json()
+        if (setup?.status === 'completed') break
+        await Bun.sleep(25)
+      } while (Date.now() < deadline)
+      expect(setup).toMatchObject({ status: 'completed' })
+      expect(readFileSync(join(thread.worktreePath, 'setup.txt'), 'utf8')).toBe('configured setup\n')
+      expect(runGit(repository, 'rev-parse', 'HEAD')).toBe(sourceHead)
+      expect(existsSync(join(repository, 'review.txt'))).toBe(false)
+      const fetched = reads
+      expect(await (await post(workspace)).json()).toEqual({ sessionId })
+      expect(reads).toBe(fetched)
+      expect((await post(workspace, 8)).status).toBe(502)
+      expect(harness.engine.current.sessions.size).toBe(1)
+      harness.stop()
+      harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+      expect(await (await fetch(endpoint())).json()).toEqual({ sessionId })
+      expect(harness.engine.current.sessions.get(sessionId)?.pullRequest?.commit).toBe(commit)
+      harness.stop()
+      harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), remote: true, localTokenPath: join(dir, 'pr-token') })
+      const pair = await fetch('http://127.0.0.1:' + port + '/pair', {
+        method: 'POST', redirect: 'manual',
+        body: new URLSearchParams({ code: harness.access!.openPairing().code, name: 'PR fixture device' }),
+      })
+      const cookie = pair.headers.get('set-cookie')!.split(';')[0]!
+      expect(await (await fetch(endpoint(), { headers: { cookie } })).json()).toEqual({ sessionId })
+      expect((await fetch(endpoint(8, workspace), { method: 'POST', headers: { 'content-type': 'application/json', cookie } })).status).toBe(403)
+    }
+    finally {
+      resume.resolve()
+      git.stop(true)
+      await pending?.catch(() => {})
+      for (const [key, value] of restore) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }, 20_000)
 })
 
 describe('shared workspace addresses', () => {

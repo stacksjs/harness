@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -40,6 +40,7 @@ export interface SessionState {
   providerConversations?: Record<string, ProviderConversation>
   handoff?: { afterTurnId: number, pending: boolean }
   fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', nativeSessionId?: string, error?: string }
+  pullRequest?: PullRequestCheckout
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
   lastSeq: number
@@ -557,6 +558,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
           ...(!fork.providerSessionId ? { handoff: { afterTurnId: fork.turnId, pending: true } } : {}),
           navigation: { title: threadDisplayTitle(source?.navigation?.title, source?.turns[0]?.prompt) + ' fork' },
         } : {}),
+        ...(p.pullRequest && {
+          pullRequest: p.pullRequest,
+          navigation: { title: p.pullRequest.repository + '#' + p.pullRequest.number },
+        }),
         state: 'idle',
         lastSeq: 0,
         turns: copied,
@@ -815,6 +820,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session) break
       session.worktreePath = p.worktreePath
       session.branch = p.branch
+      if (session.pullRequest && !session.turns.length && session.state === 'failed') {
+        session.state = 'idle'
+        delete session.lastError
+      }
       if (p.combined) session.combinedWorktree = p.combined
       delete session.worktreeIntent
       break

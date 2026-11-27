@@ -36,8 +36,9 @@ import type { ProjectSetupScope, SettlementReceipt } from './project-setup'
 import { ProjectSetup } from './project-setup'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
-import { promptLinkProjects } from './prompt-link-projects'
-import { promptLinkKeys } from './prompt-links'
+import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
+import { parsePullRequest, promptLinkKeys } from './prompt-links'
+import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -869,6 +870,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   let closing = false
+  const pullRequestCheckouts = new Set<string>()
   let settlementRetry: ReturnType<typeof setTimeout> | undefined
   let maintenanceTimer: ReturnType<typeof setTimeout> | undefined
   let maintainingThreads = false
@@ -884,6 +886,71 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (!Number.isFinite(earliest)) return
     maintenanceTimer = setTimeout(() => void maintainThreads(), Math.max(minimumDelay, Math.min(2_147_483_647, earliest - Date.now())))
     maintenanceTimer.unref()
+  }
+
+  async function respondPullRequestLink(request: Request, url: URL, isLocalPeer: boolean, extendTimeout: () => void): Promise<Response> {
+    const headers = { 'cache-control': 'no-store' }
+    const respond = (value: object, status = 200) => Response.json(value, { headers, status })
+    const site = request.headers.get('sec-fetch-site')
+    const local = canUseHostPrivileges(request, url) && isLocalPeer
+    if (site === 'cross-site' || site === 'same-site' || (!access && !local))
+      return new Response(null, { status: 403, headers })
+    const pull = parsePullRequest(url.searchParams.get('pr') ?? '')
+    if (!pull) return respond({ error: 'Invalid GitHub pull request.' }, 400)
+    const existing = findPullRequestThread(engine.current, pull)
+    if (request.method === 'GET') {
+      if (existing) return respond({ sessionId: existing.id })
+      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true })
+      return respond({ project: match ? linkedProject(match.workspace) : null, canCheckOut: local })
+    }
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers })
+    if (!local || request.headers.get('content-type') !== 'application/json')
+      return new Response(null, { status: 403, headers })
+    const workspaceId = Number(url.searchParams.get('workspace'))
+    if (!Number.isSafeInteger(workspaceId) || workspaceId <= 0)
+      return respond({ error: 'Select a trusted project for this checkout.' }, 400)
+    const retry = url.searchParams.get('session')
+    if (retry !== null) {
+      if (!existing || String(existing.id) !== retry || existing.workspaceId !== workspaceId)
+        return respond({ error: 'This pull request thread is no longer available for checkout.' }, 409)
+    }
+    if (existing) {
+      if (existing.workspaceId === workspaceId && !existing.worktreePath)
+        void runtime.preparePullRequestWorktree(existing.id).catch(() => {})
+      return respond({ sessionId: existing.id })
+    }
+
+    const key = pull.repository.toLowerCase() + '#' + pull.number
+    if (pullRequestCheckouts.has(key)) return respond({ error: 'This pull request checkout is already starting. Try again shortly.' }, 409)
+    pullRequestCheckouts.add(key)
+    extendTimeout()
+    try {
+      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true, workspaceId })
+      if (!match) return respond({ error: 'The matching project is unavailable or needs trust.' }, 409)
+      const commit = await fetchPullRequest(match.path, match.remote, pull)
+      if (!commit) return respond({ error: 'Git could not fetch this pull request. Check the number, network, and Git credentials.' }, 502)
+      const workspace = engine.current.workspaces.get(workspaceId)
+      if (closing || !workspace?.trusted || workspace.path !== match.workspace.path)
+        return respond({ error: 'The project changed during checkout. Check its trust settings and try again.' }, 409)
+      const result = await engine.dispatchInternal({
+        id: 'pull-request_' + crypto.randomUUID(),
+        at: Date.now(),
+        command: {
+          type: 'thread.pull-request.create',
+          workspaceId,
+          pullRequest: { repository: pull.repository, number: pull.number, repositoryKey: match.repositoryKey, commit },
+        },
+      })
+      const created = result.events.find(event => event.payload.type === 'session.created')
+      if (!created) return respond({ error: 'Could not record the pull request thread.' }, 503)
+      if (!closing) {
+        broadcast(result.events)
+        void runtime.preparePullRequestWorktree(created.sessionId).catch(() => {})
+      }
+      return respond({ sessionId: created.sessionId }, 201)
+    }
+    catch { return respond({ error: 'Could not start the pull request checkout. Try again.' }, 503) }
+    finally { pullRequestCheckouts.delete(key) }
   }
 
   async function maintainThreads(): Promise<void> {
@@ -1717,6 +1784,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return projectClones.handle(request, url, profile => engine.current.profiles.has(profile))
       }
 
+      if (url.pathname === '/prompt-link/pull-request')
+        return respondPullRequestLink(request, url, isLoopbackHost(srv.requestIP(request)?.address ?? ''), () => srv.timeout(request, 65))
+
       if (url.pathname === '/prompt-link/project') {
         if (request.method !== 'GET') return new Response(null, { status: 405 })
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
@@ -1733,7 +1803,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const sessionId = /^\/s\/([1-9]\d*)\/?$/u.exec(workspaceUrl.pathname)
         const id = sessionId ? Number(sessionId[1]) : undefined
         const missingThread = workspaceUrl.pathname.startsWith('/s/') && !engine.current.sessions.has(id ?? 0)
-        const shared = sharedDraft || workspaceUrl.searchParams.has('prompt')
+        const shared = sharedDraft || workspaceUrl.searchParams.has('prompt') || workspaceUrl.searchParams.has('pr')
         if (shared) {
           pageHeaders['cache-control'] = 'no-store'
           pageHeaders['referrer-policy'] = 'no-referrer'

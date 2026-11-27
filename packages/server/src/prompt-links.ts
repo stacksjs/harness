@@ -50,13 +50,13 @@ export function repositoryFromRemote(remote: string): string | null {
   return /^https?:\/\/(?:www\.)?github\.com\//iu.test(source) ? linkedRepository(source) : null
 }
 
-function parsePullRequest(value: string): { repository: string, url: string } | null {
+export function parsePullRequest(value: string): { repository: string, number: number, url: string } | null {
   const match = /^(?:https?:\/\/(?:www\.)?github\.com\/)?([^/\s]+\/[^/\s#]+)(?:\/pull\/|\/|#)(\d+)(?:[/?#].*)?$/iu.exec(value.trim())
   if (!match) return null
   const repository = linkedRepository(match[1]!)
   const number = Number(match[2])
   return repository && Number.isSafeInteger(number) && number > 0
-    ? { repository, url: 'https://github.com/' + repository + '/pull/' + number }
+    ? { repository, number, url: 'https://github.com/' + repository + '/pull/' + number }
     : null
 }
 
