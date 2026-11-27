@@ -14,6 +14,10 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, checkPages: pages, checkMode: mode }))
   }
+  const configureViewed = (viewedMode: 'normal' | 'denied' | 'lost-response' | 'unreadable' | 'revised', viewer = 'fixture-viewer') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, viewedMode, viewer }))
+  }
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bun
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -21,6 +25,10 @@ import { join } from 'node:path'
 const stateFile = join(import.meta.dir, 'state.json')
 const state = JSON.parse(readFileSync(stateFile, 'utf8'))
 const args = process.argv.slice(2)
+if (args[0] === 'auth' && args[1] === 'token') {
+  process.stdout.write('fixture-token')
+  process.exit(0)
+}
 const method = args[args.indexOf('--method') + 1]
 const endpoint = args.at(-1)
 const url = new URL(endpoint, 'https://api.github.com/')
@@ -40,9 +48,27 @@ function head(repository, branch) {
 
 if (url.pathname === '/user') reply(200, { login: 'fixture-user' })
 if (url.pathname === '/graphql' && method === 'POST') {
-  const { variables } = JSON.parse(await Bun.stdin.text())
+  const { query, variables } = JSON.parse(await Bun.stdin.text())
+  if (query.includes('mutation SetPullRequestFileViewed')) {
+    if (!process.env.GH_TOKEN || variables.id !== 'fixture-pull' || variables.path !== 'report.txt') reply(400, {})
+    if (state.viewedMode === 'denied') reply(403, { message: 'Private forge diagnostics must not leak' })
+    const marked = query.includes(' markFileAsViewed(')
+    state.fileViewed = marked
+    state.viewedWrites = (state.viewedWrites || 0) + 1
+    writeFileSync(stateFile, JSON.stringify(state))
+    if (state.viewedMode === 'lost-response') process.exit(1)
+    reply(200, { data: { [marked ? 'markFileAsViewed' : 'unmarkFileAsViewed']: { clientMutationId: null } } })
+  }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query PullRequestViewedFiles')) {
+    if (!pull || state.viewedMode === 'unreadable') reply(200, { errors: [{ message: 'Private viewed diagnostics must not leak' }] })
+    reply(200, { data: { viewer: { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }, repository: { pullRequest: {
+      id: 'fixture-pull', headRefOid: pull.head.sha, files: variables.cursor === '2'
+        ? { nodes: [{ path: 'report.txt', viewerViewedState: state.viewedMode === 'revised' ? 'DISMISSED' : state.fileViewed ? 'VIEWED' : 'UNVIEWED' }], pageInfo: { hasNextPage: false } }
+        : { nodes: [{ path: 'other.txt', viewerViewedState: 'VIEWED' }], pageInfo: { hasNextPage: true, endCursor: '2' } },
+    } } } })
+  }
   if (!pull || state.checkMode === 'unreadable') reply(200, { errors: [{ message: 'Private forge diagnostics must not leak' }] })
   const index = Number(variables.cursor ?? 0)
   const nodes = state.checkPages?.[index] ?? []
@@ -103,5 +129,5 @@ writeFileSync(stateFile, JSON.stringify(state))
 if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
-  return { bin, state, configure, configureChecks }
+  return { bin, state, configure, configureChecks, configureViewed }
 }

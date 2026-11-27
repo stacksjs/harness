@@ -1,13 +1,15 @@
 import type { HarnessState, WorkspaceState } from '@harness/engine'
+import { createHash } from 'node:crypto'
 import { isWorkspaceGitRoot } from './diff'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
 import { findPullRequestThread } from './pull-request-links'
-import { repositoryGit } from './repository-commit'
-import { RepositoryPullRequestError, repositoryGitHubRequest } from './repository-pull-request'
+import { readRepositoryBody, repositoryGit } from './repository-commit'
+import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
 import { threadTitle } from './thread-search'
 import { renderTranscriptMarkdown } from './transcript-markdown'
+import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-request-viewed'
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
@@ -116,6 +118,15 @@ async function readActivity(repository: Repository, pull: Pull, page: number, si
   return { items: items.sort((a, b) => a.time.localeCompare(b.time)), more: reply.hasNextPage }
 }
 
+function fileAnchor(path: string) {
+  return 'file-' + createHash('sha256').update(path).digest('hex').slice(0, 24)
+}
+
+function stillTrusted(state: HarnessState, workspace: WorkspaceState) {
+  const current = state.workspaces.get(workspace.id)
+  return current?.trusted && current.path === workspace.path && current.profileId === workspace.profileId
+}
+
 async function readFiles(repository: Repository, number: number, head: string, page: number, signal: AbortSignal) {
   const reply = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}/files?per_page=30&page=${page}`, undefined, signal)
   if (reply.status !== 200 || !Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitHub could not load changes for this request.')
@@ -125,7 +136,15 @@ async function readFiles(repository: Repository, number: number, head: string, p
   const current = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}`, undefined, signal)
   if (current.status !== 200 || !head || readPull(current.body, repository.name)?.head !== head)
     throw new RepositoryPullRequestError('The pull request head changed during the read. Refresh to load its current files.')
-  return { files, more: reply.hasNextPage }
+  let review = null
+  if (files.length) {
+    try { review = await readViewedFiles(repository.path, repository.name, number, head, files.map(file => file.path), signal) }
+    catch (error) {
+      if (error instanceof FileViewedConflict) throw new RepositoryPullRequestError('The pull request head or account changed. Refresh to load the current files.')
+    }
+  }
+  return { files: files.map(file => ({ ...file, anchor: fileAnchor(file.path), formPath: encodeURIComponent(file.path), viewed: review?.states.get(file.path) })),
+    viewer: review?.viewer, more: reply.hasNextPage }
 }
 
 function message(error: unknown) {
@@ -192,10 +211,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   }
   const selected = await detail
   signal.throwIfAborted()
-  if ([...repositories.values()].some(item => {
-    const current = state.workspaces.get(item.workspace.id)
-    return !current?.trusted || current.path !== item.workspace.path || current.profileId !== profile
-  })) throw new RepositoryPullRequestError('The trusted projects changed while loading pull requests.')
+  if ([...repositories.values()].some(item => !stillTrusted(state, item.workspace))) throw new RepositoryPullRequestError('The trusted projects changed while loading pull requests.')
   const selectedUrl = selection?.url ?? ''
   const detailsHref = (detailTab: string, nextPage = 1) => href({ selectedUrl, tab: detailTab, detailPage: nextPage })
   const marks = (row: Pull) => ({ ...row, selected: row.url.toLowerCase() === selectedUrl.toLowerCase(), href: href({ selectedUrl: row.url }) })
@@ -213,7 +229,71 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     selected, selectionError: query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
     listHref: href(), summaryHref: detailsHref('summary'), timelineHref: detailsHref('timeline'), codeHref: detailsHref('code'),
     detailBack: detailsHref(tab, detailPage - 1), detailNext: detailsHref(tab, detailPage + 1),
+    viewedAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/viewed?'),
+    viewedAnchor: query.get('file') ?? '', viewedNotice: viewedMessages.get(query.get('viewedResult') ?? '') ?? '',
   }
+}
+
+const viewedMessages = new Map([
+  ['viewed', 'File marked as viewed.'],
+  ['unviewed', 'File marked as unviewed.'],
+  ['changed', 'The pull request head, file, or GitHub account changed. Review the current file and try again.'],
+  ['unavailable', 'Could not confirm the viewed state on GitHub. Check the account and try again.'],
+  ['busy', 'A file review update is in progress. Try again shortly.'],
+])
+
+type ViewedResult = 'viewed' | 'unviewed' | 'changed' | 'unavailable' | 'busy'
+
+const viewedWrites = new Set<string>()
+
+export async function updateWorkspaceFileViewed(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal) {
+  const profile = integer(query.get('profile'))
+  const selection = parsePullRequest(query.get('selectedUrl') ?? '')
+  const raw = await readRepositoryBody(request, 16_384)
+  const values = new URLSearchParams(raw ?? '')
+  const head = values.get('head') ?? ''
+  const viewer = values.get('viewer') ?? ''
+  let file: string
+  try { file = decodeURIComponent(values.get('path') ?? '') }
+  catch { return null }
+  const intent = values.get('viewed')
+  if (!selection || !profile || !state.profiles.has(profile) || !/^[0-9a-f]{40}$/u.test(head)
+    || !viewer || viewer.length > 256 || !file || Buffer.byteLength(file) > 4096 || file.includes('\0')
+    || (intent !== 'true' && intent !== 'false')) return null
+  const viewed = intent === 'true'
+  const params = new URLSearchParams({ profile: String(profile), selectedUrl: selection.url, tab: 'code', file: fileAnchor(file) })
+  for (const key of ['state', 'sort', 'q', 'repository', 'page', 'detailPage']) {
+    const value = query.get(key)
+    if (value && value.length <= 512) params.set(key, value)
+  }
+  const reply = (result: ViewedResult) => {
+    params.set('viewedResult', result)
+    return { result, message: viewedMessages.get(result), location: '/pull-requests?' + params + '#' + fileAnchor(file) }
+  }
+  const key = selection.repository.toLowerCase() + '#' + selection.number
+  if (viewedWrites.has(key)) return reply('busy')
+  viewedWrites.add(key)
+  try {
+    const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
+    const repository = (await trustedRepositories(workspaces, signal)).get(selection.repository.toLowerCase())
+    if (!repository || !stillTrusted(state, repository.workspace)) return reply('changed')
+    // Pin the host's active credential while verifying and writing, even if the CLI changes accounts mid-request.
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const read = () => readViewedFiles(repository.path, repository.name, selection.number, head, [file], signal, credential)
+    const before = await read()
+    if (!before) return reply('unavailable')
+    if (before.viewer.id !== viewer || !before.states.has(file) || !stillTrusted(state, repository.workspace)) return reply('changed')
+    const desired = viewed ? 'VIEWED' : 'UNVIEWED'
+    if (before.states.get(file) !== desired) {
+      // A dropped response can follow a successful write. Confirm by reading the matching head and file.
+      await writeFileViewed(repository.path, before.id, file, viewed, signal, credential).catch(() => {})
+      const after = await read()
+      if (!after || after.viewer.id !== viewer || after.states.get(file) !== desired) return reply('unavailable')
+    }
+    return reply(viewed ? 'viewed' : 'unviewed')
+  }
+  catch (error) { return reply(error instanceof FileViewedConflict ? 'changed' : 'unavailable') }
+  finally { viewedWrites.delete(key) }
 }
 
 export function renderPullRequestMarkdown(html: string, view: Awaited<ReturnType<typeof pullRequestWorkspace>>) {

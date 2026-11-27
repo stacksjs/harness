@@ -566,9 +566,16 @@ const RESPONSIVE_SHELL = `
 [data-pr-completed] > summary, [data-pr-list-problems] > summary { cursor: pointer; padding-block: 10px; font-size: 12px; }
 [data-pr-activity] li, [data-pr-files] li { margin-block-end: 8px; padding: 10px; border: 1px solid var(--workspace-line); border-radius: 6px; }
 [data-pr-activity] time { opacity: .7; font-size: 12px; }
+[data-pr-files] li { position: relative; }
 [data-pr-files] summary { cursor: pointer; min-height: 28px; }
+[data-pr-files] li:has([data-pr-viewed-form]) summary { padding-inline-end: 80px; min-height: 42px; }
+[data-pr-viewed-form] { position: absolute; inset-block-start: 8px; inset-inline-end: 8px; }
+[data-pr-viewed-form] button[aria-pressed="true"] { color: var(--workspace-added-text); background: var(--workspace-hover); border-color: currentColor; }
+[data-pr-viewed-summary], [data-pr-viewed-notice], [data-pr-file-revised] { margin-block-end: 9px; font-size: 12px; }
+[data-pr-viewed-summary] span { opacity: .8; }
+[data-pr-file-revised] { margin: 4px 0 0; }
 [data-pr-files] summary > span { margin-inline-start: 8px; font-size: 12px; }
-[data-pr-files] pre { max-width: 100%; overflow: auto; background: var(--workspace-bg); padding: 8px; font-size: 12px; }
+[data-pr-files] pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--workspace-bg); padding: 8px; font-size: 12px; }
 [data-pr-pagination] { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-block: 12px; font-size: 12px; }
 [data-pr-empty] { color: inherit; opacity: .82; font-size: 13px; padding: 16px; }
 [data-pr-workspace] :is(input, summary, pre):focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
@@ -578,6 +585,7 @@ const RESPONSIVE_SHELL = `
   [data-pr-workspace-detail] { flex: 1; border: 0; }
   [data-pr-filters] :is(input, select), [data-pr-button], [data-pr-back], [data-pr-tabs] a { min-height: 44px; }
   [data-navigation-pr] { min-height: 44px; }
+  [data-pr-files] li:has([data-pr-viewed-form]) summary { min-height: 48px; }
   [data-pr-row] { gap: 7px; padding: 8px 4px; }
 }
 [data-diff]:not([hidden]) { display: flex; flex-direction: column; min-block-size: 0; }

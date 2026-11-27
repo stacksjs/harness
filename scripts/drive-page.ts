@@ -6384,6 +6384,28 @@ try {
     await clonePage.setViewportSize({ width: 1280, height: 800 })
     await reviewList.waitFor()
     await capture('pull-requests-code-1280x800', clonePage)
+    const viewedFile = clonePage.getByRole('button', { name: 'Viewed report.txt' })
+    const openingReviewUrl = clonePage.url()
+    await viewedFile.focus()
+    await clonePage.keyboard.press('Enter')
+    await clonePage.getByText('File marked as viewed.', { exact: true }).waitFor()
+    check('mark viewed preserves the exact file, expanded patch and selected request',
+      await viewedFile.getAttribute('aria-pressed') === 'true'
+      && clonePage.url() === openingReviewUrl
+      && await viewedFile.evaluate(button => document.activeElement === button)
+      && await clonePage.locator('details[open] pre[aria-label="Patch for report.txt"]').isVisible())
+    await clonePage.reload()
+    await viewedFile.waitFor()
+    check('viewed state survives reload and matches the forge', await viewedFile.getAttribute('aria-pressed') === 'true'
+      && JSON.parse(readFileSync(github.state, 'utf8')).fileViewed === true)
+    await clonePage.setViewportSize({ width: 390, height: 844 })
+    await capture('pull-requests-viewed-390x844', clonePage)
+    await viewedFile.click()
+    await clonePage.getByText('File marked as unviewed.', { exact: true }).waitFor()
+    check('unmark viewed restores the unchecked file without changing the pull request',
+      await viewedFile.getAttribute('aria-pressed') === 'false' && JSON.parse(readFileSync(github.state, 'utf8')).fileViewed === false)
+    await clonePage.setViewportSize({ width: 1280, height: 800 })
+
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
     await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('unmatched review')
     await reviewList.getByRole('button', { name: 'Apply filters' }).click()

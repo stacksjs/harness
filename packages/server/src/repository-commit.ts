@@ -48,8 +48,8 @@ export async function createStagedCommit(path: string, message: string) {
   return stdout.trim()
 }
 
-export async function readRepositoryInput(request: Request, maxBytes: number): Promise<Record<string, unknown> | null> {
-  if (request.headers.get('content-type') !== 'application/json' || !request.body) return null
+export async function readRepositoryBody(request: Request, maxBytes: number): Promise<string | null> {
+  if (!request.body) return null
   const reader = request.body.getReader()
   const decoder = new TextDecoder()
   let input = ''
@@ -62,11 +62,21 @@ export async function readRepositoryInput(request: Request, maxBytes: number): P
       if (size > maxBytes) return null
       input += decoder.decode(chunk.value, { stream: true })
     }
-    const value = JSON.parse(input + decoder.decode())
-    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+    return input + decoder.decode()
   }
   catch { return null }
   finally { void reader.cancel().catch(() => {}) }
+}
+
+export async function readRepositoryInput(request: Request, maxBytes: number): Promise<Record<string, unknown> | null> {
+  if (request.headers.get('content-type') !== 'application/json') return null
+  const input = await readRepositoryBody(request, maxBytes)
+  if (input === null) return null
+  try {
+    const value = JSON.parse(input)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+  }
+  catch { return null }
 }
 
 export async function readRepositorySubmission(request: Request): Promise<{ revision: string, message: string } | null> {

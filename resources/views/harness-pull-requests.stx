@@ -35,7 +35,54 @@ export const listHref = $props.listHref
 export const detailPage = $props.detailPage
 export const detailBack = $props.detailBack
 export const detailNext = $props.detailNext
+export const viewedAction = $props.viewedAction
+export const viewedAnchor = $props.viewedAnchor
+export const viewedNotice = $props.viewedNotice
+export const trackedFiles = (selected?.files || []).filter(file => file.viewed)
+export const viewedCount = trackedFiles.filter(file => file.viewed === 'VIEWED').length
+export const initialViewedStates = Object.fromEntries(trackedFiles.map(file => [file.anchor, file.viewed]))
 </script>
+@if(tab === 'code')
+<script client>
+const fileViewedStates = state(@json(initialViewedStates))
+const viewedUpdate = state('')
+const viewedMessage = state(@json(viewedNotice))
+const viewedSummary = derived(() => {
+  const states = Object.values(fileViewedStates())
+  return states.filter(value => value === 'VIEWED').length + ' of ' + states.length + ' viewed on this page'
+})
+
+function fileIsViewed(anchor) {
+  return fileViewedStates()[anchor] === 'VIEWED'
+}
+
+function fileNeedsReview(anchor) {
+  return fileViewedStates()[anchor] === 'DISMISSED'
+}
+
+async function changeFileViewed(event) {
+  if (viewedUpdate()) return
+  const form = event.currentTarget
+  const anchor = form.dataset.fileAnchor
+  const desired = !fileIsViewed(anchor)
+  const body = new URLSearchParams()
+  for (const [key, value] of new FormData(form)) if (typeof value === 'string') body.set(key, value)
+  body.set('viewed', String(desired))
+  viewedUpdate.set(anchor)
+  viewedMessage.set('Updating viewed state…')
+  try {
+    const response = await fetch(form.action, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const update = await response.json().catch(() => ({}))
+    if (response.ok && (update.result === 'viewed' || update.result === 'unviewed')) {
+      fileViewedStates.update(previous => ({ ...previous, [anchor]: update.result === 'viewed' ? 'VIEWED' : 'UNVIEWED' }))
+    }
+    viewedMessage.set(update.message || 'Could not confirm the viewed state on GitHub. Try again.')
+  }
+  catch { viewedMessage.set('Could not confirm the viewed state on GitHub. Try again.') }
+  finally { viewedUpdate.set('') }
+}
+</script>
+@endif
 <main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
   <header data-pr-workspace-header>
     <a href="{{ backHref }}" data-pr-back>
@@ -222,10 +269,16 @@ export const detailNext = $props.detailNext
             </ol>
           @else
             @if(!selected.files?.length)<p>No files on this page.</p>@endif
+            <p data-pr-viewed-notice role="status" @if(!viewedNotice) hidden@endif :hidden="!viewedMessage()" :text="viewedMessage()">{{ viewedNotice }}</p>
+            @if(trackedFiles.length)
+              <p data-pr-viewed-summary><span :text="viewedSummary()">{{ viewedCount }} of {{ trackedFiles.length }} viewed on this page</span> <span>· {{ selected.viewer.login }}</span></p>
+            @elseif(selected.files?.length)
+              <p data-pr-viewed-notice role="status">Viewed state is unavailable for this GitHub account.</p>
+            @endif
             <ul data-pr-files>
               @foreach(selected.files || [] as file)
-                <li>
-                  <details>
+                <li id="{{ file.anchor }}">
+                  <details @if(file.anchor === viewedAnchor) open@endif>
                     <summary>
                       <code>{{ file.path }}</code>
                       <span>{{ file.status }} <strong data-pr-additions>+{{ file.additions }}</strong> <strong data-pr-deletions>-{{ file.deletions }}</strong></span>
@@ -234,6 +287,18 @@ export const detailNext = $props.detailNext
                     @if(file.patch)<pre tabindex="0" aria-label="Patch for {{ file.path }}"><code>{{ file.patch }}</code></pre>
                     @else<p>No text patch available. Open the request on GitHub to inspect this file.</p>@endif
                   </details>
+                  @if(file.viewed && selected.viewer)
+                    <form method="post" action="{{ viewedAction }}" data-pr-viewed-form data-file-anchor="{{ file.anchor }}" @submit.prevent="changeFileViewed">
+                      <input type="hidden" name="path" value="{{ file.formPath }}">
+                      <input type="hidden" name="head" value="{{ selected.head }}">
+                      <input type="hidden" name="viewer" value="{{ selected.viewer.id }}">
+                      <input type="hidden" name="viewed" value="{{ String(file.viewed !== 'VIEWED') }}">
+                      <button type="submit" aria-label="Viewed {{ file.path }}" aria-pressed="{{ String(file.viewed === 'VIEWED') }}"
+                        :aria-pressed="String(fileIsViewed('{{ file.anchor }}'))" :aria-disabled="viewedUpdate() ? 'true' : 'false'"
+                        @if(file.anchor === viewedAnchor) autofocus@endif data-pr-button>Viewed</button>
+                    </form>
+                    <p data-pr-file-revised @if(file.viewed !== 'DISMISSED') hidden@endif :hidden="!fileNeedsReview('{{ file.anchor }}')">Changed since viewed</p>
+                  @endif
                 </li>
               @endforeach
             </ul>

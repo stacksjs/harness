@@ -21,14 +21,27 @@ export async function readPullRequestSubmission(request: Request) {
   return { revision, baseRef, title, body, draft }
 }
 
-export async function repositoryGitHubRequest(path: string, endpoint: string, payload?: object, signal?: AbortSignal): Promise<GitHubReply> {
+export async function repositoryGitHubCredential(path: string, signal: AbortSignal) {
+  const configured = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+  if (configured) return configured
+  if (!Bun.which('gh')) throw new RepositoryPullRequestError('Install the GitHub CLI on this host, then run gh auth login.')
+  const child = Bun.spawn(['gh', 'auth', 'token', '--hostname', 'github.com'], {
+    cwd: path, env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_DEBUG: '', NO_COLOR: '1' },
+    stdout: 'pipe', stderr: 'ignore', stdin: 'ignore', timeout: 15_000, signal,
+  })
+  const [value, status] = await Promise.all([new Response(child.stdout).text(), child.exited])
+  if (status !== 0 || !value.trim()) throw new RepositoryPullRequestError('Sign in to GitHub on the host and try again.')
+  return value.trim()
+}
+
+export async function repositoryGitHubRequest(path: string, endpoint: string, payload?: object, signal?: AbortSignal, credential?: string): Promise<GitHubReply> {
   if (!Bun.which('gh')) throw new RepositoryPullRequestError('Install the GitHub CLI on this host, then run gh auth login.')
   const child = Bun.spawn([
     'gh', 'api', '--hostname', 'github.com', '--include', '--method', payload ? 'POST' : 'GET',
     '-H', 'Accept: application/vnd.github+json', ...(payload ? ['--input', '-'] : []), endpoint,
   ], {
     cwd: path,
-    env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_DEBUG: '', NO_COLOR: '1' },
+    env: { ...process.env, GH_PROMPT_DISABLED: '1', GH_DEBUG: '', NO_COLOR: '1', ...(credential && { GH_TOKEN: credential }) },
     stdin: payload ? new Blob([JSON.stringify(payload)]) : 'ignore',
     stdout: 'pipe', stderr: 'ignore', timeout: 15_000, signal,
   })
