@@ -3,7 +3,7 @@
     <p role="status" data-pr-filter-feedback>GitHub returned partial results. Refresh to retry the search.</p>
   @endif
   @if(cappedSearch)
-    <p role="status" data-pr-filter-feedback>GitHub search shows up to 1,000 results per repository. Narrow your filters for more specific matches.</p>
+    <p role="status" data-pr-filter-feedback>GitHub search shows up to 1,000 results per search. Narrow your filters for more specific matches.</p>
   @endif
   @if(failures.length)
     <details data-pr-list-problems>
@@ -16,15 +16,18 @@
   @if(detailsUnavailable)
     <p role="status" data-pr-filter-feedback>Some pull request details are unavailable.</p>
   @endif
+  @if(partitionsUnavailable)
+    <p role="status" data-pr-filter-feedback>Could not load the priority groups. Showing the regular list.</p>
+  @endif
   @if(groups.length)
     @foreach(groups as group)
       @if(group.label)
-        <h3 id="pr-group-{{ group.key }}" data-pr-group-heading>{{ group.label }} <span>{{ group.entries.length }}</span></h3>
+        <h3 id="pr-group-{{ group.key }}" data-pr-group-heading>{{ group.label }} <span data-pr-group-count>{{ group.entries.length }}</span></h3>
       @endif
       <ul data-pr-list data-pr-group="{{ group.key }}" @if(group.label) aria-labelledby="pr-group-{{ group.key }}" @else aria-label="Pull requests" @endif>
         @foreach(group.entries as pull)
           <li>
-            <a href="{{ pull.href }}" data-pr-row @if(pull.selected) aria-current="page"@endif>
+            <a href="{{ pull.href }}" data-pr-row data-pr-entry="{{ pull.url.toLowerCase() }}" @if(pull.selected) aria-current="page"@endif>
               <span class="inline-block size-4 i-hugeicons-git-pull-request" data-pr-state="{{ pull.status }}" aria-hidden="true"></span>
               <span data-pr-row-copy>
                 <strong data-pr-row-title title="{{ pull.title }}"><span data-pr-number>#{{ pull.number }}</span> {{ pull.title }}</strong>
@@ -75,10 +78,11 @@
     <p data-pr-empty>No pull requests match these filters.</p>
   @endif
   @if(pageBack || pageNext)
-    <nav data-pr-pagination aria-label="Pull request pages">
+    <nav data-pr-pagination data-pr-result-pages aria-label="Pull request pages">
       @if(pageBack)<a href="{{ pageBack }}">Previous page</a>@endif
       <span>Page {{ page }}</span>
-      @if(pageNext)<a href="{{ pageNext }}">Next page</a>@endif
+      @if(pageNext)<a href="{{ pageNext }}" data-pr-next data-pr-button>Load more pull requests</a>@endif
+      <span data-pr-page-status role="status"></span>
     </nav>
   @endif
 </div>

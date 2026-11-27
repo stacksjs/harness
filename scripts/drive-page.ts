@@ -6930,9 +6930,53 @@ try {
     }
     finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
 
+    try {
+      const original = beforeFilters.pulls.find((pull: { number: number }) => pull.number === 1)
+      writeFileSync(github.state, JSON.stringify({ ...beforeFilters, pulls: [
+        ...beforeFilters.pulls,
+        ...Array.from({ length: 23 }, (_, index) => ({ ...original, number: index + 101,
+          title: 'Continuation pull request ' + index, user: { login: 'another-author' },
+          html_url: original.html_url.replace(/1$/u, String(index + 101)),
+          updated_at: new Date(Date.UTC(2026, 11, index + 1)).toISOString(),
+        })),
+      ] }))
+      await clonePage.goto(mergeReviewUrl)
+      await reviewList.getByLabel('Saved pull request views').waitFor()
+      const nextPage = reviewList.getByRole('link', { name: 'Load more pull requests' })
+      const selectedReview = await clonePage.locator('[data-pr-workspace-detail]').elementHandle()
+      const firstResult = await reviewList.locator('[data-pr-entry]').first().elementHandle()
+      const addressBeforeAppend = clonePage.url()
+      const firstPageRowCount = await reviewList.locator('[data-pr-entry]').count()
+      const pageResult = clonePage.waitForResponse(response => {
+        const url = new URL(response.url())
+        return url.pathname === '/pull-requests/results' && url.searchParams.get('page') === '2'
+      })
+      await nextPage.press('Enter')
+      const response = await pageResult
+      const responseBody = await response.json().catch(() => null)
+      try { await reviewList.getByText('Continuation pull request 0', { exact: false }).waitFor({ timeout: 8_000 }) }
+      catch (error) {
+        console.error('Pull request continuation', { status: response.status(), partial: responseBody?.partial,
+          rows: responseBody?.html?.match(/data-pr-entry=/gu)?.length, statusText: await reviewList.getByRole('status').allTextContents() })
+        throw error
+      }
+      const loadedKeys = await reviewList.locator('[data-pr-entry]').evaluateAll(rows => rows.map(row => row.getAttribute('data-pr-entry')))
+      check('loading more PRs appends unique rows and leaves the open review mounted',
+        loadedKeys.length > firstPageRowCount && new Set(loadedKeys).size === loadedKeys.length
+        && await reviewList.locator('[data-pr-entry]').filter({ hasText: 'Continuation pull request' }).count() === 23
+        && clonePage.url() === addressBeforeAppend && await selectedReview?.evaluate(node => node.isConnected) === true
+        && await firstResult?.evaluate(node => node.isConnected) === true)
+      await reviewList.locator('[data-pr-entry]').last().evaluate(row => row.scrollIntoView({ block: 'center' }))
+      check('revealing appended PR rows keeps the workspace header in the viewport',
+        await clonePage.locator('[data-pr-workspace-header]').evaluate(header => scrollY === 0 && header.getBoundingClientRect().top === 0))
+      await capture('pull-requests-load-more-1280x800', clonePage)
+    }
+    finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
+
     github.configureMerge('ready', ['MERGE', 'SQUASH'])
     await clonePage.setViewportSize({ width: 390, height: 844 })
-    await clonePage.goto(mergeReviewUrl, { waitUntil: 'domcontentloaded' })
+    if (clonePage.url() === mergeReviewUrl) await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    else await clonePage.goto(mergeReviewUrl, { waitUntil: 'domcontentloaded' })
     await actions.click()
     await lifecycleMenu.getByRole('button', { name: 'Ready for review', exact: true }).click()
     await lifecycleStatus('Pull request is ready for review.').waitFor()

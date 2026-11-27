@@ -1963,7 +1963,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             if (view.listUnavailable) return new Response(null, { status: 503, headers })
             const html = await renderHarnessTemplate(join(process.cwd(), 'resources/partials/harness-pr-results.stx'), view, { autoShell: false })
             return Response.json({ html, scope: view.savedViewScope, search: view.search, draft: view.draftChoice,
-              filterCount: view.activeFilterCount }, { headers: { ...headers, 'content-type': 'application/json' } })
+              filterCount: view.activeFilterCount,
+              partial: view.incompleteSearch || view.partitionsUnavailable || view.failures.length > 0,
+            }, { headers: { ...headers, 'content-type': 'application/json' } })
           }).catch(() => new Response(null, { status: 503, headers }))
         }
         if (url.pathname === '/pull-requests/comments') {
