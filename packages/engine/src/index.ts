@@ -1,7 +1,7 @@
 export { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 export { CommandRejected, Engine } from './engine'
 export type { DispatchResult, EngineOptions, Reducer } from './engine'
-export { activeThreadOrder, apply, checkpointReviewRepositories, conversationRewindPoint, emptyState, forkResponsePoint, inactivityDeadline, isForkableResponse, isTurnActive, isolatedRewindScope, isVisiblePin, profilePinnedThreads, providerConversation, replay, threadShelf } from './projections'
+export { activeThreadOrder, apply, checkpointReviewRepositories, conversationRewindPoint, emptyState, forkResponsePoint, inactivityDeadline, isForkableResponse, isTurnActive, isolatedRewindScope, isVisiblePin, profilePinnedThreads, providerConversation, replay, threadShelf, workspaceSettings } from './projections'
 export type { HarnessState, ProfileState, SessionState, TurnState, WorkspaceState } from './projections'
 export { derivedId, InvalidCommand, reduce } from './reducer'
 export { MemoryStore } from './store'

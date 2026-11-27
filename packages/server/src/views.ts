@@ -7,7 +7,7 @@
  * has run.
  */
 
-import type { ClaudeAccountCompaction, HostSettings, ThreadNavigation } from '@harness/contract'
+import type { ClaudeAccountCompaction, HostSettings, ProjectSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
 import { checkpointReviewRepositories, claudeIdleCompaction, conversationRewindPoint, isForkableResponse, isolatedRewindScope, providerConversation } from '@harness/engine'
@@ -65,6 +65,14 @@ export interface ViewProps {
    * and then correct itself.
    */
   hostSettings: HostSettings
+  /**
+   * What the project in view answers for itself, where it does not take the
+   * host's answer, and which project that is. Only the keys it pins are here:
+   * the page layers them over `hostSettings` to show what is in force, and
+   * needs them apart to show which of the two a row is following.
+   */
+  projectSettings: ProjectSettings
+  projectSettingsId: number
   /**
    * The keyboard registry, rendered into the Keyboard section.
    *
@@ -182,6 +190,7 @@ export function viewProps(state: HarnessState, options: {
     ?? selectedProfile?.workspaces[0]
     ?? null
 
+  const settingsWorkspaceId = active?.workspaceId ?? draftWorkspace?.id
   const providerProfileId = (active ? state.workspaces.get(active.workspaceId)?.profileId : undefined) ?? selectedProfile?.id ?? null
   return {
     profiles,
@@ -197,6 +206,8 @@ export function viewProps(state: HarnessState, options: {
     settingsSection: options.settingsSection ?? null,
     settingsSections,
     hostSettings: { ...state.settings },
+    projectSettingsId: settingsWorkspaceId ?? 0,
+    projectSettings: { ...(settingsWorkspaceId === undefined ? undefined : state.workspaces.get(settingsWorkspaceId)?.settings) },
     keybindings: keybindingCommands.map((command) => {
       const chord = parseChord(command.chord)
       const appleChord = parseChord(command.appleChord ?? command.chord)

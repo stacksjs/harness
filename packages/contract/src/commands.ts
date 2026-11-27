@@ -96,7 +96,20 @@ export type ClientCommand =
    * of them. Unknown keys are dropped rather than refused, so a newer client
    * may send a setting this host has not heard of.
    */
-  | { type: 'settings.update', changes: Partial<HostSettings> }
+  | {
+    type: 'settings.update'
+    changes: Partial<HostSettings>
+    /**
+     * Change what this project answers instead of the host's own answer.
+     *
+     * Absent means the host itself, which is what every client used to send.
+     * `inherit` hands keys back to the host, which a value cannot express:
+     * `autoSettleAfterDays: null` is a real answer ("never settle here"), not
+     * an absence.
+     */
+    workspaceId?: number
+    inherit?: Array<keyof HostSettings>
+  }
   | { type: 'profile.create', name: string, icon?: string, tint?: string }
   | { type: 'profile.update', profileId: number, name?: string, icon?: string, tint?: string, position?: number }
   | { type: 'profile.claude-compaction.update', profileId: number, providerInstanceId: number, changes: ClaudeAccountCompaction }

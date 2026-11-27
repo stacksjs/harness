@@ -136,6 +136,13 @@ class Client {
     return frame?.settings ?? null
   }
 
+  /** The host's own answers and one project's, which travel apart. */
+  async readProjectSettings(workspaceId: number): Promise<{ settings: HostSettings, projectSettings: Partial<HostSettings> } | null> {
+    this.send({ t: 'read-settings', workspaceId })
+    const frame = await this.waitForFrame(frame => frame?.t === 'host-settings' && frame.workspaceId === workspaceId, 3000)
+    return frame ? { settings: frame.settings, projectSettings: frame.projectSettings } : null
+  }
+
   async subscribeCreatedSession(id: string): Promise<number> {
     const receipt = await this.waitForFrame(frame => (frame?.t === 'dispatched' || frame?.t === 'rejected') && frame.id === id, 5000)
     if (receipt?.t !== 'dispatched') throw new Error(receipt?.message ?? 'Session creation was not acknowledged')
@@ -3397,6 +3404,69 @@ describe('host settings belong to the host', () => {
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
     expect(harness.engine.current.settings).toEqual(defaultHostSettings)
+  })
+
+  it('lets one project answer for itself without moving the host or another project', async () => {
+    const database = join(dir, 'test.sqlite')
+    const { driver } = fakeDriver([])
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+
+    const endpoint = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(endpoint)
+    const observer = await Client.connect(endpoint)
+    first.send({ t: 'dispatch', envelope: { id: 'c_prof', at: 1, command: { type: 'profile.create', name: 'P' } } })
+    const profileId = derivedId('c_prof')
+    first.send({ t: 'dispatch', envelope: { id: 'c_svc', at: 2, command: { type: 'workspace.add', profileId, path: dir } } })
+    first.send({ t: 'dispatch', envelope: { id: 'c_doc', at: 3, command: { type: 'workspace.add', profileId, path: join(dir, 'docs') } } })
+    const service = derivedId('c_svc')
+    const docs = derivedId('c_doc')
+    expect((await first.waitForDispatch('c_doc'))?.t).toBe('dispatched')
+
+    const changes = { defaultDriver: 'codex', terminalShell: 'den' } as const
+    first.send({ t: 'dispatch', envelope: { id: 'c_pin', at: 4, command: { type: 'settings.update', workspaceId: service, changes } } })
+    expect((await first.waitForDispatch('c_pin'))?.t).toBe('dispatched')
+
+    // The host's own answers do not move, and neither does the other project.
+    expect(harness.engine.current.settings).toEqual(defaultHostSettings)
+    expect(harness.engine.current.workspaces.get(service)?.settings).toEqual(changes)
+    expect(harness.engine.current.workspaces.get(docs)?.settings).toBeUndefined()
+
+    // A second client of the same host is served the same answer for the same
+    // project, and the host's own answers alongside it rather than merged in.
+    expect(await observer.waitFor('settings.updated')).toEqual({ type: 'settings.updated', workspaceId: service, changes })
+    expect(await observer.readProjectSettings(service)).toEqual({ settings: defaultHostSettings, projectSettings: changes })
+    expect(await observer.readProjectSettings(docs)).toEqual({ settings: defaultHostSettings, projectSettings: {} })
+    observer.close()
+    first.close()
+    harness.stop()
+
+    // In the log, so a fresh process over the same database still has it.
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+    const reconnected = await Client.connect(endpoint)
+    expect(await reconnected.readProjectSettings(service)).toEqual({ settings: defaultHostSettings, projectSettings: changes })
+
+    // Handing one key back leaves the other pinned.
+    reconnected.send({
+      t: 'dispatch',
+      envelope: { id: 'c_inherit', at: 5, command: { type: 'settings.update', workspaceId: service, changes: {}, inherit: ['defaultDriver'] } },
+    })
+    expect((await reconnected.waitForDispatch('c_inherit'))?.t).toBe('dispatched')
+    expect(harness.engine.current.workspaces.get(service)?.settings).toEqual({ terminalShell: 'den' })
+    reconnected.close()
+  })
+
+  it('refuses a project override for a project this host does not have', async () => {
+    const { driver } = fakeDriver([])
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+
+    client.send({
+      t: 'dispatch',
+      envelope: { id: 'c_ghost', at: 1, command: { type: 'settings.update', workspaceId: 4242, changes: { defaultDriver: 'codex' } } },
+    })
+    expect((await client.waitForDispatch('c_ghost'))?.t).toBe('rejected')
+    expect(harness.engine.current.settings).toEqual(defaultHostSettings)
+    client.close()
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {
