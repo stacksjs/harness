@@ -6094,6 +6094,43 @@ try {
   check('after cloning and giving trust, a new PR checkout preserves the original linked draft',
     harness.engine.current.sessions.size === countBeforeClone + 2 && !existsSync(join(newCheckout, 'review.txt')))
   await clonePage.waitForLoadState('networkidle')
+
+  if (!pullRequestThread?.worktreePath) throw new Error('The PR fixture checkout is unavailable.')
+  const commitCheckout = pullRequestThread.worktreePath
+  const fixturePath = join(commitCheckout, 'review.txt')
+  const fixtureGit = (...args: string[]) => execFileSync('git', args, { cwd: commitCheckout, encoding: 'utf8' }).trim()
+  fixtureGit('config', 'user.name', 'Fixture Author')
+  fixtureGit('config', 'user.email', 'fixture@example.invalid')
+  writeFileSync(fixturePath, 'Staged review note\n')
+  fixtureGit('add', '--', 'review.txt')
+  writeFileSync(fixturePath, 'Newer working note\n')
+  const beforeCommit = fixtureGit('rev-parse', 'HEAD')
+  await clonePage.setViewportSize({ width: 1440, height: 900 })
+  await clonePage.goto(baseUrl + '/s/' + pullRequestSession)
+  await clonePage.getByRole('button', { name: 'Changes', exact: true }).click()
+  const openCommit = clonePage.getByRole('button', { name: 'Commit staged', exact: true })
+  const commitDialog = clonePage.getByRole('dialog', { name: 'Commit staged changes' })
+  const commitMessage = commitDialog.getByRole('textbox', { name: 'Commit message' })
+  await openCommit.click()
+  await commitDialog.getByText('review.txt', { exact: true }).waitFor()
+  await commitMessage.fill('Review staged note')
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-review-commit-${width}x${height}`, clonePage)
+  }
+  await clonePage.keyboard.press('Escape')
+  await commitDialog.waitFor({ state: 'hidden' })
+  check('Escape closes commit review and leaves the index and branch unchanged',
+    fixtureGit('rev-parse', 'HEAD') === beforeCommit && await openCommit.evaluate(button => button === document.activeElement))
+  await openCommit.click()
+  await commitMessage.fill('Review staged note')
+  await commitDialog.getByRole('button', { name: 'Commit', exact: true }).click()
+  await commitDialog.waitFor({ state: 'hidden' })
+  await clonePage.getByText(/^Committed [0-9a-f]{7}\.$/u).waitFor()
+  check('the commit dialog records the index and keeps newer working changes',
+    fixtureGit('show', 'HEAD:review.txt') === 'Staged review note' && readFileSync(fixturePath, 'utf8') === 'Newer working note\n')
+  await clonePage.waitForLoadState('networkidle')
+
 }
 finally {
   delayGit = false

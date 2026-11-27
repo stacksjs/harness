@@ -318,11 +318,11 @@ const RESPONSIVE_SHELL = `
 [data-share-commands] { display: grid; gap: 2px; margin-block-start: 6px; }
 [data-share-commands] button { min-height: 34px; border-radius: 6px; padding: 4px 8px; font-size: 13px; text-align: start; }
 [data-share-commands] button:hover, [data-share-dialog-actions] button:hover { background: var(--workspace-hover); }
-[data-prompt-link-dialog], [data-share-clipboard-dialog] {
+[data-prompt-link-dialog], [data-share-clipboard-dialog], [data-repository-commit-dialog] {
   width: min(430px, calc(100% - 24px)); max-height: calc(100dvh - 24px); margin: auto;
   padding: 0; color: inherit; background: var(--workspace-surface); border: 1px solid var(--workspace-line); border-radius: 12px;
 }
-[data-prompt-link-dialog]::backdrop, [data-share-clipboard-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
+[data-prompt-link-dialog]::backdrop, [data-share-clipboard-dialog]::backdrop, [data-repository-commit-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
 [data-share-dialog-body] { display: grid; gap: 10px; padding: 16px; font-size: 13px; overflow-wrap: anywhere; }
 [data-share-dialog-body] h2 { font-size: 16px; font-weight: 600; }
 [data-share-dialog-body] pre, [data-share-dialog-body] textarea {

@@ -1054,6 +1054,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   </dialog>
 
   @include('../partials/harness-prompt-link-dialogs')
+  @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-commit')
   @include('../partials/harness-project-clone')
 
   <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
@@ -2391,6 +2392,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const browserPreviewToggle = useRef('browserPreviewToggleBox')
   let browserPreviewTrigger = null
   const diffClose = useRef('diffCloseBox')
+  const repositoryCommitDialog = useRef('repositoryCommitDialogBox')
+  const repositoryCommitPreview = state(null)
+  const repositoryCommitMessage = state('')
+  const repositoryCommitLimit = state(40)
+  const repositoryCommitError = state('')
+  const repositoryCommitResult = state('')
+  const repositoryCommitLoading = state(false)
+  const repositoryCommitBusy = state(false)
+  let repositoryCommitTrigger
+  let repositoryCommitKey
+  let repositoryCommitRequest
   const changesPane = useRef('changesPane')
   const workspaceFilesOpen = state(false)
   const workspaceFileState = state(null)
@@ -2877,6 +2889,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function stopWorkspaceStatusRequests() {
     workspaceStatusPaused = true
     diffGitStatusStop?.()
+    repositoryCommitRequest?.abort()
     providerCatalogRequest?.abort()
     draftWorktreeRequest?.abort()
     shareRepositoryRequest?.abort()
@@ -4558,6 +4571,88 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function showMoreDiffRows(path) {
     setDiffFileLimit(path, (diffFileLimits().get(path) || 0) + diffPageSize)
+  }
+
+  function repositoryCommitAddress() {
+    const query = repositoryCommitKey ? '?' + new URLSearchParams({ repository: repositoryCommitKey }) : ''
+    return '/s/' + sessionId + '/git/commit' + query
+  }
+
+  function openRepositoryCommit(event) {
+    repositoryCommitTrigger = event.currentTarget
+    repositoryCommitKey = diffRepository()
+    repositoryCommitMessage.set('')
+    repositoryCommitResult.set('')
+    repositoryCommitDialog.current?.showModal()
+    void loadRepositoryCommit()
+  }
+
+  function closeRepositoryCommit() {
+    if (repositoryCommitBusy()) return
+    repositoryCommitRequest?.abort()
+    repositoryCommitDialog.current?.close()
+    if (repositoryCommitTrigger?.offsetWidth) repositoryCommitTrigger.focus()
+    else diffClose.current?.focus()
+  }
+
+  async function loadRepositoryCommit() {
+    if (repositoryCommitBusy()) return
+    repositoryCommitRequest?.abort()
+    const request = new AbortController()
+    repositoryCommitRequest = request
+    repositoryCommitLoading.set(true)
+    repositoryCommitPreview.set(null)
+    repositoryCommitLimit.set(40)
+    repositoryCommitError.set('')
+    try {
+      const response = await fetch(repositoryCommitAddress(), { signal: request.signal })
+      const value = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(value.error || 'Could not read the staged changes.')
+      repositoryCommitPreview.set(value)
+      if (value.problem) repositoryCommitError.set(value.problem)
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositoryCommitError.set(error.message || 'Could not read the staged changes.')
+    }
+    finally {
+      if (repositoryCommitRequest === request) {
+        repositoryCommitLoading.set(false)
+        repositoryCommitRequest = undefined
+      }
+    }
+  }
+
+  async function submitRepositoryCommit() {
+    const preview = repositoryCommitPreview()
+    const message = repositoryCommitMessage().trim()
+    if (!preview?.files.length || !message || repositoryCommitBusy() || repositoryCommitError()) return
+    const request = new AbortController()
+    repositoryCommitRequest = request
+    repositoryCommitBusy.set(true)
+    try {
+      const response = await fetch(repositoryCommitAddress(), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message, revision: preview.revision }), signal: request.signal,
+      })
+      const value = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok || !value.commit) throw new Error(value.error || 'Could not confirm the commit.')
+      repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + '.')
+      repositoryCommitBusy.set(false)
+      repositoryCommitDialog.current?.close()
+      diffClose.current?.focus()
+      refreshWorkspaceDiff()
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositoryCommitError.set(error.message || 'Could not confirm the commit.')
+    }
+    finally {
+      if (repositoryCommitRequest === request) {
+        repositoryCommitBusy.set(false)
+        repositoryCommitRequest = undefined
+      }
+    }
   }
 
   function refreshWorkspaceDiff() {
@@ -6667,6 +6762,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     if (event.defaultPrevented) return
+    if (repositoryCommitDialog.current?.open) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeRepositoryCommit()
+      }
+      return
+    }
     updateSidebarJumpHints(event)
     const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
     if (draftPickerOpen()) {
