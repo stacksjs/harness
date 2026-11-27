@@ -58,8 +58,8 @@ import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
 import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
-import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLifecycle, updateWorkspaceReviewConversation } from './pull-request-workspace'
-import type { PullRequestLifecycleDraft, PullRequestReplyDraft } from './pull-request-workspace'
+import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLabels, updateWorkspacePullRequestLifecycle, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import type { PullRequestLabelDraft, PullRequestLifecycleDraft, PullRequestReplyDraft } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -1912,7 +1912,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle'].includes(url.pathname)) {
+      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
@@ -1929,6 +1929,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           replyDraft?: PullRequestReplyDraft
           lifecycleDraft?: PullRequestLifecycleDraft
           lifecycleError?: string
+          labelDraft?: PullRequestLabelDraft
+          labelError?: string
         }) => {
           try {
             const view = await pullRequestWorkspace(engine.current, query, signal)
@@ -1945,6 +1947,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
             return new Response(null, { status: 415, headers })
           srv.timeout(request, 150)
+          if (url.pathname === '/pull-requests/labels') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            const jsonHeaders = { ...headers, 'content-type': 'application/json' }
+            return updateWorkspacePullRequestLabels(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) {
+                const message = 'Invalid label selection. Open Change labels and try again.'
+                return acceptsJson ? Response.json({ message }, { status: 400, headers: jsonHeaders }) : new Response(message, { status: 400, headers })
+              }
+              const { result, message, location, params, fallback } = submission
+              const statuses = { updated: 200, confirmed: 200, pending: 202, denied: 403, changed: 409, refused: 422, unavailable: 503 }
+              if (acceptsJson) return Response.json({ result, message, location }, { status: statuses[result], headers: jsonHeaders })
+              if (statuses[result] === 200) return new Response(null, { status: 303, headers: { ...headers, location } })
+              return render(params, statuses[result], { labelDraft: fallback, labelError: message })
+            })
+          }
           if (url.pathname === '/pull-requests/lifecycle') {
             const acceptsJson = request.headers.get('accept') === 'application/json'
             return updateWorkspacePullRequestLifecycle(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {

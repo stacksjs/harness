@@ -438,6 +438,102 @@ function url(): string {
 }
 
 describe('harness serve — HTTP', () => {
+  it.skipIf(process.platform === 'win32')('applies the reviewed pull request label changes and recovers a partial save across restarts', async () => {
+    const { project, cli, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
+    const old = { id: 11, name: 'legacy/needs review', color: 'aa2222', archived_at: '2026-11-10T15:00:00Z' }
+    const inactive = { ...old, id: 12, name: 'Unused archived' }
+    const add = { id: 31, name: 'Report & analysis', color: '298265', description: 'Review the CSV export' }
+    const concurrent = { id: 41, name: 'Accessibility', color: 'cc5599' }
+    const fixture = readState()
+    fixture.pulls[0].state = 'closed'
+    fixture.pulls[0].labels = [old]
+    fixture.pulls.push({ ...fixture.pulls[0], number: 2, html_url: url.replace(/1$/u, '2'), labels: [] })
+    fixture.labelPermission = 'TRIAGE'
+    fixture.labelPages = [[old, inactive], [add, concurrent]]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-labels-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const editor = () => host + '/pull-requests?' + new URLSearchParams({ selectedUrl: url, state: 'closed', labels: 'edit' })
+      const original = await pullRequestLifecycleForm(editor(), 'pr-label-editor-title')
+      expect(original.html).toContain('legacy/needs review')
+      expect(original.html).toContain('Review the CSV export')
+      expect(original.html).not.toContain('Unused archived')
+      expect(original.values.scope.split(',')).toHaveLength(3)
+      const save = (form: typeof original, selected: string[], overrides: Record<string, string> = {}, accept = 'application/json') => {
+        const endpoint = new URL(form.endpoint.pathname + form.endpoint.search, host)
+        if (overrides.selectedUrl) endpoint.searchParams.set('selectedUrl', overrides.selectedUrl)
+        const body = new URLSearchParams(form.values)
+        for (const id of selected) body.append('label', id)
+        return fetch(endpoint, { method: 'POST', redirect: 'manual', headers: {
+          origin: overrides.origin ?? host, accept, 'content-type': 'application/x-www-form-urlencoded',
+        }, body })
+      }
+      expect((await save(original, ['31'], { origin: 'https://elsewhere.invalid' })).status).toBe(403)
+      expect((await save(original, ['99'])).status).toBe(400)
+      expect((await save(original, ['31'], { selectedUrl: url.replace(/1$/u, '2') })).status).toBe(409)
+      fixture.labelPermission = 'READ'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await save(original, ['31'])).status).toBe(403)
+      expect(await fetch(editor()).then(response => response.text())).not.toContain('Save labels')
+
+      fixture.labelPermission = 'TRIAGE'
+      fixture.labelPages[1][0] = { ...add, name: 'Renamed since review' }
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await save(original, ['31'])).status).toBe(409)
+      expect(readState().labelWrites).toBeUndefined()
+      fixture.labelPages[1][0] = add
+      fixture.pulls[0].labels.push(concurrent)
+      fixture.labelDropResponse = add.id
+      writeFileSync(cli.state, JSON.stringify(fixture))
+
+      const partial = await save(original, ['31'], {}, 'text/html')
+      expect(partial.status).toBe(202)
+      expect(await partial.text()).toContain('Check GitHub and finish labels')
+      expect(readState().labelWrites).toEqual([[1, 'POST', 31, add.name]])
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      const resumed = await save(original, ['31'], {}, 'text/html')
+      expect(resumed.status).toBe(303)
+      const result = await fetch(new URL(resumed.headers.get('location')!, host)).then(response => response.text())
+      expect(result).toContain('Labels updated on GitHub.')
+      expect(result).toContain('Accessibility')
+      expect(result).not.toContain('legacy/needs review')
+      const done = readState()
+      expect(done.labelWrites).toEqual([[1, 'POST', 31, add.name], [1, 'DELETE', 11, old.name]])
+      expect(done.pulls[0].labels.map((label: { id: number }) => label.id)).toEqual([41, 31])
+      expect(done.pulls[1].labels).toEqual([])
+      // An older confirmed form cannot reapply a label removed by a subsequent editor.
+      done.pulls[0].labels = [concurrent]
+      done.pulls[0].state = 'open'
+      writeFileSync(cli.state, JSON.stringify(done))
+      expect(await (await save(original, ['31'])).json()).toMatchObject({ result: 'confirmed' })
+      expect(readState().labelWrites).toEqual(done.labelWrites)
+
+      const fresh = await pullRequestLifecycleForm(editor(), 'pr-label-editor-title')
+      done.labelDenied = true
+      writeFileSync(cli.state, JSON.stringify(done))
+      const denied = await save(fresh, ['31', '41'])
+      expect(denied.status).toBe(403)
+      expect(await denied.json()).toMatchObject({ message: 'This GitHub account cannot change these labels.' })
+      done.labelDenied = false
+      writeFileSync(cli.state, JSON.stringify(done))
+      expect((await save(fresh, ['31', '41'])).status).toBe(200)
+      expect(readState().labelWrites).toEqual([...done.labelWrites, [1, 'POST', 31, add.name]])
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 60_000)
+
   it.skipIf(process.platform === 'win32')('accepts an empty response after GitHub approves a workflow run', async () => {
     const { project, cli, readState } = seedPullRequestLifecycle('Check the report workflow', false)
     const fixture = readState()

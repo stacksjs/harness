@@ -60,6 +60,12 @@ export const inlineReviewNotice = $props.inlineReviewNotice
 export const inlineReviewAction = $props.inlineReviewAction
 export const inlineReviewEditId = $props.inlineReviewEdit
 export const lifecycleEndpoint = $props.lifecycleEndpoint
+export const labelsHref = $props.labelsHref
+export const labelsEndpoint = $props.labelsEndpoint
+export const labelsNotice = $props.labelsNotice
+export const labelDraft = $props.labelDraft
+export const labelError = $props.labelError
+export const labelOptions = selected?.labelEditor?.labels || []
 export const lifecycleNotice = $props.lifecycleNotice
 export const lifecycleError = $props.lifecycleError
 export const lifecyclePending = $props.lifecycleDraft || null
@@ -715,7 +721,7 @@ async function sendReviewReply(event) {
   finally { replySending.update(value => ({ ...value, [anchor]: false })) }
 }
 </script>
-@elseif(selected?.lifecycle?.branchToDelete)
+@elseif(selected?.lifecycle?.branchToDelete || selected?.workflowApproval || selected?.labelEditor)
 <script client>
 import { openLegacyBranchDeletion } from '../functions/pull-request-dialogs'
 
@@ -725,9 +731,7 @@ const deleteBranchTrigger = useRef('deleteBranchTrigger')
 function openDeleteBranchDialog() {
   openLegacyBranchDeletion(deleteBranchDialog.current, deleteBranchTrigger.current)
 }
-</script>
-@elseif(selected?.workflowApproval)
-<script client>
+
 const workflowApprovalTrigger = useRef('workflowApprovalTrigger')
 const workflowApprovalPanel = useRef('workflowApprovalPanel')
 
@@ -738,6 +742,13 @@ function dismissWorkflowApproval(event) {
   workflowApprovalPanel.current?.hidePopover()
   workflowApprovalTrigger.current?.focus()
 }
+
+const labelSearch = state('')
+const searchableLabels = @json(labelOptions.map(label => [label.id, (label.name + ' ' + label.description).toLowerCase()]))
+const matchingLabelIds = derived(() => {
+  const search = labelSearch().trim().toLowerCase()
+  return new Set(searchableLabels.filter(([, text]) => text.includes(search)).map(([id]) => id))
+})
 </script>
 @endif
 <main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
@@ -878,6 +889,9 @@ function dismissWorkflowApproval(event) {
           </nav>
           <div data-pr-detail-content>
           @if(tab === 'summary')
+            @if(selected.labels.length || selected.canEditLabels || labelsNotice || labelError)
+              @include('../partials/harness-pr-labels')
+            @endif
             <h3>Description</h3>
             @if(selected.description)
               <div data-pr-markdown="description" data-transcript-markdown></div>

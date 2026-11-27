@@ -36,10 +36,11 @@ export async function repositoryGitHubCredential(path: string, signal: AbortSign
   return value.trim()
 }
 
-export async function repositoryGitHubRequest(path: string, endpoint: string, payload?: object, signal?: AbortSignal, credential?: string): Promise<GitHubReply> {
+export async function repositoryGitHubRequest(path: string, endpoint: string, payload?: object, signal?: AbortSignal, credential?: string,
+  method: 'GET' | 'POST' | 'DELETE' = payload ? 'POST' : 'GET'): Promise<GitHubReply> {
   if (!Bun.which('gh')) throw new RepositoryPullRequestError('Install the GitHub CLI on this host, then run gh auth login.')
   const child = Bun.spawn([
-    'gh', 'api', '--hostname', 'github.com', '--include', '--method', payload ? 'POST' : 'GET',
+    'gh', 'api', '--hostname', 'github.com', '--include', '--method', method,
     '-H', 'Accept: application/vnd.github+json', ...(payload ? ['--input', '-'] : []), endpoint,
   ], {
     cwd: path,

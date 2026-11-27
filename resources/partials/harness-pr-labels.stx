@@ -1,0 +1,77 @@
+<section id="pr-labels" data-pr-label-section aria-labelledby="pr-label-title">
+  <div data-pr-label-heading>
+    <h3 id="pr-label-title">Labels</h3>
+    @if(selected.canEditLabels && !selected.labelEditor && !labelDraft)
+      <a href="{{ labelsHref }}" data-pr-button>Change labels</a>
+    @endif
+  </div>
+  @if(selected.labels.length)
+    <ul data-pr-labels>
+      @foreach(selected.labels as label)
+        <li>
+          @if(label.color)
+            <span aria-hidden="true" style="background-color: {{ label.color }}"></span>
+          @endif
+          {{ label.name }}
+        </li>
+      @endforeach
+    </ul>
+  @else
+    <p>No labels.</p>
+  @endif
+  @if(labelError || labelsNotice)
+    <p role="status" data-pr-label-message>{{ labelError || labelsNotice }}</p>
+  @endif
+  @if(labelDraft)
+    <form method="post" action="{{ labelsEndpoint }}" aria-label="Recover label changes">
+      <input type="hidden" name="head" value="{{ labelDraft.head }}">
+      <input type="hidden" name="viewer" value="{{ labelDraft.viewer }}">
+      <input type="hidden" name="scope" value="{{ labelDraft.scope }}">
+      <input type="hidden" name="revision" value="{{ labelDraft.revision }}">
+      <input type="hidden" name="intent" value="{{ labelDraft.intent }}">
+      @foreach(labelDraft.checked as id)
+        <input type="hidden" name="label" value="{{ id }}">
+      @endforeach
+      <button type="submit" data-pr-button>Check GitHub and finish labels</button>
+    </form>
+  @elseif(selected.labelEditor)
+    <form method="post" action="{{ labelsEndpoint }}" aria-labelledby="pr-label-editor-title" data-pr-label-editor>
+      <h4 id="pr-label-editor-title">Change labels</h4>
+      @if(labelOptions.length)
+        <input type="hidden" name="head" value="{{ selected.head }}">
+        <input type="hidden" name="viewer" value="{{ selected.labelEditor.viewer }}">
+        <input type="hidden" name="scope" value="{{ selected.labelEditor.scope }}">
+        <input type="hidden" name="revision" value="{{ selected.labelEditor.revision }}">
+        <input type="hidden" name="intent" value="{{ selected.labelEditor.intent }}">
+        <label data-pr-label-search>
+          <span class="sr-only">Search labels</span>
+          <input type="search" placeholder="Search labels" maxlength="120" autofocus @input="labelSearch.set($event.target.value)">
+        </label>
+        <p hidden :hidden="matchingLabelIds().size !== 0">No labels match your search.</p>
+        <fieldset data-pr-label-options>
+          <legend class="sr-only">Repository labels</legend>
+          @foreach(labelOptions as label)
+            <label data-pr-label-option :hidden="!matchingLabelIds().has({{ label.id }})">
+              <input type="checkbox" name="label" value="{{ label.id }}" @if(label.applied) checked @endif>
+              <span>
+                <strong>{{ label.name }}</strong>
+                @if(label.archived)<span data-pr-label-archive>Archived</span>@endif
+                @if(label.description)<span data-pr-label-description>{{ label.description }}</span>@endif
+              </span>
+            </label>
+          @endforeach
+        </fieldset>
+      @else
+        <p>This repository has no labels.</p>
+      @endif
+      <div data-pr-review-actions>
+        <a href="{{ summaryHref }}#pr-labels" data-pr-button>Cancel</a>
+        @if(labelOptions.length)
+          <button type="submit" data-pr-button data-pr-label-save>Save labels</button>
+        @endif
+      </div>
+    </form>
+  @elseif(selected.labelEditorUnavailable)
+    <p role="status">Could not read the repository labels from GitHub.</p>
+  @endif
+</section>

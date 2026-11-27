@@ -6813,6 +6813,48 @@ try {
     await lifecycleStatus('Reviewed workflows are no longer awaiting approval.').waitFor()
     check('workflow recovery finishes only the reviewed runs and never repeats the accepted approval',
       JSON.stringify(pullState().workflowApprovalPosts) === '[41,42]' && await approve.isHidden())
+
+    const labelState = pullState()
+    const oldLabel = { id: 11, name: 'Legacy/needs review', color: 'aa2222', archived_at: '2026-11-10T15:00:00Z' }
+    const reportLabel = { id: 31, name: 'Report & analysis', color: '298265', description: 'Check the exported CSV' }
+    const concurrentLabel = { id: 41, name: 'Accessibility', color: 'cc5599' }
+    labelState.pulls[1].labels = [oldLabel]
+    labelState.labelPages = [[oldLabel, concurrentLabel], [reportLabel]]
+    labelState.labelPermission = 'TRIAGE'
+    writeFileSync(github.state, JSON.stringify(labelState))
+    await clonePage.goto(workflowUrl.href, { waitUntil: 'domcontentloaded' })
+    const changeLabels = clonePage.getByRole('link', { name: 'Change labels', exact: true })
+    const labelEditor = clonePage.getByRole('form', { name: 'Change labels', exact: true })
+    const labelSearch = labelEditor.getByRole('searchbox', { name: 'Search labels', exact: true })
+    const legacyLabel = labelEditor.getByRole('checkbox', { name: /Legacy\/needs review/u })
+    const newLabel = labelEditor.getByRole('checkbox', { name: /Report & analysis/u })
+    await changeLabels.click()
+    await legacyLabel.uncheck()
+    await labelSearch.fill('exported')
+    await newLabel.waitFor()
+    await legacyLabel.waitFor({ state: 'hidden' })
+    await capture('pull-requests-labels-390x844', clonePage)
+    check('label search retains an unchecked reviewed choice and fits on the phone',
+      await labelEditor.locator('input[name=label][value="11"]').evaluate((node: HTMLInputElement) => node.closest('label')?.hidden && !node.checked) === true
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+    await labelEditor.getByRole('link', { name: 'Cancel', exact: true }).click()
+    await changeLabels.click()
+    check('closing the label editor cancels draft changes without writing', await legacyLabel.isChecked() && pullState().labelWrites === undefined)
+    await legacyLabel.uncheck()
+    await newLabel.check()
+    const concurrent = pullState()
+    concurrent.pulls[1].labels.push(concurrentLabel)
+    concurrent.labelDropResponse = reportLabel.id
+    writeFileSync(github.state, JSON.stringify(concurrent))
+    await labelEditor.getByRole('button', { name: 'Save labels', exact: true }).click()
+    const recoverLabels = clonePage.getByRole('button', { name: 'Check GitHub and finish labels', exact: true })
+    await recoverLabels.waitFor()
+    await recoverLabels.click()
+    await clonePage.getByRole('status').filter({ hasText: 'Labels updated on GitHub.' }).waitFor()
+    const finalLabels = pullState()
+    check('label recovery preserves a concurrent label and mutates only the reviewed add and removal once',
+      JSON.stringify(finalLabels.labelWrites.map(([, method, id]: [number, string, number]) => [method, id])) === '[["POST",31],["DELETE",11]]'
+      && JSON.stringify(finalLabels.pulls[1].labels.map((label: { id: number }) => label.id)) === '[41,31]')
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

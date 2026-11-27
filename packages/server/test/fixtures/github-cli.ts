@@ -92,8 +92,8 @@ const parts = url.pathname.split('/')
 const name = parts.slice(2, 4).join('/')
 const repo = state.repositories[name]
 
-function reply(status, body) {
-  process.stdout.write('HTTP/2.0 ' + status + ' Fixture\\r\\ncontent-type: application/json\\r\\n\\r\\n' + (body === undefined ? '' : JSON.stringify(body)))
+function reply(status, body, headers = '') {
+  process.stdout.write('HTTP/2.0 ' + status + ' Fixture\\r\\ncontent-type: application/json\\r\\n' + headers + '\\r\\n' + (body === undefined ? '' : JSON.stringify(body)))
   process.exit(status < 300 ? 0 : 1)
 }
 
@@ -311,7 +311,7 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const missing = pull?.branchMode === 'missing-ref'
     reply(200, { ...(missing && { errors: [{ path: ['repository', 'pullRequest', 'baseRef', 'compare'], type: 'NOT_FOUND' }] }),
       data: { viewer, repository: { nameWithOwner: name, isArchived: state.lifecycleMode === 'archived',
-      viewerPermission: enabled && state.mergeMode !== 'readonly' ? 'WRITE' : 'READ', autoMergeAllowed: enabled,
+      viewerPermission: state.labelPermission ?? (enabled && state.mergeMode !== 'readonly' ? 'WRITE' : 'READ'), autoMergeAllowed: enabled,
       mergeCommitAllowed: state.mergeMethods?.includes('MERGE'), squashMergeAllowed: state.mergeMethods?.includes('SQUASH'),
       rebaseMergeAllowed: state.mergeMethods?.includes('REBASE'), pullRequest: pull ? {
       id: 'fixture-pull-' + pull.number, number: pull.number, state: pull.merged_at ? 'MERGED' : pull.state.toUpperCase(),
@@ -424,6 +424,40 @@ if (parts[4] === 'branches') {
 }
 const pulls = state.pulls.filter(pull => pull.base.repo.full_name === name)
 const detail = pulls.find(pull => pull.number === Number(parts[5]))
+if (parts[4] === 'labels' && method === 'GET') {
+  const page = Number(url.searchParams.get('page')) || 1
+  const pages = state.labelPages
+  const next = pages && page < pages.length ? 'Link: <https://api.github.com' + url.pathname + '?page=' + (page+1) + '>; rel="next"\\r\\n' : ''
+  reply(200, pages ? pages[page-1] ?? [] : state.labelCatalog ?? [], next)
+}
+if (parts[4] === 'issues' && parts[6] === 'labels' && detail) {
+  const applied = detail.labels ?? []
+  if (method === 'GET') {
+    if (state.labelHiddenRead) {
+      state.labelHiddenRead = false
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
+    reply(200, applied)
+  }
+  if (!process.env.GH_TOKEN || state.labelDenied) reply(403, { message: 'Private label diagnostics' })
+  const names = method === 'POST' ? JSON.parse(await Bun.stdin.text()).labels : [decodeURIComponent(parts[7] ?? '')]
+  const catalog = state.labelPages?.flat() ?? state.labelCatalog ?? []
+  const label = (method === 'POST' ? catalog : applied).find(candidate => candidate.name === names[0])
+  if (!label || names.length !== 1 || (method === 'POST' && label.archived_at)) reply(404, {})
+  state.labelWrites = [...(state.labelWrites ?? []), [detail.number, method, label.id, label.name]]
+  detail.labels = applied.filter(candidate => candidate.id !== label.id)
+  if (method === 'POST') detail.labels.push(label)
+  if (state.labelDropResponse === label.id) {
+    delete state.labelDropResponse
+    state.labelHiddenRead = true
+    writeFileSync(stateFile, JSON.stringify(state))
+    process.exit(1)
+  }
+  writeFileSync(stateFile, JSON.stringify(state))
+  if (method === 'DELETE') reply(204)
+  reply(200, detail.labels)
+}
 if (parts[4] === 'issues' && parts[6] === 'timeline' && detail) reply(200, [
   { id: 5, event: 'commented', user: { login: 'fixture-reviewer' }, created_at: '2026-11-01T13:00:00Z', body: 'Check the **export**. <script>globalThis.__pr_html = true</script>' },
   { id: 3, event: 'reviewed', user: { login: 'fixture-approver' }, state: 'approved', submitted_at: '2026-11-01T14:00:00Z' },

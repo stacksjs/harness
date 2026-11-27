@@ -1,6 +1,7 @@
 import type { HarnessState, WorkspaceState } from '@harness/engine'
 import type { ReviewComment, ReviewCommentWindow } from './pull-request-conversations'
 import type { LifecycleAction, LifecycleSnapshot, MergeMethod } from './pull-request-lifecycle'
+import type { PullRequestLabel } from './pull-request-labels'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { isWorkspaceGitRoot } from './diff'
@@ -10,6 +11,7 @@ import { placeReviewConversations, readReviewCommentPage, readReviewConversation
 import { deleteWorkspacePullRequestBranch } from './pull-request-delete-branch'
 import { findPullRequestThread } from './pull-request-links'
 import { availableLifecycleActions, behindBase, branchUpdateMethods, deletableSourceBranch, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
+import { applyPullRequestLabelChanges, parseLabelSelection, pullRequestLabels, readPullRequestLabelEditor } from './pull-request-labels'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
 import { revertWorkspacePullRequest } from './pull-request-revert'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
@@ -22,10 +24,11 @@ import { approveWorkspaceWorkflows, parseWorkflowRunSelection, readWorkflowAppro
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
-  updated: string, created: string, head: string, headRef: string, baseRef: string, baseSha: string, description: string, additions?: number, deletions?: number, changedFiles?: number }
+  updated: string, created: string, head: string, headRef: string, baseRef: string, baseSha: string, description: string, labels: PullRequestLabel[],
+  additions?: number, deletions?: number, changedFiles?: number }
 type GitHubPull = { html_url?: string, number?: number, title?: string, body?: string | null, user?: { login?: string },
   state?: string, draft?: boolean, merged_at?: string | null, pull_request?: { merged_at?: string | null }, updated_at?: string, created_at?: string,
-  head?: { sha?: string, ref?: string }, base?: { ref?: string, sha?: string }, additions?: number, deletions?: number, changed_files?: number }
+  head?: { sha?: string, ref?: string }, base?: { ref?: string, sha?: string }, additions?: number, deletions?: number, changed_files?: number, labels?: unknown }
 type Activity = { id: string, author: string, time: string, state: string, text: string, commit?: string }
 type ChangedFile = { path: string, previousPath?: string, status: string, additions: number, deletions: number, patch: string }
 
@@ -51,7 +54,7 @@ function readPull(value: unknown, repository: string): Pull | null {
     : pull.state === 'closed' ? 'Closed' : pull.draft ? 'Draft' : 'Open'
   return { ...address, title: pull.title.slice(0, 512), status, author: pull.user?.login ?? '', updated: pull.updated_at ?? '', created: pull.created_at ?? '',
     head: pull.head?.sha ?? '', headRef: pull.head?.ref ?? '', baseRef: pull.base?.ref ?? '', baseSha: pull.base?.sha ?? '',
-    description: typeof pull.body === 'string' ? pull.body.slice(0, 32_768) : '',
+    description: typeof pull.body === 'string' ? pull.body.slice(0, 32_768) : '', labels: pullRequestLabels(pull.labels) ?? [],
     additions: pull.additions, deletions: pull.deletions, changedFiles: pull.changed_files }
 }
 
@@ -275,7 +278,9 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const failures: { repository: string, reason: string }[] = []
   let nextPage = false
   const detail = selection && selectionRepo ? (async () => {
-    const reply = await repositoryGitHubRequest(selectionRepo.path, `repos/${selectionRepo.name}/pulls/${selection.number}`, undefined, signal)
+    const editingLabels = tab === 'summary' && query.get('labels') === 'edit'
+    const credential = editingLabels ? await repositoryGitHubCredential(selectionRepo.path, signal).catch(() => undefined) : undefined
+    const reply = await repositoryGitHubRequest(selectionRepo.path, `repos/${selectionRepo.name}/pulls/${selection.number}`, undefined, signal, credential)
     const data = reply.status === 200 ? readPull(reply.body, selectionRepo.name) : null
     if (!data || data.number !== selection.number) throw new RepositoryPullRequestError('This pull request is unavailable to the GitHub account on this host.')
     const tabData = tab === 'timeline' ? readActivity(selectionRepo, data, detailPage, signal)
@@ -283,7 +288,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
         : readRepositoryPullRequestChecks(selectionRepo.path, { ...selection, repositoryKey: '' }, signal)
     const [extra, current] = await Promise.all([
       tabData.catch(error => ({ error: message(error) })),
-      readPullRequestLifecycle(selectionRepo.path, selectionRepo.name, data.number, signal).catch(() => null),
+      readPullRequestLifecycle(selectionRepo.path, selectionRepo.name, data.number, signal, credential).catch(() => null),
     ])
     const result = 'checks' in extra ? extra.head === data.head
       ? { checks: extra.checks, truncated: extra.truncated }
@@ -314,7 +319,14 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
       && (!('checks' in extra) || extra.head === data.head)
       ? { revision: workflowApprovalRevision(lifecycle.revision, approvalRuns), runs: workflowRunSelection(approvalRuns), repository: fork.repository }
       : null
-    return { ...data, lifecycle, approvalRuns, workflowApproval, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
+    const canEditLabels = tab === 'summary' && Boolean(lifecycle && current?.canTriage)
+    const labelReview = editingLabels && canEditLabels && credential
+      ? await readPullRequestLabelEditor({ path: selectionRepo.path, repository: selectionRepo.name, number: data.number, credential, signal }).catch(() => null)
+      : null
+    const labelEditor = labelReview && current && lifecycle ? { ...labelReview, viewer: current.viewer.id, intent: crypto.randomUUID(),
+      revision: labelReviewRevision(profile, selectionRepo.workspace.id, selectionRepo.name, current.id, current.viewer.id, labelReview.scope) } : null
+    return { ...data, lifecycle, approvalRuns, workflowApproval, canEditLabels, labelEditor, labelEditorUnavailable: editingLabels && canEditLabels && !labelEditor,
+      thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
       startHref: '/new?' + new URLSearchParams({ pr: data.url, profile: String(profile) }), ...result }
   })().catch(error => ({ error: message(error) })) : Promise.resolve(null)
 
@@ -371,6 +383,9 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     inlineReviewEdit: reviewCommentCursor(query.get('reviewEdit')) ?? '',
     lifecycleEndpoint: '/pull-requests/lifecycle?' + lifecycleParams,
     lifecycleNotice: lifecycleSuccess(query.get('lifecycleResult')),
+    labelsHref: href({ selectedUrl, tab: 'summary', labels: 'edit' }) + '#pr-labels',
+    labelsEndpoint: detailsHref('summary').replace('/pull-requests?', '/pull-requests/labels?'),
+    labelsNotice: query.get('labelsResult') === 'updated' ? 'Labels updated on GitHub.' : '',
     commentsBase,
     commentsAction: commentsBase.replace('/pull-requests?', '/pull-requests/comments?'),
   }
@@ -400,6 +415,60 @@ async function readReviewSubmission(state: HarnessState, query: URLSearchParams,
 async function reviewRepository(state: HarnessState, profile: number, repository: string, signal: AbortSignal) {
   const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
   return (await trustedRepositories(workspaces, signal)).get(repository.toLowerCase())
+}
+
+function labelReviewRevision(profile: number, workspace: number, repository: string, pull: string, viewer: string, scope: string) {
+  return createHash('sha256').update(JSON.stringify(['pr-label-review', profile, workspace, repository.toLowerCase(), pull, viewer, scope])).digest('hex')
+}
+
+export type PullRequestLabelDraft = { viewer: string, head: string, intent: string, scope: string, revision: string, checked: string[] }
+
+const labelMessages = {
+  updated: 'Labels updated on GitHub.',
+  confirmed: 'GitHub already confirmed the earlier label changes.',
+  denied: 'This GitHub account cannot change these labels.',
+  changed: 'The pull request, account, or reviewed labels changed. Open Change labels to review again.',
+  unavailable: 'Could not load the labels from GitHub. Try again.',
+  refused: 'GitHub refused a reviewed label change. Open Change labels to review the current labels.',
+  pending: 'GitHub has yet to confirm all the reviewed label changes.',
+}
+
+export async function updateWorkspacePullRequestLabels(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
+  receipts: PullRequestReplyReceipts) {
+  const submission = await readReviewSubmission(state, query, request, 90_000)
+  if (!submission) return null
+  const { profile, selection, values, head, viewer } = submission
+  const scope = values.get('scope') ?? ''
+  const revision = values.get('revision') ?? ''
+  const intent = values.get('intent') ?? ''
+  const labels = parseLabelSelection(scope, values.getAll('label'))
+  if (!labels || !/^[0-9a-f]{64}$/u.test(revision)
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(intent)) return null
+  const params = reviewReturnParams(query, profile, selection.url, 'summary')
+  const finish = (result: keyof typeof labelMessages) => {
+    const target = new URLSearchParams(params)
+    if (result === 'updated' || result === 'confirmed') target.set('labelsResult', 'updated')
+    const fallback: PullRequestLabelDraft | undefined = result === 'pending'
+      ? { viewer, head, intent, scope, revision, checked: labels.checked } : undefined
+    return { result, message: labelMessages[result], params, fallback, location: '/pull-requests?' + target + '#pr-labels' }
+  }
+  try {
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
+    if (!repository || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const current = await readPullRequestLifecycle(repository.path, repository.name, selection.number, signal, credential)
+    if (!current) return finish('unavailable')
+    if (current.viewer.id !== viewer || revision !== labelReviewRevision(profile, repository.workspace.id, repository.name, current.id, viewer, scope))
+      return finish('changed')
+    if (!current.canTriage) return finish('denied')
+    const fingerprint = createHash('sha256').update(JSON.stringify(['pr-label-changes', revision, labels.checked])).digest('hex')
+    const result = await applyPullRequestLabelChanges({
+      path: repository.path, repository: repository.name, number: selection.number, credential, signal, receipts,
+      trusted: () => Boolean(stillTrusted(state, repository.workspace)),
+    }, labels.changes, intent, fingerprint)
+    return finish(result)
+  }
+  catch { return finish('unavailable') }
 }
 
 const lifecycleMessages = {

@@ -14,6 +14,7 @@ const fields = `id number state isDraft headRefOid baseRefOid baseRefName update
 const status = ['OPEN', 'CLOSED', 'MERGED'] as const
 const mergeableStates = new Set(['CLEAN', 'HAS_HOOKS', 'UNSTABLE'])
 const writePermissions = new Set(['WRITE', 'MAINTAIN', 'ADMIN'])
+const triagePermissions = new Set(['TRIAGE', ...writePermissions])
 type PullState = typeof status[number]
 export type SourceRepository = {
   id?: string
@@ -53,6 +54,7 @@ type Pull = {
 }
 export type LifecycleSnapshot = Pull & {
   viewer: { id: string, login: string }
+  canTriage: boolean
   branch: { behind: number | null, canUpdate: boolean }
   merge: {
     canWrite: boolean
@@ -144,7 +146,8 @@ export async function readPullRequestLifecycle(path: string, repository: string,
   const count = errors.length ? undefined : pull.baseRef?.compare?.behindBy
   const branch = { behind: typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : null,
     canUpdate: repo.isArchived === false && pull.viewerCanUpdateBranch === true && Boolean(pull.baseRefName) }
-  return { ...pull, viewer, branch, viewerCanUpdate: !repo.isArchived && pull.viewerCanUpdate === true, merge: {
+  return { ...pull, viewer, branch, canTriage: repo.isArchived === false && triagePermissions.has(repo.viewerPermission ?? ''),
+    viewerCanUpdate: !repo.isArchived && pull.viewerCanUpdate === true, merge: {
     canWrite: canWrite && typeof pull.baseRefName === 'string' && Boolean(pull.baseRefName),
     methods,
     canEnableAutoMerge: (repo.autoMergeAllowed === true || pull.isMergeQueueEnabled === true) && pull.viewerCanEnableAutoMerge === true,
