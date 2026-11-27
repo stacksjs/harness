@@ -1600,6 +1600,66 @@ describe('harness serve — HTTP', () => {
     expect((await fetch(route)).status).toBe(404)
   }, 20_000)
 
+  it('commits only selected staged blobs and keeps excluded entries and newer working edits', async () => {
+    const project = join(dir, 'selected-commit')
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(['git', '--literal-pathspecs', '-C', project, ...args])
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    mkdirSync(project)
+    git('init', '-qb', 'main')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('config', 'user.name', 'Fixture Author')
+    const selected = '[selected] notes.txt'
+    for (const path of [selected, 'excluded.txt', 'removed.txt']) writeFileSync(join(project, path), 'Original\n')
+    git('add', '--', '.')
+    git('commit', '-qm', 'base')
+    const original = git('rev-parse', 'HEAD')
+    writeFileSync(join(project, selected), 'Reviewed blob\n')
+    writeFileSync(join(project, 'excluded.txt'), 'Keep this staged\n')
+    git('add', '--', selected, 'excluded.txt')
+    git('rm', '-q', '--', 'removed.txt')
+    writeFileSync(join(project, selected), 'Later edit\n')
+    writeFileSync(join(project, 'untracked.txt'), 'Keep this untracked\n')
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    await dispatch('selected-commit-project', { type: 'workspace.register', path: realpathSync(project), trusted: true })
+    const workspaceId = derivedId('selected-commit-project')
+    await dispatch('selected-commit-thread', { type: 'session.create', workspaceId, driverKind: 'claude' })
+    const route = `http://127.0.0.1:${port}/s/${derivedId('selected-commit-thread')}/git/commit`
+    const read = () => fetch(route).then(response => response.json())
+    const send = (revision: string, excluded: number[]) => fetch(route, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ revision, message: 'Include only the reviewed files', excluded }),
+    })
+    const preview = await read()
+    expect(preview.files).toEqual([selected, 'excluded.txt', 'removed.txt'])
+    expect((await send(preview.revision, [0, 1, 2])).status).toBe(409)
+    expect((await send(preview.revision, [3])).status).toBe(409)
+    const hook = join(project, '.git', 'hooks', 'pre-commit')
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    const index = readFileSync(join(project, '.git', 'index'))
+    expect((await send(preview.revision, [1])).status).toBe(503)
+    expect(git('rev-parse', 'HEAD')).toBe(original)
+    expect(readFileSync(join(project, '.git', 'index'))).toEqual(index)
+    rmSync(hook)
+    writeFileSync(join(project, 'excluded.txt'), 'Revised staged exclusion\n')
+    git('add', '--', 'excluded.txt')
+    expect((await send(preview.revision, [1])).status).toBe(409)
+    const refreshed = await read()
+    const response = await send(refreshed.revision, [1])
+    expect(response.status).toBe(201)
+    expect((await response.json()).commit).toBe(git('rev-parse', 'HEAD'))
+    expect(git('show', `HEAD:${selected}`)).toBe('Reviewed blob')
+    expect(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD')).toBe(`${selected}\nremoved.txt`)
+    expect(git('diff', '--cached', '--name-only')).toBe('excluded.txt')
+    expect(git('show', ':excluded.txt')).toBe('Revised staged exclusion')
+    expect(readFileSync(join(project, selected), 'utf8')).toBe('Later edit\n')
+    expect(git('ls-files', '--others', '--exclude-standard')).toBe('untracked.txt')
+    expect((await send(refreshed.revision, [1])).status).toBe(409)
+  }, 20_000)
+
   it('publishes and fast-forwards the selected branch through its configured remote', async () => {
     const remote = join(dir, 'remote.git')
     const project = join(dir, 'project')

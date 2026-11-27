@@ -39,7 +39,7 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
-import { createStagedCommit, readRepositorySubmission, stagedCommitPreview } from './repository-commit'
+import { createStagedCommit, prepareStagedCommit, readRepositorySubmission, RepositoryCommitError } from './repository-commit'
 import { readRepositoryStatus } from './repository-status'
 import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
@@ -550,7 +550,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const key = url.searchParams.get('repository') ?? ''
     const submitted = request.method === 'POST'
     const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
-    const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request) : null
+    const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request, action === 'commit') : null
     if (submitted && (!input && !pullInput || action === 'commit' && !input?.message))
       return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the staged review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
 
@@ -609,7 +609,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }).then(() => true, () => false)
         return respond({ ...result, linked }, result.existing ? 200 : 201)
       }
-      const preview = action === 'commit' ? await stagedCommitPreview(repository) : await repositorySyncPreview(repository, action)
+      const review = action === 'commit'
+        ? { kind: 'commit' as const, ...await prepareStagedCommit(repository) }
+        : { kind: 'sync' as const, action, preview: await repositorySyncPreview(repository, action) }
+      const { preview } = review
       if (!input) return respond(preview)
       if (preview.problem) return respond({ error: preview.problem }, 409)
       if (preview.revision !== input.revision)
@@ -617,11 +620,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           : 'The branch or remote changed. Review the Git action again.' }, 409)
       if (!authorize())
         return respond({ error: 'The checkout changed or a turn is still active. Wait for it to finish and try again.' }, 409)
-      if ('files' in preview) return respond({ commit: await createStagedCommit(repository, input.message) }, 201)
-      return respond(await syncRepository(repository, action as RepositorySyncAction, preview, authorize))
+      if (review.kind === 'commit') return respond({ commit: await createStagedCommit(repository, input.message, review, input.excluded, authorize) }, 201)
+      return respond(await syncRepository(repository, review.action, review.preview, authorize))
     }
     catch (error) {
-      if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError) return respond({ error: error.message }, 409)
+      if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError || error instanceof RepositoryCommitError)
+        return respond({ error: error.message }, 409)
       if (readingChecks) return respond({ error: 'Could not read checks from GitHub. Try again.' }, 503)
       return respond({ error: action === 'commit' ? (input
         ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'

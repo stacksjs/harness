@@ -1,6 +1,7 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstat } from 'node:fs/promises'
+import { lstat, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { readRepositoryStatus } from './repository-status'
@@ -8,11 +9,15 @@ import { readRepositoryStatus } from './repository-status'
 const exec = promisify(execFile)
 const checkoutOperations = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-apply', 'rebase-merge', 'sequencer', 'BISECT_START']
 
-export function repositoryGit(path: string, args: string[], timeout = 5000) {
+function gitEnvironment(index?: string) {
+  return { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'true', GCM_INTERACTIVE: 'Never', LC_ALL: 'C',
+    ...(index && { GIT_INDEX_FILE: index }),
+  }
+}
+
+export function repositoryGit(path: string, args: string[], timeout = 5000, index?: string) {
   return exec('git', ['-C', path, ...args], {
-    timeout,
-    maxBuffer: 2 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'true', GCM_INTERACTIVE: 'Never', LC_ALL: 'C' },
+    timeout, maxBuffer: 2 * 1024 * 1024, env: gitEnvironment(index),
   })
 }
 
@@ -25,25 +30,93 @@ export async function gitOperationInProgress(path: string) {
   })))).some(Boolean)
 }
 
-export async function stagedCommitPreview(path: string) {
+export class RepositoryCommitError extends Error {}
+
+interface StagedEntry {
+  path: Buffer
+  mode: string
+  object: string
+}
+
+function stagedDiff(path: string, format: string[], index?: string) {
+  return exec('git', ['-C', path, 'diff', '--cached', '-z', '--no-renames', '--no-ext-diff', ...format], {
+    encoding: 'buffer', timeout: 5000, maxBuffer: 2 * 1024 * 1024, env: gitEnvironment(index),
+  }).then(result => result.stdout)
+}
+
+export async function prepareStagedCommit(path: string) {
   const [status, diff, operating] = await Promise.all([
     readRepositoryStatus(path),
-    repositoryGit(path, ['diff', '--cached', '--raw', '-z', '--no-renames', '--no-abbrev', '--no-ext-diff']),
+    stagedDiff(path, ['--raw', '--no-abbrev']),
     gitOperationInProgress(path),
   ])
   if (!status) throw new Error('Git could not read the repository.')
-  const records = diff.stdout.split('\0')
-  const files = records.filter((record, index) => index % 2 === 1 && record.length > 0)
-  const revision = createHash('sha256').update(JSON.stringify([path, status.branch, status.head, diff.stdout])).digest('hex')
+  const entries: StagedEntry[] = []
+  for (let start = 0; start < diff.length;) {
+    const metadataEnd = diff.indexOf(0, start)
+    if (metadataEnd < 0) throw new Error('Git returned an invalid staged file.')
+    const pathEnd = diff.indexOf(0, metadataEnd + 1)
+    const match = /^:\d{6} (\d{6}) [0-9a-f]+ ([0-9a-f]+) [A-Z]$/u.exec(diff.toString('ascii', start, metadataEnd))
+    if (!match || pathEnd <= metadataEnd + 1) throw new Error('Git returned an invalid staged file.')
+    entries.push({ path: diff.subarray(metadataEnd + 1, pathEnd), mode: match[1]!, object: match[2]! })
+    start = pathEnd + 1
+  }
+  const revision = createHash('sha256').update(JSON.stringify([path, status.branch, status.head])).update(diff).digest('hex')
   const problem = operating || status.conflicted ? 'Finish the in-progress Git operation before committing here.'
     : !status.branch ? 'Switch to a branch before committing here.'
-      : !files.length ? 'Stage files in this repository before committing.' : null
-  return { branch: status.branch, files, revision, problem }
+      : !entries.length ? 'Stage files in this repository before committing.' : null
+  return {
+    head: status.head, entries,
+    preview: {
+      branch: status.branch, revision, problem,
+      files: entries.map(entry => entry.path.toString()),
+      fileKeys: entries.map(entry => entry.path.toString('base64')),
+    },
+  }
 }
 
-export async function createStagedCommit(path: string, message: string) {
+const pathTerminator = Buffer.from([0])
+
+function writeSelectedIndex(path: string, index: string, entries: StagedEntry[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['-C', path, 'update-index', '-z', '--index-info'], {
+      env: gitEnvironment(index), timeout: 5000, stdio: ['pipe', 'ignore', 'ignore'],
+    })
+    child.once('error', reject)
+    child.stdin.once('error', reject)
+    child.once('close', code => code === 0 ? resolve() : reject(new Error('Git could not prepare the selected index.')))
+    child.stdin.end(Buffer.concat(entries.flatMap(entry => [Buffer.from(`${entry.mode} ${entry.object}\t`), entry.path, pathTerminator])))
+  })
+}
+
+export async function createStagedCommit(path: string, message: string, prepared: Awaited<ReturnType<typeof prepareStagedCommit>>,
+  excluded: number[], authorize: () => boolean) {
   // Use the checkout's index, identity, hooks and signing configuration.
-  await repositoryGit(path, ['commit', '--quiet', '--message', message], 45_000)
+  if (excluded.length === 0) {
+    await repositoryGit(path, ['commit', '--quiet', '--message', message], 45_000)
+  }
+  else {
+    const omitted = new Set(excluded)
+    if (excluded.some(index => index >= prepared.entries.length)) throw new RepositoryCommitError('Refresh the review and select the staged files again.')
+    const entries = prepared.entries.filter((_, index) => !omitted.has(index))
+    if (entries.length === 0) throw new RepositoryCommitError('Include at least one staged file.')
+    const temporary = await mkdtemp(join(tmpdir(), 'harness-commit-'))
+    try {
+      const index = join(temporary, 'index')
+      // Commit the reviewed blobs. The real index already has these entries,
+      // so changing HEAD leaves the excluded entries staged without rewriting it.
+      await repositoryGit(path, ['read-tree', prepared.head ?? '--empty'], 5000, index)
+      await writeSelectedIndex(path, index, entries)
+      const paths = await stagedDiff(path, ['--name-only', ...(prepared.head ? [prepared.head] : [])], index)
+      if (!paths.equals(Buffer.concat(entries.flatMap(entry => [entry.path, pathTerminator]))))
+        throw new RepositoryCommitError('These staged paths depend on one another. Review the selection and include the related files.')
+      const latest = await prepareStagedCommit(path)
+      if (!authorize() || latest.preview.problem || latest.preview.revision !== prepared.preview.revision)
+        throw new RepositoryCommitError('The checkout or staged files changed. Refresh the review before committing.')
+      await repositoryGit(path, ['commit', '--quiet', '--message', message], 45_000, index)
+    }
+    finally { await rm(temporary, { recursive: true, force: true }).catch(() => {}) }
+  }
   const { stdout } = await repositoryGit(path, ['rev-parse', '--verify', 'HEAD'])
   return stdout.trim()
 }
@@ -79,10 +152,12 @@ export async function readRepositoryInput(request: Request, maxBytes: number): P
   catch { return null }
 }
 
-export async function readRepositorySubmission(request: Request): Promise<{ revision: string, message: string } | null> {
-  const value = await readRepositoryInput(request, 24_576)
+export async function readRepositorySubmission(request: Request, commit: boolean): Promise<{ revision: string, message: string, excluded: number[] } | null> {
+  const value = await readRepositoryInput(request, commit ? 131_072 : 24_576)
   const revision = value?.revision
   const message = typeof value?.message === 'string' ? value.message.trim() : ''
+  const excluded = commit && value?.excluded !== undefined ? value.excluded : []
   return typeof revision === 'string' && /^[0-9a-f]{64}$/u.test(revision)
-    && Buffer.byteLength(message) <= 4096 && !message.includes('\0') ? { revision, message } : null
+    && Array.isArray(excluded) && excluded.every(index => Number.isSafeInteger(index) && index >= 0)
+    && Buffer.byteLength(message) <= 4096 && !message.includes('\0') ? { revision, message, excluded } : null
 }
