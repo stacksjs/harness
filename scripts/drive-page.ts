@@ -924,6 +924,8 @@ await terminalHost.press('Shift+PageUp')
 const terminalActions = page.getByRole('menu', { name: 'Terminal actions', exact: true })
 const terminalActionsToggle = page.getByRole('button', { name: 'Terminal actions', exact: true })
 await terminalActionsToggle.click()
+await terminalActions.waitFor()
+await capture('workspace-terminal-actions-1280x720')
 await terminalActions.getByRole('menuitem', { name: 'Select all', exact: true }).click()
 check('terminal Select all scopes the selection to its retained output',
   await terminalHost.evaluate(host => {
@@ -937,6 +939,7 @@ const terminalTextDialog = page.getByRole('dialog', { name: 'Visible terminal ou
 check('terminal selection reader exposes visible output in a read-only control',
   (await terminalTextDialog.getByRole('textbox').inputValue()).includes('history-')
   && await terminalTextDialog.getByRole('textbox').getAttribute('readonly') !== null)
+await capture('workspace-terminal-output-reader-1280x720')
 await terminalTextDialog.getByRole('button', { name: 'Done', exact: true }).click()
 await terminalActionsToggle.click()
 await terminalActions.getByRole('menuitem', { name: 'Jump to latest', exact: true }).click()
