@@ -2,19 +2,46 @@ import { createHash } from 'node:crypto'
 import { RepositoryPullRequestError, repositoryGitHubRequest } from './repository-pull-request'
 
 const sha = /^[0-9a-f]{40}$/u
-const fields = 'id number state isDraft headRefOid baseRefOid updatedAt viewerCanUpdate'
+const fields = `id number state isDraft headRefOid baseRefOid baseRefName updatedAt viewerCanUpdate
+  mergeable mergeStateStatus isMergeQueueEnabled mergeQueueEntry { id } autoMergeRequest { mergeMethod }
+  viewerCanEnableAutoMerge viewerCanDisableAutoMerge`
 const status = ['OPEN', 'CLOSED', 'MERGED'] as const
+const mergeableStates = new Set(['CLEAN', 'HAS_HOOKS', 'UNSTABLE'])
+const writePermissions = new Set(['WRITE', 'MAINTAIN', 'ADMIN'])
 type PullState = typeof status[number]
-type LifecycleSnapshot = {
+type Pull = {
   id: string
   number: number
   state: PullState
   isDraft: boolean
   headRefOid: string
   baseRefOid: string
+  baseRefName: string
   updatedAt: string
   viewerCanUpdate: boolean
+  mergeable?: string
+  mergeStateStatus?: string
+  isMergeQueueEnabled?: boolean
+  mergeQueueEntry?: { id?: string } | null
+  autoMergeRequest?: { mergeMethod?: string } | null
+  viewerCanEnableAutoMerge?: boolean
+  viewerCanDisableAutoMerge?: boolean
+}
+export type LifecycleSnapshot = Pull & {
   viewer: { id: string, login: string }
+  merge: {
+    canWrite: boolean
+    methods: MergeMethod[]
+    canEnableAutoMerge: boolean
+    canDisableAutoMerge: boolean
+  }
+}
+
+export const mergeMethods = { MERGE: 'Merge commit', SQUASH: 'Squash and merge', REBASE: 'Rebase and merge' }
+export type MergeMethod = keyof typeof mergeMethods
+
+export function mergeMethod(value: string | null): MergeMethod | null {
+  return value && Object.hasOwn(mergeMethods, value) ? value as MergeMethod : null
 }
 
 export const lifecycleActions = {
@@ -22,9 +49,22 @@ export const lifecycleActions = {
   draft: { label: 'Convert to draft', success: 'Pull request converted to draft.', mutation: 'convertPullRequestToDraft' },
   close: { label: 'Close pull request', success: 'Pull request closed.', mutation: 'closePullRequest' },
   reopen: { label: 'Reopen pull request', success: 'Pull request reopened.', mutation: 'reopenPullRequest' },
+  merge: { label: 'Merge pull request', success: 'Pull request merged.', mutation: 'mergePullRequest' },
+  'enable-auto-merge': { label: 'Enable auto-merge', success: 'Auto-merge enabled.', mutation: 'enablePullRequestAutoMerge' },
+  'disable-auto-merge': { label: 'Disable auto-merge', success: 'Auto-merge disabled.', mutation: 'disablePullRequestAutoMerge' },
+  enqueue: { label: 'Join merge queue', success: 'Pull request added to the merge queue.', mutation: 'enqueuePullRequest' },
+  dequeue: { label: 'Leave merge queue', success: 'Pull request removed from the merge queue.', mutation: 'dequeuePullRequest' },
 }
 
 export type LifecycleAction = keyof typeof lifecycleActions
+
+export function isMergeAction(action: LifecycleAction) {
+  return action === 'merge' || action === 'enable-auto-merge' || action === 'disable-auto-merge' || action === 'enqueue' || action === 'dequeue'
+}
+
+export function takesMergeMethod(action: LifecycleAction) {
+  return action === 'merge' || action === 'enable-auto-merge'
+}
 
 export function lifecycleAction(value: string | null): LifecycleAction | null {
   return value && Object.hasOwn(lifecycleActions, value) ? value as LifecycleAction : null
@@ -32,7 +72,16 @@ export function lifecycleAction(value: string | null): LifecycleAction | null {
 
 type ReadReply = {
   errors?: unknown[]
-  data?: { viewer?: LifecycleSnapshot['viewer'], repository?: { nameWithOwner?: string, isArchived?: boolean, pullRequest?: LifecycleSnapshot } }
+  data?: { viewer?: LifecycleSnapshot['viewer'], repository?: {
+    nameWithOwner?: string
+    isArchived?: boolean
+    viewerPermission?: string
+    mergeCommitAllowed?: boolean
+    squashMergeAllowed?: boolean
+    rebaseMergeAllowed?: boolean
+    autoMergeAllowed?: boolean
+    pullRequest?: Pull
+  } }
 }
 
 export async function readPullRequestLifecycle(path: string, repository: string, number: number, signal: AbortSignal, credential?: string): Promise<LifecycleSnapshot | null> {
@@ -41,7 +90,7 @@ export async function readPullRequestLifecycle(path: string, repository: string,
     query: `query HarnessPullRequestLifecycle($owner: String!, $name: String!, $number: Int!) {
       viewer { id login }
       repository(owner: $owner, name: $name) {
-        nameWithOwner isArchived
+        nameWithOwner isArchived viewerPermission mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed
         pullRequest(number: $number) { ${fields} }
       }
     }`,
@@ -54,34 +103,82 @@ export async function readPullRequestLifecycle(path: string, repository: string,
   if (reply.status !== 200 || result?.errors?.length || repo?.nameWithOwner?.toLowerCase() !== repository.toLowerCase()
     || !pull?.id || pull.number !== number || !status.includes(pull.state) || !sha.test(pull.headRefOid) || !sha.test(pull.baseRefOid)
     || typeof pull.isDraft !== 'boolean' || !Number.isFinite(Date.parse(pull.updatedAt)) || !viewer?.id || !viewer.login) return null
-  return { ...pull, viewer, viewerCanUpdate: !repo.isArchived && pull.viewerCanUpdate === true }
+  const canWrite = repo.isArchived === false && writePermissions.has(repo.viewerPermission ?? '')
+  const methods: MergeMethod[] = []
+  if (repo.mergeCommitAllowed === true) methods.push('MERGE')
+  if (repo.squashMergeAllowed === true) methods.push('SQUASH')
+  if (repo.rebaseMergeAllowed === true) methods.push('REBASE')
+  return { ...pull, viewer, viewerCanUpdate: !repo.isArchived && pull.viewerCanUpdate === true, merge: {
+    canWrite: canWrite && typeof pull.baseRefName === 'string' && Boolean(pull.baseRefName),
+    methods,
+    canEnableAutoMerge: (repo.autoMergeAllowed === true || pull.isMergeQueueEnabled === true) && pull.viewerCanEnableAutoMerge === true,
+    canDisableAutoMerge: pull.viewerCanDisableAutoMerge === true,
+  } }
 }
 
 export function lifecycleRevision(pull: LifecycleSnapshot) {
   return createHash('sha256').update(JSON.stringify([pull.id, pull.viewer.id, pull.state, pull.isDraft, pull.headRefOid,
-    pull.baseRefOid, pull.updatedAt])).digest('hex')
+    pull.baseRefOid, pull.updatedAt, pull.baseRefName, pull.mergeStateStatus, pull.mergeable, pull.isMergeQueueEnabled,
+    pull.mergeQueueEntry?.id, pull.autoMergeRequest?.mergeMethod, pull.merge])).digest('hex')
 }
 
 export function availableLifecycleActions(pull: LifecycleSnapshot): LifecycleAction[] {
-  if (!pull.viewerCanUpdate || pull.state === 'MERGED') return []
-  if (pull.state === 'CLOSED') return ['reopen']
-  return [pull.isDraft ? 'ready' : 'draft', 'close']
+  if (pull.state === 'MERGED') return []
+  if (pull.state === 'CLOSED') return pull.viewerCanUpdate ? ['reopen'] : []
+  const actions: LifecycleAction[] = pull.viewerCanUpdate ? [pull.isDraft ? 'ready' : 'draft'] : []
+  if (pull.merge.canWrite) {
+    const canMergeNow = pull.mergeable === 'MERGEABLE' && mergeableStates.has(pull.mergeStateStatus ?? '')
+    if (pull.mergeQueueEntry?.id) actions.push('dequeue')
+    else if (pull.autoMergeRequest) {
+      if (pull.merge.canDisableAutoMerge) actions.push('disable-auto-merge')
+    }
+    else if (!pull.isDraft) {
+      if (canMergeNow && pull.isMergeQueueEnabled === true) actions.push('enqueue')
+      else if (canMergeNow && pull.isMergeQueueEnabled === false && pull.merge.methods.length) actions.push('merge')
+      else if (pull.merge.canEnableAutoMerge && pull.merge.methods.length) actions.push('enable-auto-merge')
+    }
+  }
+  if (pull.viewerCanUpdate) actions.push('close')
+  return actions
 }
 
-export function lifecycleTargetReached(pull: LifecycleSnapshot, action: LifecycleAction) {
+export function lifecycleTargetReached(pull: LifecycleSnapshot, action: LifecycleAction, method: MergeMethod | null) {
+  if (action === 'merge') return pull.state === 'MERGED'
+  if (action === 'enqueue') return pull.state === 'MERGED' || Boolean(pull.mergeQueueEntry?.id)
+  if (action === 'enable-auto-merge') {
+    return pull.state === 'MERGED' || Boolean(pull.mergeQueueEntry?.id)
+      || Boolean(pull.autoMergeRequest && (pull.isMergeQueueEnabled || pull.autoMergeRequest.mergeMethod === method))
+  }
   if (action === 'close') return pull.state === 'CLOSED'
   if (pull.state !== 'OPEN') return false
+  if (action === 'dequeue') return pull.mergeQueueEntry === null
+  if (action === 'disable-auto-merge') return pull.autoMergeRequest === null
   return action === 'reopen' || pull.isDraft === (action === 'draft')
 }
 
-export async function writePullRequestLifecycle(path: string, id: string, action: LifecycleAction, signal: AbortSignal, credential: string) {
+const mergeInputType = {
+  merge: 'MergePullRequestInput',
+  'enable-auto-merge': 'EnablePullRequestAutoMergeInput',
+  enqueue: 'EnqueuePullRequestInput',
+  dequeue: 'DequeuePullRequestInput',
+  'disable-auto-merge': 'DisablePullRequestAutoMergeInput',
+} as const
+
+export async function writePullRequestLifecycle(path: string, pull: LifecycleSnapshot, action: LifecycleAction, method: MergeMethod | null,
+  signal: AbortSignal, credential: string) {
   const { mutation } = lifecycleActions[action]
+  const inputType = Object.hasOwn(mergeInputType, action) ? mergeInputType[action as keyof typeof mergeInputType] : null
+  const parameters = inputType ? `$input: ${inputType}!` : '$id: ID!'
+  const argument = inputType ? '$input' : '{ pullRequestId: $id }'
+  const payload = action === 'dequeue' ? { id: pull.id } : {
+    pullRequestId: pull.id,
+    ...(action === 'merge' || action === 'enqueue' || action === 'enable-auto-merge' ? { expectedHeadOid: pull.headRefOid } : {}),
+    ...(method && { mergeMethod: method }),
+  }
   try {
     const reply = await repositoryGitHubRequest(path, 'graphql', {
-      query: `mutation HarnessSetPullRequestLifecycle($id: ID!) {
-        ${mutation}(input: { pullRequestId: $id }) { pullRequest { id } }
-      }`,
-      variables: { id },
+      query: `mutation HarnessSetPullRequestLifecycle(${parameters}) { ${mutation}(input: ${argument}) { __typename } }`,
+      variables: inputType ? { input: payload } : { id: pull.id },
     }, signal, credential)
     const errors = (reply.body as { errors?: { type?: string }[] } | null)?.errors
     if (reply.status === 200 && errors?.length && errors.every(error => error.type === 'FORBIDDEN')) return 'denied'

@@ -806,6 +806,7 @@ async function sendReviewReply(event) {
           @if(selected?.title)
             <p data-pr-detail-meta>
               <strong data-pr-state="{{ selected.status }}">{{ selected.status }}</strong>
+              @if(selected.lifecycle?.mergeStatus)<span data-pr-merge-status>{{ selected.lifecycle.mergeStatus }}</span>@endif
               @if(selected.author)<span>{{ selected.author }}</span>@endif
               @if(selected.updated)<time datetime="{{ selected.updated }}">{{ dateLabel(selected.updated) }}</time>@endif
               @if(headLabel)<code title="{{ selected.head }}">Head {{ headLabel }}</code>@endif

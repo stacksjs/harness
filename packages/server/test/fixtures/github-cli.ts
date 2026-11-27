@@ -38,6 +38,10 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, lifecycleMode }))
   }
+  const configureMerge = (mergeMode: 'ready' | 'blocked' | 'queue' | 'readonly', mergeMethods = ['MERGE', 'SQUASH', 'REBASE']) => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, mergeMode, mergeMethods }))
+  }
   const revealLifecycle = () => {
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     const { invisibleLifecycle, ...shown } = previous
@@ -128,18 +132,38 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
   if (query.includes('mutation HarnessSetPullRequestLifecycle')) {
-    const pull = state.pulls.find(pull => 'fixture-pull-' + pull.number === variables.id)
-    const mutation = ['markPullRequestReadyForReview', 'convertPullRequestToDraft', 'closePullRequest', 'reopenPullRequest'].find(key => query.includes(key + '('))
+    const id = variables.input?.pullRequestId ?? variables.input?.id ?? variables.id
+    const pull = state.pulls.find(pull => 'fixture-pull-' + pull.number === id)
+    const mutation = ['markPullRequestReadyForReview', 'convertPullRequestToDraft', 'closePullRequest', 'reopenPullRequest',
+      'mergePullRequest', 'enablePullRequestAutoMerge', 'disablePullRequestAutoMerge', 'enqueuePullRequest', 'dequeuePullRequest'].find(key => query.includes(' ' + key + '('))
     if (!pull || !mutation || !process.env.GH_TOKEN || state.lifecycleMode === 'denied')
       reply(200, { errors: [{ type: 'FORBIDDEN', message: 'Private lifecycle diagnostics' }] })
     if (state.lifecycleMode === 'refused')
       reply(200, { errors: [{ type: 'UNPROCESSABLE', message: 'Private lifecycle diagnostics' }] })
+    if (variables.input) {
+      const { expectedHeadOid, mergeMethod } = variables.input
+      const guarded = ['mergePullRequest', 'enablePullRequestAutoMerge', 'enqueuePullRequest'].includes(mutation)
+      const needsMethod = ['mergePullRequest', 'enablePullRequestAutoMerge'].includes(mutation)
+      if ((guarded && expectedHeadOid !== pull.head.sha) || (needsMethod && !state.mergeMethods?.includes(mergeMethod))
+        || (!needsMethod && mergeMethod) || (mutation === 'mergePullRequest' && state.mergeMode !== 'ready'))
+        reply(200, { errors: [{ type: 'UNPROCESSABLE' }] })
+      state.mergeWrites = [...(state.mergeWrites ?? []), { mutation, input: variables.input }]
+    }
     state.lifecycleWrites = (state.lifecycleWrites || 0) + 1
     const updated = { ...pull, updated_at: new Date(Date.UTC(2026, 10, 1, 16, 0, state.lifecycleWrites)).toISOString() }
     if (mutation === 'markPullRequestReadyForReview') updated.draft = false
     if (mutation === 'convertPullRequestToDraft') updated.draft = true
     if (mutation === 'closePullRequest') updated.state = 'closed'
     if (mutation === 'reopenPullRequest') updated.state = 'open'
+    if (mutation === 'mergePullRequest') {
+      updated.state = 'closed'
+      updated.merged_at = updated.updated_at
+      updated.base = { ...pull.base, sha: 'c'.repeat(40) }
+    }
+    if (mutation === 'enablePullRequestAutoMerge') updated.autoMergeMethod = variables.input.mergeMethod
+    if (mutation === 'disablePullRequestAutoMerge') updated.autoMergeMethod = null
+    if (mutation === 'enqueuePullRequest') updated.queueEntry = 'fixture-queue-' + pull.number
+    if (mutation === 'dequeuePullRequest') updated.queueEntry = null
     if (state.lifecycleMode === 'unconfirmed') state.invisibleLifecycle = updated
     else Object.assign(pull, updated)
     writeFileSync(stateFile, JSON.stringify(state))
@@ -186,10 +210,18 @@ if (url.pathname === '/graphql' && method === 'POST') {
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
   if (query.includes('query HarnessPullRequestLifecycle')) {
-    reply(200, { data: { viewer, repository: { nameWithOwner: name, isArchived: state.lifecycleMode === 'archived', pullRequest: pull ? {
+    const enabled = Boolean(state.mergeMode)
+    reply(200, { data: { viewer, repository: { nameWithOwner: name, isArchived: state.lifecycleMode === 'archived',
+      viewerPermission: enabled && state.mergeMode !== 'readonly' ? 'WRITE' : 'READ', autoMergeAllowed: enabled,
+      mergeCommitAllowed: state.mergeMethods?.includes('MERGE'), squashMergeAllowed: state.mergeMethods?.includes('SQUASH'),
+      rebaseMergeAllowed: state.mergeMethods?.includes('REBASE'), pullRequest: pull ? {
       id: 'fixture-pull-' + pull.number, number: pull.number, state: pull.merged_at ? 'MERGED' : pull.state.toUpperCase(),
       isDraft: pull.draft, headRefOid: pull.head.sha, baseRefOid: pull.base.sha, updatedAt: pull.updated_at,
-      viewerCanUpdate: state.lifecycleMode !== 'readonly',
+      baseRefName: pull.base.ref, viewerCanUpdate: state.lifecycleMode !== 'readonly',
+      mergeable: 'MERGEABLE', mergeStateStatus: state.mergeMode === 'blocked' ? 'BLOCKED' : 'CLEAN',
+      isMergeQueueEnabled: state.mergeMode === 'queue', mergeQueueEntry: pull.queueEntry ? { id: pull.queueEntry } : null,
+      autoMergeRequest: pull.autoMergeMethod ? { mergeMethod: pull.autoMergeMethod } : null,
+      viewerCanEnableAutoMerge: state.mergeMode === 'blocked', viewerCanDisableAutoMerge: Boolean(pull.autoMergeMethod),
     } : null } } })
   }
   if (query.includes('query HarnessPullRequestReviewAccount')) {
@@ -310,5 +342,5 @@ if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
   return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages,
-    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle }
+    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle, configureMerge }
 }

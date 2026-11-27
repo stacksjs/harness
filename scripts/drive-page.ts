@@ -6651,6 +6651,7 @@ try {
     await lifecycleStatus('Pull request reopened.').waitFor()
     check('the draft, close, and reopen transitions are confirmed on GitHub without a repeated close',
       pullState().lifecycleWrites === 4 && pullState().pulls[0].state === 'open' && pullState().pulls[0].draft === true)
+    const mergeReviewUrl = clonePage.url()
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
@@ -6664,6 +6665,34 @@ try {
     check('review search reopens a matching title and restores the selected sort from its address',
       new URL(clonePage.url()).searchParams.get('q') === 'draft pull request'
       && await reviewList.getByRole('combobox', { name: 'Sort' }).inputValue() === 'oldest')
+
+    github.configureMerge('ready', ['MERGE', 'SQUASH'])
+    await clonePage.setViewportSize({ width: 390, height: 844 })
+    await clonePage.goto(mergeReviewUrl, { waitUntil: 'domcontentloaded' })
+    await actions.click()
+    await lifecycleMenu.getByRole('button', { name: 'Ready for review', exact: true }).click()
+    await lifecycleStatus('Pull request is ready for review.').waitFor()
+    const mergeTrigger = clonePage.getByRole('button', { name: 'Merge pull request', exact: true })
+    const mergeConfirmation = clonePage.getByRole('form', { name: 'Merge pull request', exact: true })
+    await mergeTrigger.press('Enter')
+    await mergeConfirmation.waitFor()
+    await capture('pull-requests-merge-method-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('merging requires confirmation and Escape returns focus to the merge action',
+      await mergeConfirmation.isHidden()
+      && await mergeTrigger.evaluate(element => element === document.activeElement)
+      && pullState().mergeWrites === undefined)
+    await mergeTrigger.press('Enter')
+    await mergeConfirmation.getByRole('radio', { name: 'Squash and merge' }).check()
+    github.configureLifecycle('unconfirmed')
+    await mergeConfirmation.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.revealLifecycle()
+    await checkLifecycle.click()
+    await lifecycleStatus('Pull request merged.').waitFor()
+    check('merge recovery retains the chosen method and never submits a second GitHub mutation',
+      pullState().mergeWrites.length === 1 && pullState().mergeWrites[0].input.mergeMethod === 'SQUASH'
+      && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible() && await actions.isHidden())
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

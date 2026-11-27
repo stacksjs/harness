@@ -1,29 +1,38 @@
-@if(lifecyclePending || selected.lifecycle?.actions.length)
+@if(lifecyclePending || selected.lifecycle?.actions.length || selected.lifecycle?.mergeAction)
   <div id="pr-lifecycle" data-pr-lifecycle>
     @if(lifecyclePending)
       <form method="post" action="{{ lifecycleEndpoint }}">
         <input type="hidden" name="action" value="{{ lifecyclePending.action }}">
         <input type="hidden" name="base" value="{{ lifecyclePending.base }}">
+        <input type="hidden" name="baseBranch" value="{{ lifecyclePending.baseBranch }}">
         <input type="hidden" name="head" value="{{ lifecyclePending.head }}">
         <input type="hidden" name="viewer" value="{{ lifecyclePending.viewer }}">
         <input type="hidden" name="revision" value="{{ lifecyclePending.revision }}">
         <input type="hidden" name="intent" value="{{ lifecyclePending.token }}">
+        @if(lifecyclePending.method)
+          <input type="hidden" name="method" value="{{ lifecyclePending.method }}">
+        @endif
         <button type="submit" data-pr-button>Check GitHub again</button>
       </form>
     @else
-      <button type="button" popovertarget="pr-lifecycle-menu" data-pr-button data-pr-lifecycle-trigger aria-label="Pull request actions">
-        Actions <span class="inline-block size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
-      </button>
-      <form method="post" action="{{ lifecycleEndpoint }}" aria-label="Update pull request" id="pr-lifecycle-menu" data-pr-lifecycle-menu data-pr-lifecycle-panel popover>
-        @include('./harness-pr-lifecycle-fields')
-        @foreach(selected.lifecycle.actions as item)
-          @if(item.action === 'close')
-            <button type="button" popovertarget="pr-close-confirmation" data-pr-lifecycle-action data-pr-close-trigger>{{ item.label }}</button>
-          @else
-            <button type="submit" name="action" value="{{ item.action }}" data-pr-lifecycle-action>{{ item.label }}</button>
-          @endif
-        @endforeach
-      </form>
+      @if(selected.lifecycle.mergeAction)
+        <button type="button" popovertarget="pr-merge-confirmation" data-pr-button data-pr-merge-trigger>{{ selected.lifecycle.mergeAction.label }}</button>
+      @endif
+      @if(selected.lifecycle.actions.length)
+        <button type="button" popovertarget="pr-lifecycle-menu" data-pr-button data-pr-lifecycle-trigger aria-label="Pull request actions">
+          Actions <span class="inline-block size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+        </button>
+        <form method="post" action="{{ lifecycleEndpoint }}" aria-label="Update pull request" id="pr-lifecycle-menu" data-pr-lifecycle-menu data-pr-lifecycle-panel popover>
+          @include('./harness-pr-lifecycle-fields')
+          @foreach(selected.lifecycle.actions as item)
+            @if(item.action === 'close')
+              <button type="button" popovertarget="pr-close-confirmation" data-pr-lifecycle-action data-pr-close-trigger>{{ item.label }}</button>
+            @else
+              <button type="submit" name="action" value="{{ item.action }}" data-pr-lifecycle-action>{{ item.label }}</button>
+            @endif
+          @endforeach
+        </form>
+      @endif
       @if(selected.lifecycle.actions.some(item => item.action === 'close'))
         <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-close-title" id="pr-close-confirmation" data-pr-close-confirmation data-pr-lifecycle-panel popover>
           @include('./harness-pr-lifecycle-fields')
@@ -31,6 +40,25 @@
           <div data-pr-review-actions>
             <button type="button" popovertarget="pr-close-confirmation" popovertargetaction="hide" data-pr-button>Cancel</button>
             <button type="submit" name="action" value="close" data-pr-button data-pr-close-confirm>Confirm close</button>
+          </div>
+        </form>
+      @endif
+      @if(selected.lifecycle.mergeAction)
+        <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-merge-title" id="pr-merge-confirmation" data-pr-merge-confirmation data-pr-lifecycle-panel popover>
+          @include('./harness-pr-lifecycle-fields')
+          <p id="pr-merge-title"><strong>{{ selected.lifecycle.mergeAction.label }}</strong></p>
+          <p data-pr-merge-target>Base <code>{{ selected.baseRef }}</code><span>Head <code title="{{ selected.head }}">{{ headLabel }}</code></span></p>
+          @if(selected.lifecycle.mergeAction.chooseMethod)
+            <fieldset>
+              <legend>Merge method</legend>
+              @foreach(selected.lifecycle.methods as option)
+                <label><input type="radio" name="method" value="{{ option.value }}" @if(option.value === selected.lifecycle.methods[0].value) checked @endif required> {{ option.label }}</label>
+              @endforeach
+            </fieldset>
+          @endif
+          <div data-pr-review-actions>
+            <button type="button" popovertarget="pr-merge-confirmation" popovertargetaction="hide" data-pr-button>Cancel</button>
+            <button type="submit" name="action" value="{{ selected.lifecycle.mergeAction.action }}" data-pr-button data-pr-merge-confirm>Confirm</button>
           </div>
         </form>
       @endif

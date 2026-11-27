@@ -1333,13 +1333,71 @@ describe('harness serve — HTTP', () => {
       expect(await earlierClose.json()).toMatchObject({ message: 'GitHub already confirmed the earlier update.' })
       expect(readState().lifecycleWrites).toBe(4)
       expect(readState().pulls[0].state).toBe('open')
+
+      cli.configureMerge('ready')
+      const readyToMerge = await lifecycleForm()
+      expect(readyToMerge.html).not.toContain('data-pr-merge-trigger')
+      expect((await changeLifecycle(readyToMerge, 'merge', { method: 'SQUASH' })).status).toBe(409)
+      expect((await changeLifecycle(readyToMerge, 'ready')).status).toBe(200)
+      cli.configureMerge('readonly')
+      const reader = await lifecycleForm()
+      expect(reader.html).not.toContain('data-pr-merge-trigger')
+      expect((await changeLifecycle(reader, 'merge', { method: 'SQUASH' })).status).toBe(403)
+      cli.configureMerge('blocked', ['SQUASH'])
+      const blocked = await lifecycleForm()
+      expect(blocked.html).toContain('Enable auto-merge')
+      expect(blocked.html).not.toContain('Rebase and merge')
+      expect((await changeLifecycle(blocked, 'merge', { method: 'SQUASH' })).status).toBe(409)
+      expect((await changeLifecycle(blocked, 'enable-auto-merge', { method: 'REBASE' })).status).toBe(409)
+      expect((await changeLifecycle(blocked, 'enable-auto-merge', { method: 'SQUASH' })).status).toBe(200)
+      const auto = await lifecycleForm()
+      expect(auto.html).toContain('Auto-merge enabled')
+      expect((await changeLifecycle(auto, 'disable-auto-merge')).status).toBe(200)
+      cli.configureMerge('queue')
+      const queue = await lifecycleForm()
+      expect(queue.html).toContain('Join merge queue')
+      expect((await changeLifecycle(queue, 'merge', { method: 'SQUASH' })).status).toBe(409)
+      expect((await changeLifecycle(queue, 'enqueue')).status).toBe(200)
+      const queued = await lifecycleForm()
+      expect(queued.html).toContain('In merge queue')
+      expect((await changeLifecycle(queued, 'dequeue')).status).toBe(200)
+      cli.configureMerge('ready')
+      const merge = await lifecycleForm()
+      expect(merge.html).toContain('Squash and merge')
+      expect((await changeLifecycle(merge, 'merge')).status).toBe(400)
+      expect((await changeLifecycle(merge, 'merge', { method: 'SQUASH', baseBranch: 'other-branch' })).status).toBe(409)
+      expect((await changeLifecycle(merge, 'merge', { method: 'SQUASH', base: 'd'.repeat(40) })).status).toBe(409)
+      expect((await changeLifecycle(merge, 'merge', { method: 'SQUASH', head: 'd'.repeat(40) })).status).toBe(409)
+      cli.configureLifecycle('unconfirmed')
+      const delayedMerge = await changeLifecycle(merge, 'merge', { method: 'SQUASH' }, 'text/html')
+      expect(delayedMerge.status).toBe(202)
+      expect(await delayedMerge.text()).toContain('name="method" value="SQUASH"')
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      replyHost = 'http://127.0.0.1:' + harness.server.port
+      expect((await changeLifecycle(merge, 'merge', { method: 'REBASE' })).status).toBe(409)
+      cli.revealLifecycle()
+      const merged = await changeLifecycle(merge, 'merge', { method: 'SQUASH' })
+      expect(merged.status).toBe(200)
+      expect(await merged.json()).toMatchObject({ message: 'Pull request merged.' })
+      expect((await changeLifecycle(merge, 'merge', { method: 'SQUASH' })).status).toBe(200)
+      const mergedView = await fetch(lifecycleView()).then(response => response.text())
+      expect(mergedView).toContain('data-pr-state="Merged"')
+      expect(mergedView).not.toContain('aria-label="Pull request actions"')
+      expect(readState().mergeWrites).toEqual([
+        { mutation: 'enablePullRequestAutoMerge', input: { pullRequestId: 'fixture-pull-1', expectedHeadOid: local, mergeMethod: 'SQUASH' } },
+        { mutation: 'disablePullRequestAutoMerge', input: { pullRequestId: 'fixture-pull-1' } },
+        { mutation: 'enqueuePullRequest', input: { pullRequestId: 'fixture-pull-1', expectedHeadOid: local } },
+        { mutation: 'dequeuePullRequest', input: { id: 'fixture-pull-1' } },
+        { mutation: 'mergePullRequest', input: { pullRequestId: 'fixture-pull-1', expectedHeadOid: local, mergeMethod: 'SQUASH' } },
+      ])
     }
     finally {
       process.chdir(previousCwd)
       if (path === undefined) delete process.env.PATH
       else process.env.PATH = path
     }
-  }, 60_000)
+  }, 90_000)
 
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')
