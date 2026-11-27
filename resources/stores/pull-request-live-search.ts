@@ -1,3 +1,5 @@
+import { pullRequestListPosition } from './pull-request-list-position'
+
 type SearchResult = {
   html: string
   scope: string
@@ -25,7 +27,7 @@ export function withCurrentPullRequestQuery(address: string, current: Location) 
   const target = new URL(address, current.href)
   if (target.origin !== current.origin || !/^\/pull-requests(?:\/|$)/u.test(target.pathname)) return address
   const list = new URLSearchParams(current.search)
-  for (const key of ['q', 'page']) {
+  for (const key of ['q', 'page', 'through']) {
     const value = list.get(key)
     if (value) target.searchParams.set(key, value)
     else target.searchParams.delete(key)
@@ -81,15 +83,37 @@ function appendPullRequestPage(current: Element, incoming: Element, link: HTMLAn
 }
 
 export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElement, scope: () => string,
-  applied: (result: SearchResult) => void, pending: (value: 'search' | 'page' | '') => void, status: (message: string) => void) {
+  applied: (result: SearchResult) => void, pending: (value: 'search' | 'page' | '') => void, status: (message: string) => void,
+  range: { page: number, through: number }) {
   const view = input.ownerDocument.defaultView
   const form = input.form
   if (!view || !form) return
   const browser = view
+  const pane = results.closest<HTMLElement>('[data-pr-workspace-list]')
+  const position = pane ? pullRequestListPosition(browser, pane, scope) : null
   const initialFormScope = listFormScope(form)
   let timer: ReturnType<typeof setTimeout> | undefined
   let request: AbortController | undefined
   let composing = false
+  const address = new URL(browser.location.href)
+  if (address.searchParams.has('through')) {
+    if (range.through > range.page) address.searchParams.set('through', String(range.through))
+    else address.searchParams.delete('through')
+    if (address.href !== browser.location.href) browser.history.replaceState(browser.history.state, '', address)
+  }
+  position?.restore()
+
+  function updateWorkspaceLinks() {
+    const workspace = results.closest('[data-pr-workspace-columns]')
+    const links = workspace?.querySelectorAll(
+      '[data-pr-entry], [data-pr-workspace-detail] a[href^="/pull-requests?"], [data-pr-workspace-detail] form[action^="/pull-requests/"]',
+    )
+    for (const link of links ?? []) {
+      const attribute = link.localName === 'form' ? 'action' : 'href'
+      const address = link.getAttribute(attribute)
+      if (address) link.setAttribute(attribute, withCurrentPullRequestQuery(address, browser.location))
+    }
+  }
 
   function cancel() {
     clearTimeout(timer)
@@ -137,8 +161,19 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
       if (link && target) {
         const current = results.querySelector('[data-pr-results-fragment]')
         if (!current || result.scope !== expectedScope) throw new Error('Could not finish loading this page')
+        const receivedRows = Boolean(fragment.querySelector('[data-pr-entry]'))
         if (!appendPullRequestPage(current, fragment, link, keyboard, result.partial)) browser.location.assign(target.href)
         else {
+          if (!result.partial || receivedRows) {
+            const url = new URL(browser.location.href)
+            const end = Number(target.searchParams.get('page'))
+            if (end > Number(url.searchParams.get('through') ?? 0)) {
+              url.searchParams.set('through', String(end))
+              browser.history.replaceState(browser.history.state, '', url)
+              updateWorkspaceLinks()
+              position?.save()
+            }
+          }
           const count = current.querySelectorAll('[data-pr-row]').length
           status(count + ' pull requests shown.')
           if (result.partial && pageStatus) pageStatus.textContent = 'Some repositories could not finish loading. Retry this page.'
@@ -149,18 +184,17 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
       if (result.search) url.searchParams.set('q', result.search)
       else url.searchParams.delete('q')
       url.searchParams.delete('page')
+      url.searchParams.delete('through')
       browser.history.replaceState(browser.history.state, '', url)
       results.replaceChildren(fragment)
-      const workspace = results.closest('[data-pr-workspace-columns]')
-      const links = workspace?.querySelectorAll(
-        '[data-pr-workspace-detail] a[href^="/pull-requests?"], [data-pr-workspace-detail] form[action^="/pull-requests/"], [data-pr-clear-filters]',
-      )
-      for (const link of links ?? []) {
-        const attribute = link.localName === 'form' ? 'action' : 'href'
-        const address = link.getAttribute(attribute)
-        if (address) link.setAttribute(attribute, withCurrentPullRequestQuery(address, browser.location))
+      updateWorkspaceLinks()
+      const clear = results.closest('[data-pr-workspace-list]')?.querySelector('[data-pr-clear-filters]')
+      const clearAddress = clear?.getAttribute('href')
+      if (clearAddress) {
+        clear?.setAttribute('href', withCurrentPullRequestQuery(clearAddress, browser.location))
       }
       applied(result)
+      position?.reset()
       const count = fragment.querySelectorAll('[data-pr-row]').length
       status(count === 1 ? '1 pull request shown.' : count + ' pull requests shown.')
     }
@@ -197,6 +231,9 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
 
   return {
     cancel,
+    savePosition() { position?.save() },
+    listScrolled() { position?.scrolled() },
+    rememberNavigation(event: MouseEvent) { position?.remember(event) },
     next(event: MouseEvent) {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
       const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-pr-next]') : null

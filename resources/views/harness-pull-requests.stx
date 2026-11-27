@@ -25,8 +25,9 @@ export const involvementOptions = [{ value: '', label: 'Everyone' }, { value: 'a
 export const draftOptions = [{ value: '', label: 'Any' }, { value: 'only', label: 'Drafts only' }, { value: 'hide', label: 'Hide drafts' }]
 export const reviewOptions = [{ value: '', label: 'Any' }, { value: 'approved', label: 'Approved' }, { value: 'changes-requested', label: 'Changes requested' }, { value: 'review-required', label: 'Review required' }, { value: 'none', label: 'No reviews' }]
 export const checkOptions = [{ value: '', label: 'Any' }, { value: 'passing', label: 'Passing' }, { value: 'failing', label: 'Failing' }]
+export const codeHref = $props.codeHref
 export const tabOptions = [{ value: 'summary', label: 'Summary', href: $props.summaryHref },
-  { value: 'timeline', label: 'Timeline', href: $props.timelineHref }, { value: 'code', label: 'Code', href: $props.codeHref }]
+  { value: 'timeline', label: 'Timeline', href: $props.timelineHref }, { value: 'code', label: 'Code', href: codeHref }]
 const outcomes = { failed: 'Failed', cancelled: 'Cancelled', 'action-required': 'Action required', pending: 'Pending', passed: 'Passed', skipped: 'Skipped', neutral: 'Neutral', unknown: 'Unknown' }
 const attention = check => !['passed', 'neutral', 'skipped'].includes(check.status)
 export const checks = (selected?.checks || []).filter(attention).sort((a, b) => Number(a.status === 'pending') - Number(b.status === 'pending'))
@@ -35,6 +36,21 @@ export const primaryChecks = checks.length ? checks : completed
 export const approvalRuns = selected?.approvalRuns || []
 export const approvalLookupFailed = selected?.approvalRuns === null
 export const checksLabel = check => outcomes[check.status] || 'Unknown'
+const failingChecks = checks.filter(check => check.status === 'failed').length
+const pendingChecks = checks.filter(check => check.status === 'pending').length
+const otherChecks = checks.length - failingChecks - pendingChecks
+const totalChecks = checks.length + completed.length
+export const checkRollup = failingChecks
+  ? { status: 'failed', text: (selected?.truncated ? failingChecks : failingChecks + ' of ' + totalChecks) + ' failing' }
+  : approvalRuns.length || otherChecks
+    ? { status: 'action-required', text: 'Checks need attention' }
+    : pendingChecks
+      ? { status: 'pending', text: pendingChecks + ' pending' }
+      : completed.length ? { status: 'passed', text: 'Checks complete' } : null
+export const changedFileCount = Number.isSafeInteger(selected?.changedFiles) && selected.changedFiles >= 0
+  ? selected.changedFiles === 1 ? '1 file' : selected.changedFiles + ' files'
+  : ''
+export const hasChangeTotals = Number.isSafeInteger(selected?.additions) && Number.isSafeInteger(selected?.deletions)
 const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 export const dateLabel = date => date && Number.isFinite(Date.parse(date)) ? dates.format(new Date(date)) : ''
 export const detailTitle = selected?.title || 'Pull request unavailable'
@@ -47,6 +63,7 @@ export const repositoryFilter = $props.repository
 export const filter = $props.filter
 export const pageBack = $props.pageBack
 export const page = $props.page
+export const through = $props.through
 export const pageNext = $props.pageNext
 export const listHref = $props.listHref
 export const detailPage = $props.detailPage
@@ -842,7 +859,7 @@ onMount(() => {
         shown.value = result.draft
       }
       refreshSavedPrViews()
-    }, value => prSearchPending.set(value), message => prSearchStatus.set(message))
+    }, value => prSearchPending.set(value), message => prSearchStatus.set(message), @json({ page, through }))
   }
   savedPrStore = pullRequestViewStore(browser)
   refreshSavedPrViews()
@@ -853,7 +870,10 @@ useEventListener('storage', event => {
   if (event.key === PULL_REQUEST_VIEWS_KEY || event.key === null) refreshSavedPrViews()
 })
 useEventListener('pageshow', refreshSavedPrViews)
-useEventListener('pagehide', () => livePrSearch?.cancel())
+useEventListener('pagehide', () => {
+  livePrSearch?.savePosition()
+  livePrSearch?.cancel()
+})
 useEventListener('pointerdown', event => {
   for (const menu of [savedPrViewsMenu.current, prFiltersMenu.current]) {
     if (menu?.open && !menu.contains(event.target)) menu.open = false
@@ -996,7 +1016,7 @@ function closeSavedPrEditor() {
   savedPrViewsTrigger.current?.focus()
 }
 </script>
-<main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
+<main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100" @click="livePrSearch?.rememberNavigation($event)">
   <header data-pr-workspace-header>
     <a href="{{ backHref }}" data-pr-back>
       <span class="inline-block size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>Workspace
@@ -1004,7 +1024,7 @@ function closeSavedPrEditor() {
     <h1>Pull requests</h1>
   </header>
   <div data-pr-workspace-columns data-detail="{{ hasDetail }}">
-    <section aria-label="Pull request list" data-pr-workspace-list>
+    <section aria-label="Pull request list" data-pr-workspace-list @scroll="livePrSearch?.listScrolled()">
       <form method="get" action="/pull-requests" data-pr-filters @submit="livePrSearch?.submit($event)">
         @foreach(listSelectionFields as pair)
           <input type="hidden" name="{{ pair[0] }}" value="{{ pair[1] }}">
@@ -1213,7 +1233,7 @@ function closeSavedPrEditor() {
           @if(selected?.title)
             <span data-pr-detail-repo>{{ selected.repository }} <span data-pr-number>#{{ selected.number }}</span></span>
           @endif
-          <h2 id="pr-detail-title">{{ detailTitle }}</h2>
+          <h2 id="pr-detail-title" tabindex="-1">{{ detailTitle }}</h2>
           @if(selected?.title)
             <p data-pr-detail-meta>
               <strong data-pr-state="{{ selected.status }}">{{ selected.status }}</strong>
@@ -1227,6 +1247,15 @@ function closeSavedPrEditor() {
                 <code>{{ selected.baseRef }}</code><span aria-label="receives changes from">←</span><code>{{ selected.headRef }}</code>
                 @if(selected.lifecycle?.branchUpdate)
                   @include('../partials/harness-pr-branch-update')
+                @endif
+                @if(changedFileCount || hasChangeTotals)
+                  <a href="{{ codeHref }}" data-pr-change-totals>
+                    @if(changedFileCount)<span>{{ changedFileCount }}</span>@endif
+                    @if(hasChangeTotals)
+                      <span data-pr-additions aria-label="{{ selected.additions }} additions">+{{ selected.additions }}</span>
+                      <span data-pr-deletions aria-label="{{ selected.deletions }} deletions">-{{ selected.deletions }}</span>
+                    @endif
+                  </a>
                 @endif
               </div>
             @endif
@@ -1247,11 +1276,16 @@ function closeSavedPrEditor() {
         @if(selectionError || !selected?.title)
           <p data-pr-empty role="status">{{ selectionError || selected?.error }}</p>
         @else
-          <nav aria-label="Pull request views" data-pr-tabs>
-            @foreach(tabOptions as item)
-              <a href="{{ item.href }}" @if(item.value === tab) aria-current="page"@endif>{{ item.label }}</a>
-            @endforeach
-          </nav>
+          <div data-pr-detail-tab-bar>
+            <nav aria-label="Pull request views" data-pr-tabs>
+              @foreach(tabOptions as item)
+                <a href="{{ item.href }}" @if(item.value === tab) aria-current="page"@endif>{{ item.label }}</a>
+              @endforeach
+            </nav>
+            @if(tab === 'summary' && checkRollup && !selected.error)
+              <a href="#pr-detail-checks" data-pr-check-rollup data-check-status="{{ checkRollup.status }}">{{ checkRollup.text }}</a>
+            @endif
+          </div>
           <div data-pr-detail-content>
           @if(tab === 'summary')
             @if(selected.reviewers.length || selected.reviewDecision || selected.reviewOutcomesNotice || selected.canEditReviewers || reviewerEditor || reviewerDraft || reviewerError || reviewersNotice)
@@ -1266,7 +1300,7 @@ function closeSavedPrEditor() {
             @else
               <p>No description.</p>
             @endif
-            <h3>Checks</h3>
+            <h3 id="pr-detail-checks" tabindex="-1">Checks</h3>
             @if(approvalLookupFailed)
               <p role="status">GitHub could not confirm which workflows are awaiting approval for this pull request.</p>
             @elseif(approvalRuns.length)

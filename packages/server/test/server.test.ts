@@ -1123,6 +1123,16 @@ describe('harness serve — HTTP', () => {
       expect(page).toContain('Recent change 0')
       expect(page).not.toContain('data-pr-next')
       expect(keys(page).some(key => keys(full).includes(key))).toBe(false)
+      const restoredUrl = new URL(host + '/pull-requests?' + scope)
+      restoredUrl.searchParams.set('selectedUrl', url.replace(/1$/u, '10'))
+      restoredUrl.searchParams.set('through', '2')
+      const restored = await (await fetch(restoredUrl)).text()
+      expect(keys(restored)).toHaveLength(26)
+      expect(keys(restored).sort()).toEqual([...keys(full), ...keys(page)].sort())
+      expect(restored).toMatch(/data-detail="true"/u)
+      expect(/<a\b[^>]*data-pr-entry="[^"]+\/10"[^>]*>/u.exec(restored)?.[0]).toContain('aria-current="page"')
+      expect(restored).not.toContain('data-pr-next')
+      expect(restored).toMatch(/href="[^"]*through=2[^"]*tab=timeline/u)
       nextUrl.pathname = '/pull-requests/results'
       expect(await (await fetch(nextUrl)).json()).toMatchObject({ partial: false })
       fixture.filterPriorityFailure = 'fixture/notebook'
@@ -1131,6 +1141,9 @@ describe('harness serve — HTTP', () => {
       expect(fallback.partial).toBe(true)
       expect(fallback.html).toContain('Could not load the priority groups.')
       expect(fallback.html).not.toContain('Private list search diagnostics')
+      const incompleteRestoration = await (await fetch(restoredUrl)).text()
+      expect(incompleteRestoration).toContain('Retry loaded pages')
+      expect(incompleteRestoration).not.toContain('data-pr-next')
       const typed = await (await fetch(host + '/pull-requests/results?q=Older+team')).json()
       expect(typed.partial).toBe(false)
       expect(typed.html).toContain('Older team review request')
@@ -1149,6 +1162,25 @@ describe('harness serve — HTTP', () => {
       expect(keys(partialPage.html)).toHaveLength(3)
       expect(partialPage.html).toContain('Recent change 0')
       expect(partialPage.html).toContain('fixture/unreadable')
+      fixture.repositories['fixture/unreadable'] = { bare: join(unreadable, '.git') }
+      fixture.pulls.push(makePull(51, 'Other repository request', { user: { login: 'outside' },
+        html_url: 'https://github.com/fixture/unreadable/pull/51', updated_at: '2026-09-01T00:00:00Z',
+        base: { ...original.base, repo: { full_name: 'fixture/unreadable' } } }))
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const multiFirst = await (await fetch(host + '/pull-requests?' + scope)).text()
+      const multiSecond = await (await fetch(nextUrl)).json()
+      const multiRestored = await (await fetch(restoredUrl)).text()
+      expect(keys(multiRestored)).toEqual([...keys(multiFirst), ...keys(multiSecond.html)])
+
+      fixture.pulls.push(...Array.from({ length: 125 }, (_, index) => makePull(index + 101, 'Window row ' + index, {
+        created_at: new Date(Date.UTC(2026, 10, index + 1)).toISOString(),
+      })))
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const range = await (await fetch(host + '/pull-requests/results?' + new URLSearchParams({
+        repository: 'fixture/notebook', q: 'Window row', sort: 'oldest', page: '5', through: '6',
+      }))).json()
+      expect(keys(range.html)).toEqual(Array.from({ length: 40 }, (_, index) => url.replace(/1$/u, String(index + 181))))
+      expect(range.html).toContain('page=7')
     }
     finally {
       process.chdir(cwd)
@@ -1828,6 +1860,8 @@ describe('harness serve — HTTP', () => {
       const detail = review + '?' + new URLSearchParams({ selectedUrl: url })
       const summary = await fetch(detail).then(response => response.text())
       expect(summary).toContain('Details')
+      expect(summary).toMatch(/href="#pr-detail-checks" data-pr-check-rollup data-check-status="failed">1 of 4 failing<\/a>/u)
+      expect(summary).toContain('id="pr-detail-checks" tabindex="-1"')
       expect(summary).toContain('Verify the export.')
       expect(summary).toContain('href="/s/' + sessionId + '"')
       const timeline = await fetch(detail + '&tab=timeline').then(response => response.text())
