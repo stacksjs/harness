@@ -5674,8 +5674,14 @@ for (const [width, height] of workspaceViewports) {
   await savedDraftPage.setViewportSize({ width, height })
   const toggle = savedDraftPage.locator('[data-sidebar-toggle]')
   if (await toggle.isVisible() && !await savedList.isVisible()) await toggle.click()
-  await setFixtureModifier(true)
-  await savedLink('Saved scratch draft').locator('xpath=self::*[@data-sidebar-jump]').waitFor()
+  const scratchHint = savedLink('Saved scratch draft').locator('xpath=self::*[@data-sidebar-jump]')
+  // Resizing or presenting the sidebar can briefly blur the headless window.
+  // Keep the fixture's modifier engaged until the numbered hint is visible.
+  for (let attempt = 0; ; attempt++) {
+    await setFixtureModifier(true)
+    if (await scratchHint.waitFor({ timeout: 1200 }).then(() => true).catch(() => false)) break
+    if (attempt === 3) throw new Error(`Sidebar hint unavailable at ${width}×${height}`)
+  }
   check(`numbered sidebar hints fit at ${width}×${height}`, await savedList.evaluate(list => {
     const bounds = list.getBoundingClientRect()
     const link = list.querySelector('[data-sidebar-jump]')
@@ -6039,6 +6045,7 @@ try {
   await clonePage.waitForURL(baseUrl + '/')
   check('cancelling a pull request link preserves the project and creates no thread',
     harness.engine.current.sessions.size === countBeforeClone && !existsSync(join(linkDestination, 'review.txt')))
+  await clonePage.waitForLoadState('networkidle')
   await clonePage.goto(pullRequestUrl)
   await checkOut.click()
   await clonePage.waitForURL(url => /^\/s\/\d+$/.test(url.pathname))
