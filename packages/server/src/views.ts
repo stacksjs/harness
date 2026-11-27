@@ -223,6 +223,7 @@ export function viewProps(state: HarnessState, options: {
           navigation: active.navigation,
           linkedPullRequests: active.linkedPullRequests,
           pullRequest: active.pullRequest ? {
+            reference: active.pullRequest,
             url: 'https://github.com/' + active.pullRequest.repository + '/pull/' + active.pullRequest.number,
             label: active.pullRequest.repository + '#' + active.pullRequest.number,
           } : undefined,

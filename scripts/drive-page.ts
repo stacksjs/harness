@@ -6321,6 +6321,45 @@ try {
     await prDialog.waitFor({ state: 'hidden' })
     check('reload restores the scoped PR link and linking again does not create another PR',
       await linkedPr.getAttribute('href') === address && JSON.parse(readFileSync(github.state, 'utf8')).posts === 1)
+
+    const checks = [[
+      { __typename: 'StatusContext', id: 'status:pending', context: 'Verify packaging', state: 'PENDING', description: 'Waiting for a runner' },
+      { __typename: 'CheckRun', id: 'check:completed', name: 'Unit tests', conclusion: 'SUCCESS', status: 'COMPLETED' },
+      { __typename: 'CheckRun', id: 'check:failed', name: 'Integration suite', conclusion: 'FAILURE', status: 'COMPLETED', detailsUrl: 'https://ci.example.com/jobs/2' },
+    ]]
+    github.configureChecks(checks)
+    const checksToggle = clonePage.getByRole('button', { name: 'Checks', exact: true })
+    const checksPanel = clonePage.getByRole('region', { name: 'Pull request checks' })
+    await checksToggle.focus()
+    await clonePage.keyboard.press('Enter')
+    await checksPanel.getByText('Integration suite', { exact: true }).waitFor()
+    const checkRows = checksPanel.locator('[data-pull-request-check]')
+    const checkNames = () => checkRows.locator('p.font-medium').allTextContents()
+    check('keyboard opens checks for the linked PR head with attention and pending checks first',
+      await checksToggle.getAttribute('aria-expanded') === 'true' && (await checkNames()).join(',') === 'Integration suite,Verify packaging'
+      && await checksPanel.getByText('Head ' + head.slice(0, 7), { exact: true }).getAttribute('title') === head
+      && await checksPanel.getByRole('link', { name: 'Details for Integration suite' }).getAttribute('href') === 'https://ci.example.com/jobs/2')
+    await checksPanel.getByRole('button', { name: 'Show all', exact: true }).click()
+    await checksPanel.getByText('Unit tests', { exact: true }).waitFor()
+    await clonePage.setViewportSize({ width: 390, height: 844 })
+    await capture('workspace-pull-request-checks-390x844', clonePage)
+    check('Show all reveals completed checks without page overflow',
+      (await checkNames()).join(',') === 'Integration suite,Verify packaging,Unit tests'
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+    await checksPanel.getByRole('button', { name: 'Show less', exact: true }).click()
+    await checksPanel.getByText('Unit tests', { exact: true }).waitFor({ state: 'hidden' })
+    github.configureChecks([], 'unreadable')
+    const refreshChecks = checksPanel.getByRole('button', { name: 'Refresh checks', exact: true })
+    await refreshChecks.click()
+    await checksPanel.getByRole('alert').getByText(/Check the host account/).waitFor()
+    github.configureChecks([])
+    await refreshChecks.click()
+    await checksPanel.getByText('No checks reported for this commit.', { exact: true }).waitFor()
+    await checksToggle.click()
+    await checksPanel.waitFor({ state: 'hidden' })
+    check('refresh recovers from a GitHub read error and closing leaves the linked PR intact',
+      await checksToggle.getAttribute('aria-expanded') === 'false' && await linkedPr.getAttribute('href') === address
+      && JSON.parse(readFileSync(github.state, 'utf8')).posts === 1)
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

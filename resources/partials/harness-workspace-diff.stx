@@ -97,8 +97,14 @@
     <a data-repository-pull-request-link target="_blank" rel="noopener noreferrer" class="content-center min-h-8 underline underline-offset-2"
       :href="repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().url : pullRequestLink(selectedRepositoryPullRequest())"
       :text="'GitHub #' + (repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().number : selectedRepositoryPullRequest()?.number)"></a>
+    @if(workspaceEditorAllowed)
+      <button type="button" data-pull-request-checks-toggle :hidden="!selectedRepositoryPullRequest()" aria-controls="harness-pull-request-checks"
+        :aria-expanded="repositoryChecksOpen() ? 'true' : 'false'" @click="toggleRepositoryChecks" class="min-h-9 font-medium underline underline-offset-2">Checks</button>
+      <span data-pull-request-checks-summary :hidden="!repositoryChecksSummary()" :text="repositoryChecksSummary()"></span>
+    @endif
   </div>
   <div data-diff-body>
+    @includeWhen(workspaceEditorAllowed, '../partials/harness-pull-request-checks')
     <div data-diff-overview>
       <p data-diff-status role="status" :text="diffStatus()">Loading…</p>
       <button type="button" hidden :hidden="!diffFiles().length" :aria-disabled="diffFileLimits().size ? 'false' : 'true'" @click="collapseDiffFiles">Collapse all</button>

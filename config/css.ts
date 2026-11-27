@@ -521,6 +521,23 @@ const RESPONSIVE_SHELL = `
 .dark [data-diff] { --diff-addition: #183529; --diff-deletion: #40252b; }
 [data-diff-header] { padding: 5px 8px 5px 12px; border-block-end: 1px solid var(--workspace-line); }
 [data-diff-body] { flex: 1; min-block-size: 0; overflow: auto; }
+[data-pull-request-checks]:not([hidden]) {
+  display: grid; gap: 6px; padding: 10px 12px; font-size: 12px; overflow-wrap: anywhere;
+  border-block: 1px solid var(--workspace-line);
+}
+[data-pull-request-check] { border-block-start: 1px solid var(--workspace-line); }
+[data-pull-request-check-description], [data-pull-request-checks] header p,
+[data-pull-request-checks-summary] { opacity: .78; }
+[data-pull-request-check] [data-check-status] { font-weight: 600; }
+[data-check-status="failed"], [data-check-status="cancelled"] { color: #a3263d; }
+[data-check-status="pending"], [data-check-status="action-required"] { color: #7b5014; }
+[data-check-status="passed"] { color: #286448; }
+.dark [data-check-status="failed"], .dark [data-check-status="cancelled"] { color: #ff9aa8; }
+.dark [data-check-status="pending"], .dark [data-check-status="action-required"] { color: #efc074; }
+.dark [data-check-status="passed"] { color: #85d0a7; }
+[data-pull-request-checks] button { justify-self: start; }
+[data-pull-request-checks] button:focus-visible, [data-pull-request-checks] a:focus-visible,
+[data-pull-request-checks-toggle]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
 [data-diff-layout-controls] { display: inline-flex; border: 1px solid var(--workspace-line); border-radius: 6px; padding: 2px; }
 [data-diff-layout-controls] button, [data-diff-wrap-control] {
   padding-inline: 8px; min-height: 26px; font-size: 12px; border-radius: 4px;
@@ -628,6 +645,7 @@ const RESPONSIVE_SHELL = `
 [data-diff-raw], [data-diff-empty-patch], [data-diff-more] { margin: 8px 12px; font-size: 12px; }
 [data-diff-raw] pre { overflow-x: auto; max-height: 18rem; }
 @media (pointer: coarse) {
+  [data-pull-request-checks-toggle], [data-pull-request-checks] button,
   [data-diff-header] button, [data-diff-file-toggle], [data-diff-more], [data-diff-overview] button { min-height: 44px; }
 }
 @media (pointer: coarse), (max-width: 47.999rem) {

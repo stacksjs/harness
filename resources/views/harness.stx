@@ -2439,7 +2439,64 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const repositoryPullRequestBusy = state(false)
   const repositoryPullRequestResult = state(null)
   const linkedRepositoryPullRequests = state(@json(activeSession?.linkedPullRequests || []))
-  const selectedRepositoryPullRequest = derived(() => linkedRepositoryPullRequests().findLast(link => link.repositoryKey === diffRepository()))
+  const pullRequestCheckout = @json(activeSession?.pullRequest?.reference || null)
+  const selectedRepositoryPullRequest = derived(() => linkedRepositoryPullRequests().findLast(link => link.repositoryKey === diffRepository())
+    || (pullRequestCheckout?.repositoryKey === diffRepository() ? pullRequestCheckout : null))
+  const repositoryChecksOpen = state(false)
+  const repositoryChecksData = state(null)
+  const repositoryChecksError = state('')
+  const repositoryChecksLoading = state(false)
+  const repositoryChecksShowAll = state(false)
+  const checkLabels = { failed: 'Failed', cancelled: 'Cancelled', 'action-required': 'Action required',
+    pending: 'Pending', passed: 'Passed', skipped: 'Skipped', neutral: 'Neutral', unknown: 'Unknown' }
+  const completedCheckStates = ['passed', 'skipped', 'neutral']
+  const repositoryChecksGroups = derived(() => {
+    const attention = []
+    const pending = []
+    const completed = []
+    for (const check of repositoryChecksData()?.checks || []) {
+      (completedCheckStates.includes(check.status) ? completed : check.status === 'pending' ? pending : attention).push(check)
+    }
+    return { attention, pending, completed, canCollapse: completed.length > 0 && attention.length + pending.length > 0 }
+  })
+  const repositoryChecksVisible = derived(() => {
+    const { attention, pending, completed, canCollapse } = repositoryChecksGroups()
+    return [...attention, ...pending, ...(!canCollapse || repositoryChecksShowAll() ? completed : [])]
+  })
+  const repositoryChecksSummary = derived(() => {
+    const data = repositoryChecksData()
+    if (!data || repositoryChecksError()) return ''
+    const { attention, pending } = repositoryChecksGroups()
+    const count = data.checks.length
+    if (!count) return 'No checks reported'
+    const countLabel = String(count) + (data.truncated ? '+' : '') + (count === 1 ? ' check' : ' checks')
+    const parts = [countLabel]
+    if (attention.length) parts.push(attention.length + ' need attention')
+    if (pending.length) parts.push(pending.length + ' pending')
+    if (!data.truncated && data.checks.every(check => check.status === 'passed')) parts.push('all passed')
+    return parts.join(' · ')
+  })
+  const repositoryChecksStateLabel = derived(() => {
+    const data = repositoryChecksData()
+    if (!data) return ''
+    if (data.state === 'MERGED') return 'Merged'
+    if (data.state === 'CLOSED') return 'Closed'
+    return data.draft ? 'Draft' : 'Open'
+  })
+  let repositoryChecksRequest
+  effect(() => {
+    diffOpen()
+    diffRepository()
+    selectedRepositoryPullRequest()
+    repositoryChecksRequest?.abort()
+    batch(() => {
+      repositoryChecksOpen.set(false)
+      repositoryChecksData.set(null)
+      repositoryChecksError.set('')
+      repositoryChecksShowAll.set(false)
+      repositoryChecksLoading.set(false)
+    })
+  })
   const repositoryPullRequestBaseChanged = derived(() => Boolean(repositoryPullRequestPreview()
     && repositoryPullRequestBaseText().trim() !== repositoryPullRequestPreview().baseRef))
   const repositoryPullRequestCanSubmit = derived(() => Boolean(repositoryPullRequestPreview()?.revision
@@ -4652,6 +4709,50 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function pullRequestLink(link) {
     return link ? 'https://github.com/' + link.repository + '/pull/' + link.number : undefined
+  }
+
+  function toggleRepositoryChecks() {
+    if (repositoryChecksOpen()) {
+      repositoryChecksRequest?.abort()
+      repositoryChecksLoading.set(false)
+      repositoryChecksOpen.set(false)
+      return
+    }
+    repositoryChecksShowAll.set(false)
+    repositoryChecksOpen.set(true)
+    void refreshRepositoryChecks()
+  }
+
+  async function refreshRepositoryChecks() {
+    if (repositoryChecksLoading() || !selectedRepositoryPullRequest()) return
+    const request = new AbortController()
+    repositoryChecksRequest = request
+    repositoryChecksLoading.set(true)
+    repositoryChecksError.set('')
+    const params = new URLSearchParams({ repository: diffRepository() })
+    try {
+      const response = await fetch('/s/' + sessionId + '/git/pull-request-checks?' + params, { signal: request.signal, cache: 'no-store' })
+      const data = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(data.error || 'Could not read checks from GitHub. Try again.')
+      repositoryChecksData.set(data)
+    }
+    catch (error) {
+      if (!request.signal.aborted) {
+        repositoryChecksData.set(null)
+        repositoryChecksError.set(error.message || 'Could not read checks from GitHub. Try again.')
+      }
+    }
+    finally {
+      if (repositoryChecksRequest === request) {
+        repositoryChecksLoading.set(false)
+        repositoryChecksRequest = undefined
+      }
+    }
+  }
+
+  function toggleAllRepositoryChecks() {
+    repositoryChecksShowAll.update(value => !value)
   }
 
   function openRepositoryPullRequest(event) {

@@ -1,0 +1,35 @@
+<section id="harness-pull-request-checks" data-pull-request-checks aria-label="Pull request checks" hidden :hidden="!repositoryChecksOpen()">
+  <header class="flex gap-2 items-start justify-between">
+    <div class="min-w-0">
+      <h3 class="font-semibold text-[13px]" :text="repositoryChecksData()?.title || 'Pull request checks'"></h3>
+      <p class="flex flex-wrap gap-x-2" :hidden="!repositoryChecksData()">
+        <span :text="repositoryChecksStateLabel()"></span>
+        <span :text="'Head ' + (repositoryChecksData()?.head || '').slice(0, 7)" :title="repositoryChecksData()?.head" class="font-mono"></span>
+      </p>
+    </div>
+    <button type="button" class="harness-icon-button" aria-label="Refresh checks" title="Refresh checks"
+      :aria-disabled="repositoryChecksLoading() ? 'true' : 'false'" @click="refreshRepositoryChecks">
+      <span class="inline-block size-4 i-hugeicons-refresh" aria-hidden="true"></span>
+    </button>
+  </header>
+  <p role="status" :hidden="!repositoryChecksLoading()">Loading checks…</p>
+  <p role="alert" :hidden="!repositoryChecksError()" :text="repositoryChecksError()"></p>
+  <p role="status" :hidden="!repositoryChecksData() || repositoryChecksData()?.checks.length > 0 || repositoryChecksLoading()">No checks reported for this commit.</p>
+  <ul id="harness-pull-request-check-results" aria-label="Check results" class="grid gap-1.5 list-none" :hidden="!repositoryChecksVisible().length">
+    <template :for="check in repositoryChecksVisible()" :key="check.id">
+      <li data-pull-request-check class="grid gap-x-2 grid-cols-[minmax(0,1fr)_auto] items-start py-1.5">
+        <div class="min-w-0">
+          <p class="font-medium" :text="check.name"></p>
+          <p data-pull-request-check-description :hidden="!check.description" :text="check.description"></p>
+        </div>
+        <div class="flex flex-col gap-1 items-end">
+          <span class="whitespace-nowrap" :data-check-status="check.status" :text="checkLabels[check.status]"></span>
+          <a :hidden="!check.url" :href="check.url" target="_blank" rel="noopener noreferrer" :aria-label="'Details for ' + check.name" class="underline underline-offset-2">Details</a>
+        </div>
+      </li>
+    </template>
+  </ul>
+  <button type="button" class="min-h-9 underline underline-offset-2" aria-controls="harness-pull-request-check-results" :hidden="!repositoryChecksGroups().canCollapse"
+    :aria-expanded="repositoryChecksShowAll() ? 'true' : 'false'" @click="toggleAllRepositoryChecks" :text="repositoryChecksShowAll() ? 'Show less' : 'Show all'"></button>
+  <p role="status" :hidden="!repositoryChecksData()?.truncated">More checks are available on GitHub.</p>
+</section>
