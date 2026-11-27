@@ -5517,15 +5517,24 @@ await modelBatchPage.waitForFunction(() => document.querySelector<HTMLTextAreaEl
 await batchNotice.getByRole('button', { name: 'Retry pending' }).click()
 await batchNotice.getByRole('link', { name: 'Fixture Balanced' }).waitFor()
 const batchThreads = () => [...harness.engine.current.sessions.values()].filter(thread => thread.turns.some(turn => turn.prompt === batchText))
-for (let attempt = 0; attempt < 160 && batchThreads().filter(thread => thread.turns.at(-1)?.status === 'complete').length < 2; attempt++) await Bun.sleep(50)
+const batchCompletionDeadline = performance.now() + 20_000
+while (performance.now() < batchCompletionDeadline && batchThreads().filter(thread => thread.turns.at(-1)?.status === 'complete').length < 2)
+  await Bun.sleep(50)
 const finishedBatchThreads = batchThreads()
-check('the two models run the same prompt and file in independent checkouts',
+const independentBatchThreads =
   finishedBatchThreads.length === 2
   && finishedBatchThreads.every(thread => thread.turns.length === 1 && thread.turns[0]?.status === 'complete'
     && thread.turns[0].attachments?.[0]?.name === 'comparison-notes.txt' && thread.providerInstanceId === 4 && thread.worktreePath)
   && new Set(finishedBatchThreads.map(thread => thread.worktreePath)).size === 2
   && finishedBatchThreads.find(thread => thread.model === 'fixture-fast')?.codexTurnOptions?.effort === 'high'
-  && finishedBatchThreads.some(thread => thread.model === 'fixture-balanced'))
+  && finishedBatchThreads.some(thread => thread.model === 'fixture-balanced')
+if (!independentBatchThreads) {
+  console.error('Model comparison fixture', finishedBatchThreads.map(thread => ({
+    model: thread.model, status: thread.turns.at(-1)?.status, turns: thread.turns.length,
+    provider: thread.providerInstanceId, isolated: Boolean(thread.worktreePath), attachments: thread.turns[0]?.attachments?.length,
+  })))
+}
+check('the two models run the same prompt and file in independent checkouts', independentBatchThreads)
 const batchFiles = await Promise.all(finishedBatchThreads.map(thread => {
   const file = thread.turns[0]?.attachments?.[0]
   return file ? fetch(`${baseUrl}/composer-attachments/${file.id}?session=${thread.id}`).then(response => response.text()) : null
