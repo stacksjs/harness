@@ -2,11 +2,6 @@
   @if(clippedRestoration)
     <p role="status" data-pr-filter-feedback>The pull request list grew. Showing the starting page.</p>
   @endif
-  @if(restoreRetry)
-    <p role="status" data-pr-filter-feedback>Some loaded pages could not be restored.
-      <a href="{{ restoreRetry }}" data-pr-restore>Retry loaded pages</a>
-    </p>
-  @endif
   @if(incompleteSearch)
     <p role="status" data-pr-filter-feedback>GitHub returned partial results. Refresh to retry the search.</p>
   @endif
@@ -92,5 +87,10 @@
       @if(pageNext)<a href="{{ pageNext }}" data-pr-next data-pr-button>Load more pull requests</a>@endif
       <span data-pr-page-status role="status"></span>
     </nav>
+  @endif
+  @if(restoreRetry)
+    <p role="status" data-pr-filter-feedback>Some loaded pages could not be restored.
+      <a href="{{ restoreRetry }}" data-pr-restore>Retry loaded pages</a>
+    </p>
   @endif
 </div>

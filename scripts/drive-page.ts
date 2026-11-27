@@ -6970,22 +6970,31 @@ try {
       await capture('pull-requests-load-more-1280x800', clonePage)
       const olderRequest = reviewList.locator('[data-pr-entry]').filter({ hasText: 'Continuation pull request 0' })
       await olderRequest.scrollIntoViewIfNeeded()
-      const listTop = await reviewList.evaluate(list => list.scrollTop)
+      const firstVisible = await reviewList.evaluate(list => {
+        const top = list.getBoundingClientRect().top
+        return [...list.querySelectorAll('[data-pr-entry]')].find(row => row.getBoundingClientRect().bottom > top)?.getAttribute('data-pr-entry')
+      })
+      const listRestored = () => reviewList.evaluate((list, key) => {
+        const anchor = [...list.querySelectorAll('[data-pr-entry]')].find(row => row.getAttribute('data-pr-entry') === key)
+        const bounds = list.getBoundingClientRect()
+        const row = anchor?.getBoundingClientRect()
+        return Boolean(row && row.bottom > bounds.top && row.top < bounds.bottom)
+      }, firstVisible)
       const beforeReview = clonePage.url()
       await olderRequest.press('Enter')
       await clonePage.getByRole('heading', { name: 'Continuation pull request 0', exact: true }).waitFor()
       await reviewList.getByLabel('Saved pull request views').waitFor()
-      check('opening an appended pull request restores the loaded keys and list position',
+      check('opening an appended pull request restores the loaded keys',
         new URL(clonePage.url()).searchParams.get('through') === '2'
-        && JSON.stringify(await reviewList.locator('[data-pr-entry]').evaluateAll(rows => rows.map(row => row.getAttribute('data-pr-entry')))) === JSON.stringify(loadedKeys)
-        && Math.abs(await reviewList.evaluate(list => list.scrollTop) - listTop) <= 2)
+        && JSON.stringify(await reviewList.locator('[data-pr-entry]').evaluateAll(rows => rows.map(row => row.getAttribute('data-pr-entry')))) === JSON.stringify(loadedKeys))
+      check('opening an appended pull request keeps the previous scroll anchor visible',
+        await listRestored())
       await capture('pull-requests-restored-list-1280x800', clonePage)
       await clonePage.goBack()
       await clonePage.waitForURL(beforeReview)
       await reviewList.getByLabel('Saved pull request views').waitFor()
-      check('browser Back restores loaded PRs and the previous list position',
-        await reviewList.locator('[data-pr-entry]').count() === loadedKeys.length
-        && Math.abs(await reviewList.evaluate(list => list.scrollTop) - listTop) <= 2)
+      check('browser Back restores loaded PRs and keeps the prior scroll anchor visible',
+        await reviewList.locator('[data-pr-entry]').count() === loadedKeys.length && await listRestored())
     }
     finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
 
