@@ -84,20 +84,26 @@
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('staged', $event)" class="min-h-10 font-medium underline underline-offset-2">Commit staged</button>
         <button type="button" aria-haspopup="dialog"
           :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head || Boolean(diffGitStatus()?.conflicted) || !(diffGitStatus()?.staged || diffGitStatus()?.unstaged || diffGitStatus()?.untracked)"
-          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event, true)" class="min-h-10 font-medium underline underline-offset-2">Commit &amp; push</button>
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event, '1')" class="min-h-10 font-medium underline underline-offset-2">Commit &amp; push</button>
+        <button type="button" aria-haspopup="dialog"
+          :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head || Boolean(diffGitStatus()?.conflicted) || !(diffGitStatus()?.staged || diffGitStatus()?.unstaged || diffGitStatus()?.untracked)"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event, 'pr')" class="min-h-10 font-medium underline underline-offset-2">Commit, push &amp; PR</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.upstream || !diffGitStatus()?.branch"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('pull', $event)" class="min-h-10 font-medium underline underline-offset-2">Pull</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('push', $event)" class="min-h-10 font-medium underline underline-offset-2">Push</button>
         <button type="button" data-repository-pull-request-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
-          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryPullRequest" class="min-h-10 font-medium underline underline-offset-2">Create pull request</button>
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryPullRequest($event)" class="min-h-10 font-medium underline underline-offset-2">Create pull request</button>
       </div>
     @endif
   </section>
-  <div hidden :hidden="!repositoryCommitResult() && !repositoryPublicationReady()" class="flex flex-wrap gap-x-2 items-baseline px-3 py-1 text-xs">
+  <div hidden :hidden="!repositoryCommitResult() && !repositoryPublicationReady() && !diffGitStatus()?.pendingPullRequest" class="flex flex-wrap gap-x-2 items-baseline px-3 py-1 text-xs">
     <p role="status" data-repository-commit-result :hidden="!repositoryCommitResult()" :text="repositoryCommitResult()"></p>
     <button type="button" aria-haspopup="dialog" hidden :hidden="!repositoryPublicationReady()"
       @click="retryRepositoryPublication($event)" class="min-h-9 font-medium underline underline-offset-2">Retry push</button>
+    <button type="button" aria-haspopup="dialog" hidden :hidden="!diffGitStatus()?.pendingPullRequest"
+      :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryPullRequest($event, diffGitStatus()?.pendingPullRequest)"
+      class="min-h-9 font-medium underline underline-offset-2">Continue pull request</button>
   </div>
   <p role="status" data-repository-sync-result hidden :hidden="!repositorySyncResult() || repositorySyncResult()?.repository !== diffRepository()"
     :text="repositorySyncResult()?.message" class="px-3 py-1 text-xs"></p>

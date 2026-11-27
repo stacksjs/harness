@@ -11,10 +11,20 @@
         :text="'Remote branch ' + repositoryCommitPreview()?.publish?.current.remote + '/' + repositoryCommitPreview()?.publish?.current.ref.slice(11)" class="break-all"></p>
       <p :hidden="!repositoryCommitPreview()?.publish?.current.defaultTarget" class="text-amber-700 dark:text-amber-300">This is the remote’s default branch.</p>
       <p :hidden="!repositoryCommitPreview()?.publish?.current.problem" :text="repositoryCommitPreview()?.publish?.current.problem"></p>
-      <p :hidden="!repositoryCommitPreview()?.publish?.feature?.remote || Boolean(repositoryCommitPreview()?.publish?.feature?.problem)"
+      <p :hidden="repositoryCommitStacks() || !repositoryCommitPreview()?.publish?.feature?.remote || Boolean(repositoryCommitPreview()?.publish?.feature?.problem)"
         :text="'New branch remote ' + repositoryCommitPreview()?.publish?.feature?.remote" class="break-all"></p>
-      <p :hidden="!repositoryCommitPreview()?.publish?.feature?.problem" :text="repositoryCommitPreview()?.publish?.feature?.problem"></p>
+      <p :hidden="repositoryCommitStacks() || !repositoryCommitPreview()?.publish?.feature?.problem" :text="repositoryCommitPreview()?.publish?.feature?.problem"></p>
     </div>
+    <p role="alert" hidden :hidden="!repositoryCommitPreview()?.pullRequest?.problem"
+      :text="repositoryCommitPreview()?.pullRequest?.problem"></p>
+    <dl hidden :hidden="!repositoryCommitPreview()?.pullRequest?.revision" class="grid gap-x-3 gap-y-1 grid-cols-[auto_minmax(0,1fr)]">
+      <dt>PR base</dt>
+      <dd class="break-all font-mono" :text="repositoryCommitPreview()?.pullRequest?.repository + ':' + repositoryCommitPreview()?.pullRequest?.baseRef"></dd>
+      <dt>GitHub account</dt>
+      <dd class="break-all" :text="repositoryCommitPreview()?.pullRequest?.actor"></dd>
+    </dl>
+    <p hidden :hidden="!repositoryCommitPreview()?.pullRequest?.existing"
+      :text="'Links existing pull request #' + repositoryCommitPreview()?.pullRequest?.existing?.number"></p>
     <div :hidden="!repositoryCommitFileCount()" class="grid gap-1 min-w-0">
       <div class="flex flex-wrap gap-2 items-center justify-between">
         <div class="flex gap-2 items-center">
@@ -57,17 +67,30 @@
     <textarea id="harness-repository-commit-message" rows="3" maxlength="4096" autofocus
       :placeholder="repositoryCommitPreview()?.generation ? 'Leave blank to generate from the included files' : ''"
       :value="repositoryCommitMessage()" :disabled="repositoryCommitBusy()" @input="repositoryCommitMessage.set($event.target.value)"></textarea>
+    <fieldset hidden :hidden="!repositoryCommitPreview()?.pullRequest?.revision || Boolean(repositoryCommitPreview()?.pullRequest?.problem) || Boolean(repositoryCommitPreview()?.pullRequest?.existing)"
+      :disabled="repositoryCommitBusy()" class="grid gap-2 min-w-0">
+      <label for="harness-stacked-pr-title" class="font-medium">PR title <span class="font-normal opacity-70">(optional)</span></label>
+      <input id="harness-stacked-pr-title" class="px-2 min-h-9 w-full border border-black/15 rounded-md dark:border-white/20"
+        maxlength="256" :placeholder="repositoryCommitPreview()?.pullRequest?.generation ? 'Leave blank to generate' : 'Uses the commit subject'" :value="stackedPullRequestTitle()" @input="stackedPullRequestTitle.set($event.target.value)" />
+      <label for="harness-stacked-pr-description" class="font-medium">Description <span class="font-normal opacity-70">(optional)</span></label>
+      <textarea id="harness-stacked-pr-description" rows="2" maxlength="16000"
+        :value="stackedPullRequestBody()" @input="stackedPullRequestBody.set($event.target.value)"></textarea>
+      <label class="flex gap-2 items-center min-h-8">
+        <input type="checkbox" :checked="stackedPullRequestDraft()" @change="stackedPullRequestDraft.set($event.target.checked)" />
+        Open as draft
+      </label>
+    </fieldset>
     <div data-share-dialog-actions class="flex-wrap">
       <button type="button" @click="closeRepositoryCommit" :disabled="repositoryCommitBusy()">Cancel</button>
       <button type="button" @click="loadRepositoryCommit" :hidden="!repositoryCommitError() || repositoryCommitGenerationFailed()" :disabled="repositoryCommitBusy() || repositoryCommitLoading()"
         :text="repositoryCommitStaged() ? 'Refresh staged files' : 'Refresh changed files'">Refresh staged files</button>
-      <button type="button" hidden :hidden="!repositoryCommitPreview()?.pendingPublication" :disabled="repositoryCommitBusy()"
+      <button type="button" hidden :hidden="!repositoryCommitPreview()?.pendingPublication || repositoryCommitPreview()?.pendingPublication?.pullRequest" :disabled="repositoryCommitBusy()"
         @click="retryRepositoryPublication($event, true)">Retry push</button>
-      <button type="button" hidden :hidden="repositoryCommitStaged() || !repositoryCommitPreview()?.canCreateBranch"
+      <button type="button" hidden :hidden="repositoryCommitStacks() || repositoryCommitStaged() || !repositoryCommitPreview()?.canCreateBranch"
         @click="submitRepositoryCommit(true)" :disabled="!repositoryCommitFeatureAllowed()"
         :text="repositoryCommitBusy() && repositoryCommitNewBranch() ? repositoryCommitPendingLabel() : (repositoryCommitPublishes() ? 'Commit &amp; push on new branch' : 'Commit on new branch')">Commit on new branch</button>
       <button type="submit" data-share-primary :disabled="!repositoryCommitCurrentAllowed()"
-        :text="repositoryCommitBusy() && !repositoryCommitNewBranch() ? repositoryCommitPendingLabel() : (repositoryCommitPublishes() ? 'Commit &amp; push' : 'Commit')">Commit</button>
+        :text="repositoryCommitBusy() && !repositoryCommitNewBranch() ? repositoryCommitPendingLabel() : (repositoryCommitStacks() ? 'Commit, push &amp; create PR' : (repositoryCommitPublishes() ? 'Commit &amp; push' : 'Commit'))">Commit</button>
     </div>
   </form>
 </dialog>

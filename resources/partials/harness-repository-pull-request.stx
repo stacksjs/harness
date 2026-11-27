@@ -1,7 +1,7 @@
 <dialog data-repository-pull-request-dialog ref="repositoryPullRequestDialogBox" aria-labelledby="harness-repository-pull-request-title"
   @cancel.prevent="closeRepositoryPullRequest" @click.self="closeRepositoryPullRequest">
   <form data-share-dialog-body @submit.prevent="submitRepositoryPullRequest">
-    <h2 id="harness-repository-pull-request-title">Create pull request</h2>
+    <h2 id="harness-repository-pull-request-title" :text="repositoryPullRequestContinuation() ? 'Continue pull request' : 'Create pull request'">Create pull request</h2>
     <p role="status" :hidden="!repositoryPullRequestLoading()">Checking branches on GitHub…</p>
     <dl :hidden="!repositoryPullRequestPreview()" class="grid gap-x-3 gap-y-1 grid-cols-[auto_minmax(0,1fr)]">
       <dt>Head branch</dt>
@@ -18,7 +18,7 @@
       <label for="harness-pr-base">Base branch</label>
       <input id="harness-pr-base" ref="repositoryPullRequestBaseBox" autocomplete="off" spellcheck="false" maxlength="255"
         class="px-2 min-h-9 w-full font-mono border border-black/15 rounded-md dark:border-white/20"
-        :disabled="repositoryPullRequestLoading() || repositoryPullRequestBusy()" @input="setRepositoryPullRequestBase($event.target.value)"
+        :disabled="repositoryPullRequestLoading() || repositoryPullRequestBusy()" :readonly="Boolean(repositoryPullRequestContinuation())" @input="setRepositoryPullRequestBase($event.target.value)"
         @keydown.enter.prevent="refreshRepositoryPullRequest" />
     </div>
     <a :hidden="!repositoryPullRequestPreview()?.existing" :href="repositoryPullRequestPreview()?.existing?.url || undefined"
@@ -28,6 +28,7 @@
       <div class="grid gap-1">
         <label for="harness-pr-title">Title</label>
         <input id="harness-pr-title" ref="repositoryPullRequestTitleBox" maxlength="256"
+          :placeholder="repositoryPullRequestPreview()?.canGenerate ? 'Leave blank to generate' : ''"
           class="px-2 min-h-9 w-full border border-black/15 rounded-md dark:border-white/20"
           @input="setRepositoryPullRequestTitle($event.target.value)" />
       </div>

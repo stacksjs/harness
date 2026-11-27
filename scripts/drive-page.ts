@@ -325,6 +325,7 @@ let providerPreviewProcess: Bun.Subprocess | undefined
 const providerPreviewPrompt = 'Start the provider preview fixture.'
 let rejectCommitGeneration = false
 const commitGenerationPatches: string[] = []
+const pullRequestGenerationPatches: string[] = []
 
 const driver: Driver = {
   kind: 'claude',
@@ -335,6 +336,10 @@ const driver: Driver = {
     if (input.patch.includes('Combined action reviewed note'))
       return { subject: 'Publish selected working files', body: '', branch: 'feature/publish-selected-working-files' }
     return { subject: 'Summarize the reviewed edit', body: '', branch: 'feature/generated-review' }
+  },
+  async generatePullRequestText(_config, input) {
+    pullRequestGenerationPatches.push(input.patch)
+    return { title: 'Review the published export', body: 'Validate the committed report.' }
   },
   async create(config) {
     if (config.workspacePath.startsWith(`${scratchDirectory}/`)) writeFileSync(join(config.workspacePath, 'kept.txt'), 'scratch fixture')
@@ -7517,6 +7522,60 @@ try {
     check('saving searched labels applies only their reviewed additions and removals',
       JSON.stringify(pullState().labelWrites.slice(2).map(([, method, id]: [number, string, number]) => [method, id])) === `[["POST",${farLabel.id}],["DELETE",31]]`
       && JSON.stringify(pullState().pulls[1].labels.map((label: { id: number }) => label.id)) === `[41,${farLabel.id}]`)
+
+    const stackedBranch = 'review/stacked-report'
+    fixtureGit('switch', '-qc', stackedBranch)
+    fixtureGit('config', 'branch.' + stackedBranch + '.pushRemote', 'publish')
+    const before = fixtureGit('rev-parse', 'HEAD')
+    writeFileSync(fixturePath, 'Published export for the stacked PR\n')
+    await clonePage.setViewportSize({ width: 360, height: 800 })
+    await clonePage.goto(baseUrl + '/s/' + pullRequestSession)
+    await clonePage.getByRole('button', { name: 'Changes', exact: true }).click()
+    const stackedTrigger = clonePage.getByRole('button', { name: 'Commit, push & PR', exact: true })
+    const stackedReview = clonePage.getByRole('dialog', { name: 'Commit, push & create PR' })
+    await stackedTrigger.press('Enter')
+    await stackedReview.getByText('fixture/workspace-pr-review:main', { exact: true }).waitFor()
+    await clonePage.keyboard.press('Escape')
+    await stackedReview.waitFor({ state: 'hidden' })
+    check('cancelling the stacked PR review restores focus and leaves HEAD unchanged',
+      await stackedTrigger.evaluate(button => button === document.activeElement) && fixtureGit('rev-parse', 'HEAD') === before)
+    await stackedTrigger.click()
+    await stackedReview.getByText('fixture-user', { exact: true }).waitFor()
+    await stackedReview.getByRole('textbox', { name: /Commit message/ }).fill('Publish the reviewed export')
+    const confirmStacked = stackedReview.getByRole('button', { name: 'Commit, push & create PR', exact: true })
+    await capture('workspace-stacked-pr-review-360x800', clonePage)
+    const beforeForge = JSON.parse(readFileSync(github.state, 'utf8'))
+    github.configure('denied')
+    await confirmStacked.click()
+    await stackedReview.waitFor({ state: 'hidden' })
+    const continuationButton = clonePage.getByRole('button', { name: 'Continue pull request', exact: true })
+    await continuationButton.waitFor()
+    const committed = fixtureGit('rev-parse', 'HEAD')
+    check('a denied forge write leaves one published commit and generates PR text from its committed patch',
+      committed !== before
+      && execFileSync('git', ['--git-dir', publishRemote, 'rev-parse', 'refs/heads/' + stackedBranch], { encoding: 'utf8' }).trim() === committed
+      && JSON.parse(readFileSync(github.state, 'utf8')).posts === beforeForge.posts + 1
+      && pullRequestGenerationPatches.length === 1 && pullRequestGenerationPatches[0]!.includes('Published export for the stacked PR'))
+    await capture('workspace-stacked-pr-denied-360x800', clonePage)
+    await clonePage.reload()
+    await clonePage.getByRole('button', { name: 'Changes', exact: true }).click()
+    await continuationButton.click()
+    const continuation = clonePage.getByRole('dialog', { name: 'Continue pull request' })
+    const retryTitle = continuation.getByRole('textbox', { name: 'Title', exact: true })
+    await retryTitle.waitFor()
+    check('reopening a pending pull request restores the generated title and its locked base',
+      await retryTitle.inputValue() === 'Review the published export'
+      && await continuation.getByRole('textbox', { name: 'Base branch' }).getAttribute('readonly') !== null)
+    await capture('workspace-stacked-pr-retry-360x800', clonePage)
+    github.configure('lost-response')
+    await continuation.getByRole('button', { name: 'Create pull request', exact: true }).click()
+    await continuation.waitFor({ state: 'hidden' })
+    const afterForge = JSON.parse(readFileSync(github.state, 'utf8'))
+    check('retry after reload links the request despite a lost forge response and never commits or generates again',
+      afterForge.posts === beforeForge.posts + 2 && afterForge.pulls.length === beforeForge.pulls.length + 1
+      && afterForge.pulls.at(-1).head.sha === committed && fixtureGit('rev-parse', 'HEAD') === committed
+      && pullRequestGenerationPatches.length === 1)
+    await capture('workspace-stacked-pr-opened-360x800', clonePage)
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 
