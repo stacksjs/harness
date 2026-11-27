@@ -5,14 +5,32 @@
     <p :hidden="!repositoryCommitPreview()?.branch" :text="'Branch ' + repositoryCommitPreview()?.branch"></p>
     <p role="status" :hidden="!repositoryCommitLoading()">Reading the staged changes…</p>
     <p role="alert" :hidden="!repositoryCommitError()" :text="repositoryCommitError()"></p>
-    <div :hidden="!repositoryCommitPreview()?.files.length" class="grid gap-1">
-      <p class="font-medium" :text="repositoryCommitPreview()?.files.length === 1 ? '1 staged file' : repositoryCommitPreview()?.files.length + ' staged files'"></p>
-      <ul aria-label="Staged files" class="overflow-y-auto max-h-[22dvh] list-none rounded-md">
-        <template :for="path in repositoryCommitPreview()?.files.slice(0, repositoryCommitLimit()) || []" :key="path">
-          <li class="px-2 py-1 break-all font-mono text-xs" :text="path"></li>
+    <div :hidden="!repositoryCommitFileCount()" class="grid gap-1 min-w-0">
+      <div class="flex flex-wrap gap-2 items-center justify-between">
+        <div class="flex gap-2 items-center">
+          <input type="checkbox" ref="repositoryCommitAllFilesBox" aria-label="Include all staged files" :hidden="!repositoryCommitEditing()"
+            :disabled="repositoryCommitBusy() || repositoryCommitLoading()" :checked="repositoryCommitIncludedCount() === repositoryCommitFileCount()"
+            @change="chooseAllRepositoryCommitFiles" class="shrink-0 size-4">
+          <p class="font-medium" aria-live="polite" :text="repositoryCommitIncludedCount() + ' of ' + repositoryCommitFileCount() + ' staged files included'"></p>
+        </div>
+        <button type="button" :aria-expanded="String(repositoryCommitEditing())" aria-controls="harness-repository-commit-files"
+          :disabled="repositoryCommitBusy() || repositoryCommitLoading()" @click="repositoryCommitEditing.update(editing => !editing)"
+          :text="repositoryCommitEditing() ? 'Done' : 'Edit files'" class="min-h-8 underline underline-offset-2">Edit files</button>
+      </div>
+      <ul id="harness-repository-commit-files" aria-label="Staged files" class="overflow-y-auto max-h-[27dvh] list-none rounded-md">
+        <template :for="file in repositoryCommitVisibleFiles()" :key="file.key">
+          <li class="flex gap-2 items-start px-2 py-1 min-w-0">
+            <label class="flex flex-1 gap-2 items-start min-w-0" :class="repositoryCommitEditing() ? 'cursor-pointer' : ''">
+              <input type="checkbox" :hidden="!repositoryCommitEditing()" :aria-label="'Include ' + file.path"
+                :disabled="repositoryCommitBusy() || repositoryCommitLoading()" :checked="!repositoryCommitExcluded().has(file.index)"
+                @change="chooseRepositoryCommitFile(file.index, $event)" class="shrink-0 size-4">
+              <span class="min-w-0 break-all font-mono text-xs" :text="file.path"></span>
+            </label>
+            <span :hidden="!repositoryCommitExcluded().has(file.index)" class="shrink-0 text-neutral-600 text-xs dark:text-neutral-300">Excluded</span>
+          </li>
         </template>
       </ul>
-      <button type="button" :hidden="(repositoryCommitPreview()?.files.length || 0) <= repositoryCommitLimit()"
+      <button type="button" :hidden="repositoryCommitFileCount() <= repositoryCommitLimit()"
         @click="repositoryCommitLimit.update(limit => limit + 40)" class="min-h-8 text-start underline">Show more files</button>
     </div>
     <label for="harness-repository-commit-message" class="font-medium">Commit message</label>
@@ -21,7 +39,7 @@
     <div data-share-dialog-actions>
       <button type="button" @click="closeRepositoryCommit" :disabled="repositoryCommitBusy()">Cancel</button>
       <button type="button" @click="loadRepositoryCommit" :hidden="!repositoryCommitError()" :disabled="repositoryCommitBusy() || repositoryCommitLoading()">Refresh staged files</button>
-      <button type="submit" data-share-primary :disabled="repositoryCommitBusy() || repositoryCommitLoading() || Boolean(repositoryCommitError()) || !repositoryCommitMessage().trim() || !repositoryCommitPreview()?.files.length"
+      <button type="submit" data-share-primary :disabled="repositoryCommitBusy() || repositoryCommitLoading() || Boolean(repositoryCommitError()) || !repositoryCommitMessage().trim() || !repositoryCommitIncludedCount()"
         :text="repositoryCommitBusy() ? 'Committing…' : 'Commit'">Commit</button>
     </div>
   </form>

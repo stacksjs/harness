@@ -2516,6 +2516,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const repositoryCommitPreview = state(null)
   const repositoryCommitMessage = state('')
   const repositoryCommitLimit = state(40)
+  const repositoryCommitEditing = state(false)
+  const repositoryCommitExcluded = state(new Set())
+  const repositoryCommitFileCount = derived(() => repositoryCommitPreview()?.files.length || 0)
+  const repositoryCommitIncludedCount = derived(() => repositoryCommitFileCount() - repositoryCommitExcluded().size)
+  const repositoryCommitVisibleFiles = derived(() => (repositoryCommitPreview()?.files || [])
+    .slice(0, repositoryCommitLimit()).map((path, index) => ({ path, index, key: repositoryCommitPreview().fileKeys[index] })))
+  const repositoryCommitAllFiles = useRef('repositoryCommitAllFilesBox')
+  effect(() => {
+    const included = repositoryCommitIncludedCount()
+    const mixed = included > 0 && included < repositoryCommitFileCount()
+    const checkbox = repositoryCommitAllFiles.current
+    if (checkbox) checkbox.indeterminate = mixed
+  })
   const repositoryCommitError = state('')
   const repositoryCommitResult = state('')
   const repositoryCommitLoading = state(false)
@@ -5114,8 +5127,24 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     repositoryCommitKey = diffRepository()
     repositoryCommitMessage.set('')
     repositoryCommitResult.set('')
+    repositoryCommitPreview.set(null)
+    repositoryCommitExcluded.set(new Set())
+    repositoryCommitEditing.set(false)
+    repositoryCommitLimit.set(40)
     repositoryCommitDialog.current?.showModal()
     void loadRepositoryCommit()
+  }
+
+  function chooseRepositoryCommitFile(index, event) {
+    const excluded = new Set(repositoryCommitExcluded())
+    if (event.currentTarget.checked) excluded.delete(index)
+    else excluded.add(index)
+    repositoryCommitExcluded.set(excluded)
+  }
+
+  function chooseAllRepositoryCommitFiles(event) {
+    const excluded = event.currentTarget.checked ? [] : repositoryCommitPreview().files.map((_, index) => index)
+    repositoryCommitExcluded.set(new Set(excluded))
   }
 
   function closeRepositoryCommit() {
@@ -5132,14 +5161,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const request = new AbortController()
     repositoryCommitRequest = request
     repositoryCommitLoading.set(true)
-    repositoryCommitPreview.set(null)
-    repositoryCommitLimit.set(40)
     repositoryCommitError.set('')
     try {
       const response = await fetch(repositoryCommitAddress(), { signal: request.signal })
       const value = await response.json().catch(() => ({}))
       if (request.signal.aborted) return
       if (!response.ok) throw new Error(value.error || 'Could not read the staged changes.')
+      const previous = repositoryCommitPreview()
+      const excluded = repositoryCommitExcluded()
+      if (previous && excluded.size) {
+        const included = new Set(previous.fileKeys.filter((_, index) => !excluded.has(index)))
+        repositoryCommitExcluded.set(new Set(value.fileKeys.flatMap((key, index) => included.has(key) ? [] : [index])))
+      }
       repositoryCommitPreview.set(value)
       if (value.problem) repositoryCommitError.set(value.problem)
     }
@@ -5157,14 +5190,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function submitRepositoryCommit() {
     const preview = repositoryCommitPreview()
     const message = repositoryCommitMessage().trim()
-    if (!preview?.files.length || !message || repositoryCommitBusy() || repositoryCommitError()) return
+    if (!preview || !repositoryCommitIncludedCount() || !message || repositoryCommitLoading() || repositoryCommitBusy() || repositoryCommitError()) return
     const request = new AbortController()
     repositoryCommitRequest = request
     repositoryCommitBusy.set(true)
     try {
       const response = await fetch(repositoryCommitAddress(), {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message, revision: preview.revision }), signal: request.signal,
+        body: JSON.stringify({ message, revision: preview.revision, excluded: [...repositoryCommitExcluded()] }), signal: request.signal,
       })
       const value = await response.json().catch(() => ({}))
       if (request.signal.aborted) return
