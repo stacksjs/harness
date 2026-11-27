@@ -6730,6 +6730,115 @@ finally {
   await cloneContext.close()
 }
 
+// 16. Project scope: one host, two projects, and an agent pinned to one of
+// them. The project left alone is as much of the point as the pinned one, so
+// the host's own answer is set first and both projects are read against it.
+//
+// On its own page: the main one is still mounted on a live thread from an
+// earlier section, and the events arriving there navigate it out from under a
+// goto.
+const scopePage = await browserContext.newPage()
+scopePage.on('pageerror', error => pageErrors.push(error.message))
+await scopePage.setViewportSize({ width: 1280, height: 800 })
+const scopedServiceFolder = join(driveRoot, 'scoped-service')
+const scopedDocsFolder = join(driveRoot, 'scoped-docs')
+mkdirSync(scopedServiceFolder)
+mkdirSync(scopedDocsFolder)
+// Earlier sections leave the host default wherever they finished with it, and
+// a command that changes nothing is refused, so this only moves it if needed.
+if (harness.engine.current.settings.defaultDriver !== 'claude')
+  await harness.engine.dispatch({ id: 'project-scope-host', at: Date.now(), command: { type: 'settings.update', changes: { defaultDriver: 'claude' } } })
+for (const [id, path] of [['project-scope-service', scopedServiceFolder], ['project-scope-docs', scopedDocsFolder]] as const) {
+  await harness.engine.dispatch({ id, at: Date.now(), command: { type: 'workspace.add', profileId: derivedId(ledgerProfile), path } })
+  await harness.engine.dispatch({ id: `${id}-trust`, at: Date.now(), command: { type: 'workspace.trust', workspaceId: derivedId(id), trusted: true } })
+}
+const scopedService = derivedId('project-scope-service')
+const scopedDocs = derivedId('project-scope-docs')
+
+const scopeSettings = scopePage.getByRole('dialog', { name: 'Settings' })
+const projectAgent = scopePage.locator('#settings-project-driver')
+const projectAgentNote = scopePage.locator('[data-project-settings-note]')
+const composerAgent = scopePage.locator('[data-model-picker-trigger]')
+
+/** The project's own answer as the log holds it, or undefined for inherited. */
+const pinnedAgent = (workspaceId: number): string | undefined =>
+  harness.engine.current.workspaces.get(workspaceId)?.settings?.defaultDriver
+
+async function waitForPinnedAgent(workspaceId: number, driver: string | undefined, timeoutMs = 4000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (pinnedAgent(workspaceId) === driver) return true
+    await scopePage.waitForTimeout(50)
+  }
+  return false
+}
+
+/**
+ * Open a project's draft page.
+ *
+ * Committed rather than loaded: the island replaces the address once it has
+ * picked a profile, and that navigation aborts a goto still waiting on load.
+ */
+async function openProjectDraft(workspaceId: number): Promise<void> {
+  await scopePage.goto(`${baseUrl}/?workspace=${workspaceId}`, { waitUntil: 'commit' })
+  await composerAgent.waitFor({ timeout: 8000 })
+}
+
+async function openProjectGeneral(workspaceId: number): Promise<void> {
+  await openProjectDraft(workspaceId)
+  await pressChord('Meta+,', scopePage)
+  await scopeSettings.waitFor({ state: 'visible', timeout: 4000 })
+  await scopePage.waitForURL(url => url.pathname === '/settings/general')
+}
+
+await openProjectGeneral(scopedService)
+check('a project that pins nothing says it follows the host, and names itself',
+  await projectAgent.inputValue() === ''
+  && ((await projectAgentNote.textContent()) ?? '').includes('scoped-service')
+  && ((await projectAgentNote.textContent()) ?? '').includes('follows the host default'))
+
+await projectAgent.selectOption('codex')
+check('pinning an agent reaches the log as the project\'s answer and leaves the host alone',
+  await waitForPinnedAgent(scopedService, 'codex')
+  && harness.engine.current.settings.defaultDriver === 'claude'
+  && pinnedAgent(scopedDocs) === undefined)
+await capture('settings-project-agent-desktop', scopePage)
+
+// Where the setting actually bites: the agent the project's next thread starts
+// with. A draft already open keeps the agent it was composed with, which is
+// why this is read on a fresh draft rather than on the one behind the sheet.
+await openProjectDraft(scopedService)
+check('the next thread in that project starts with the pinned agent',
+  ((await composerAgent.textContent()) ?? '').includes('Codex'))
+
+await openProjectGeneral(scopedDocs)
+check('the other project is untouched and follows the host',
+  await projectAgent.inputValue() === ''
+  && ((await projectAgentNote.textContent()) ?? '').includes('scoped-docs'))
+await openProjectDraft(scopedDocs)
+check('a project that pinned nothing still starts with the host agent',
+  ((await composerAgent.textContent()) ?? '').includes('Claude'))
+
+// Rendered, not hydrated: the pin is in the page the host serves, so the row
+// is right on first paint rather than correcting itself a moment later. The
+// settings route takes its project from the address it will return to, which
+// is how the sheet itself links to it.
+const scopedServiceSettings = `${baseUrl}/settings/general?from=${encodeURIComponent(`/?workspace=${scopedService}`)}`
+await scopePage.goto(scopedServiceSettings, { waitUntil: 'commit' })
+await scopeSettings.waitFor({ state: 'visible', timeout: 8000 })
+check('a reload shows the pinned agent before the island hydrates',
+  await projectAgent.inputValue() === 'codex'
+  && ((await projectAgentNote.textContent()) ?? '').includes('Only sessions in'))
+
+await projectAgent.selectOption('')
+check('handing the agent back to the host forgets the project override entirely',
+  await waitForPinnedAgent(scopedService, undefined)
+  && harness.engine.current.workspaces.get(scopedService)?.settings === undefined
+  && harness.engine.current.settings.defaultDriver === 'claude')
+await openProjectDraft(scopedService)
+check('the project follows the host again once it pins nothing',
+  ((await composerAgent.textContent()) ?? '').includes('Claude'))
+
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
 await browser.close()
