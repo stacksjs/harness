@@ -19,7 +19,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer, workspaceSettings } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
@@ -133,7 +133,7 @@ type ClientFrame =
   | { t: 'unsubscribe', sessionId: number }
   | { t: 'watch-pins', profileId: number }
   | { t: 'watch-sidebar', profileId: number }
-  | { t: 'read-settings' }
+  | { t: 'read-settings', workspaceId?: number }
   | { t: 'ping' }
   | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number, projectScriptId?: string }
   | { t: 'term-input', termId: number, data: string }
@@ -345,7 +345,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const authorized = () => !signal.aborted && projectWorktreeIsTrusted(scope)
       && (!settlement || Boolean(activeSettlementScript(settlement)))
     const workspace = engine.current.workspaces.get(scope.workspaceId)
-    const shellKind = engine.current.settings.terminalShell
+    const shellKind = workspaceSettings(engine.current, scope.workspaceId).terminalShell
     const shell = shellKind === 'den' ? findDenShell() : undefined
     if (!workspace || shell === null || !authorized()) return Promise.resolve(null)
     const env = { T3CODE_PROJECT_ROOT: workspace.path, T3CODE_WORKTREE_PATH: scope.checkout }
@@ -989,10 +989,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (maintainingThreads || closing) return
     clearTimeout(maintenanceTimer)
     let earliest = Infinity
-    const { sessions, settings, workspaces } = engine.current
+    const { sessions, workspaces } = engine.current
     for (const session of sessions.values())
       earliest = Math.min(earliest, session.navigation?.snoozedUntil ?? Infinity,
-        workspaces.has(session.workspaceId) ? inactivityDeadline(session, settings) ?? Infinity : Infinity)
+        workspaces.has(session.workspaceId)
+          ? inactivityDeadline(session, workspaceSettings(engine.current, session.workspaceId)) ?? Infinity
+          : Infinity)
     if (!Number.isFinite(earliest)) return
     maintenanceTimer = setTimeout(() => void maintainThreads(), Math.max(minimumDelay, Math.min(2_147_483_647, earliest - Date.now())))
     maintenanceTimer.unref()
@@ -1082,7 +1084,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           })
           if (!closing) broadcast(result.events)
         }
-        const deadline = inactivityDeadline(session, engine.current.settings)
+        const deadline = inactivityDeadline(session, workspaceSettings(engine.current, session.workspaceId))
         if (deadline === undefined || deadline > at || closing) continue
         const result = await engine.dispatchInternal({
           id: `thread-auto-settle_${crypto.randomUUID()}`, at,
@@ -1322,7 +1324,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return
 
       case 'read-settings':
-        send(socket, { t: 'host-settings', settings: engine.current.settings })
+        // The host's own answers and the project's own answers travel apart,
+        // as they do on first paint: a client that only had the effective
+        // settings could not tell a pinned value from an inherited one.
+        send(socket, {
+          t: 'host-settings',
+          settings: engine.current.settings,
+          ...(frame.workspaceId === undefined ? {} : {
+            workspaceId: frame.workspaceId,
+            projectSettings: { ...engine.current.workspaces.get(frame.workspaceId)?.settings },
+          }),
+        })
         return
 
       case 'watch-pins':
@@ -1369,7 +1381,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           if (!terminals.resume(socket, scope)) {
             try {
               const history = terminals.savedHistory(scope)
-              if (history !== undefined) terminals.openProjectHistory(socket, scope, engine.current.settings.terminalShell, history, jobHistory.exitCode)
+              if (history !== undefined) terminals.openProjectHistory(socket, scope, workspaceSettings(engine.current, scope.workspaceId).terminalShell, history, jobHistory.exitCode)
               else send(socket, { t: 'term-error', message: 'The worktree script has no saved terminal output.' })
             }
             catch { send(socket, { t: 'term-error', message: 'Could not load the worktree script output.' }) }
@@ -1377,7 +1389,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return
         }
         if (terminals.resume(socket, scope)) return
-        const shellKind = engine.current.settings.terminalShell
+        const shellKind = workspaceSettings(engine.current, scope.workspaceId).terminalShell
         const shell = shellKind === 'den' ? findDenShell() : undefined
         if (shell === null) {
           send(socket, { t: 'term-error', message: 'Den was not found on this host. Install Den or choose System shell in Settings.' })
