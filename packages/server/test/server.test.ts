@@ -806,6 +806,7 @@ describe('harness serve — HTTP', () => {
       'fixture/notebook-fork': { bare: fork, parent: 'fixture/notebook' },
     })
     const path = process.env.PATH
+    const previousCwd = process.cwd()
     process.env.PATH = cli.bin + delimiter + path
     try {
       const workspaceId = derivedId('pr-create-project')
@@ -898,6 +899,7 @@ describe('harness serve — HTTP', () => {
       expect(readState().posts).toBe(2)
       expect(git(project, 'status', '--porcelain')).toBe('')
 
+      process.chdir(join(import.meta.dir, '../../..'))
       cli.configureChecks(pages)
       const review = host + '/pull-requests'
       const view = await fetch(review)
@@ -945,7 +947,11 @@ describe('harness serve — HTTP', () => {
       const result = await fetch('http://127.0.0.1:' + harness.server.port + '/prompt-link/pull-request?pr=fixture/notebook/1')
       expect(await result.json()).toEqual({ sessionId })
     }
-    finally { if (path === undefined) delete process.env.PATH; else process.env.PATH = path }
+    finally {
+      process.chdir(previousCwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
   }, 60_000)
 
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
