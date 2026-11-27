@@ -4953,10 +4953,20 @@ const settingsThreadPane = page.locator('[data-settings-section="threads"]').loc
 const autoSettleSwitch = settingsThreadPane.getByLabel('Auto-settle inactive threads')
 const autoSettleDays = settingsThreadPane.getByLabel('Days before auto-settle')
 await autoSettleDays.waitFor()
+await page.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready', undefined, { timeout: 10_000 })
 check('inactive threads default to seven days on the host', await autoSettleSwitch.isChecked() && await autoSettleDays.inputValue() === '7')
 await autoSettleDays.fill('14')
 await autoSettleDays.press('Tab')
-for (let attempt = 0; attempt < 80 && harness.engine.current.settings.autoSettleAfterDays !== 14; attempt++) await Bun.sleep(50)
+await page.waitForFunction(() => document.activeElement?.id !== 'settings-auto-settle-days', undefined, { timeout: 5_000 })
+const durationSaveDeadline = performance.now() + 12_000
+while (performance.now() < durationSaveDeadline && harness.engine.current.settings.autoSettleAfterDays !== 14) await Bun.sleep(50)
+if (harness.engine.current.settings.autoSettleAfterDays !== 14) {
+  console.error('Auto-settle settings fixture', {
+    host: harness.engine.current.settings.autoSettleAfterDays,
+    input: await autoSettleDays.inputValue(),
+    status: await settingsThreadPane.getByRole('alert').allTextContents(),
+  })
+}
 check('the inactivity duration is stored on the host', harness.engine.current.settings.autoSettleAfterDays === 14)
 await page.reload()
 await page.waitForFunction(() => (document.querySelector('#settings-auto-settle-days') as HTMLInputElement)?.value === '14')
