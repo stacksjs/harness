@@ -703,6 +703,9 @@ check('tool call rendered in the transcript', toolRows >= 1)
 writeFileSync(join(dir, 'notes.txt'), 'hello from the drive\n')
 await page.click('[data-diff-toggle]')
 await page.waitForFunction(() => (document.querySelector('[data-diff-files]')?.textContent ?? '').includes('notes.txt'), undefined, { timeout: 8000 })
+const gitStatus = page.getByRole('region', { name: 'Repository status' })
+await gitStatus.getByText('1 unstaged', { exact: true }).waitFor()
+check('Changes shows the repository branch and worktree status', await gitStatus.getByText('No upstream', { exact: true }).isVisible())
 check('diff panel lists the changed file', true)
 check('desktop docks Changes beside the conversation', await page.evaluate(() => {
   const changes = document.querySelector('[data-diff]')?.getBoundingClientRect()
@@ -4069,6 +4072,7 @@ await terminalHost.focus()
 await page.keyboard.type('git add ledger.txt && git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm Signed-ledger')
 await page.keyboard.press('Enter')
 await ledgerChanges.getByText('No uncommitted changes.', { exact: true }).waitFor()
+await ledgerPanel.getByRole('region', { name: 'Repository status' }).getByText('Clean working tree', { exact: true }).waitFor()
 check('a terminal Git commit automatically updates the open Changes totals',
   await page.locator('[data-diff-file]').count() === 0
   && execFileSync('git', ['log', '-1', '--format=%s'], { cwd: ledgerRepo, encoding: 'utf8' }).trim() === 'Signed-ledger')
@@ -5661,6 +5665,8 @@ await savedDraftPage.waitForFunction(() => {
   return harnessKeyboard === 'ready' && fixtureDesktopMenu === 'ready'
 })
 await savedLink('Saved draft two').waitFor()
+await savedLink('Saved scratch draft').waitFor()
+await savedDraftPage.waitForLoadState('networkidle')
 const primaryModifier = await savedDraftPage.evaluate(() =>
   /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent) ? 'Meta' : 'Control')
 // Screenshots exercise the held hint through the same events after the simulated

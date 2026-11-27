@@ -553,14 +553,25 @@ describe('harness serve — HTTP', () => {
       expect(response.status).toBe(200)
       expect(await response.json()).toMatchObject({ scope: 'working-tree', patch: expect.stringContaining(`+${label}`) })
     }
+    const api = join(project, 'api')
+    runGit(api, 'add', 'fixture.txt')
+    await Bun.write(join(api, 'fixture.txt'), 'Unstaged on top of staged\n')
+    await Bun.write(join(api, 'draft.txt'), 'Untracked\n')
+    expect(await (await fetch(route + '/status?repository=api')).json()).toMatchObject({
+      status: { branch: 'main', upstream: null, staged: 1, unstaged: 1, untracked: 1, conflicted: 0 },
+    })
     const web = join(project, 'packages', 'web')
     runGit(web, 'switch', '-qc', 'review/web')
     runGit(web, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'Web review')
+    runGit(web, 'branch', '--set-upstream-to=main', 'review/web')
     const branches = await (await fetch(route + '/options?repository=packages%2Fweb')).json()
     expect(branches).toMatchObject({
       hasProjectRepository: false,
       branches: [{ ref: 'refs/heads/main' }, { ref: 'refs/heads/review/web' }],
       commits: [{ subject: 'Web review' }],
+    })
+    expect(await (await fetch(route + '/status?repository=packages%2Fweb')).json()).toMatchObject({
+      status: { branch: 'review/web', upstream: 'main', ahead: 1, behind: 0, staged: 0, unstaged: 0, untracked: 0 },
     })
     expect(await (await review('packages/web', 'branch')).json()).toMatchObject({
       scope: 'branch', comparisonTarget: 'refs/heads/main', patch: expect.stringContaining('+Web change'),

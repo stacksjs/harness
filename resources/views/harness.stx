@@ -1486,6 +1486,28 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const diffCommit = state('')
   const diffTurn = state('')
   const diffReviewOptions = state(null)
+  const diffGitStatus = state(null)
+  const diffGitStatusLoader = state(null)
+  let diffGitStatusStop
+  const diffStatusBranch = derived(() => {
+    const status = diffGitStatus()
+    if (!status) return ''
+    return status.branch ?? (status.head ? 'Detached at ' + status.head.slice(0, 7) : 'No commits')
+  })
+  const diffStatusTracking = derived(() => {
+    const status = diffGitStatus()
+    if (!status) return ''
+    if (!status.upstream) return status.branch ? 'No upstream' : ''
+    if (status.ahead === null || status.behind === null) return 'Upstream unavailable'
+    return [status.ahead && status.ahead + ' ahead', status.behind && status.behind + ' behind'].filter(Boolean).join(' · ') || 'Up to date'
+  })
+  const diffStatusChanges = derived(() => {
+    const status = diffGitStatus()
+    if (!status) return ''
+    return [status.staged && status.staged + ' staged', status.unstaged && status.unstaged + ' unstaged',
+      status.untracked && status.untracked + ' untracked', status.conflicted && status.conflicted + ' conflicted']
+      .filter(Boolean).join(' · ') || 'Clean working tree'
+  })
   const diffReviewError = state('')
   const diffLineSelection = state(null)
   const diffLineNotice = state('')
@@ -2854,6 +2876,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function stopWorkspaceStatusRequests() {
     workspaceStatusPaused = true
+    diffGitStatusStop?.()
     providerCatalogRequest?.abort()
     draftWorktreeRequest?.abort()
     shareRepositoryRequest?.abort()
@@ -4801,6 +4824,30 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (linked) void selectLinkedDiffLine(linked)
     if (selectedFile && diffOpen()) void nextTick(() => diffTools.focusWorkspaceDiffFile(changesPane.current, selectedFile))
   }
+
+  effect(() => {
+    const load = diffGitStatusLoader()
+    const repository = diffRepository()
+    const mode = diffReviewMode()
+    diffRefresh()
+    diffGitStatus.set(null)
+    if (!sessionId || !load || !diffOpen() || workspaceStatusPaused || changesVisibility() !== 'visible'
+      || mode === 'commit' || mode === 'turn') return
+    const request = new AbortController()
+    let timer
+    async function update() {
+      const status = await load(sessionId, repository, request.signal).catch(() => null)
+      if (request.signal.aborted) return
+      diffGitStatus.set(status)
+      timer = useTimeout(update, 3500)
+    }
+    diffGitStatusStop = () => {
+      request.abort()
+      timer?.stop()
+    }
+    void update()
+    return diffGitStatusStop
+  })
 
   effect(() => {
     const load = reviewOptionsLoader()
@@ -6771,7 +6818,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
     const codec = await import(codecUrl)
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions } = codec
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions, loadRepositoryStatus } = codec
     snoozeEditor.set({
       ...codec.createSnoozeEditor({
         initial: settings().snoozePresets ?? [],
@@ -6851,6 +6898,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     diffTools = codec
     changesWatcher.set(watchWorkspaceChanges)
     reviewOptionsLoader.set(loadWorkspaceReviewOptions)
+    diffGitStatusLoader.set(loadRepositoryStatus)
     openLinkedDiffLine()
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
@@ -7236,6 +7284,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   useEventListener('pageshow', (event) => {
     if (!event.persisted || !workspaceStatusPaused) return
     workspaceStatusPaused = false
+    if (diffOpen()) refreshWorkspaceDiff()
     void annotateDriverPickers()
     void refreshProjectSetup()
     void refreshProjectSettlement()

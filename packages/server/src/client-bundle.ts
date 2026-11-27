@@ -44,7 +44,7 @@ export { createSidebarJumpHints, sidebarShortcutTarget } from './packages/server
 export { createPromptStash, newComposerDraftId, PROMPT_STASH_KEY } from './packages/server/src/browser-prompt-stash'
 export { composerFileStatus, createComposerFileActions, releaseComposerUploads, restoreRewoundAttachments } from './packages/server/src/browser-composer-files'
 export { discardComposerDraft, expireComposerDraft, persistDraftUndo, restoreComposerDraft, wasComposerDraftDiscarded, watchSidebarDrafts } from './packages/server/src/browser-composer-drafts'
-export { loadWorkspaceDiffContext, loadWorkspaceReviewOptions, observeTurnFiles, watchWorkspaceChanges } from './packages/server/src/browser-workspace-changes'
+export { loadRepositoryStatus, loadWorkspaceDiffContext, loadWorkspaceReviewOptions, observeTurnFiles, watchWorkspaceChanges } from './packages/server/src/browser-workspace-changes'
 export { copyWorkspaceDiffLink, currentWorkspaceDiffLink, expandWorkspaceDiffGap, focusWorkspaceDiffFile, hasWorkspaceDiffLine, moveWorkspaceDiffLine, parseWorkspacePatch, revealWorkspaceDiffContext, revealWorkspaceDiffLine, workspaceDiffContextKey, workspaceDiffLinkedRows, workspaceDiffRows } from './packages/server/src/browser-diff'
 export { closeTranscriptMenu, useTranscriptControl } from './packages/server/src/browser-transcript-controls'
 export { maxSnoozePresets } from '@harness/contract'

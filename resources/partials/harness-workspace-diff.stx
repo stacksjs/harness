@@ -70,6 +70,12 @@
       </select>
     </label>
   </div>
+  <section data-diff-git-status hidden :hidden="!diffGitStatus()" aria-label="Repository status"
+    class="flex flex-wrap gap-x-3 gap-y-1 items-baseline px-3 py-1.5 min-w-0 text-neutral-600 text-xs dark:text-neutral-300">
+    <span class="max-w-full font-mono truncate" :text="diffStatusBranch()" :title="diffStatusBranch()"></span>
+    <span :hidden="!diffStatusTracking()" :text="diffStatusTracking()"></span>
+    <span role="status" :text="diffStatusChanges()"></span>
+  </section>
   <div data-diff-body>
     <div data-diff-overview>
       <p data-diff-status role="status" :text="diffStatus()">Loading…</p>

@@ -39,6 +39,7 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
+import { readRepositoryStatus } from './repository-status'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -559,6 +560,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const path = await reviewRepositoryPath(root, session, repository || '')
     if (!path) return Response.json({ error: 'This project repository is unavailable.' }, { status: 404, headers })
 
+    if (operation === 'status') {
+      const status = await isWorkspaceGitRoot(path) ? await readRepositoryStatus(path) : null
+      return Response.json({ status }, { headers })
+    }
     const turns = reviewTurns(session, repository || '')
     try {
       if (operation === 'options') {
@@ -1604,7 +1609,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files))?$/u.exec(url.pathname)
+      const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files|status))?$/u.exec(url.pathname)
       if (request.method === 'GET' && diffRoute) {
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const id = Number(diffRoute[1])
