@@ -34,9 +34,17 @@ function patchPath(header: string): string | undefined {
 }
 
 export function parseWorkspacePatch(patch: string): ReadonlyMap<string, DiffHunk[]> {
+  return parsePatch(patch)
+}
+
+export function parseFilePatch(patch: string): DiffHunk[] {
+  return parsePatch(patch, '').get('') ?? []
+}
+
+function parsePatch(patch: string, file?: string): ReadonlyMap<string, DiffHunk[]> {
   const files = new Map<string, DiffHunk[]>()
   let original: string | undefined
-  let current: string | undefined
+  let current = file
   let beforeObject: string | undefined
   let before = 0
   let after = 0

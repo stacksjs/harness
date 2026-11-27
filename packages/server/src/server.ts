@@ -57,7 +57,7 @@ import { threadSidebarLayout } from './thread-sidebar'
 import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
-import { pullRequestWorkspace, renderPullRequestMarkdown, updateWorkspaceFileViewed } from './pull-request-workspace'
+import { pullRequestWorkspace, renderPullRequestMarkdown, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -1909,13 +1909,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (url.pathname === '/pull-requests' || url.pathname === '/pull-requests/viewed') {
+      if (url.pathname === '/pull-requests' || url.pathname === '/pull-requests/viewed' || url.pathname === '/pull-requests/conversation') {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
         const site = request.headers.get('sec-fetch-site')
         if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
           || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
-        if (url.pathname === '/pull-requests/viewed') {
+        if (url.pathname !== '/pull-requests') {
           if (request.method !== 'POST') return new Response(null, { status: 405, headers })
           const referer = request.headers.get('referer')
           if (request.headers.get('origin') !== url.origin && site !== 'same-origin'
@@ -1923,7 +1923,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
             return new Response(null, { status: 415, headers })
           srv.timeout(request, 150)
-          return updateWorkspaceFileViewed(engine.current, url.searchParams, request, AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]))
+          const action = url.pathname === '/pull-requests/viewed' ? updateWorkspaceFileViewed : updateWorkspaceReviewConversation
+          return action(engine.current, url.searchParams, request, AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]))
             .then((update) => {
               const acceptsJson = request.headers.get('accept') === 'application/json'
               if (!update) {
@@ -1931,8 +1932,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
                 return acceptsJson ? Response.json({ message }, { status: 400, headers: { ...headers, 'content-type': 'application/json' } }) : new Response(message, { status: 400, headers })
               }
               if (!acceptsJson) return new Response(null, { status: 303, headers: { ...headers, location: update.location } })
-              const status = update.result === 'viewed' || update.result === 'unviewed' ? 200 : update.result === 'unavailable' ? 503 : 409
-              return Response.json({ result: update.result, message: update.message }, { status, headers: { ...headers, 'content-type': 'application/json' } })
+              const status = update.result === 'unavailable' ? 503 : update.result === 'denied' ? 403
+                : update.result === 'changed' || update.result === 'busy' ? 409 : 200
+              const conversation = 'conversation' in update ? update.conversation : undefined
+              return Response.json({ result: update.result, message: update.message, conversation }, { status, headers: { ...headers, 'content-type': 'application/json' } })
             })
         }
         if (request.method !== 'GET') return new Response(null, { status: 405, headers })

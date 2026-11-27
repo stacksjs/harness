@@ -18,6 +18,10 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, viewedMode, viewer }))
   }
+  const configureConversations = (conversationMode: 'normal' | 'readonly' | 'unreadable' | 'lost-response' | 'head-changed') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, conversationMode }))
+  }
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bun
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -59,8 +63,51 @@ if (url.pathname === '/graphql' && method === 'POST') {
     if (state.viewedMode === 'lost-response') process.exit(1)
     reply(200, { data: { [marked ? 'markFileAsViewed' : 'unmarkFileAsViewed']: { clientMutationId: null } } })
   }
+  const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
+  const isResolved = Boolean(state.conversationResolved)
+  const allowed = state.conversationMode !== 'readonly'
+  const thread = { id: 'fixture-conversation', isResolved, viewerCanResolve: allowed && !isResolved, viewerCanUnresolve: allowed && isResolved }
+  if (query.includes('mutation SetPullRequestConversationResolved')) {
+    if (!process.env.GH_TOKEN || !allowed || variables.id !== thread.id) reply(403, {})
+    const resolved = query.includes(' resolveReviewThread(')
+    state.conversationResolved = resolved
+    state.conversationWrites = (state.conversationWrites || 0) + 1
+    writeFileSync(stateFile, JSON.stringify(state))
+    if (state.conversationMode === 'lost-response') process.exit(1)
+    reply(200, { data: { [resolved ? 'resolveReviewThread' : 'unresolveReviewThread']: { thread: { id: thread.id, isResolved: resolved } } } })
+  }
+  if (query.includes('query PullRequestReviewConversation(')) {
+    const pull = state.pulls[0]
+    const node = !pull || ![thread.id, 'other-conversation'].includes(variables.id) ? null : {
+      ...thread, id: variables.id, pullRequest: { number: pull.number, headRefOid: pull.head.sha,
+        repository: { nameWithOwner: variables.id === thread.id ? pull.base.repo.full_name : 'fixture/another-project' } },
+    }
+    reply(200, { data: { viewer, node } })
+  }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query PullRequestReviewConversations')) {
+    if (!pull || state.conversationMode === 'unreadable') reply(200, { errors: [{ message: 'Private conversation diagnostics' }] })
+    const inline = {
+      ...thread, path: 'report.txt', line: 1, startLine: 1, diffSide: 'RIGHT', isOutdated: false,
+      comments: { nodes: [
+        { id: 'fixture-inline', author: { login: 'fixture-reviewer' }, createdAt: '2026-11-01T14:00:00Z',
+          url: pull.html_url + '#discussion_r4', body: 'Verify the **inline report**. <img src=x onerror=alert(1)> <!-- hidden inline marker -->' },
+        { id: 'fixture-minimized', body: 'Hidden by GitHub', isMinimized: true, url: 'https://other.example/unsafe' },
+      ], pageInfo: { hasNextPage: true } },
+    }
+    const outdated = { ...thread, id: 'fixture-outdated', isResolved: true, viewerCanResolve: false, viewerCanUnresolve: false,
+      path: 'report.txt', originalLine: 12, line: null, diffSide: 'LEFT', isOutdated: true,
+      comments: { nodes: [{ id: 'fixture-outdated-comment', body: 'Previous review location' }] },
+    }
+    const detached = { ...outdated, id: 'fixture-detached', path: 'removed-earlier.txt', comments: { nodes: [{ id: 'fixture-detached-comment', body: 'Earlier file discussion' }] } }
+    const second = variables.cursor === 'more-conversations'
+    reply(200, { data: { viewer, repository: { pullRequest: { id: 'fixture-pull',
+      headRefOid: second && state.conversationMode === 'head-changed' ? 'd'.repeat(40) : pull.head.sha,
+      reviewThreads: { nodes: !state.conversationMode ? [] : second ? [outdated, detached] : [inline],
+        pageInfo: { hasNextPage: Boolean(state.conversationMode) && !second, endCursor: 'more-conversations' } },
+    } } } })
+  }
   if (query.includes('query PullRequestViewedFiles')) {
     if (!pull || state.viewedMode === 'unreadable') reply(200, { errors: [{ message: 'Private viewed diagnostics must not leak' }] })
     reply(200, { data: { viewer: { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }, repository: { pullRequest: {
@@ -129,5 +176,5 @@ writeFileSync(stateFile, JSON.stringify(state))
 if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
-  return { bin, state, configure, configureChecks, configureViewed }
+  return { bin, state, configure, configureChecks, configureViewed, configureConversations }
 }

@@ -65,6 +65,21 @@ export function renderTranscriptMarkdown(source: string): string {
   return markdown.render(source)
 }
 
+let pullRequestMarkdown: typeof markdown | undefined
+
+export function renderPullRequestCommentMarkdown(source: string): string {
+  if (!pullRequestMarkdown) {
+    // Recognize forge markup and hidden comments while leaving code fences literal.
+    pullRequestMarkdown = new MarkdownIt({ ...markdown.options, html: true })
+    pullRequestMarkdown.validateLink = markdown.validateLink
+    Object.assign(pullRequestMarkdown.renderer.rules, markdown.renderer.rules, {
+      html_block: () => '',
+      html_inline: () => '',
+    })
+  }
+  return pullRequestMarkdown.render(source)
+}
+
 export function setTranscriptCodeWrap(button: Element, wrapped: boolean): void {
   const response = button.closest('[data-response]')
   if (response && !wrapped) responsesWithWrapOverrides.add(response)

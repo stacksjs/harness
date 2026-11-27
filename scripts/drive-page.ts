@@ -6378,8 +6378,9 @@ try {
     await clonePage.locator('[data-pr-activity] strong').filter({ hasText: 'export' }).waitFor()
     check('review conversation renders safe Markdown in the Timeline view',
       !await clonePage.evaluate(() => Boolean((globalThis as typeof globalThis & { __pr_html?: boolean }).__pr_html)))
+    github.configureConversations('normal')
     await reviewTabs.getByRole('link', { name: 'Code' }).click()
-    await clonePage.locator('[data-pr-files] summary').click()
+    await clonePage.locator('[data-pr-file-patch] > summary').click()
     await clonePage.locator('pre[aria-label="Patch for report.txt"]').getByText('+Report fixture', { exact: false }).waitFor()
     await clonePage.setViewportSize({ width: 1280, height: 800 })
     await reviewList.waitFor()
@@ -6413,6 +6414,39 @@ try {
     await clonePage.getByText('File marked as unviewed.', { exact: true }).waitFor()
     check('unmark viewed restores the unchecked file without changing the pull request',
       await viewedFile.getAttribute('aria-pressed') === 'false' && JSON.parse(readFileSync(github.state, 'utf8')).fileViewed === false)
+
+    const filePatch = clonePage.locator('[data-pr-file-patch]')
+    await filePatch.locator(':scope > summary').click()
+    const conversation = filePatch.locator('[data-pr-conversation]').filter({ hasText: 'Line 1 after changes' })
+    const oldConversation = filePatch.locator('[data-pr-conversation]').filter({ hasText: 'Line 12 before changes' })
+    const comment = conversation.getByText(/Verify the inline report/)
+    const resolveConversation = conversation.getByRole('button', { name: 'Resolve', exact: true })
+    await comment.waitFor()
+    await conversation.locator('button[aria-disabled="false"]').waitFor()
+    check('Code anchors the current review after its line and keeps outdated comments collapsed',
+      await conversation.evaluate(element => element.previousElementSibling?.textContent?.includes('+Report fixture'))
+      && await oldConversation.getAttribute('open') === null)
+    await capture('pull-requests-inline-conversation-390x844', clonePage)
+    const [resolution] = await Promise.all([
+      clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/conversation' && response.request().method() === 'POST'),
+      resolveConversation.press('Enter'),
+    ])
+    if (!resolution.ok()) throw new Error(`Resolve conversation returned HTTP ${resolution.status()}: ${await resolution.text()}`)
+    const undoResolution = conversation.getByRole('button', { name: 'Unresolve', exact: true })
+    await conversation.getByText('Conversation resolved.', { exact: true }).waitFor()
+    check('resolving keeps the review and focus visible and updates the forge',
+      await comment.isVisible() && await undoResolution.evaluate(button => button === document.activeElement)
+      && JSON.parse(readFileSync(github.state, 'utf8')).conversationResolved === true)
+    await clonePage.reload()
+    await filePatch.locator(':scope > summary').click()
+    await conversation.getByText('Resolved conversation', { exact: true }).waitFor()
+    check('reloading a resolved thread hides the conversation until expanded', !await comment.isVisible())
+    await conversation.locator(':scope > summary').click()
+    await comment.waitFor()
+    await undoResolution.click()
+    await conversation.getByText('Conversation reopened.', { exact: true }).waitFor()
+    check('unresolving returns the same conversation to the open state',
+      await comment.isVisible() && JSON.parse(readFileSync(github.state, 'utf8')).conversationResolved === false)
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()

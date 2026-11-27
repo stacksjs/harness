@@ -3,12 +3,13 @@ import { createHash } from 'node:crypto'
 import { isWorkspaceGitRoot } from './diff'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
+import { placeReviewConversations, readReviewConversations, readReviewConversationState, ReviewConversationConflict, reviewConversationAnchor, reviewThreadId, writeReviewConversation } from './pull-request-conversations'
 import { findPullRequestThread } from './pull-request-links'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
 import { threadTitle } from './thread-search'
-import { renderTranscriptMarkdown } from './transcript-markdown'
+import { renderPullRequestCommentMarkdown } from './transcript-markdown'
 import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-request-viewed'
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
@@ -127,7 +128,8 @@ function stillTrusted(state: HarnessState, workspace: WorkspaceState) {
   return current?.trusted && current.path === workspace.path && current.profileId === workspace.profileId
 }
 
-async function readFiles(repository: Repository, number: number, head: string, page: number, signal: AbortSignal) {
+async function readFiles(repository: Repository, pull: Pull, page: number, signal: AbortSignal) {
+  const { number, head } = pull
   const reply = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}/files?per_page=30&page=${page}`, undefined, signal)
   if (reply.status !== 200 || !Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitHub could not load changes for this request.')
   const files: ChangedFile[] = reply.body.flatMap(file => typeof file?.filename === 'string' ? [{ path: file.filename,
@@ -137,14 +139,36 @@ async function readFiles(repository: Repository, number: number, head: string, p
   if (current.status !== 200 || !head || readPull(current.body, repository.name)?.head !== head)
     throw new RepositoryPullRequestError('The pull request head changed during the read. Refresh to load its current files.')
   let review = null
-  if (files.length) {
-    try { review = await readViewedFiles(repository.path, repository.name, number, head, files.map(file => file.path), signal) }
+  let discussion = null
+  if (files.length || page === 1) {
+    try {
+      const credential = await repositoryGitHubCredential(repository.path, signal)
+      const [viewed, conversations] = await Promise.allSettled([
+        files.length ? readViewedFiles(repository.path, repository.name, number, head, files.map(file => file.path), signal, credential) : null,
+        readReviewConversations(repository.path, repository.name, number, head, pull.url, signal, credential),
+      ])
+      if (viewed.status === 'rejected' && viewed.reason instanceof FileViewedConflict) throw viewed.reason
+      if (conversations.status === 'rejected' && conversations.reason instanceof ReviewConversationConflict) throw conversations.reason
+      review = viewed.status === 'fulfilled' ? viewed.value : null
+      discussion = conversations.status === 'fulfilled' ? conversations.value : null
+      if (review && discussion && review.viewer.id !== discussion.viewer) throw new ReviewConversationConflict()
+    }
     catch (error) {
-      if (error instanceof FileViewedConflict) throw new RepositoryPullRequestError('The pull request head or account changed. Refresh to load the current files.')
+      if (error instanceof FileViewedConflict || error instanceof ReviewConversationConflict)
+        throw new RepositoryPullRequestError('The pull request head or account changed. Refresh to load the current files.')
     }
   }
-  return { files: files.map(file => ({ ...file, anchor: fileAnchor(file.path), formPath: encodeURIComponent(file.path), viewed: review?.states.get(file.path) })),
-    viewer: review?.viewer, more: reply.hasNextPage }
+  const byPath = new Map(files.map(file => [file.path, file]))
+  const byPreviousPath = new Map(files.flatMap(file => file.previousPath ? [[file.previousPath, file] as const] : []))
+  const assigned = Map.groupBy(discussion?.conversations ?? [], thread =>
+    byPath.get(thread.path) ?? (thread.outdated || thread.side === 'before' ? byPreviousPath.get(thread.path) : undefined))
+  return {
+    files: files.map(file => ({ ...file, anchor: fileAnchor(file.path), formPath: encodeURIComponent(file.path),
+      viewed: review?.states.get(file.path), sections: placeReviewConversations(file.patch, assigned.get(file) ?? []) })),
+    viewer: review?.viewer, more: reply.hasNextPage, conversationViewer: discussion?.viewer,
+    conversationsUnavailable: !discussion, conversationsTruncated: discussion?.truncated,
+    detachedConversations: page === 1 ? assigned.get(undefined) ?? [] : [],
+  }
 }
 
 function message(error: unknown) {
@@ -184,7 +208,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const data = reply.status === 200 ? readPull(reply.body, selectionRepo.name) : null
     if (!data || data.number !== selection.number) throw new RepositoryPullRequestError('This pull request is unavailable to the GitHub account on this host.')
     const tabData = tab === 'timeline' ? readActivity(selectionRepo, data, detailPage, signal)
-      : tab === 'code' ? readFiles(selectionRepo, data.number, data.head, detailPage, signal)
+      : tab === 'code' ? readFiles(selectionRepo, data, detailPage, signal)
         : readRepositoryPullRequestChecks(selectionRepo.path, { ...selection, repositoryKey: '' }, signal)
     const extra = await tabData.catch(error => ({ error: message(error) }))
     const result = 'checks' in extra ? extra.head === data.head
@@ -231,7 +255,35 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     detailBack: detailsHref(tab, detailPage - 1), detailNext: detailsHref(tab, detailPage + 1),
     viewedAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/viewed?'),
     viewedAnchor: query.get('file') ?? '', viewedNotice: viewedMessages.get(query.get('viewedResult') ?? '') ?? '',
+    conversationAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/conversation?'),
+    conversationAnchor: query.get('conversation') ?? '',
+    conversationNotice: conversationMessages.get(query.get('conversationResult') ?? '') ?? '',
   }
+}
+
+function reviewReturnParams(query: URLSearchParams, profile: number, url: string) {
+  const params = new URLSearchParams({ profile: String(profile), selectedUrl: url, tab: 'code' })
+  for (const key of ['state', 'sort', 'q', 'repository', 'page', 'detailPage']) {
+    const value = query.get(key)
+    if (value && value.length <= 512) params.set(key, value)
+  }
+  return params
+}
+
+async function readReviewSubmission(state: HarnessState, query: URLSearchParams, request: Request) {
+  const profile = integer(query.get('profile'))
+  const selection = parsePullRequest((query.get('selectedUrl') ?? '').slice(0, 512))
+  const raw = await readRepositoryBody(request, 16_384)
+  const values = new URLSearchParams(raw ?? '')
+  const head = values.get('head') ?? ''
+  const viewer = values.get('viewer') ?? ''
+  if (!selection || !profile || !state.profiles.has(profile) || !/^[0-9a-f]{40}$/u.test(head) || !viewer || viewer.length > 256) return null
+  return { profile, selection, values, head, viewer }
+}
+
+async function reviewRepository(state: HarnessState, profile: number, repository: string, signal: AbortSignal) {
+  const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
+  return (await trustedRepositories(workspaces, signal)).get(repository.toLowerCase())
 }
 
 const viewedMessages = new Map([
@@ -247,25 +299,17 @@ type ViewedResult = 'viewed' | 'unviewed' | 'changed' | 'unavailable' | 'busy'
 const viewedWrites = new Set<string>()
 
 export async function updateWorkspaceFileViewed(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal) {
-  const profile = integer(query.get('profile'))
-  const selection = parsePullRequest(query.get('selectedUrl') ?? '')
-  const raw = await readRepositoryBody(request, 16_384)
-  const values = new URLSearchParams(raw ?? '')
-  const head = values.get('head') ?? ''
-  const viewer = values.get('viewer') ?? ''
+  const submission = await readReviewSubmission(state, query, request)
+  if (!submission) return null
+  const { profile, selection, values, head, viewer } = submission
   let file: string
   try { file = decodeURIComponent(values.get('path') ?? '') }
   catch { return null }
   const intent = values.get('viewed')
-  if (!selection || !profile || !state.profiles.has(profile) || !/^[0-9a-f]{40}$/u.test(head)
-    || !viewer || viewer.length > 256 || !file || Buffer.byteLength(file) > 4096 || file.includes('\0')
-    || (intent !== 'true' && intent !== 'false')) return null
+  if (!file || Buffer.byteLength(file) > 4096 || file.includes('\0') || (intent !== 'true' && intent !== 'false')) return null
   const viewed = intent === 'true'
-  const params = new URLSearchParams({ profile: String(profile), selectedUrl: selection.url, tab: 'code', file: fileAnchor(file) })
-  for (const key of ['state', 'sort', 'q', 'repository', 'page', 'detailPage']) {
-    const value = query.get(key)
-    if (value && value.length <= 512) params.set(key, value)
-  }
+  const params = reviewReturnParams(query, profile, selection.url)
+  params.set('file', fileAnchor(file))
   const reply = (result: ViewedResult) => {
     params.set('viewedResult', result)
     return { result, message: viewedMessages.get(result), location: '/pull-requests?' + params + '#' + fileAnchor(file) }
@@ -274,8 +318,7 @@ export async function updateWorkspaceFileViewed(state: HarnessState, query: URLS
   if (viewedWrites.has(key)) return reply('busy')
   viewedWrites.add(key)
   try {
-    const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
-    const repository = (await trustedRepositories(workspaces, signal)).get(selection.repository.toLowerCase())
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
     if (!repository || !stillTrusted(state, repository.workspace)) return reply('changed')
     // Pin the host's active credential while verifying and writing, even if the CLI changes accounts mid-request.
     const credential = await repositoryGitHubCredential(repository.path, signal)
@@ -296,13 +339,68 @@ export async function updateWorkspaceFileViewed(state: HarnessState, query: URLS
   finally { viewedWrites.delete(key) }
 }
 
+const conversationMessages = new Map([
+  ['resolved', 'Conversation resolved.'],
+  ['reopened', 'Conversation reopened.'],
+  ['changed', 'The pull request, conversation, or GitHub account changed. Refresh the Code view and try again.'],
+  ['denied', 'This GitHub account cannot change the conversation.'],
+  ['unavailable', 'Could not confirm the conversation on GitHub. Try again.'],
+  ['busy', 'This conversation is already being updated. Try again shortly.'],
+])
+type ConversationResult = 'resolved' | 'reopened' | 'changed' | 'denied' | 'unavailable' | 'busy'
+const conversationWrites = new Set<string>()
+
+export async function updateWorkspaceReviewConversation(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal) {
+  const submission = await readReviewSubmission(state, query, request)
+  if (!submission) return null
+  const { profile, selection, values, head, viewer } = submission
+  const id = values.get('thread') ?? ''
+  const intent = values.get('resolved')
+  if (!reviewThreadId.test(id) || (intent !== 'true' && intent !== 'false')) return null
+  const resolved = intent === 'true'
+  const anchor = reviewConversationAnchor(id)
+  const params = reviewReturnParams(query, profile, selection.url)
+  params.set('conversation', anchor)
+  const reply = (result: ConversationResult, conversation?: { isResolved: boolean, viewerCanResolve: boolean, viewerCanUnresolve: boolean }) => {
+    params.set('conversationResult', result)
+    return { result, message: conversationMessages.get(result), location: '/pull-requests?' + params + '#' + anchor,
+      conversation: conversation && { isResolved: conversation.isResolved, viewerCanResolve: conversation.viewerCanResolve,
+        viewerCanUnresolve: conversation.viewerCanUnresolve } }
+  }
+  if (conversationWrites.has(id)) return reply('busy')
+  conversationWrites.add(id)
+  try {
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
+    if (!repository || !stillTrusted(state, repository.workspace)) return reply('changed')
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const read = () => readReviewConversationState(repository.path, repository.name, selection.number, head, id, signal, credential)
+    const before = await read()
+    if (!before) return reply('unavailable')
+    if (before.viewer !== viewer || !stillTrusted(state, repository.workspace)) return reply('changed')
+    const success = resolved ? 'resolved' : 'reopened'
+    if (before.thread.isResolved === resolved) return reply(success, before.thread)
+    if (!(resolved ? before.thread.viewerCanResolve : before.thread.viewerCanUnresolve)) return reply('denied', before.thread)
+    await writeReviewConversation(repository.path, id, resolved, signal, credential).catch(() => {})
+    const after = await read()
+    if (!after) return reply('unavailable')
+    if (after.viewer !== viewer || !stillTrusted(state, repository.workspace)) return reply('changed')
+    return after.thread.isResolved === resolved ? reply(success, after.thread) : reply('unavailable')
+  }
+  catch (error) { return reply(error instanceof ReviewConversationConflict ? 'changed' : 'unavailable') }
+  finally { conversationWrites.delete(id) }
+}
+
 export function renderPullRequestMarkdown(html: string, view: Awaited<ReturnType<typeof pullRequestWorkspace>>) {
   const selected = view.selected
   if (!selected || !('description' in selected)) return html
   const bodies = new Map<string, string>([['description', selected.description]])
   if ('items' in selected) for (const item of selected.items) bodies.set(item.id, item.text)
+  if ('files' in selected) {
+    const conversations = selected.files.flatMap(file => file.sections.flatMap(section => section.conversations)).concat(selected.detachedConversations)
+    for (const thread of conversations) for (const comment of thread.comments) bodies.set(comment.anchor, comment.text)
+  }
   return new HTMLRewriter().on('[data-pr-markdown]', { element(element) {
     const text = bodies.get(element.getAttribute('data-pr-markdown') ?? '')
-    if (text) element.setInnerContent(renderTranscriptMarkdown(text), { html: true })
+    if (text) element.setInnerContent(renderPullRequestCommentMarkdown(text), { html: true })
   } }).transform(html)
 }

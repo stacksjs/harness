@@ -41,12 +41,23 @@ export const viewedNotice = $props.viewedNotice
 export const trackedFiles = (selected?.files || []).filter(file => file.viewed)
 export const viewedCount = trackedFiles.filter(file => file.viewed === 'VIEWED').length
 export const initialViewedStates = Object.fromEntries(trackedFiles.map(file => [file.anchor, file.viewed]))
+export const conversationAction = $props.conversationAction
+export const conversationAnchor = $props.conversationAnchor
+export const conversationNotice = $props.conversationNotice
+export const conversations = (selected?.files || []).flatMap(file => file.sections.flatMap(section => section.conversations)).concat(selected?.detachedConversations || [])
+export const initialConversationStates = Object.fromEntries(conversations.map(thread => [thread.anchor, {
+  isResolved: thread.isResolved, viewerCanResolve: thread.viewerCanResolve, viewerCanUnresolve: thread.viewerCanUnresolve,
+}]))
+export const conversationOnPage = conversations.some(thread => thread.anchor === conversationAnchor)
 </script>
 @if(tab === 'code')
 <script client>
 const fileViewedStates = state(@json(initialViewedStates))
 const viewedUpdate = state('')
 const viewedMessage = state(@json(viewedNotice))
+const reviewThreads = state(@json(initialConversationStates))
+const reviewPending = state({})
+const reviewMessages = state(@json(conversationOnPage && conversationNotice ? { [conversationAnchor]: conversationNotice } : {}))
 const viewedSummary = derived(() => {
   const states = Object.values(fileViewedStates())
   return states.filter(value => value === 'VIEWED').length + ' of ' + states.length + ' viewed on this page'
@@ -80,6 +91,38 @@ async function changeFileViewed(event) {
   }
   catch { viewedMessage.set('Could not confirm the viewed state on GitHub. Try again.') }
   finally { viewedUpdate.set('') }
+}
+
+function threadResolved(anchor) {
+  return reviewThreads()[anchor]?.isResolved === true
+}
+
+function canChangeThread(anchor) {
+  const thread = reviewThreads()[anchor]
+  return thread?.isResolved ? thread.viewerCanUnresolve : thread?.viewerCanResolve
+}
+
+async function changeConversation(event) {
+  const form = event.currentTarget
+  const anchor = form.dataset.conversationAnchor
+  if (reviewPending()[anchor] || !canChangeThread(anchor)) return
+  const body = new URLSearchParams(new FormData(form))
+  body.set('resolved', String(!threadResolved(anchor)))
+  reviewPending.update(value => ({ ...value, [anchor]: true }))
+  reviewMessages.update(value => ({ ...value, [anchor]: 'Updating conversation…' }))
+  try {
+    const response = await fetch(form.action, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const update = await response.json().catch(() => ({}))
+    if (update.conversation) {
+      reviewThreads.update(value => ({ ...value, [anchor]: update.conversation }))
+      if (!canChangeThread(anchor)) form.closest('details')?.querySelector('summary')?.focus()
+    }
+    reviewMessages.update(value => ({ ...value, [anchor]: update.message || 'Could not confirm the conversation on GitHub. Try again.' }))
+  }
+  catch {
+    reviewMessages.update(value => ({ ...value, [anchor]: 'Could not confirm the conversation on GitHub. Try again.' }))
+  }
+  finally { reviewPending.update(value => ({ ...value, [anchor]: false })) }
 }
 </script>
 @endif
@@ -275,17 +318,28 @@ async function changeFileViewed(event) {
             @elseif(selected.files?.length)
               <p data-pr-viewed-notice role="status">Viewed state is unavailable for this GitHub account.</p>
             @endif
+            @if(selected.conversationsUnavailable)
+              <p data-pr-viewed-notice role="status">Review conversations are unavailable. Open the request on GitHub or refresh to try again.</p>
+            @elseif(selected.conversationsTruncated)
+              <p data-pr-viewed-notice role="status">More review conversations are available on GitHub.</p>
+            @endif
+            @if(conversationNotice && !conversationOnPage)<p role="status">{{ conversationNotice }}</p>@endif
             <ul data-pr-files>
               @foreach(selected.files || [] as file)
                 <li id="{{ file.anchor }}">
-                  <details @if(file.anchor === viewedAnchor) open@endif>
+                  <details data-pr-file-patch @if(file.anchor === viewedAnchor || file.sections.some(section => section.conversations.some(thread => thread.anchor === conversationAnchor))) open@endif>
                     <summary>
                       <code>{{ file.path }}</code>
                       <span>{{ file.status }} <strong data-pr-additions>+{{ file.additions }}</strong> <strong data-pr-deletions>-{{ file.deletions }}</strong></span>
                     </summary>
                     @if(file.previousPath)<p>Renamed from <code>{{ file.previousPath }}</code></p>@endif
-                    @if(file.patch)<pre tabindex="0" aria-label="Patch for {{ file.path }}"><code>{{ file.patch }}</code></pre>
-                    @else<p>No text patch available. Open the request on GitHub to inspect this file.</p>@endif
+                    @if(!file.patch)<p>No text patch available. Open the request on GitHub to inspect this file.</p>@endif
+                    @foreach(file.sections as section)
+                      @if(section.patch)<pre data-pr-patch tabindex="0" aria-label="Patch for {{ file.path }}"><code>{{ section.patch }}</code></pre>@endif
+                      @foreach(section.conversations as thread)
+                        @include('../partials/harness-pr-conversation', { thread, detached: !section.patch, showPath: false })
+                      @endforeach
+                    @endforeach
                   </details>
                   @if(file.viewed && selected.viewer)
                     <form method="post" action="{{ viewedAction }}" data-pr-viewed-form data-file-anchor="{{ file.anchor }}" @submit.prevent="changeFileViewed">
@@ -302,6 +356,14 @@ async function changeFileViewed(event) {
                 </li>
               @endforeach
             </ul>
+            @if(selected.detachedConversations?.length)
+              <details data-pr-other-conversations @if(selected.detachedConversations.some(thread => thread.anchor === conversationAnchor)) open@endif>
+                <summary>Conversations outside this file page</summary>
+                @foreach(selected.detachedConversations as thread)
+                  @include('../partials/harness-pr-conversation', { thread, detached: true, showPath: true })
+                @endforeach
+              </details>
+            @endif
           @endif
           @if(tab !== 'summary' && (detailPage > 1 || selected.more))
             <nav data-pr-pagination aria-label="Detail pages">
