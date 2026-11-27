@@ -809,6 +809,7 @@ describe('harness serve — HTTP', () => {
       expect(labels).toMatch(/value="hide"\s+selected/u)
       const authors = await (await list({ find: 'authors', findQuery: 'alix' })).text()
       expect(authors).toContain('Alix Coder')
+      expect(authors).toContain('<strong>@alix</strong>')
       const chosen = await (await list({ chooseAuthor: 'alix', author: 'fixture-user', review: 'changes-requested', checks: 'failing' })).text()
       expect(chosen).toContain('External report with checks')
       expect(chosen).not.toContain('Small report with checks')

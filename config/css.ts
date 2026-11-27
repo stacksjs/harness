@@ -549,7 +549,8 @@ const RESPONSIVE_SHELL = `
 [data-pr-filter-choices] { display: grid; gap: 4px; min-inline-size: 0; max-block-size: min(15rem, 32dvh); overflow: auto; }
 [data-pr-filter-choices] legend { font-size: 12px; font-weight: 650; }
 [data-pr-filter-choices] label { display: flex; align-items: center; gap: 8px; padding: 4px 0; overflow-wrap: anywhere; }
-[data-pr-filter-choices] button { text-align: start; overflow-wrap: anywhere; }
+[data-pr-filter-choices] button { display: grid; justify-content: start; gap: 2px; padding-block: 6px; text-align: start; white-space: normal; overflow-wrap: anywhere; }
+[data-pr-filter-choices] button span { font-weight: 400; opacity: .78; }
 [data-pr-filter-choices] input[type="checkbox"] { flex: none; min-height: auto; }
 [data-pr-filter-color] { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-inline-end: 4px; }
 [data-pr-filters-clear] { justify-self: start; }

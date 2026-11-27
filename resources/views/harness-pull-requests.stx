@@ -900,8 +900,8 @@ const matchingLabelIds = derived(() => {
               <div data-pr-filter-choices role="group" aria-label="Choose an author">
                 @foreach(filterChoices.options as option)
                   <button type="submit" name="chooseAuthor" value="{{ option.value }}" data-pr-button>
-                    <strong>@{{ option.value }}</strong>
-                    @if(option.description)<span> {{ option.description }}</span>@endif
+                    <strong>{{ '@' + option.value }}</strong>
+                    @if(option.description)<span>{{ option.description }}</span>@endif
                   </button>
                 @endforeach
               </div>
