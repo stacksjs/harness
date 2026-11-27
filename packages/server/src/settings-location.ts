@@ -1,5 +1,6 @@
 export const settingsSections = [
   { id: 'general', label: 'General', icon: 'i-hugeicons-settings-02' },
+  { id: 'projects', label: 'Projects', icon: 'i-hugeicons-folder-02' },
   { id: 'threads', label: 'Threads', icon: 'i-hugeicons-bubble-chat' },
   { id: 'appearance', label: 'Appearance', icon: 'i-hugeicons-paint-brush-02' },
   { id: 'keybindings', label: 'Keyboard', icon: 'i-hugeicons-keyboard' },
