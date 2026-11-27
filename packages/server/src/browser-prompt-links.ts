@@ -5,8 +5,9 @@ export function readPromptLink(element: Element, activeThread: boolean) {
   if (!view) return null
   const address = new URL(view.location.href)
   const newThread = address.pathname === '/new' || address.pathname === '/new/'
+    || (address.pathname === '/' && address.searchParams.has('workspace') && address.searchParams.has('pr'))
   if (!newThread && (!activeThread || !address.searchParams.has('prompt'))) return null
-  return { ...parseLinkedPrompt(address.searchParams, newThread), newThread }
+  return { ...parseLinkedPrompt(address.searchParams, newThread), newThread, rawText: address.searchParams.get('prompt') }
 }
 
 export function clearPromptLink(element: Element): void {

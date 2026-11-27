@@ -3,16 +3,17 @@
     <h2 id="harness-prompt-link-title" :text="linkReview()?.title"></h2>
     <p :hidden="!linkReview()?.detail" :text="linkReview()?.detail"></p>
     <p data-shared-prompt-warning role="alert" :hidden="!linkReview()?.prompt?.hiddenCharacters">Hidden characters were removed from this prompt. Read it carefully before sending.</p>
-    <pre :hidden="!linkReview()?.prompt?.text" :text="linkReview()?.prompt?.text"></pre>
+    <pre :hidden="!linkReview()?.prompt?.text || linkReview()?.canCheckOut" :text="linkReview()?.prompt?.text"></pre>
     <a data-linked-pr :hidden="!linkReview()?.prompt?.pullRequest" :href="linkReview()?.prompt?.pullRequest" target="_blank" rel="noopener noreferrer">Open pull request on GitHub</a>
     <p role="alert" :hidden="!linkReviewError()" :text="linkReviewError()"></p>
     <div data-share-dialog-actions>
-      <button type="button" @click="cancelPromptLink" :disabled="linkOpening()">Cancel</button>
-      <button type="button" @click="acceptLinkedPrompt('scratch')" :hidden="!linkReview()?.prompt?.text || linkReview()?.replace" :disabled="linkOpening()">
+      <button type="button" autofocus @click="cancelPromptLink" :disabled="linkOpening()">Cancel</button>
+      <button type="button" @click="acceptLinkedPrompt('scratch')" :hidden="!linkReview()?.prompt?.text || linkReview()?.replace || linkReview()?.canCheckOut" :disabled="linkOpening()">
         Use without a project
       </button>
       <button type="button" data-share-primary @click="openProjectClone(linkReview()?.prompt)" :hidden="!linkReview()?.canClone" :disabled="linkOpening()">Clone repository</button>
-      <button type="button" data-share-primary @click="acceptLinkedPrompt('selected')" :hidden="!linkReview()?.replace && !linkReview()?.project" :disabled="linkOpening()" :text="linkReview()?.replace ? 'Replace draft text' : 'Open project draft'"></button>
+      <button type="button" data-pull-request-confirm data-share-primary @click="confirmPullRequestCheckout" :hidden="!linkReview()?.canCheckOut" :disabled="linkOpening()" :text="linkOpening() ? 'Fetching pull request…' : 'Check out pull request'"></button>
+      <button type="button" data-share-primary @click="acceptLinkedPrompt('selected')" :hidden="!linkReview()?.replace && (!linkReview()?.project || Boolean(linkReview()?.prompt?.pullRequest))" :disabled="linkOpening()" :text="linkReview()?.replace ? 'Replace draft text' : 'Open project draft'"></button>
     </div>
   </div>
 </dialog>

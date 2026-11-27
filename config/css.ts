@@ -335,6 +335,9 @@ const RESPONSIVE_SHELL = `
 [data-share-dialog-actions] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 [data-share-dialog-actions] button { min-height: 36px; padding: 4px 8px; border: 1px solid var(--workspace-line); border-radius: 6px; }
 [data-share-dialog-actions] [data-share-primary] { font-weight: 600; background: var(--workspace-hover); }
+[data-share-dialog-actions] [data-pull-request-confirm] { background: var(--workspace-accent); border-color: var(--workspace-accent); color: white; }
+.dark [data-share-dialog-actions] [data-pull-request-confirm] { color: #101318; }
+[data-share-dialog-actions] [data-pull-request-confirm]:hover:not(:disabled) { filter: brightness(1.08); }
 @media (pointer: coarse) {
   [data-prompt-share] button, [data-share-dialog-actions] button, [data-share-commands] button { min-height: 44px; min-width: 44px; }
 }

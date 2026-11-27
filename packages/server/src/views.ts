@@ -221,6 +221,10 @@ export function viewProps(state: HarnessState, options: {
           id: active.id,
           title: threadTitle(active),
           navigation: active.navigation,
+          pullRequest: active.pullRequest ? {
+            url: 'https://github.com/' + active.pullRequest.repository + '/pull/' + active.pullRequest.number,
+            label: active.pullRequest.repository + '#' + active.pullRequest.number,
+          } : undefined,
           fork: active.fork ? {
             sourceSessionId: active.fork.sessionId,
             sourceTurnId: active.fork.turnId,

@@ -14,7 +14,7 @@
  * if yours lives somewhere else.
  */
 import type { ConversationRewindInput, Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
-import { fixtureGitRepository, serveFixtureGit } from '../packages/server/test/fixtures/git-http'
+import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from '../packages/server/test/fixtures/git-http'
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
@@ -5933,6 +5933,7 @@ clonePage.on('pageerror', error => {
   pageErrors.push(error.message)
 })
 const gitFiles = fixtureGitRepository(join(driveRoot, 'clone-server'))
+const pullRequestHead = fixturePullRequest(join(driveRoot, 'clone-server'), 7)
 const networkGate = Promise.withResolvers<void>()
 let delayGit = true
 const gitFixture = serveFixtureGit(gitFiles.remote, () => delayGit ? networkGate.promise : Promise.resolve())
@@ -6019,6 +6020,66 @@ try {
   check('cloning from a prompt link preserves its draft through project trust without sending',
     harness.engine.current.sessions.size === countBeforeClone
     && readFileSync(join(linkDestination, 'README.md'), 'utf8') === 'Clone fixture notebook\n')
+  const pullRequestPrompt = 'Review the notebook pull request.'
+  await clonePage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
+  const pullRequestUrl = baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/notebook/7', prompt: pullRequestPrompt })
+  const checkOut = promptReview.getByRole('button', { name: 'Check out pull request', exact: true })
+  await clonePage.goto(pullRequestUrl)
+  await checkOut.waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    check(`pull request confirmation fits at ${width}×${height}`, await checkOut.evaluate(button => {
+      const frame = button.closest('dialog')!.getBoundingClientRect()
+      const action = button.getBoundingClientRect()
+      return frame.left >= 0 && frame.right <= innerWidth + 1 && action.bottom <= frame.bottom
+    }))
+    await capture(`workspace-pull-request-confirm-${width}x${height}`, clonePage)
+  }
+  await promptReview.getByRole('button', { name: 'Cancel' }).click()
+  await clonePage.waitForURL(baseUrl + '/')
+  check('cancelling a pull request link preserves the project and creates no thread',
+    harness.engine.current.sessions.size === countBeforeClone && !existsSync(join(linkDestination, 'review.txt')))
+  await clonePage.goto(pullRequestUrl)
+  await checkOut.click()
+  await clonePage.waitForURL(url => /^\/s\/\d+$/.test(url.pathname))
+  const pullRequestSession = Number(new URL(clonePage.url()).pathname.slice(3))
+  await clonePage.waitForFunction(() => document.querySelector('[data-workspace-branch]')?.textContent?.startsWith('harness/session-'))
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pullRequestPrompt)
+  const pullRequestThread = harness.engine.current.sessions.get(pullRequestSession)
+  check('confirmation checks out the exact PR commit with an unsent draft and no provider run',
+    pullRequestThread?.pullRequest?.commit === pullRequestHead && pullRequestThread?.turns.length === 0
+    && readFileSync(join(pullRequestThread.worktreePath, 'review.txt'), 'utf8') === 'Only in the pull request\n'
+    && !existsSync(join(linkDestination, 'review.txt')))
+  await capture('workspace-pull-request-thread-360x800', clonePage)
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'FIXTURE/notebook/7', prompt: 'Replacement text.' }))
+  await promptReview.getByText('Replace draft text?', { exact: true }).waitFor()
+  await promptReview.getByRole('button', { name: 'Cancel' }).click()
+  check('reopening a PR uses the same thread and respects an existing draft',
+    new URL(clonePage.url()).pathname === '/s/' + pullRequestSession && await editor.inputValue() === pullRequestPrompt
+    && harness.engine.current.sessions.size === countBeforeClone + 1)
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/notebook/7' }))
+  await clonePage.waitForURL(baseUrl + '/s/' + pullRequestSession)
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pullRequestPrompt)
+  check('a PR link without a prompt opens the existing draft without a replacement dialog', !await promptReview.isVisible())
+
+  process.env[gitConfigValue] = 'https://github.com/fixture/another-notebook.git'
+  const newCheckout = join(driveRoot, 'second-pr-project')
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/another-notebook/7', prompt: pullRequestPrompt }))
+  await promptReview.getByRole('button', { name: 'Clone repository' }).click()
+  await destinationBox.fill(newCheckout)
+  await submitClone()
+  await clonePage.waitForURL(url => url.searchParams.has('workspace') && url.searchParams.has('pr'))
+  const trustControl = clonePage.locator('[data-project-trust]')
+  await trustControl.waitFor()
+  check('a PR clone pauses for project trust before asking to check out the pull request',
+    !await promptReview.isVisible() && harness.engine.current.sessions.size === countBeforeClone + 1)
+  await trustControl.click()
+  await checkOut.waitFor()
+  await checkOut.click()
+  await clonePage.waitForURL(url => /^\/s\/\d+$/.test(url.pathname) && url.pathname !== '/s/' + pullRequestSession)
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pullRequestPrompt)
+  check('after cloning and giving trust, a new PR checkout preserves the original linked draft',
+    harness.engine.current.sessions.size === countBeforeClone + 2 && !existsSync(join(newCheckout, 'review.txt')))
   await clonePage.waitForLoadState('networkidle')
 }
 finally {

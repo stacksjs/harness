@@ -106,6 +106,7 @@ export const providerDisplayName = kind => providerNames[kind] || kind
 export const initialSessionModel = activeSession?.model || ''
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialFork = activeSession?.fork || null
+export const sessionPullRequest = activeSession?.pullRequest || null
 export const initialCodexSelection = activeCodex && activeSession.model
   ? { model: activeSession.model, ...activeSession.codexTurnOptions } : null
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
@@ -700,6 +701,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <div data-steering-text class="break-words text-[13px] whitespace-pre-wrap"></div>
           </div>
         </template>
+      @endif
+      @if(sessionPullRequest)
+        <div data-thread-pull-request class="flex flex-wrap gap-x-3 gap-y-1 items-baseline mb-4 break-words text-neutral-600 text-sm dark:text-neutral-300">
+          <a href="{{ sessionPullRequest.url }}" target="_blank" rel="noopener noreferrer" class="underline underline-offset-2">Pull request {{ sessionPullRequest.label }}</a>
+          <span role="status" :hidden="Boolean(workspaceBranch() || sessionError())">Isolated checkout pending.</span>
+          @if(workspaceEditorAllowed)
+            <button type="button" hidden :hidden="Boolean(workspaceBranch() || threadNavigation().archivedAt)" :disabled="pullRequestRetrying()" @click="retryPullRequestCheckout" class="min-h-8 font-medium underline underline-offset-2">Retry checkout</button>
+            <span role="alert" :hidden="!pullRequestRetryError()" :text="pullRequestRetryError()"></span>
+          @endif
+        </div>
       @endif
       @if(activeSession && workspaceEditorAllowed)
         <section data-project-setup-status hidden :hidden="!projectSetupStatus()" aria-label="Worktree setup" class="grid mb-4 p-3 text-neutral-700 text-sm dark:text-neutral-200 border border-black/10 rounded-md dark:border-white/15">
@@ -2180,10 +2191,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectScriptsBusy = state(false)
   const projectScriptDraft = state(null)
   const projectSetup = state(null)
+  const pullRequestRetrying = state(false)
+  const pullRequestRetryError = state('')
   const projectSetupStatus = derived(() => {
     const setup = projectSetup()
     if (!setup) return ''
-    if (setup.status === 'pending') return 'Worktree setup will run with the next message.'
+    if (setup.status === 'pending') return sessionPullRequest ? 'Preparing worktree setup…' : 'Worktree setup will run with the next message.'
     if (setup.status === 'running') return 'Running worktree setup…'
     if (setup.status === 'failed') return `Worktree setup exited with code ${setup.exitCode}.`
     if (setup.status === 'interrupted') return 'Worktree setup was interrupted.'
@@ -2870,7 +2883,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         projectSetupPreview = false
         void previewProjectScript(setup.previewUrl, true)
       }
-      if (setup?.status === 'pending' ? uiBusy() : setup?.status === 'running')
+      if (setup?.status === 'pending' ? (uiBusy() || sessionPullRequest) : setup?.status === 'running')
         projectSetupPoll = useTimeout(refreshProjectSetup, 750)
       else projectSetupPreview = false
     }
@@ -3413,6 +3426,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (result.phase === 'done') {
         const target = cloneDialog.current
         target?.close()
+        if (operation.prompt?.pullRequest) {
+          const params = new URLSearchParams({ workspace: String(result.workspace), pr: operation.prompt.pullRequest })
+          if (operation.prompt.text) params.set('prompt', operation.prompt.text)
+          openDraftAddress('/?' + params)
+          return
+        }
         if (operation.prompt && target) {
           try {
             await openLinkedDraft(operation.prompt, { id: result.workspace, profile: result.profile }, target)
@@ -5632,9 +5651,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function openIncomingPromptLink() {
     const target = promptRef.current ?? transcriptRef.current
     const link = target && composerDraftTools.readPromptLink(target, Boolean(sessionId))
-    if (!link) return
+    if (!link || (link.prompt?.pullRequest && draftProject && !draftProject.trusted)) return
     composerDraftTools.clearPromptLink(target)
-    const { newThread, prompt, error } = link
+    const { newThread, prompt, error, rawText } = link
     if (error) {
       showLinkedPrompt({ title: 'Could not open prompt link', detail: error, newThread })
       return
@@ -5661,17 +5680,69 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     showLinkedPrompt({ title: 'Open linked prompt', detail: 'Looking for ' + prompt.repository + ' on this host.', prompt, newThread })
     const request = new AbortController()
     linkedPromptRequest = request
-    const result = prompt.pullRequest ? null : await fetch('/prompt-link/project?repo=' + encodeURIComponent(prompt.repository), { signal: request.signal })
+    const endpoint = prompt.pullRequest ? pullRequestAddress(prompt.pullRequest) : '/prompt-link/project?repo=' + encodeURIComponent(prompt.repository)
+    const result = await fetch(endpoint, { signal: request.signal })
       .then(response => response.ok ? response.json() : null).catch(() => null)
     if (request.signal.aborted || !linkReview()) return
     linkedPromptRequest = undefined
-    // A shared PR URL can be opened for review. Drafting in its checkout is
-    // a separate project operation that needs a branch setup confirmation.
-    const project = prompt.pullRequest ? null : result?.project
-    const detail = prompt.pullRequest
-      ? 'Open the pull request to review it, or start a draft without a project.'
-      : project ? 'Open a draft in ' + project.name + '.' : prompt.repository + ' is unavailable on this host.'
-    showLinkedPrompt({ title: 'Open linked prompt', detail, prompt, newThread, project, canClone: projectCloneAllowed && !project && !prompt.pullRequest })
+    if (result?.sessionId) {
+      openPullRequestThread(result.sessionId, rawText)
+      return
+    }
+    const project = result?.project
+    const canCheckOut = Boolean(prompt.pullRequest && project && result?.canCheckOut)
+    const label = prompt.pullRequest ? prompt.repository + '#' + prompt.pullRequest.split('/').at(-1) : ''
+    const title = canCheckOut ? 'Check out ' + label + '?' : prompt.pullRequest ? 'Open pull request' : 'Open linked prompt'
+    const detail = canCheckOut ? 'This creates an isolated worktree in ' + project.name + ' and runs any configured setup.'
+      : prompt.pullRequest && project ? 'Check out this pull request from the Harness host.'
+        : project ? 'Open a draft in ' + project.name + '.' : prompt.repository + ' is unavailable on this host.'
+    showLinkedPrompt({ title, detail, prompt, newThread, project, canCheckOut, rawText, canClone: projectCloneAllowed && !project })
+  }
+
+  function pullRequestAddress(pullRequest, project, thread) {
+    const params = new URLSearchParams({ pr: pullRequest })
+    if (project) params.set('workspace', String(project))
+    if (thread) params.set('session', String(thread))
+    return '/prompt-link/pull-request?' + params
+  }
+
+  function openPullRequestThread(id, rawText) {
+    const params = rawText?.trim() ? '?' + new URLSearchParams({ prompt: rawText }) : ''
+    openDraftAddress('/s/' + id + params)
+  }
+
+  async function requestPullRequestCheckout(pullRequest, project, thread) {
+    const response = await fetch(pullRequestAddress(pullRequest, project, thread), { method: 'POST', headers: { 'content-type': 'application/json' } })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok || !result.sessionId) throw new Error(result.error || 'Could not start the pull request checkout.')
+    return result.sessionId
+  }
+
+  async function confirmPullRequestCheckout() {
+    const review = linkReview()
+    if (!review?.canCheckOut || linkOpening()) return
+    linkOpening.set(true)
+    linkReviewError.set('')
+    try {
+      const id = await requestPullRequestCheckout(review.prompt.pullRequest, review.project.id)
+      openPullRequestThread(id, review.rawText)
+    }
+    catch (error) { linkReviewError.set(error.message || 'Could not start the pull request checkout.') }
+    finally { linkOpening.set(false) }
+  }
+
+  async function retryPullRequestCheckout() {
+    if (pullRequestRetrying() || !sessionPullRequest || workspaceBranch()) return
+    pullRequestRetrying.set(true)
+    pullRequestRetryError.set('')
+    const previousError = sessionError()
+    sessionError.set('')
+    try { await requestPullRequestCheckout(sessionPullRequest.url, activeWorkspaceId, sessionId) }
+    catch (error) {
+      sessionError.set(previousError)
+      pullRequestRetryError.set(error.message || 'Could not retry the checkout.')
+    }
+    finally { pullRequestRetrying.set(false) }
   }
 
   async function connectComposerDrafts() {
@@ -6885,6 +6956,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       }
       if (payload.type === 'session.worktree-reserved') worktreeSetup.set(Boolean(payload.intent?.layout))
       if (payload.type === 'session.isolated') {
+        if (sessionPullRequest && !turns.length && !liveTurns().length && uiState() === 'failed') {
+          setSessionState('idle')
+          sessionError.set('')
+        }
         worktreeSetup.set(false)
         workspaceBranch.set(payload.branch)
         isolatedRewind.set(payload.combined && !payload.combined.checkouts.some(checkout => !checkout.key) ? 'repositories' : 'files')
