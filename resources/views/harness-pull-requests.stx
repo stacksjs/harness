@@ -8,19 +8,21 @@ export const tab = $props.tab || 'summary'
 export const selectionError = $props.selectionError || ''
 export const hasDetail = Boolean(selected || selectionError)
 export const stateOptions = [{ value: 'open', label: 'Open' }, { value: 'closed', label: 'Closed' }, { value: 'merged', label: 'Merged' }, { value: 'all', label: 'All states' }]
-export const sortOptions = [{ value: 'updated', label: 'Recently updated' }, { value: 'newest', label: 'Newest created' }, { value: 'oldest', label: 'Oldest created' }]
+export const sortOptions = [{ value: 'updated', label: 'Updated' }, { value: 'newest', label: 'Newest' }, { value: 'oldest', label: 'Oldest' }]
 export const sort = $props.sort
 export const filters = $props.filters || { involvement: '', draft: '', review: '', checks: '', author: '', label: [] }
 export const draftChoice = $props.draftChoice || ''
 export const menuFilterCount = [filters.involvement, filters.draft, filters.review, filters.checks, filters.author].filter(Boolean).length + filters.label.length
 export const activeFilterCount = menuFilterCount + Number(Boolean(draftChoice) && !filters.draft)
-export const additionalFiltersLabel = activeFilterCount ? 'More filters (' + activeFilterCount + ')' : 'More filters'
+  + [Boolean($props.repository), $props.filter && $props.filter !== 'open', profiles[0] && $props.profile !== profiles[0].id].filter(Boolean).length
+export const additionalFiltersLabel = activeFilterCount ? 'Filters (' + activeFilterCount + ')' : 'Filters'
 export const filterChoices = $props.choices
 export const labelChoices = [...filters.label.map(value => ({ value, description: '', color: '' })),
   ...(filterChoices?.kind === 'labels' ? filterChoices.options.filter(option => !filters.label.some(value => value.toLowerCase() === option.value.toLowerCase())) : [])]
 export const clearFiltersHref = $props.clearFiltersHref
 export const savedViewScope = $props.savedViewScope || ''
 export const savedViewDetail = $props.savedViewDetail || ''
+export const listSelectionFields = $props.listSelectionFields || []
 export const incompleteSearch = $props.incompleteSearch
 export const cappedSearch = $props.cappedSearch
 export const involvementOptions = [{ value: '', label: 'Everyone' }, { value: 'authored', label: 'Authored by me' }, { value: 'reviewing', label: 'My review requested' }]
@@ -785,6 +787,8 @@ const currentSavedPrRepositories = @json(repositories.map(repository => reposito
 const suggestedSavedPrName = @json(filters.involvement === 'reviewing' ? 'PRs requesting my review' : '')
 const savedPrViewsMenu = useRef('savedPrViewsMenu')
 const savedPrViewsTrigger = useRef('savedPrViewsTrigger')
+const prFiltersMenu = useRef('prFiltersMenu')
+const prFiltersTrigger = useRef('prFiltersTrigger')
 const savedPrViewDialog = useRef('savedPrViewDialog')
 const savedPrNameInput = useRef('savedPrNameInput')
 const savedPrViewsReady = state(false)
@@ -826,9 +830,24 @@ useEventListener('storage', event => {
 })
 useEventListener('pageshow', refreshSavedPrViews)
 useEventListener('pointerdown', event => {
-  const menu = savedPrViewsMenu.current
-  if (menu?.open && !menu.contains(event.target)) menu.open = false
+  for (const menu of [savedPrViewsMenu.current, prFiltersMenu.current]) {
+    if (menu?.open && !menu.contains(event.target)) menu.open = false
+  }
 })
+
+function closePrToolbarSibling(isViews) {
+  const other = isViews ? prFiltersMenu.current : savedPrViewsMenu.current
+  if (other) other.open = false
+}
+
+function prFiltersKeydown(event) {
+  const menu = prFiltersMenu.current
+  if (event.key !== 'Escape' || !menu?.open || event.defaultPrevented || event.isComposing) return
+  event.preventDefault()
+  event.stopPropagation()
+  menu.open = false
+  prFiltersTrigger.current?.focus()
+}
 
 function closeSavedPrViews(restoreFocus = true) {
   if (savedPrViewsMenu.current) savedPrViewsMenu.current.open = false
@@ -846,6 +865,7 @@ function savedPrMenuKeydown(event) {
   if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
   if (!menu.open && (event.key === 'Home' || event.key === 'End')) return
   event.preventDefault()
+  closePrToolbarSibling(true)
   menu.open = true
   const buttons = [...menu.querySelectorAll('button:not([hidden])')]
   if (!buttons.length) return
@@ -961,73 +981,64 @@ function closeSavedPrEditor() {
   <div data-pr-workspace-columns data-detail="{{ hasDetail }}">
     <section aria-label="Pull request list" data-pr-workspace-list>
       <form method="get" action="/pull-requests" data-pr-filters>
-        <label data-pr-search>
-          <span>Search pull requests</span>
-          <input type="search" name="q" placeholder="Search or label:bug" maxlength="200" value="{{ search }}" aria-describedby="pr-search-syntax">
-        </label>
+        @foreach(listSelectionFields as pair)
+          <input type="hidden" name="{{ pair[0] }}" value="{{ pair[1] }}">
+        @endforeach
+        <div data-pr-search-box>
+          <label data-pr-search class="relative">
+            <span class="sr-only">Search pull requests</span>
+            <span class="i-hugeicons-search-01" aria-hidden="true"></span>
+            <input type="search" name="q" placeholder="Search or label:bug" maxlength="200" value="{{ search }}" aria-describedby="pr-search-syntax"
+              enterkeyhint="search" autocapitalize="none" spellcheck="false">
+          </label>
+          <button type="submit" data-pr-button data-pr-search-submit aria-label="Search" title="Search">
+            <span class="inline-block size-4 i-hugeicons-arrow-right-01" aria-hidden="true"></span>
+          </button>
+        </div>
         <span id="pr-search-syntax" class="sr-only">Use label:, author:, draft:, review:, or checks: to filter your search. Quote labels that contain spaces or commas.</span>
-        <label>
-          <span>Profile</span>
-          <select name="profile">
-            @foreach(profiles as profile)
-              <option value="{{ profile.id }}" @if(profile.id === activeProfileId) selected@endif>{{ profile.name }}</option>
-            @endforeach
-          </select>
-        </label>
-        <label>
-          <span>Repository</span>
-          <select name="repository">
-            <option value="">All repositories</option>
-            @foreach(repositories as repository)
-              <option value="{{ repository.name }}" @if(repository.name === repositoryFilter) selected@endif>{{ repository.name }}</option>
-            @endforeach
-          </select>
-        </label>
-        <label>
-          <span>State</span>
-          <select name="state">
-            @foreach(stateOptions as option)
-              <option value="{{ option.value }}" @if(option.value === filter) selected@endif>{{ option.label }}</option>
-            @endforeach
-          </select>
-        </label>
-        <label>
-          <span>Sort</span>
-          <select name="sort">
-            @foreach(sortOptions as option)
-              <option value="{{ option.value }}" @if(option.value === sort) selected@endif>{{ option.label }}</option>
-            @endforeach
-          </select>
-        </label>
-        <button type="submit" data-pr-button>Apply filters</button>
         <div data-pr-filter-toolbar>
-          <details ref="savedPrViewsMenu" data-pr-views hidden :hidden="!savedPrViewsReady()" @keydown="savedPrMenuKeydown">
-            <summary ref="savedPrViewsTrigger" data-pr-button aria-label="Saved pull request views" aria-describedby="pr-active-view-name" :title="activeSavedPrView()?.name || 'Saved pull request views'">
-              <span class="inline-block shrink-0 size-4 i-hugeicons-bookmark-01" aria-hidden="true"></span>
-              <span id="pr-active-view-name" data-pr-view-name :text="activeSavedPrView()?.name || 'Views'">Views</span>
-              <span data-pr-view-modified :hidden="!savedPrViewModified()">Modified</span>
-              <span class="inline-block shrink-0 size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
-            </summary>
-            <div data-pr-view-panel>
-              <button :for="view in savedPrViews()" :key="view.id" type="button" data-pr-view-choice
-                :aria-current="view.id === activeSavedPrView()?.id && !savedPrViewModified() ? 'true' : null" @click="applySavedPrView(view.id)">
-                <span class="inline-block shrink-0 size-4 i-hugeicons-tick-02" aria-hidden="true"></span>
-                <span :text="view.name"></span>
-              </button>
-              <div data-pr-view-commands>
-                <button type="button" @click="openSavedPrEditor(false)">Save current view…</button>
-                <button type="button" :hidden="!savedPrViewModified()" @click="changeSavedPrView(false)">Update saved view</button>
-                <button type="button" :hidden="!activeSavedPrView()" @click="openSavedPrEditor(true)">Rename view…</button>
-                <button type="button" data-pr-view-remove :hidden="!activeSavedPrView()" @click="changeSavedPrView(true)">Delete view</button>
-              </div>
-            </div>
-          </details>
-          <details data-pr-additional-filters @if(filterChoices) open @endif>
-            <summary data-pr-button>
+          <label data-pr-sort>
+            <span class="sr-only">Sort</span>
+            <select name="sort" title="Sort">
+              @foreach(sortOptions as option)
+                <option value="{{ option.value }}" @if(option.value === sort) selected@endif>{{ option.label }}</option>
+              @endforeach
+            </select>
+          </label>
+          <details ref="prFiltersMenu" data-pr-additional-filters @if(filterChoices) open @endif @keydown="prFiltersKeydown">
+            <summary ref="prFiltersTrigger" data-pr-button aria-label="{{ additionalFiltersLabel }}" @click="closePrToolbarSibling(false)">
               <span class="inline-block size-4 i-hugeicons-filter" aria-hidden="true"></span>
-              {{ additionalFiltersLabel }}
+              Filters
+              @if(activeFilterCount)
+                <span data-pr-filter-count aria-hidden="true">{{ activeFilterCount }}</span>
+              @endif
             </summary>
             <div data-pr-advanced-fields>
+              <label>
+                <span>Profile</span>
+                <select name="profile">
+                  @foreach(profiles as profile)
+                    <option value="{{ profile.id }}" @if(profile.id === activeProfileId) selected@endif>{{ profile.name }}</option>
+                  @endforeach
+                </select>
+              </label>
+              <label>
+                <span>Repository</span>
+                <select name="repository">
+                  <option value="">All repositories</option>
+                  @foreach(repositories as repository)
+                    <option value="{{ repository.name }}" @if(repository.name === repositoryFilter) selected@endif>{{ repository.name }}</option>
+                  @endforeach
+                </select>
+              </label>
+              <label>
+                <span>State</span>
+                <select name="state">
+                  @foreach(stateOptions as option)
+                    <option value="{{ option.value }}" @if(option.value === filter) selected@endif>{{ option.label }}</option>
+                  @endforeach
+                </select>
+              </label>
               <label>
                 <span>Involvement</span>
                 <select name="involvement">
@@ -1112,9 +1123,33 @@ function closeSavedPrEditor() {
                   @endforeach
                 </div>
               @endif
-              @if(menuFilterCount)
-                <a href="{{ clearFiltersHref }}" data-pr-button data-pr-filters-clear>Clear additional filters</a>
-              @endif
+              <div data-pr-filter-actions>
+                @if(menuFilterCount)
+                  <a href="{{ clearFiltersHref }}" data-pr-button>Clear additional filters</a>
+                @endif
+                <button type="submit" data-pr-button data-pr-filter-submit>Apply filters</button>
+              </div>
+            </div>
+          </details>
+          <details ref="savedPrViewsMenu" data-pr-views hidden :hidden="!savedPrViewsReady()" @keydown="savedPrMenuKeydown">
+            <summary ref="savedPrViewsTrigger" data-pr-button aria-label="Saved pull request views" aria-describedby="pr-active-view-name" :title="activeSavedPrView()?.name || 'Saved pull request views'" @click="closePrToolbarSibling(true)">
+              <span class="inline-block shrink-0 size-4 i-hugeicons-bookmark-01" aria-hidden="true"></span>
+              <span id="pr-active-view-name" data-pr-view-name :text="activeSavedPrView()?.name || 'Views'">Views</span>
+              <span data-pr-view-modified :hidden="!savedPrViewModified()">Modified</span>
+              <span class="inline-block shrink-0 size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+            </summary>
+            <div data-pr-view-panel>
+              <button :for="view in savedPrViews()" :key="view.id" type="button" data-pr-view-choice
+                :aria-current="view.id === activeSavedPrView()?.id && !savedPrViewModified() ? 'true' : null" @click="applySavedPrView(view.id)">
+                <span class="inline-block shrink-0 size-4 i-hugeicons-tick-02" aria-hidden="true"></span>
+                <span :text="view.name"></span>
+              </button>
+              <div data-pr-view-commands>
+                <button type="button" @click="openSavedPrEditor(false)">Save current view…</button>
+                <button type="button" :hidden="!savedPrViewModified()" @click="changeSavedPrView(false)">Update saved view</button>
+                <button type="button" :hidden="!activeSavedPrView()" @click="openSavedPrEditor(true)">Rename view…</button>
+                <button type="button" data-pr-view-remove :hidden="!activeSavedPrView()" @click="changeSavedPrView(true)">Delete view</button>
+              </div>
             </div>
           </details>
         </div>

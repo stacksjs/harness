@@ -6736,11 +6736,11 @@ try {
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
     await reviewList.getByRole('searchbox', { name: 'Search pull requests' }).fill('unmatched review')
-    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.getByRole('button', { name: 'Search', exact: true }).click()
     await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
     await reviewList.getByRole('searchbox', { name: 'Search pull requests' }).fill('draft pull request')
     await reviewList.getByRole('combobox', { name: 'Sort' }).selectOption('oldest')
-    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.getByRole('button', { name: 'Search', exact: true }).click()
     await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
     check('review search reopens a matching title and restores the selected sort from its address',
       new URL(clonePage.url()).searchParams.get('q') === 'draft pull request'
@@ -6756,6 +6756,18 @@ try {
       await clonePage.setViewportSize({ width: 390, height: 844 })
       const filters = reviewList.locator('[data-pr-filters]')
       const additionalFilters = filters.locator('[data-pr-additional-filters] > summary')
+      const resultRow = reviewList.locator('[data-pr-row]').first()
+      const initialRow = await resultRow.boundingBox()
+      await additionalFilters.press('Enter')
+      const openRow = await resultRow.boundingBox()
+      check('the phone filters panel exposes list scope without shifting the results',
+        await filters.getByRole('combobox', { name: 'Repository' }).isVisible()
+        && Boolean(initialRow && openRow && Math.abs(initialRow.y - openRow.y) < 1))
+      await filters.getByRole('combobox', { name: 'Profile' }).focus()
+      await clonePage.keyboard.press('Escape')
+      check('Escape closes pull request filters and returns focus to their trigger',
+        await filters.getByRole('combobox', { name: 'Profile' }).isHidden()
+        && await additionalFilters.evaluate(element => element === element.ownerDocument.activeElement))
       await additionalFilters.press('Enter')
       await filters.getByRole('combobox', { name: 'Draft', exact: true }).selectOption('only')
       await filters.getByRole('combobox', { name: 'Review', exact: true }).selectOption('none')
@@ -6831,6 +6843,12 @@ try {
       await clonePage.setViewportSize({ width: 1280, height: 800 })
       await clonePage.goto(mergeReviewUrl)
       await clonePage.getByRole('link', { name: 'Timeline', exact: true }).click()
+      await search.fill('preserve an independently selected request')
+      await search.press('Enter')
+      await clonePage.waitForURL(url => url.searchParams.get('q') === 'preserve an independently selected request')
+      check('submitting a pull request search preserves an independently selected request',
+        new URL(clonePage.url()).searchParams.get('selectedUrl') === address
+        && new URL(clonePage.url()).searchParams.get('tab') === 'timeline')
       await savedViews.click()
       await filters.getByRole('button', { name: 'Reviewed release drafts', exact: true }).click()
       await savedViews.getByText('Reviewed release drafts', { exact: true }).waitFor()

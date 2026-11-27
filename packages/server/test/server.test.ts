@@ -803,6 +803,24 @@ describe('harness serve — HTTP', () => {
       const timeline = [...detail.matchAll(/href="([^"]*tab=timeline[^"]+)"/gu)][0]?.[1]
       expect(timeline).toBeDefined()
       expect(new URL(timeline!.replaceAll('&amp;', '&'), host).searchParams.getAll('label')).toEqual([compliance.name, report.name])
+      const profile = selected.searchParams.get('profile')!
+      expect(detail).toContain(`name="selectionProfile" value="${profile}"`)
+      const formScope = { selectedUrl: url, tab: 'timeline', selectionProfile: profile }
+      const withSelection = await (await list({ ...formScope, profile, q: 'unmatched search', draft: 'hide' })).text()
+      expect(withSelection).toContain('data-detail="true"')
+      expect(withSelection).toContain('No pull requests match these filters.')
+      const clearLink = /href="([^"]+)" data-pr-button>Clear additional filters<\/a>/u.exec(withSelection)?.[1]
+      expect(clearLink).toBeDefined()
+      const clearParams = new URL(clearLink!.replaceAll('&amp;', '&'), host).searchParams
+      expect(clearParams.get('selectedUrl')).toBe(url)
+      expect(clearParams.get('tab')).toBe('timeline')
+      expect(clearParams.has('draft')).toBe(false)
+      await harness.engine.dispatch({ id: 'pull-request-filters-other-profile', at: Date.now(),
+        command: { type: 'profile.create', name: 'Other reviews' } })
+      const otherProfile = [...harness.engine.current.profiles.values()].find(item => item.name === 'Other reviews')!
+      const switched = await (await list({ ...formScope, profile: String(otherProfile.id) })).text()
+      expect(switched).toContain('data-detail="false"')
+      expect(switched).not.toContain('Choose a pull request in a trusted GitHub project in this profile.')
 
       const labels = await (await list({ find: 'labels', findQuery: 'phase 2', draft: 'hide' })).text()
       expect(labels).toContain('Validate the staged export')
@@ -844,7 +862,7 @@ describe('harness serve — HTTP', () => {
       expect(typedPage).toMatch(/value="hide"\s+selected/u)
       expect(typedPage).toContain('GitHub search shows up to 1,000 results')
       const typedOnly = await (await list({ q: 'draft:false "Small report"' })).text()
-      expect(typedOnly).toContain('More filters (1)')
+      expect(typedOnly).toContain('aria-label="Filters (1)"')
       expect(typedOnly).not.toContain('Clear additional filters')
       for (const text of ['ledger needs a checksum', 'earlier result was redacted']) {
         const contentSearch = await (await list({ q: 'size:S -label:wip "' + text + '"' })).text()

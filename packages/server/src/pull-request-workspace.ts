@@ -289,7 +289,8 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
   const repositories = await trustedRepositories(workspaces, signal)
   const repository = repositories.get((query.get('repository') ?? '').toLowerCase())
-  const selection = parsePullRequest((query.get('selectedUrl') ?? '').slice(0, 512))
+  const selectionInProfile = !query.has('selectionProfile') || query.get('selectionProfile') === String(profile)
+  const selection = selectionInProfile ? parsePullRequest((query.get('selectedUrl') ?? '').slice(0, 512)) : null
   const selectionRepo = selection && repositories.get(selection.repository.toLowerCase())
   const filter = listStates.find(value => value === query.get('state')) ?? 'open'
   const sort = listSorts.find(value => value === query.get('sort')) ?? 'updated'
@@ -302,7 +303,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const params = new URLSearchParams({ profile: String(profile), state: filter, sort })
   if (search) params.set('q', search)
   if (repository) params.set('repository', repository.name)
-  const clearFiltersHref = '/pull-requests?' + new URLSearchParams(params)
+  const clearFilters = new URLSearchParams(params)
   writePullRequestFilters(params, menu)
   const savedViewScope = params.toString()
   if (page > 1) params.set('page', String(page))
@@ -416,6 +417,8 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     if (detailPage > 1) savedViewDetail.set('detailPage', String(detailPage))
     if (tab === 'code') carryReviewView(query, savedViewDetail)
   }
+  for (const [name, value] of savedViewDetail) clearFilters.set(name, value)
+  const listSelectionFields = selectionRepo ? [...savedViewDetail, ['selectionProfile', String(profile)]] : []
   const detailsHref = (detailTab: string, nextPage = 1) => href({ selectedUrl, tab: detailTab, detailPage: nextPage })
   const commentsBase = detailsHref('code', detailPage)
   const lifecycleParams = new URLSearchParams(detailsHref(tab, detailPage).split('?')[1])
@@ -434,11 +437,12 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   return {
     profiles, profile, backHref: profile ? '/?profile=' + profile : '/', repository: repository?.name ?? '',
     repositories: [...repositories.values()].map(item => ({ name: item.name })),
-    filter, filters: menu, draftChoice: filters.draft, choices, clearFiltersHref, incompleteSearch, cappedSearch, sort, search, page, tab, detailPage, rows: rows.map(marks), failures,
+    filter, filters: menu, draftChoice: filters.draft, choices, clearFiltersHref: '/pull-requests?' + clearFilters,
+    incompleteSearch, cappedSearch, sort, search, page, tab, detailPage, rows: rows.map(marks), failures,
     pageBack: page > 1 ? href({ page: page - 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
     pageNext: nextPage && page < MAX_LIST_PAGE ? href({ page: page + 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
-    selected, savedViewScope, savedViewDetail: savedViewDetail.toString(),
-    selectionError: query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
+    selected, savedViewScope, savedViewDetail: savedViewDetail.toString(), listSelectionFields,
+    selectionError: selectionInProfile && query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
     listHref: href(), summaryHref: detailsHref('summary'), timelineHref: detailsHref('timeline'), codeHref: detailsHref('code'),
     detailBack: detailsHref(tab, detailPage - 1), detailNext: detailsHref(tab, detailPage + 1),
     viewedAction: reviewAction('viewed'),
