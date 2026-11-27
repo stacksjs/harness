@@ -36,6 +36,7 @@ function check(name: string, ok: boolean): void {
 // Use a stable shell with no user startup files. The provider command exercises
 // terminal input without starting an actual sign-in on the developer's machine.
 const fixtureBin = mkdtempSync(join(tmpdir(), 'harness-page-bin-'))
+process.once('exit', () => rmSync(fixtureBin, { force: true, recursive: true }))
 const fixtureShell = join(fixtureBin, 'harness-test-shell')
 const fixtureEditorArgs = join(fixtureBin, 'editor-args')
 async function editorReceived(expected: string): Promise<boolean> {
@@ -55,6 +56,7 @@ process.env.PATH = `${fixtureBin}:${process.env.PATH ?? ''}`
 
 // --- workspace: a real repo with an uncommitted change, so the diff has content
 const driveRoot = mkdtempSync(join(tmpdir(), 'harness-page-drive-'))
+process.once('exit', () => rmSync(driveRoot, { force: true, recursive: true }))
 const dir = join(driveRoot, 'notes-app')
 const secondProject = join(driveRoot, 'docs-site')
 const scratchDirectory = join(driveRoot, 'scratch')
