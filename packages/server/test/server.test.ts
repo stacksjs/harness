@@ -100,18 +100,16 @@ class TestClient {
   }
 }
 
-let portCounter = 3900
-
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'harness-server-'))
   const dbPath = join(dir, 'test.sqlite')
   prepareDatabase(dbPath)
-  port = ++portCounter
-  harness = await serve({ port, databasePath: dbPath })
+  harness = await serve({ port: 0, databasePath: dbPath })
+  port = harness.server.port
 })
 
 afterEach(() => {
-  harness.stop()
+  harness?.stop()
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -1127,7 +1125,7 @@ describe('harness serve — HTTP', () => {
       expect(readState().replyRequests).toBe(1)
 
       harness.stop()
-      harness = await serve({ port: ++portCounter, databasePath: join(dir, 'test.sqlite') })
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
       replyHost = 'http://127.0.0.1:' + harness.server.port
       expect(harness.engine.current.sessions.get(sessionId)?.linkedPullRequests).toEqual(links)
       const result = await fetch(replyHost + '/prompt-link/pull-request?pr=fixture/notebook/1')
@@ -1717,8 +1715,8 @@ describe('harness serve — durability', () => {
 
     const dbPath = join(dir, 'test.sqlite')
     harness.stop()
-    harness = await serve({ port: ++portCounter, databasePath: dbPath })
-    port = portCounter
+    harness = await serve({ port: 0, databasePath: dbPath })
+    port = harness.server.port
 
     // Hydrated from the log, not from anything held in memory.
     expect(harness.engine.current.profiles.size).toBe(1)
@@ -1735,8 +1733,8 @@ describe('harness serve — durability', () => {
 
     const dbPath = join(dir, 'test.sqlite')
     harness.stop()
-    harness = await serve({ port: ++portCounter, databasePath: dbPath })
-    port = portCounter
+    harness = await serve({ port: 0, databasePath: dbPath })
+    port = harness.server.port
 
     // The client reconnects and resends what it never saw acked.
     const resumed = await TestClient.connect(url())
@@ -1909,8 +1907,8 @@ describe('terminals over the socket', () => {
     const restart = async () => {
       harness.stop()
       client.close()
-      port = ++portCounter
-      harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      port = harness.server.port
       client = await TestClient.connect(url())
       await client.until('ready')
     }
