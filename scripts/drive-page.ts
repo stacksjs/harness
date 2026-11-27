@@ -6771,6 +6771,24 @@ try {
         && await resultRow.getByText('Release reporting', { exact: true }).isVisible()
         && await resultRow.getByText('fixture-user', { exact: true }).isVisible())
       await capture('pull-requests-grouped-phone-390x844', clonePage)
+      await clonePage.setViewportSize({ width: 360, height: 800 })
+      await clonePage.locator('html').evaluate(root => { root.style.zoom = '1.5' })
+      try {
+        const enlargedViews = filters.locator('[data-pr-views] > summary')
+        check('enlarged list controls keep the saved views icons inside their trigger',
+          await enlargedViews.evaluate((trigger) => {
+            const bounds = trigger.getBoundingClientRect()
+            return [...trigger.children].every((child) => {
+              const icon = child.getBoundingClientRect()
+              return !icon.width || icon.left >= bounds.left && icon.right <= bounds.right
+            }) && bounds.right <= innerWidth
+          }))
+        await capture('pull-requests-grouped-zoom-360x800', clonePage)
+      }
+      finally {
+        await clonePage.locator('html').evaluate(root => { root.style.zoom = '' })
+        await clonePage.setViewportSize({ width: 390, height: 844 })
+      }
       const initialRow = await resultRow.boundingBox()
       await additionalFilters.press('Enter')
       const openRow = await resultRow.boundingBox()

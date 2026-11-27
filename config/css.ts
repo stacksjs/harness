@@ -649,6 +649,14 @@ const RESPONSIVE_SHELL = `
 [data-pr-checks="Failing"], [data-pr-conflicts] { color: var(--workspace-removed-text); }
 [data-pr-row-diff] { display: inline-flex; gap: 5px; font-variant-numeric: tabular-nums; }
 [data-pr-row-status] { display: flex; flex-direction: column; align-items: end; gap: 2px; text-align: right; }
+@container pr-list (max-width: 17rem) {
+  [data-pr-filter-toolbar] { flex-wrap: wrap; }
+  [data-pr-row] { grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; }
+  [data-pr-row] > [data-pr-state] { align-self: start; margin-block-start: 2px; }
+  [data-pr-row-status] {
+    grid-column: 2; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; text-align: start;
+  }
+}
 [data-pr-number], [data-pr-workspace] time, [data-pr-workspace] code { font-variant-numeric: tabular-nums; }
 [data-pr-number] { color: var(--workspace-accent); }
 [data-pr-state="Open"], [data-pr-additions] { color: var(--workspace-added-text); }
