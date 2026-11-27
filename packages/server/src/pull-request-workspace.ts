@@ -132,34 +132,90 @@ function listQuery(repository: string, state: ListState, search: string, page: n
   return { endpoint: 'search/issues?' + params, useSearch }
 }
 
-async function listRepository(repository: Repository, state: ListState, search: string, page: number, sort: ListSort, filters: string[], viewer: string, signal: AbortSignal) {
+async function readPullRequestPage(repository: Repository, state: ListState, search: string, page: number, sort: ListSort, filters: string[], signal: AbortSignal) {
   const { endpoint, useSearch } = listQuery(repository.name, state, search, page, sort, filters)
-  if (useSearch && page > MAX_GITHUB_SEARCH_PAGE) return { rows: [], more: false, incomplete: false, capped: true, detailsUnavailable: false }
+  if (useSearch && page > MAX_GITHUB_SEARCH_PAGE) return { pulls: [], more: false, incomplete: false, capped: true }
   const reply = await repositoryGitHubRequest(repository.path, endpoint, undefined, signal)
   const indexed = useSearch ? reply.body as { items?: unknown[], incomplete_results?: boolean, total_count?: number } | null : null
   const items = useSearch ? indexed?.items : reply.body
   if (reply.status !== 200 || !Array.isArray(items))
     throw new RepositoryPullRequestError('GitHub could not list this repository. Check the host account and repository permissions.')
-  const pulls = items.flatMap(item => readPull(item, repository.name) ?? []).slice(0, LIST_PAGE_SIZE)
-  const summary = pulls.length ? await readPullRequestListDetails(repository.path, repository.name, pulls, signal).catch(() => null) : null
-  const login = summary?.viewer || viewer.toLowerCase()
-  const rows = pulls.map((row): ListRow => {
+  return {
+    pulls: items.flatMap(item => readPull(item, repository.name) ?? []).slice(0, LIST_PAGE_SIZE),
+    more: reply.hasNextPage && (!useSearch || page < MAX_GITHUB_SEARCH_PAGE),
+    incomplete: indexed?.incomplete_results === true,
+    capped: (indexed?.total_count ?? 0) > MAX_GITHUB_SEARCH_RESULTS,
+  }
+}
+
+async function listRepository(repository: Repository, scope: {
+  state: ListState, text: string, page: number, sort: ListSort, qualifiers: string[], partition: boolean, explicitAuthor: string,
+}, viewer: string, resolveViewer: () => Promise<string>, signal: AbortSignal) {
+  const { state, text, page, sort, qualifiers, partition, explicitAuthor } = scope
+  const readPage = (filters: string[]) => readPullRequestPage(repository, state, text, page, sort, filters, signal)
+  let result = await readPage(qualifiers)
+  let partitionsUnavailable = false
+  const assignedGroups = new Map<number, ListGroup>()
+  // The broad page is enough if it already contains every result and no team
+  // request needs GitHub to resolve membership. Preserve the normal list if
+  // any priority search cannot confirm its part of the listing.
+  if (partition && (result.more || (page > 1 && result.pulls.length > 0)
+    || result.pulls.some(pull => pull.requestedReviewers.some(reviewer => reviewer.team)))) {
+    viewer ||= await resolveViewer().catch(() => '')
+    if (!viewer) partitionsUnavailable = true
+    else if (explicitAuthor.toLowerCase() !== viewer.toLowerCase()) {
+      const notAuthored = explicitAuthor ? [] : ['-author:' + viewer]
+      const plans: [ListGroup, string[]][] = [
+        ['reviewing', [...notAuthored, 'review-requested:' + viewer]],
+        ['other', [...notAuthored, '-review-requested:' + viewer]],
+      ]
+      if (!explicitAuthor) plans.unshift(['authored', ['author:' + viewer]])
+      const sections = await Promise.all(plans.map(async ([key, filters]) => {
+        const section = await readPage([...qualifiers, ...filters]).catch(() => null)
+        return { key, section }
+      }))
+      signal.throwIfAborted()
+      if (sections.every(item => item.section && !item.section.incomplete)) {
+        const pulls: Pull[] = []
+        let more = false
+        let capped = false
+        for (const { key, section } of sections) {
+          if (!section) continue
+          more ||= section.more
+          capped ||= section.capped
+          for (const pull of section.pulls) {
+            if (assignedGroups.has(pull.number)) continue
+            assignedGroups.set(pull.number, key)
+            pulls.push(pull)
+          }
+        }
+        if (page === 1 && result.pulls.some(pull => !assignedGroups.has(pull.number))) {
+          // GitHub can return a REST row before it enters the search index.
+          assignedGroups.clear()
+          partitionsUnavailable = true
+        }
+        else result = { pulls, more, capped, incomplete: false }
+      }
+      else partitionsUnavailable = true
+    }
+  }
+  const summary = result.pulls.length ? await readPullRequestListDetails(repository.path, repository.name, result.pulls, signal).catch(() => null) : null
+  const login = viewer.toLowerCase() || summary?.viewer || ''
+  const rows = result.pulls.map((row): ListRow => {
     const details = summary?.details.get(row.number)
     const authored = Boolean(login && row.author.toLowerCase() === login)
     const reviewing = details?.reviewRequested ?? Boolean(login && row.requestedReviewers.some(reviewer =>
       !reviewer.team && reviewer.name.toLowerCase() === '@' + login))
     const status = row.status === 'Open' && details?.isDraft ? 'Draft' : row.status
-    return { ...row, status, group: authored ? 'authored' : reviewing ? 'reviewing' : 'other',
+    return { ...row, status, group: authored ? 'authored' : assignedGroups.get(row.number) ?? (reviewing ? 'reviewing' : 'other'),
       checks: details?.checks ?? '', reviewDecision: details?.reviewDecision ?? '',
       conflicts: status === 'Open' && details?.conflicts === true, isPrivate: summary?.isPrivate === true,
       additions: details?.additions ?? row.additions, deletions: details?.deletions ?? row.deletions }
   })
   return {
     rows,
-    more: reply.hasNextPage && (!useSearch || page < MAX_GITHUB_SEARCH_PAGE),
-    incomplete: indexed?.incomplete_results === true,
-    capped: (indexed?.total_count ?? 0) > MAX_GITHUB_SEARCH_RESULTS,
-    detailsUnavailable: Boolean(pulls.length && (!summary || summary.incomplete)),
+    more: result.more, incomplete: result.incomplete, capped: result.capped, partitionsUnavailable,
+    detailsUnavailable: Boolean(result.pulls.length && (!summary || summary.incomplete)),
   }
 }
 
@@ -345,6 +401,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   let incompleteSearch = false
   let cappedSearch = false
   let detailsUnavailable = false
+  let partitionsUnavailable = false
   const filterChoices = !listOnly && lookup ? readPullRequestFilterChoices(list, lookup, signal)
     .catch(() => ({ ...lookup, options: [], more: false, failed: list.length })) : Promise.resolve(null)
   const detail = !listOnly && selection && selectionRepo ? (async () => {
@@ -419,11 +476,15 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     return null
   }) : ''
   const qualifiers = viewer === null ? null : pullRequestFilterQualifiers(filters, viewer)
+  const scope = qualifiers ? { state: filter, text, page, sort, qualifiers, partition: !search && !filters.involvement,
+    explicitAuthor: filters.author === '@me' ? viewer ?? '' : filters.author } : null
+  let partitionViewer: Promise<string> | undefined
+  const resolveViewer = () => partitionViewer ??= readFilterViewer(list[0]!.path, signal)
   // Keep the host responsive and preserve any successful repository results.
-  for (let index = 0; qualifiers && index < list.length; index += 4) {
+  for (let index = 0; scope && index < list.length; index += 4) {
     signal.throwIfAborted()
     const batch = list.slice(index, index + 4)
-    const results = await Promise.allSettled(batch.map(item => listRepository(item, filter, text, page, sort, qualifiers, viewer ?? '', signal)))
+    const results = await Promise.allSettled(batch.map(item => listRepository(item, scope, viewer ?? '', resolveViewer, signal)))
     for (const [offset, result] of results.entries()) {
       if (result.status === 'fulfilled') {
         rows.push(...result.value.rows)
@@ -431,6 +492,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
         incompleteSearch ||= result.value.incomplete
         cappedSearch ||= result.value.capped
         detailsUnavailable ||= result.value.detailsUnavailable
+        partitionsUnavailable ||= result.value.partitionsUnavailable
       }
       else failures.push({ repository: batch[offset]!.name, reason: message(result.reason) })
     }
@@ -478,7 +540,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     profiles, profile, backHref: profile ? '/?profile=' + profile : '/', repository: repository?.name ?? '',
     repositories: [...repositories.values()].map(item => ({ name: item.name })),
     filter, filters: menu, draftChoice: filters.draft, choices, clearFiltersHref: '/pull-requests?' + clearFilters, activeFilterCount,
-    incompleteSearch, cappedSearch, sort, search, page, tab, detailPage, groups, detailsUnavailable, failures,
+    incompleteSearch, cappedSearch, sort, search, page, tab, detailPage, groups, detailsUnavailable, partitionsUnavailable, failures,
     listUnavailable: viewer === null || (list.length > 0 && failures.length === list.length),
     pageBack: page > 1 ? pageHref(page - 1) : '',
     pageNext: nextPage && page < MAX_LIST_PAGE ? pageHref(page + 1) : '',

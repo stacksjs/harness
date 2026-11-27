@@ -904,7 +904,7 @@ describe('harness serve — HTTP', () => {
       writeFileSync(cli.state, JSON.stringify(fixture))
       const firstPage = await (await list({ addLabel: report.name, author: 'fixture-user' })).text()
       expect([...firstPage.matchAll(/<a\b[^>]*\bdata-pr-row\b/gu)]).toHaveLength(20)
-      const next = /<a href="([^"]+)"[^>]*>Next page<\/a>/u.exec(firstPage)?.[1]
+      const next = /<a href="([^"]+)" data-pr-next[^>]*>Load more pull requests<\/a>/u.exec(firstPage)?.[1]
       expect(next).toBeDefined()
       const nextPage = new URL(next!.replaceAll('&amp;', '&'), host)
       expect(nextPage.searchParams.get('page')).toBe('2')
@@ -1071,6 +1071,70 @@ describe('harness serve — HTTP', () => {
       const legacy = await post({ head: local, viewer, intent: legacyIntent, scope: legacyScope, revision: legacyRevision }, [String(outside.id)])
       expect(legacy.status).toBe(200)
       expect(readState().labelWrites).toEqual([...saved.labelWrites, [1, 'DELETE', old.id, old.name]])
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 60_000)
+
+  it.skipIf(process.platform === 'win32')('paginates the three GitHub priority groups independently across the same review scope', async () => {
+    const { project, cli, url, readState } = seedPullRequestLifecycle('Older authored request', false)
+    const fixture = readState()
+    const original = fixture.pulls[0]
+    const makePull = (number: number, title: string, fields: Record<string, unknown>) => ({
+      ...original, number, title, html_url: url.replace(/1$/u, String(number)), ...fields,
+    })
+    original.updated_at = '2026-10-01T00:00:00Z'
+    fixture.pulls.push(
+      makePull(2, 'Older team review request', { user: { login: 'teammate' }, teamReviewerLogins: ['fixture-user'],
+        requested_teams: [{ slug: 'maintainers' }], updated_at: '2026-10-02T00:00:00Z' }),
+      makePull(3, 'Authored and requested', { requested_reviewers: [{ login: 'fixture-user' }], updated_at: '2026-10-03T00:00:00Z' }),
+      ...Array.from({ length: 23 }, (_, offset) => makePull(offset + 10, 'Recent change ' + offset, {
+        user: { login: 'another-author' }, updated_at: new Date(Date.UTC(2026, 10, offset + 1)).toISOString(),
+      })),
+    )
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pull-request-priority-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const host = 'http://127.0.0.1:' + port
+      const scope = new URLSearchParams({ selectedUrl: url, tab: 'timeline' })
+      const full = await (await fetch(host + '/pull-requests?' + scope)).text()
+      const keys = (html: string) => Array.from(html.matchAll(/data-pr-entry="([^"]+)"/gu), match => match[1])
+      expect(keys(full)).toHaveLength(23)
+      expect(new Set(keys(full)).size).toBe(23)
+      expect(/data-pr-group="reviewing"[^>]*>([\s\S]*?)<\/ul>/u.exec(full)?.[1]).toContain('Older team review request')
+      expect(/data-pr-group="authored"[^>]*>([\s\S]*?)<\/ul>/u.exec(full)?.[1]).toContain('Authored and requested')
+      expect(full).not.toContain('Recent change 0')
+      const next = /href="([^"]+)" data-pr-next/u.exec(full)?.[1]?.replaceAll('&amp;', '&')
+      expect(next).toBeDefined()
+      const nextUrl = new URL(next!, host)
+      expect(nextUrl.searchParams.get('page')).toBe('2')
+      expect(nextUrl.searchParams.get('selectedUrl')).toBe(url)
+      expect(nextUrl.searchParams.get('tab')).toBe('timeline')
+      const page = await (await fetch(nextUrl)).text()
+      expect(keys(page)).toHaveLength(3)
+      expect(page).toContain('Recent change 0')
+      expect(page).not.toContain('data-pr-next')
+      expect(keys(page).some(key => keys(full).includes(key))).toBe(false)
+      nextUrl.pathname = '/pull-requests/results'
+      expect(await (await fetch(nextUrl)).json()).toMatchObject({ partial: false })
+      fixture.filterPriorityFailure = 'fixture/notebook'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const fallback = await (await fetch(nextUrl)).json()
+      expect(fallback.partial).toBe(true)
+      expect(fallback.html).toContain('Could not load the priority groups.')
+      expect(fallback.html).not.toContain('Private list search diagnostics')
+      const typed = await (await fetch(host + '/pull-requests/results?q=Older+team')).json()
+      expect(typed.partial).toBe(false)
+      expect(typed.html).toContain('Older team review request')
+      expect(typed.html).not.toContain('Recent change')
     }
     finally {
       process.chdir(cwd)

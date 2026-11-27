@@ -452,18 +452,25 @@ if (url.pathname === '/search/issues') {
   const terms = new Set(withoutText.replace(labelsMatcher, ' ').split(' '))
   const author = /(?:^| )author:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
   const reviewer = /(?:^| )review-requested:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
+  const excludedAuthor = /(?:^| )-author:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
+  const excludedReviewer = /(?:^| )-review-requested:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
   const review = /(?:^| )review:([^ ]+)/.exec(withoutText)?.[1]
   const checks = /(?:^| )status:([^ ]+)/.exec(withoutText)?.[1]
-  if (state.filterListFailure === selected) reply(503, { message: 'Private list search diagnostics' })
+  if (state.filterListFailure === selected || (state.filterPriorityFailure === selected && excludedAuthor))
+    reply(503, { message: 'Private list search diagnostics' })
   const matching = state.pulls.filter(pull => {
     const applied = new Set((pull.labels ?? []).map(label => label.name.toLowerCase()))
     const searchable = [pull.title, pull.body ?? '', ...(pull.searchComments ?? [])]
+    const requested = [...(pull.requested_reviewers ?? []).map(user => user.login), ...(pull.teamReviewerLogins ?? [])]
+      .map(login => login.toLowerCase())
     return pull.base.repo.full_name === selected && searchable.some(value => value.toLowerCase().includes(phrase))
       && (!terms.has('is:open') || pull.state === 'open') && (!terms.has('is:closed') || pull.state === 'closed')
       && (!terms.has('is:merged') || pull.merged_at) && (!terms.has('is:unmerged') || !pull.merged_at)
       && (!terms.has('draft:true') || pull.draft) && (!terms.has('draft:false') || !pull.draft)
       && (!author || pull.user?.login.toLowerCase() === author)
-      && (!reviewer || (pull.requested_reviewers ?? []).some(user => user.login.toLowerCase() === reviewer))
+      && (!excludedAuthor || pull.user?.login.toLowerCase() !== excludedAuthor)
+      && (!reviewer || requested.includes(reviewer))
+      && (!excludedReviewer || !requested.includes(excludedReviewer))
       && (!review || review === (pull.filterReview ?? 'none')) && (!checks || checks === pull.filterChecks)
       && labels.every(group => group.exclude !== group.names.some(name => applied.has(name)))
   })
@@ -618,6 +625,17 @@ if (method === 'GET' && parts[5]) {
     patch: ['@@ -1,2 +1,3 @@', '-Old report', '+Report fixture', '+Report details', ' Shared context',
       '@@ -20 +21 @@', '-Old ending', '+New ending'].join(String.fromCharCode(10)) }])
   reply(200, detail)
+}
+if (method === 'GET' && parts[4] === 'pulls' && url.searchParams.has('page')) {
+  const status = url.searchParams.get('state')
+  const field = url.searchParams.get('sort') === 'created' ? 'created_at' : 'updated_at'
+  const direction = url.searchParams.get('direction') === 'asc' ? 1 : -1
+  const matching = pulls.filter(pull => status === 'all' || pull.state === status)
+    .sort((a, b) => direction * (a[field] ?? '').localeCompare(b[field] ?? ''))
+  const size = Number(url.searchParams.get('per_page') || 20)
+  const page = Number(url.searchParams.get('page') || 1)
+  const more = matching.length > page * size ? 'link: <' + endpoint + '>; rel="next"\\r\\n' : ''
+  reply(200, matching.slice((page - 1) * size, page * size), more)
 }
 if (method === 'GET') reply(200, pulls.filter(pull => !url.searchParams.has('head')
   || (pull.base.ref === url.searchParams.get('base') && pull.head.label === url.searchParams.get('head'))))
