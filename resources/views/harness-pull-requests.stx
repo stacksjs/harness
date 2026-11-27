@@ -137,7 +137,7 @@ export const conversationOnPage = conversations.some(thread => thread.anchor ===
 @if(tab === 'code')
 <script client>
 import { openLegacyBranchDeletion } from '../functions/pull-request-dialogs'
-import { withCurrentPullRequestQuery } from '../stores/pull-request-live-search'
+import { withCurrentPullRequestQuery } from '../client/pull-request-live-search'
 
 const deleteBranchDialog = useRef('deleteBranchDialog')
 const deleteBranchTrigger = useRef('deleteBranchTrigger')
@@ -795,8 +795,8 @@ const matchingLabelIds = derived(() => {
 </script>
 @endif
 <script client>
-import { pullRequestLiveSearch } from '../stores/pull-request-live-search'
-import { PULL_REQUEST_VIEWS_KEY, pullRequestViewHref, pullRequestViewMatches, pullRequestViewNameError, pullRequestViewStore } from '../stores/pull-request-saved-views'
+import { pullRequestLiveSearch } from '../client/pull-request-live-search'
+import { PULL_REQUEST_VIEWS_KEY, pullRequestViewHref, pullRequestViewMatches, pullRequestViewNameError, pullRequestViewStore } from '../client/pull-request-saved-views'
 
 const currentSavedPrScope = state(@json(savedViewScope))
 const currentSavedPrDetail = @json(savedViewDetail)
