@@ -25,6 +25,7 @@ interface Pane {
   closing?: CloseAction
   following: boolean
   renderQueued: boolean
+  selectionDeferred?: boolean
 }
 
 type TerminalFrame =
@@ -54,6 +55,7 @@ const keys: Record<string, string> = {
   ArrowUp: '\x1B[A', ArrowDown: '\x1B[B', ArrowRight: '\x1B[C', ArrowLeft: '\x1B[D',
   Home: '\x1B[H', End: '\x1B[F', PageUp: '\x1B[5~', PageDown: '\x1B[6~',
 }
+const navigationCodes: Record<string, string> = { Home: '1H', End: '1F', PageUp: '5~', PageDown: '6~' }
 
 export function createTerminalDock(options: TerminalDockOptions) {
   const panes = new Map<string, Pane>()
@@ -83,6 +85,45 @@ export function createTerminalDock(options: TerminalDockOptions) {
       .find(element => element.dataset.terminalHost === key)
   }
 
+  function output(key: string): HTMLElement | null | undefined {
+    return host(key)?.querySelector<HTMLElement>('[data-terminal-screen]')
+  }
+
+  function selection(screen: HTMLElement): Selection | null {
+    const current = screen.ownerDocument.getSelection()
+    return current && !current.isCollapsed && screen.contains(current.anchorNode) && screen.contains(current.focusNode)
+      ? current : null
+  }
+
+  function selectedText(key: string): string {
+    const screen = output(key)
+    return screen ? selection(screen)?.toString() ?? '' : ''
+  }
+
+  function selectAll(key: string): void {
+    const screen = output(key)
+    const current = screen?.ownerDocument.getSelection()
+    if (!screen || !current || !screen.textContent) return
+    const range = screen.ownerDocument.createRange()
+    range.selectNodeContents(screen)
+    current.removeAllRanges()
+    current.addRange(range)
+  }
+
+  function scroll(key: string, move: 'start' | 'latest' | 'page-up' | 'page-down'): void {
+    const viewport = host(key)
+    const pane = panes.get(key)
+    if (!viewport || !pane?.model) return
+    if (move === 'latest') {
+      const screen = output(key)
+      if (screen) selection(screen)?.removeAllRanges()
+      viewport.scrollTop = viewport.scrollHeight
+    }
+    else if (move === 'start') viewport.scrollTop = 0
+    else viewport.scrollTop += (move === 'page-up' ? -1 : 1) * viewport.clientHeight
+    pane.following = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop < 25
+  }
+
   function status(pane: Pane, changes: Partial<PaneStatus>): void {
     if (Object.entries(changes).every(([key, value]) => pane.status[key as keyof PaneStatus] === value)) return
     pane.status = { ...pane.status, ...changes }
@@ -96,8 +137,11 @@ export function createTerminalDock(options: TerminalDockOptions) {
       pane.renderQueued = false
       if (panes.get(pane.tab.key) !== pane || !pane.model) return
       const viewport = host(pane.tab.key)
-      const screen = viewport?.querySelector('[data-terminal-screen]')
+      const screen = viewport?.querySelector<HTMLElement>('[data-terminal-screen]')
       if (!viewport || !screen) return
+      // Replacing the rendered rows would collapse a native text selection.
+      pane.selectionDeferred = Boolean(selection(screen))
+      if (pane.selectionDeferred) return
       screen.innerHTML = toHtml(pane.model.snapshot())
       if (pane.following || pane.model.onAltScreen) viewport.scrollTop = viewport.scrollHeight
     })
@@ -164,6 +208,8 @@ export function createTerminalDock(options: TerminalDockOptions) {
 
   function sendInput(pane: Pane, data: string): void {
     if (!data || !options.online() || pane.status.reconnecting || pane.status.exited || pane.status.error || pane.closing) return
+    const screen = output(pane.tab.key)
+    if (screen) selection(screen)?.removeAllRanges()
     if (pane.id === null) pane.pendingInput += data
     else options.send({ t: 'term-input', termId: pane.id, data })
   }
@@ -277,23 +323,31 @@ export function createTerminalDock(options: TerminalDockOptions) {
   }
 
   function keydown(tab: TerminalTab, event: KeyboardEvent): void {
-    const viewport = event.currentTarget as HTMLElement
+    if (event.isComposing || event.keyCode === 229) return
     const pane = paneFor(tab)
-    if (pane.model && !pane.model.onAltScreen && event.shiftKey) {
+    const key = event.key.toLowerCase()
+    if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && !event.altKey && key === 'a') {
+      event.preventDefault()
+      selectAll(tab.key)
+      return
+    }
+    if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && (key === 'c' || key === 'v')) return
+    const navigation = navigationCodes[event.key]
+    if (pane.model && !pane.model.onAltScreen && event.shiftKey && !event.altKey) {
       const edge = (event.ctrlKey || event.metaKey) && (event.key === 'Home' || event.key === 'End')
-      const page = event.key === 'PageUp' || event.key === 'PageDown'
+      const page = !event.ctrlKey && !event.metaKey && (event.key === 'PageUp' || event.key === 'PageDown')
       if (edge || page) {
         event.preventDefault()
-        if (edge) viewport.scrollTop = event.key === 'Home' ? 0 : viewport.scrollHeight
-        else viewport.scrollTop += (event.key === 'PageUp' ? -1 : 1) * viewport.clientHeight
+        scroll(tab.key, edge ? (event.key === 'Home' ? 'start' : 'latest') : (event.key === 'PageUp' ? 'page-up' : 'page-down'))
         return
       }
     }
-    if (event.metaKey || (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v')) return
-    if (pane.status.exited || pane.status.error || event.isComposing || event.keyCode === 229) return
+    if (pane.status.exited || pane.status.error || (event.metaKey && !(pane.model?.onAltScreen && navigation))) return
     let data = keys[event.key]
-    if (event.ctrlKey && event.key.length === 1) {
-      const code = event.key.toLowerCase().charCodeAt(0)
+    const modifiers = 1 + Number(event.shiftKey) + 2 * Number(event.altKey) + 4 * Number(event.ctrlKey) + 8 * Number(event.metaKey)
+    if (navigation && modifiers > 1) data = `\x1B[${navigation[0]};${modifiers}${navigation[1]}`
+    else if (event.ctrlKey && event.key.length === 1) {
+      const code = key.charCodeAt(0)
       data = code >= 97 && code <= 122 ? String.fromCharCode(code - 96) : ''
     }
     else if (event.key.length === 1) data = event.key
@@ -304,15 +358,35 @@ export function createTerminalDock(options: TerminalDockOptions) {
 
   return {
     show, receive, onOffline, close, keydown,
+    selectedText, selectAll,
+    visibleText(key: string) {
+      const viewport = host(key)
+      const screen = output(key)
+      const height = viewport?.querySelector('[data-term-metric]')?.getBoundingClientRect().height
+      if (!viewport || !height || !screen?.textContent) return ''
+      const from = viewport.getBoundingClientRect().top + viewport.clientTop - screen.getBoundingClientRect().top
+      const first = Math.max(0, Math.floor(from / height))
+      const last = Math.ceil((from + viewport.clientHeight) / height)
+      return screen.textContent.split('\n').slice(first, last).join('\n')
+    },
+    hasOutput: (key: string) => Boolean(output(key)?.textContent),
+    jumpToLatest: (key: string) => scroll(key, 'latest'),
+    selectionChanged() {
+      for (const pane of panes.values()) {
+        if (pane.selectionDeferred) paint(pane)
+      }
+    },
     queueProjectScript: (key: string, scriptId: string) => scriptStarts.set(key, scriptId),
     canEnd: (key: string) => panes.get(key)?.id != null && !panes.get(key)?.status.exited,
     focus: (key: string) => host(key)?.focus({ preventScroll: true }),
     input: (tab: TerminalTab, data: string) => sendInput(paneFor(tab), data),
-    paste(key: string, event: ClipboardEvent) {
-      event.preventDefault()
+    pasteText(key: string, text: string) {
       const pane = panes.get(key)
-      const text = event.clipboardData?.getData('text/plain')
       if (text && pane?.model) sendInput(pane, pane.model.formatPaste(text))
+    },
+    canPaste(key: string) {
+      const pane = panes.get(key)
+      return Boolean(pane?.model && options.online() && !pane.status.reconnecting && !pane.status.exited && !pane.status.error && !pane.closing)
     },
     track(key: string, event: Event) {
       const pane = panes.get(key)

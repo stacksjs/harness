@@ -1325,7 +1325,7 @@ const TERMINAL_PANEL = `
 .terminal-panel {
   flex: 0 0 max(120px, var(--terminal-dock-height, 31dvh)); min-width: 0; overflow: hidden;
   background: #16181f; border-block-start: 1px solid rgb(255 255 255 / 16%);
-  display: flex; flex-direction: column;
+  display: flex; flex-direction: column; position: relative;
   --t-color-0: #1c1e26; --t-color-1: #e05561; --t-color-2: #8cc265;
   --t-color-3: #d18f52; --t-color-4: #4aa5f0; --t-color-5: #c162de;
   --t-color-6: #42b3c2; --t-color-7: #d7dae0; --t-color-8: #5f6672;
@@ -1390,10 +1390,46 @@ const TERMINAL_PANEL = `
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #d7dae0; white-space: pre;
 }
+[data-terminal-actions] {
+  position: fixed; inset: auto; margin: 0; padding: 4px; min-inline-size: 152px;
+  max-inline-size: calc(100vw - 16px); max-block-size: calc(100dvh - 16px); overflow-y: auto;
+  color: #eef1f7; background: #242933; border: 1px solid #4a5260; border-radius: 7px;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 29%);
+}
+[data-terminal-actions]:popover-open { display: grid; }
+[data-terminal-actions] button {
+  min-height: 34px; padding-inline: 9px; text-align: start; font-size: 13px; border-radius: 4px;
+}
+[data-terminal-actions] button:enabled:hover,
+[data-terminal-actions] button:focus-visible { background: #353e4f; }
+[data-terminal-actions] button:disabled { color: #a7b1c0; }
+[data-terminal-action-status] {
+  position: absolute; inset: auto 8px 8px auto; max-inline-size: calc(100% - 16px); margin: 0;
+  padding: 4px 8px; color: #eef1f7; background: #242933; border: 1px solid #4a5260; border-radius: 5px;
+  font-size: 12px; pointer-events: none;
+}
+[data-terminal-text-dialog] {
+  box-sizing: border-box; position: fixed; inset: 0; margin: auto; padding: 12px;
+  width: min(34rem, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto;
+  color: #eef1f7; background: #1b202a; border: 1px solid #4a5260; border-radius: 10px;
+}
+[data-terminal-text-dialog]::backdrop { background: rgb(0 0 0 / 55%); }
+[data-terminal-text-heading] { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+[data-terminal-text-heading] h2 { font-size: 14px; font-weight: 650; }
+[data-terminal-text-heading] button { min-height: 44px; padding-inline: 9px; font-size: 13px; }
+[data-terminal-text-dialog] textarea {
+  width: 100%; height: min(42dvh, 18rem); margin-block-start: 6px; padding: 8px;
+  color: inherit; background: #11151e; border: 1px solid #4a5260; border-radius: 5px;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; resize: vertical;
+}
+@media (pointer: coarse) {
+  [data-terminal-actions] button { min-height: 44px; }
+}
 @media (max-width: 47.999rem) {
   [data-terminal-output] [data-terminal-pane]:not([data-active="true"]) { display: none; }
   [data-terminal-pane-picker] button { min-height: 36px; padding-inline: 10px; }
   [data-terminal-toolbar] .harness-icon-button { width: 34px; height: 36px; flex-basis: 34px; }
+  [data-terminal-toolbar] [data-terminal-actions-trigger] { width: 44px; height: 44px; flex-basis: 44px; }
   [data-terminal-restart] { width: 34px; height: 36px; padding: 0; }
   [data-terminal-restart-icon] { display: inline-block; vertical-align: middle; }
   [data-terminal-restart-label] { display: none; }

@@ -920,6 +920,29 @@ check('terminal preserves the reading position when new output arrives', await t
 await page.keyboard.press('Control+Shift+End')
 check('terminal history shortcut returns to the newest output', await terminalHost.evaluate(host =>
   host.scrollHeight - host.clientHeight - host.scrollTop < 25))
+await terminalHost.press('Shift+PageUp')
+const terminalActions = page.getByRole('menu', { name: 'Terminal actions', exact: true })
+const terminalActionsToggle = page.getByRole('button', { name: 'Terminal actions', exact: true })
+await terminalActionsToggle.click()
+await terminalActions.getByRole('menuitem', { name: 'Select all', exact: true }).click()
+check('terminal Select all scopes the selection to its retained output',
+  await terminalHost.evaluate(host => {
+    const selection = host.ownerDocument.getSelection()
+    return Boolean(selection && host.contains(selection.anchorNode) && host.contains(selection.focusNode)
+      && selection.toString().includes('history-1') && selection.toString().includes('latest-45'))
+  }))
+await terminalActionsToggle.click()
+await terminalActions.getByRole('menuitem', { name: 'Select visible text', exact: true }).click()
+const terminalTextDialog = page.getByRole('dialog', { name: 'Visible terminal output', exact: true })
+check('terminal selection reader exposes visible output in a read-only control',
+  (await terminalTextDialog.getByRole('textbox').inputValue()).includes('history-')
+  && await terminalTextDialog.getByRole('textbox').getAttribute('readonly') !== null)
+await terminalTextDialog.getByRole('button', { name: 'Done', exact: true }).click()
+await terminalActionsToggle.click()
+await terminalActions.getByRole('menuitem', { name: 'Jump to latest', exact: true }).click()
+check('terminal actions return to the live output and focus its input',
+  await terminalHost.evaluate(host => host === host.ownerDocument.activeElement
+    && host.scrollHeight - host.clientHeight - host.scrollTop < 25))
 
 // Reopen a storage entry from before tabs shipped, then run two live shells.
 await page.evaluate(() => {

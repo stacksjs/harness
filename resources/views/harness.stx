@@ -929,6 +929,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <button type="button" aria-label="End terminal session" :title="terminalShortcutTitle('terminal.close')" :aria-keyshortcuts="shortcutKeys('terminal.close')" hidden :hidden="!activeTerminalTab()" :disabled="terminalBusy() || !sessionOnline()" @click="endTerminal" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-stop" aria-hidden="true"></span>
           </button>
+          <button type="button" data-terminal-actions-trigger aria-label="Terminal actions" title="Terminal actions" aria-haspopup="menu"
+            aria-controls="harness-terminal-actions" :aria-expanded="terminalActionsOpen() ? 'true' : 'false'"
+            @click="openTerminalActions(terminalTabs().activeKey, $event)" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
+          </button>
           <button type="button" aria-label="Hide terminal dock" title="Hide terminal dock" @click="toggleTerminal" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
           </button>
@@ -942,13 +947,31 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         <div :for="pane in visibleTerminalTabs()" :key="pane.key" data-terminal-pane :data-active="pane.key === terminalTabs().activeKey ? 'true' : 'false'">
           <p data-terminal-error role="alert" hidden :hidden="!terminalStates()[pane.key]?.error" :text="terminalStates()[pane.key]?.error || ''" class="px-3 py-2 text-red-300 text-sm"></p>
           <div role="group" :data-terminal-host="pane.key" :aria-label="(terminalStates()[pane.key]?.shell || 'Terminal') + ' ' + pane.number + ' input and output'"
-            @focus="focusTerminalInput(pane.key)" @blur="blurTerminalInput($event)" @keydown="termKeydown(pane, $event)" @paste="terminalController()?.paste(pane.key, $event)"
+            @focus="focusTerminalInput(pane.key)" @blur="blurTerminalInput($event)" @keydown="termKeydown(pane, $event)" @paste="pasteTerminalEvent(pane.key, $event)"
+            @contextmenu="openTerminalActions(pane.key, $event)"
             @scroll="terminalController()?.track(pane.key, $event)" tabindex="0" class="terminal-host">
             <span data-term-metric aria-hidden="true" class="term-metric">0123456789</span>
             <div data-terminal-screen></div>
           </div>
         </div>
       </div>
+      <div id="harness-terminal-actions" data-terminal-actions popover="manual" tabindex="-1"
+        role="menu" aria-label="Terminal actions" @toggle="terminalActionsToggled" @keydown="terminalActionsKeydown">
+        <button type="button" role="menuitem" :disabled="!terminalActionSelection() || !promptRef.current || promptRef.current.form?.hidden" @click="runTerminalAction('chat', $event)">Add to chat</button>
+        <button type="button" role="menuitem" :disabled="!terminalActionSelection()" @click="runTerminalAction('copy', $event)">Copy</button>
+        <button type="button" role="menuitem" :disabled="!terminalActionWritable()" @click="runTerminalAction('paste', $event)">Paste</button>
+        <button type="button" role="menuitem" :disabled="!terminalActionHasOutput()" @click="runTerminalAction('all', $event)">Select all</button>
+        <button type="button" role="menuitem" :disabled="!terminalActionHasOutput()" @click="runTerminalAction('read', $event)">Select visible text</button>
+        <button type="button" role="menuitem" :disabled="!terminalActionHasOutput()" @click="runTerminalAction('latest', $event)">Jump to latest</button>
+      </div>
+      <dialog data-terminal-text-dialog aria-labelledby="terminal-text-title" @close="closeTerminalTextDialog">
+        <div data-terminal-text-heading>
+          <h2 id="terminal-text-title">Visible terminal output</h2>
+          <form method="dialog"><button type="submit">Done</button></form>
+        </div>
+        <textarea aria-label="Visible terminal output" readonly :value="terminalReadableText()" spellcheck="false"></textarea>
+      </dialog>
+      <p data-terminal-action-status role="status" hidden :hidden="!terminalClipboardNotice()" :text="terminalClipboardNotice()"></p>
     </section>
   @endif
     </div>
@@ -7027,6 +7050,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const canRestartTerminal = derived(() => terminalExited() || Boolean(terminalError()))
   const terminalStatus = derived(() => activeTerminalStatus()?.reconnecting ? 'Reconnecting…' : activeTerminalStatus()?.activity || '')
   const canSplitTerminal = derived(() => sessionOnline() && !terminalBusy() && visibleTerminalTabs().length > 0 && visibleTerminalTabs().length < 4)
+  const terminalActionsOpen = state(false)
+  const terminalActionSelection = state('')
+  const terminalActionHasOutput = state(false)
+  const terminalActionWritable = state(false)
+  const terminalClipboardNotice = state('')
+  const terminalReadableText = state('')
+  let terminalActionKey = ''
+  let terminalActionOrigin = null
   let terminalTrigger = null
 
   function boundedTerminalHeight(height) {
@@ -7157,6 +7188,149 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (!event.relatedTarget?.closest?.('[data-terminal-host]')) terminalInputFocused.set(false)
   }
 
+  function terminalPanelElement(selector) {
+    return termSurface.current?.closest('[data-terminal]')?.querySelector(selector)
+  }
+
+  function openTerminalActions(key, event) {
+    const menu = terminalPanelElement('[data-terminal-actions]')
+    const dock = terminalController()
+    if (!menu || !dock || !key || typeof menu.showPopover !== 'function') return
+    event.preventDefault()
+    if (menu.matches(':popover-open')) {
+      menu.hidePopover()
+      if (event.type === 'click') return
+    }
+    terminalActionKey = key
+    terminalActionOrigin = event.currentTarget
+    terminalActionSelection.set(dock.selectedText(key))
+    terminalActionHasOutput.set(dock.hasOutput(key))
+    terminalActionWritable.set(dock.canPaste(key))
+    terminalClipboardNotice.set('')
+    const context = event.type === 'contextmenu' && (event.clientX || event.clientY)
+    const anchor = terminalActionOrigin.getBoundingClientRect()
+    const viewport = menu.ownerDocument.documentElement
+    menu.showPopover()
+    terminalActionsOpen.set(true)
+    const { width, height } = menu.getBoundingClientRect()
+    const x = context ? event.clientX : anchor.right - width
+    const y = context ? event.clientY : anchor.top - height - 4
+    menu.style.left = Math.max(8, Math.min(x, viewport.clientWidth - width - 8)) + 'px'
+    menu.style.top = Math.max(8, Math.min(y, viewport.clientHeight - height - 8)) + 'px'
+    menu.focus({ preventScroll: true })
+    void nextTick(() => {
+      if (menu.matches(':popover-open')) (menu.querySelector('button:not(:disabled)') || menu).focus({ preventScroll: true })
+    })
+  }
+
+  function terminalActionsToggled(event) {
+    const open = event.currentTarget.matches(':popover-open')
+    terminalActionsOpen.set(open)
+    if (!open) terminalActionSelection.set('')
+  }
+
+  function terminalActionsKeydown(event) {
+    const menu = event.currentTarget
+    if (event.key === 'Tab') {
+      menu.hidePopover()
+      terminalActionOrigin?.focus({ preventScroll: true })
+      return
+    }
+    const items = [...menu.querySelectorAll('button:not(:disabled)')]
+    const index = items.indexOf(event.target)
+    const next = event.key === 'ArrowDown' ? items[(index + 1) % items.length]
+      : event.key === 'ArrowUp' ? items[(index - 1 + items.length) % items.length]
+        : event.key === 'Home' ? items[0] : event.key === 'End' ? items.at(-1) : null
+    if (!next) return
+    event.preventDefault()
+    next.focus({ preventScroll: true })
+  }
+
+  function pasteTerminalEvent(key, event) {
+    event.preventDefault()
+    terminalController()?.pasteText(key, event.clipboardData?.getData('text/plain') || '')
+  }
+
+  async function copyTerminalText(target, text) {
+    try {
+      await composerDraftTools.writeClipboardText(target, text, desktop()?.clipboard)
+      terminalClipboardNotice.set('Copied terminal output.')
+    }
+    catch {
+      terminalClipboardNotice.set('Could not copy. Use the system Copy command.')
+    }
+  }
+
+  function addTerminalTextToDraft(text) {
+    const box = promptRef.current
+    if (!box || box.form?.hidden || !text) return
+    if (text.length > 32000) {
+      terminalClipboardNotice.set('Select up to 32,000 characters to add to chat.')
+      return
+    }
+    let fence = '~~~'
+    for (const match of text.matchAll(/~+/gu)) {
+      if (match[0].length >= fence.length) fence = '~'.repeat(match[0].length + 1)
+    }
+    const before = box.value.trimEnd()
+    box.value = (before ? before + '\n\n' : '') + 'Terminal output\n\n' + fence + '\n' + text + '\n' + fence
+    box.setSelectionRange(box.value.length, box.value.length)
+    promptEdited()
+    box.focus({ preventScroll: true })
+  }
+
+  async function runTerminalAction(action, event) {
+    const key = terminalActionKey
+    const dock = terminalController()
+    if (!dock || !key) return
+    const target = event.currentTarget
+    const selection = terminalActionSelection()
+    terminalPanelElement('[data-terminal-actions]')?.hidePopover()
+    if (action === 'read') {
+      terminalReadableText.set(dock.visibleText(key))
+      terminalPanelElement('[data-terminal-text-dialog]')?.showModal()
+      return
+    }
+    dock.focus(key)
+    if (action === 'all') dock.selectAll(key)
+    else if (action === 'latest') dock.jumpToLatest(key)
+    else if (action === 'chat') addTerminalTextToDraft(selection)
+    else if (action === 'copy') await copyTerminalText(target, selection)
+    else if (action === 'paste' && dock.canPaste(key)) {
+      try {
+        const text = await composerDraftTools.readClipboardText(target, desktop()?.clipboard)
+        dock.pasteText(key, text)
+      }
+      catch {
+        terminalClipboardNotice.set('Could not paste. Use the system Paste command.')
+      }
+    }
+  }
+
+  function closeTerminalTextDialog() {
+    terminalReadableText.set('')
+    terminalActionOrigin?.focus({ preventScroll: true })
+  }
+
+  useEventListener('selectionchange', () => terminalController()?.selectionChanged(), { target: document })
+  useEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return
+    const menu = terminalPanelElement('[data-terminal-actions]')
+    if (!menu?.matches(':popover-open')) return
+    event.preventDefault()
+    event.stopPropagation()
+    menu.hidePopover()
+    terminalActionOrigin?.focus({ preventScroll: true })
+  }, { target: document, capture: true })
+  useEventListener('pointerdown', (event) => {
+    if (!terminalActionsOpen() || event.target?.closest?.('[data-terminal-actions], [data-terminal-actions-trigger]')) return
+    const menu = terminalPanelElement('[data-terminal-actions]')
+    if (menu?.matches(':popover-open')) menu.hidePopover()
+  }, { target: document })
+  useEventListener('resize', () => {
+    if (terminalActionsOpen()) terminalPanelElement('[data-terminal-actions]')?.hidePopover()
+  })
+
   function terminalTabKeydown(event) {
     const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
     const index = tabs.indexOf(event.target)
@@ -7240,6 +7414,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       }
     }
     if (termOpen()) {
+      const menu = terminalPanelElement('[data-terminal-actions]')
+      if (menu?.matches(':popover-open')) menu.hidePopover()
       termOpen.set(false)
       restoreTerminalFocus()
       return
@@ -7419,6 +7595,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function termKeydown(tab, event) {
+    if ((event.ctrlKey && event.shiftKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'c') {
+      const text = terminalController()?.selectedText(tab.key)
+      if (text) {
+        event.preventDefault()
+        void copyTerminalText(event.currentTarget, text)
+        return
+      }
+    }
+    if (terminalClipboardNotice()) terminalClipboardNotice.set('')
     const command = matchedCommand(event, true)
     if (command === 'settings.open') return
     if (!command) {
