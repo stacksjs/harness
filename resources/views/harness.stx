@@ -3109,7 +3109,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function editProjectScript(script) {
     projectScriptsError.set('')
     projectScriptDraft.set(script || { name: '', command: '', previewUrl: '', autoOpenPreview: false, stopOnSettle: false })
-    void nextTick(() => projectScriptName.current?.focus())
+    void nextTick(() => {
+      const name = projectScriptName.current
+      if (projectScriptsDialog.current?.open && name?.form && !name.form.contains(name.ownerDocument.activeElement)) name.focus()
+    })
   }
 
   function cancelProjectScriptEdit() {
