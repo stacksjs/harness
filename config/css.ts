@@ -620,6 +620,10 @@ const RESPONSIVE_SHELL = `
 [data-pr-detail-content] { font-size: 13px; }
 [data-pr-detail-content] h3 { font-size: 13px; font-weight: 650; margin-block: 8px; }
 [data-pr-detail-content] h3:not(:first-child) { margin-block-start: 20px; }
+[data-pr-reviewers] { margin-block-end: 14px; }
+[data-pr-reviewer-list] { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+[data-pr-reviewer-list] li { min-inline-size: 0; overflow-wrap: anywhere; }
+[data-pr-reviewer-list] small { margin-inline-start: 3px; opacity: .75; }
 [data-pr-labels] { display: flex; flex-wrap: wrap; gap: 6px; }
 [data-pr-labels] li { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 8px; border: 1px solid var(--workspace-line); border-radius: 12px; font-size: 12px; overflow-wrap: anywhere; }
 [data-pr-labels] span { inline-size: 8px; block-size: 8px; flex: none; border-radius: 50%; }

@@ -6819,11 +6819,22 @@ try {
     const reportLabel = { id: 31, name: 'Report & analysis', color: '298265', description: 'Check the exported CSV' }
     const concurrentLabel = { id: 41, name: 'Accessibility', color: 'cc5599' }
     labelState.pulls[1].labels = [oldLabel]
+    labelState.pulls[1].requested_reviewers = [{ login: 'accessibility-reviewer' }, { login: 'review-check[bot]' }]
+    labelState.pulls[1].requested_teams = [{ slug: 'docs-and-release-reviewers' }]
     labelState.labelPages = [[oldLabel, concurrentLabel], [reportLabel]]
     labelState.labelPermission = 'TRIAGE'
     writeFileSync(github.state, JSON.stringify(labelState))
     await clonePage.goto(workflowUrl.href, { waitUntil: 'domcontentloaded' })
     const changeLabels = clonePage.getByRole('link', { name: 'Change labels', exact: true })
+    const reviewers = clonePage.getByRole('region', { name: 'Requested reviewers', exact: true })
+    await reviewers.waitFor()
+    check('the Summary shows pending people, bot, and team reviewers before labels',
+      await reviewers.getByRole('listitem').count() === 3
+      && await reviewers.getByText('@accessibility-reviewer', { exact: true }).isVisible()
+      && await reviewers.getByText('@review-check[bot]', { exact: true }).isVisible()
+      && await reviewers.getByText('Team', { exact: true }).isVisible()
+      && await reviewers.evaluate(section => section.nextElementSibling?.hasAttribute('data-pr-label-section') === true))
+    await capture('pull-requests-reviewers-390x844', clonePage)
     const labelEditor = clonePage.getByRole('form', { name: 'Change labels', exact: true })
     const labelSearch = labelEditor.getByRole('searchbox', { name: 'Search labels', exact: true })
     const legacyLabel = labelEditor.getByRole('checkbox', { name: /Legacy\/needs review/u })

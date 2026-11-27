@@ -23,12 +23,14 @@ import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-req
 import { approveWorkspaceWorkflows, parseWorkflowRunSelection, readWorkflowApprovals, workflowApprovalHead, workflowApprovalRevision, workflowRunSelection } from './pull-request-workflow-approvals'
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
+type RequestedReviewer = { name: string, team: boolean }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
   updated: string, created: string, head: string, headRef: string, baseRef: string, baseSha: string, description: string, labels: PullRequestLabel[],
-  additions?: number, deletions?: number, changedFiles?: number }
+  requestedReviewers: RequestedReviewer[], additions?: number, deletions?: number, changedFiles?: number }
 type GitHubPull = { html_url?: string, number?: number, title?: string, body?: string | null, user?: { login?: string },
   state?: string, draft?: boolean, merged_at?: string | null, pull_request?: { merged_at?: string | null }, updated_at?: string, created_at?: string,
-  head?: { sha?: string, ref?: string }, base?: { ref?: string, sha?: string }, additions?: number, deletions?: number, changed_files?: number, labels?: unknown }
+  head?: { sha?: string, ref?: string }, base?: { ref?: string, sha?: string }, additions?: number, deletions?: number, changed_files?: number,
+  labels?: unknown, requested_reviewers?: unknown, requested_teams?: unknown }
 type Activity = { id: string, author: string, time: string, state: string, text: string, commit?: string }
 type ChangedFile = { path: string, previousPath?: string, status: string, additions: number, deletions: number, patch: string }
 
@@ -44,6 +46,23 @@ function integer(value: string | null) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0
 }
 
+function requestedReviewers(pull: GitHubPull, organization: string): RequestedReviewer[] {
+  const people = Array.isArray(pull.requested_reviewers) ? pull.requested_reviewers : []
+  const teams = Array.isArray(pull.requested_teams) ? pull.requested_teams : []
+  const reviewers = new Map<string, RequestedReviewer>()
+  for (const { login } of people.filter(person => person && typeof person === 'object')) {
+    if (typeof login === 'string' && /^[\w-]{1,100}(?:\[bot\])?$/u.test(login))
+      reviewers.set(login.toLowerCase(), { name: '@' + login, team: false })
+  }
+  for (const { slug } of teams.filter(team => team && typeof team === 'object')) {
+    if (typeof slug === 'string' && /^[\w-]{1,100}$/u.test(slug)) {
+      const name = '@' + organization + '/' + slug
+      reviewers.set(name.toLowerCase(), { name, team: true })
+    }
+  }
+  return [...reviewers.values()]
+}
+
 function readPull(value: unknown, repository: string): Pull | null {
   if (!value || typeof value !== 'object') return null
   const pull = value as GitHubPull
@@ -55,6 +74,7 @@ function readPull(value: unknown, repository: string): Pull | null {
   return { ...address, title: pull.title.slice(0, 512), status, author: pull.user?.login ?? '', updated: pull.updated_at ?? '', created: pull.created_at ?? '',
     head: pull.head?.sha ?? '', headRef: pull.head?.ref ?? '', baseRef: pull.base?.ref ?? '', baseSha: pull.base?.sha ?? '',
     description: typeof pull.body === 'string' ? pull.body.slice(0, 32_768) : '', labels: pullRequestLabels(pull.labels) ?? [],
+    requestedReviewers: requestedReviewers(pull, repository.split('/')[0]!),
     additions: pull.additions, deletions: pull.deletions, changedFiles: pull.changed_files }
 }
 

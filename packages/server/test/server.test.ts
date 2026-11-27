@@ -438,6 +438,39 @@ function url(): string {
 }
 
 describe('harness serve — HTTP', () => {
+  it.skipIf(process.platform === 'win32')('shows people, bots, and teams requested to review a GitHub pull request', async () => {
+    const { project, cli, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
+    const fixture = readState()
+    fixture.pulls[0].requested_reviewers = [{ login: 'requested-reviewer' }, { login: 'requested-reviewer' }, { login: 'quality-check[bot]' }, null]
+    fixture.pulls[0].requested_teams = [{ slug: 'release-review' }, { slug: '<img src=x>' }]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-reviewers-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const detail = 'http://127.0.0.1:' + port + '/pull-requests?' + new URLSearchParams({ selectedUrl: url })
+      const summary = await fetch(detail).then(response => response.text())
+      expect(summary).toContain('Requested reviewers')
+      expect(summary.match(/@requested-reviewer/gu)).toHaveLength(1)
+      expect(summary).toContain('@quality-check[bot]')
+      expect(summary).toContain('@fixture/release-review')
+      expect(summary).not.toContain('<img src=x>')
+      fixture.pulls[0].requested_reviewers = []
+      fixture.pulls[0].requested_teams = []
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect(await fetch(detail).then(response => response.text())).not.toContain('Requested reviewers')
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+      rmSync(project, { recursive: true, force: true })
+    }
+  })
+
   it.skipIf(process.platform === 'win32')('applies the reviewed pull request label changes and recovers a partial save across restarts', async () => {
     const { project, cli, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
     const old = { id: 11, name: 'legacy/needs review', color: 'aa2222', archived_at: '2026-11-10T15:00:00Z' }

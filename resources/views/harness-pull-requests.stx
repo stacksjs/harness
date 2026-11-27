@@ -889,6 +889,19 @@ const matchingLabelIds = derived(() => {
           </nav>
           <div data-pr-detail-content>
           @if(tab === 'summary')
+            @if(selected.requestedReviewers.length)
+              <section data-pr-reviewers aria-labelledby="pr-requested-reviewers-title">
+                <h3 id="pr-requested-reviewers-title">Requested reviewers</h3>
+                <ul data-pr-reviewer-list>
+                  @foreach(selected.requestedReviewers as reviewer)
+                    <li>
+                      {{ reviewer.name }}
+                      @if(reviewer.team)<small>Team</small>@endif
+                    </li>
+                  @endforeach
+                </ul>
+              </section>
+            @endif
             @if(selected.labels.length || selected.canEditLabels || labelsNotice || labelError)
               @include('../partials/harness-pr-labels')
             @endif
