@@ -373,7 +373,7 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
   }).transform(html)
 }
 
-export async function renderHarnessTemplate(path: string, props: Record<string, unknown>) {
+export async function renderHarnessTemplate(path: string, props: Record<string, unknown>, options: { autoShell?: boolean } = {}) {
   // Socket-only hosts never need the renderer. Web requests load its STX
   // subpath directly so rendering does not also load the other SDK features.
   const { renderView } = await import('@stacksjs/stx/build-views')
@@ -395,6 +395,7 @@ export async function renderHarnessTemplate(path: string, props: Record<string, 
   // build resolves them.
   return renderView(path, props, {
     ...ui,
+    ...options,
     buildMode: 'serve',
     componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
   })

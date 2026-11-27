@@ -809,7 +809,7 @@ describe('harness serve — HTTP', () => {
       const withSelection = await (await list({ ...formScope, profile, q: 'unmatched search', draft: 'hide' })).text()
       expect(withSelection).toContain('data-detail="true"')
       expect(withSelection).toContain('No pull requests match these filters.')
-      const clearLink = /href="([^"]+)" data-pr-button>Clear additional filters<\/a>/u.exec(withSelection)?.[1]
+      const clearLink = /href="([^"]+)" data-pr-button data-pr-clear-filters>Clear additional filters<\/a>/u.exec(withSelection)?.[1]
       expect(clearLink).toBeDefined()
       const clearParams = new URL(clearLink!.replaceAll('&amp;', '&'), host).searchParams
       expect(clearParams.get('selectedUrl')).toBe(url)
@@ -821,6 +821,25 @@ describe('harness serve — HTTP', () => {
       const switched = await (await list({ ...formScope, profile: String(otherProfile.id) })).text()
       expect(switched).toContain('data-detail="false"')
       expect(switched).not.toContain('Choose a pull request in a trusted GitHub project in this profile.')
+      const liveResults = (params: Record<string, string>, init?: RequestInit) =>
+        fetch(host + '/pull-requests/results?' + new URLSearchParams(params), init)
+      const liveQuery = 'draft:false "Small report"'
+      const liveResponse = await liveResults({ ...formScope, profile, q: liveQuery })
+      expect(liveResponse.status).toBe(200)
+      expect(liveResponse.headers.get('cache-control')).toBe('private, no-store')
+      const live = await liveResponse.json()
+      expect(live).toMatchObject({ search: liveQuery, draft: 'hide', filterCount: 1 })
+      expect(new URLSearchParams(live.scope).get('q')).toBe(liveQuery)
+      expect(new URLSearchParams(live.scope).has('selectedUrl')).toBe(false)
+      expect(live.html).toContain('data-pr-results-fragment')
+      expect(live.html).toContain('Small report with checks')
+      expect(live.html).toContain('aria-current="page"')
+      expect(live.html).not.toContain('Draft report with checks')
+      expect(live.html).not.toMatch(/<script|<html|data-pr-workspace-detail/u)
+      const otherResults = await (await liveResults({ ...formScope, profile: String(otherProfile.id), q: liveQuery })).json()
+      expect(otherResults.html).not.toContain('Small report with checks')
+      expect((await liveResults({}, { headers: { 'sec-fetch-site': 'cross-site' } })).status).toBe(403)
+      expect((await liveResults({}, { method: 'POST' })).status).toBe(405)
 
       const labels = await (await list({ find: 'labels', findQuery: 'phase 2', draft: 'hide' })).text()
       expect(labels).toContain('Validate the staged export')
@@ -881,6 +900,7 @@ describe('harness serve — HTTP', () => {
 
       fixture.filterListFailure = 'fixture/notebook'
       writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await liveResults({ q: 'report' })).status).toBe(503)
       const beyondIndex = await (await list({ q: 'label:bug', page: '51' })).text()
       expect(beyondIndex).toContain('GitHub search shows up to 1,000 results')
       expect(beyondIndex).not.toContain('GitHub could not list this repository.')

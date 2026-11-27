@@ -1,0 +1,48 @@
+<div data-pr-results-fragment>
+  @if(incompleteSearch)
+    <p role="status" data-pr-filter-feedback>GitHub returned partial results. Refresh to retry the search.</p>
+  @endif
+  @if(cappedSearch)
+    <p role="status" data-pr-filter-feedback>GitHub search shows up to 1,000 results per repository. Narrow your filters for more specific matches.</p>
+  @endif
+  @if(failures.length)
+    <details data-pr-list-problems>
+      <summary>Some repositories could not be loaded</summary>
+      @foreach(failures as failure)
+        <p>{{ failure.repository }}. {{ failure.reason }}</p>
+      @endforeach
+    </details>
+  @endif
+  @if(pulls.length)
+    <ul data-pr-list>
+      @foreach(pulls as pull)
+        <li>
+          <a href="{{ pull.href }}" data-pr-row @if(pull.selected) aria-current="page"@endif>
+            <span class="inline-block size-4 i-hugeicons-git-pull-request" data-pr-state="{{ pull.status }}" aria-hidden="true"></span>
+            <span data-pr-row-copy>
+              <strong><span data-pr-number>#{{ pull.number }}</span> {{ pull.title }}</strong>
+              <span>{{ pull.repository }} @if(pull.author) · {{ pull.author }}@endif</span>
+            </span>
+            <span data-pr-row-status>
+              {{ pull.status }}
+              @if(pull.updated)
+                <time datetime="{{ pull.updated }}">{{ pull.updatedLabel }}</time>
+              @endif
+            </span>
+          </a>
+        </li>
+      @endforeach
+    </ul>
+  @elseif(!repositories.length)
+    <p data-pr-empty>Add a trusted project with a GitHub remote to see its pull requests here.</p>
+  @elseif(!failures.length)
+    <p data-pr-empty>No pull requests match these filters.</p>
+  @endif
+  @if(pageBack || pageNext)
+    <nav data-pr-pagination aria-label="Pull request pages">
+      @if(pageBack)<a href="{{ pageBack }}">Previous page</a>@endif
+      <span>Page {{ page }}</span>
+      @if(pageNext)<a href="{{ pageNext }}">Next page</a>@endif
+    </nav>
+  @endif
+</div>

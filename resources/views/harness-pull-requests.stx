@@ -13,8 +13,7 @@ export const sort = $props.sort
 export const filters = $props.filters || { involvement: '', draft: '', review: '', checks: '', author: '', label: [] }
 export const draftChoice = $props.draftChoice || ''
 export const menuFilterCount = [filters.involvement, filters.draft, filters.review, filters.checks, filters.author].filter(Boolean).length + filters.label.length
-export const activeFilterCount = menuFilterCount + Number(Boolean(draftChoice) && !filters.draft)
-  + [Boolean($props.repository), $props.filter && $props.filter !== 'open', profiles[0] && $props.profile !== profiles[0].id].filter(Boolean).length
+export const activeFilterCount = $props.activeFilterCount || 0
 export const additionalFiltersLabel = activeFilterCount ? 'Filters (' + activeFilterCount + ')' : 'Filters'
 export const filterChoices = $props.choices
 export const labelChoices = [...filters.label.map(value => ({ value, description: '', color: '' })),
@@ -23,8 +22,6 @@ export const clearFiltersHref = $props.clearFiltersHref
 export const savedViewScope = $props.savedViewScope || ''
 export const savedViewDetail = $props.savedViewDetail || ''
 export const listSelectionFields = $props.listSelectionFields || []
-export const incompleteSearch = $props.incompleteSearch
-export const cappedSearch = $props.cappedSearch
 export const involvementOptions = [{ value: '', label: 'Everyone' }, { value: 'authored', label: 'Authored by me' }, { value: 'reviewing', label: 'My review requested' }]
 export const draftOptions = [{ value: '', label: 'Any' }, { value: 'only', label: 'Drafts only' }, { value: 'hide', label: 'Hide drafts' }]
 export const reviewOptions = [{ value: '', label: 'Any' }, { value: 'approved', label: 'Approved' }, { value: 'changes-requested', label: 'Changes requested' }, { value: 'review-required', label: 'Review required' }, { value: 'none', label: 'No reviews' }]
@@ -124,6 +121,7 @@ export const conversationOnPage = conversations.some(thread => thread.anchor ===
 @if(tab === 'code')
 <script client>
 import { openLegacyBranchDeletion } from '../functions/pull-request-dialogs'
+import { withCurrentPullRequestQuery } from '../stores/pull-request-live-search'
 
 const deleteBranchDialog = useRef('deleteBranchDialog')
 const deleteBranchTrigger = useRef('deleteBranchTrigger')
@@ -306,7 +304,7 @@ function editStagedComment(id) {
   const draft = inlineReview().comments.find(comment => comment.id === id)
   if (!draft || reviewIsLocked() || reviewIsStale()) return
   const view = reviewDialogBox.current.ownerDocument.defaultView
-  const target = new URL(patchBase, view.location.origin)
+  const target = new URL(withCurrentPullRequestQuery(patchBase, view.location), view.location.origin)
   target.searchParams.set('detailPage', String(draft.page))
   target.searchParams.set('reviewHead', patchHead)
   target.searchParams.set('reviewBase', patchBaseSha)
@@ -382,7 +380,7 @@ async function submitInlineReview(event) {
   submittingInlineReview.set(true)
   inlineReviewMessage.set(current.intent ? 'Checking GitHub…' : 'Submitting review…')
   const view = form.ownerDocument.defaultView
-  const target = new URL(inlineReviewApi, view.location.origin)
+  const target = new URL(withCurrentPullRequestQuery(inlineReviewApi, view.location), view.location.origin)
   const selection = patchSelection()
   if (selection) {
     target.searchParams.set('reviewLine', selection.line)
@@ -397,7 +395,7 @@ async function submitInlineReview(event) {
     const result = await response.json()
     if (result.result === 'posted' && result.location?.startsWith('/pull-requests?')) {
       if (inlineReview().intent === intent) inlineReview.set(emptyInlineReview)
-      view.location.assign(result.location)
+      view.location.assign(withCurrentPullRequestQuery(result.location, view.location))
       return
     }
     if (!result.result) throw new Error('Missing review outcome')
@@ -422,8 +420,11 @@ function patchSelectionLabel() {
 
 function patchSelectionHref() {
   const selection = patchSelection()
-  return selection ? patchBase + '&reviewHead=' + patchHead + '&reviewBase=' + patchBaseSha + '&reviewLine=' + selection.line
-    + (selection.start !== selection.line ? '&reviewStart=' + selection.start : '') + '#' + selection.line : ''
+  if (!selection) return ''
+  const href = patchBase + '&reviewHead=' + patchHead + '&reviewBase=' + patchBaseSha + '&reviewLine=' + selection.line
+    + (selection.start !== selection.line ? '&reviewStart=' + selection.start : '') + '#' + selection.line
+  const view = reviewComposerBox.current?.ownerDocument.defaultView
+  return view ? withCurrentPullRequestQuery(href, view.location) : href
 }
 
 function selectPatchLine(file, link, extend) {
@@ -778,15 +779,25 @@ const matchingLabelIds = derived(() => {
 </script>
 @endif
 <script client>
+import { pullRequestLiveSearch } from '../stores/pull-request-live-search'
 import { PULL_REQUEST_VIEWS_KEY, pullRequestViewHref, pullRequestViewMatches, pullRequestViewNameError, pullRequestViewStore } from '../stores/pull-request-saved-views'
 
-const currentSavedPrScope = @json(savedViewScope)
+const currentSavedPrScope = state(@json(savedViewScope))
 const currentSavedPrDetail = @json(savedViewDetail)
 const availableSavedPrProfiles = @json(profiles.map(profile => String(profile.id)))
 const currentSavedPrRepositories = @json(repositories.map(repository => repository.name.toLowerCase()))
 const suggestedSavedPrName = @json(filters.involvement === 'reviewing' ? 'PRs requesting my review' : '')
 const savedPrViewsMenu = useRef('savedPrViewsMenu')
 const savedPrViewsTrigger = useRef('savedPrViewsTrigger')
+const prSearchInput = useRef('prSearchInput')
+const prListResults = useRef('prListResults')
+const prDraftChoice = useRef('prDraftChoice')
+const prShownDraft = useRef('prShownDraft')
+const prSearchPending = state(false)
+const prSearchStatus = state('')
+const prFilterCount = state(@json(activeFilterCount))
+const prFiltersName = derived(() => prFilterCount() ? 'Filters (' + prFilterCount() + ')' : 'Filters')
+let livePrSearch
 const prFiltersMenu = useRef('prFiltersMenu')
 const prFiltersTrigger = useRef('prFiltersTrigger')
 const savedPrViewDialog = useRef('savedPrViewDialog')
@@ -803,7 +814,7 @@ let savedPrStore
 const activeSavedPrView = derived(() => savedPrViews().find(view => view.id === savedPrActiveId()))
 const savedPrViewModified = derived(() => {
   const view = activeSavedPrView()
-  return Boolean(view && !pullRequestViewMatches(view.scope, currentSavedPrScope))
+  return Boolean(view && !pullRequestViewMatches(view.scope, currentSavedPrScope()))
 })
 
 function refreshSavedPrViews() {
@@ -811,7 +822,7 @@ function refreshSavedPrViews() {
   const views = savedPrStore.read()
   const storedId = savedPrStore.active()
   const matchingId = views.find(view => view.id === storedId)?.id
-    ?? views.find(view => pullRequestViewMatches(view.scope, currentSavedPrScope))?.id ?? ''
+    ?? views.find(view => pullRequestViewMatches(view.scope, currentSavedPrScope()))?.id ?? ''
   savedPrViews.set(views)
   savedPrActiveId.set(matchingId)
   if (matchingId !== storedId) savedPrStore.select(matchingId)
@@ -820,6 +831,20 @@ function refreshSavedPrViews() {
 onMount(() => {
   const browser = savedPrViewsTrigger.current?.ownerDocument.defaultView
   if (!browser) return
+  if (prSearchInput.current && prListResults.current) {
+    livePrSearch = pullRequestLiveSearch(prSearchInput.current, prListResults.current, currentSavedPrScope, result => {
+      currentSavedPrScope.set(result.scope)
+      prFilterCount.set(result.filterCount)
+      savedPrStatus.set('')
+      const choice = prDraftChoice.current
+      const shown = prShownDraft.current
+      if (shown && choice) {
+        if (choice.value === shown.value) choice.value = result.draft
+        shown.value = result.draft
+      }
+      refreshSavedPrViews()
+    }, value => prSearchPending.set(value), message => prSearchStatus.set(message))
+  }
   savedPrStore = pullRequestViewStore(browser)
   refreshSavedPrViews()
   savedPrViewsReady.set(true)
@@ -829,6 +854,7 @@ useEventListener('storage', event => {
   if (event.key === PULL_REQUEST_VIEWS_KEY || event.key === null) refreshSavedPrViews()
 })
 useEventListener('pageshow', refreshSavedPrViews)
+useEventListener('pagehide', () => livePrSearch?.cancel())
 useEventListener('pointerdown', event => {
   for (const menu of [savedPrViewsMenu.current, prFiltersMenu.current]) {
     if (menu?.open && !menu.contains(event.target)) menu.open = false
@@ -888,13 +914,13 @@ function applySavedPrView(id) {
   const profile = scope.get('profile')
   const repository = scope.get('repository')?.toLowerCase()
   if (!availableSavedPrProfiles.includes(profile)
-    || (profile === new URLSearchParams(currentSavedPrScope).get('profile') && repository && !currentSavedPrRepositories.includes(repository))) {
+    || (profile === new URLSearchParams(currentSavedPrScope()).get('profile') && repository && !currentSavedPrRepositories.includes(repository))) {
     closeSavedPrViews()
     savedPrStatus.set('The profile or repository for this view is unavailable.')
     return
   }
   savedPrStore.select(id)
-  savedPrStore.navigate(pullRequestViewHref(view.scope, currentSavedPrScope, currentSavedPrDetail))
+  savedPrStore.navigate(pullRequestViewHref(view.scope, currentSavedPrScope(), currentSavedPrDetail))
 }
 
 function openSavedPrEditor(rename) {
@@ -934,7 +960,7 @@ function savePrViewName() {
   }
   const id = editing || savedPrStore.id()
   const next = editing ? current.map(view => view.id === id ? { ...view, name } : view)
-    : [...current, { id, name, scope: currentSavedPrScope }]
+    : [...current, { id, name, scope: currentSavedPrScope() }]
   if (!savedPrStore.write(next)) {
     savedPrError.set('Could not save views on this device. Check browser storage and try again.')
     return
@@ -956,7 +982,7 @@ function changeSavedPrView(remove) {
     return
   }
   const next = remove ? current.filter(view => view.id !== active.id)
-    : current.map(view => view.id === active.id ? { ...view, scope: currentSavedPrScope } : view)
+    : current.map(view => view.id === active.id ? { ...view, scope: currentSavedPrScope() } : view)
   if (!savedPrStore.write(next)) {
     savedPrStatus.set('Could not save views on this device. Check browser storage and try again.')
     return
@@ -980,7 +1006,7 @@ function closeSavedPrEditor() {
   </header>
   <div data-pr-workspace-columns data-detail="{{ hasDetail }}">
     <section aria-label="Pull request list" data-pr-workspace-list>
-      <form method="get" action="/pull-requests" data-pr-filters>
+      <form method="get" action="/pull-requests" data-pr-filters @submit="livePrSearch?.submit($event)">
         @foreach(listSelectionFields as pair)
           <input type="hidden" name="{{ pair[0] }}" value="{{ pair[1] }}">
         @endforeach
@@ -988,8 +1014,10 @@ function closeSavedPrEditor() {
           <label data-pr-search class="relative">
             <span class="sr-only">Search pull requests</span>
             <span class="i-hugeicons-search-01" aria-hidden="true"></span>
-            <input type="search" name="q" placeholder="Search or label:bug" maxlength="200" value="{{ search }}" aria-describedby="pr-search-syntax"
-              enterkeyhint="search" autocapitalize="none" spellcheck="false">
+            <input ref="prSearchInput" type="search" name="q" placeholder="Search or label:bug" maxlength="200" value="{{ search }}" aria-describedby="pr-search-syntax"
+              enterkeyhint="search" autocapitalize="none" spellcheck="false"
+              @input="livePrSearch?.input($event)" @keydown="livePrSearch?.keydown($event)"
+              @compositionstart="livePrSearch?.startComposition()" @compositionend="livePrSearch?.endComposition()">
           </label>
           <button type="submit" data-pr-button data-pr-search-submit aria-label="Search" title="Search">
             <span class="inline-block size-4 i-hugeicons-arrow-right-01" aria-hidden="true"></span>
@@ -1006,12 +1034,11 @@ function closeSavedPrEditor() {
             </select>
           </label>
           <details ref="prFiltersMenu" data-pr-additional-filters @if(filterChoices) open @endif @keydown="prFiltersKeydown">
-            <summary ref="prFiltersTrigger" data-pr-button aria-label="{{ additionalFiltersLabel }}" @click="closePrToolbarSibling(false)">
+            <summary ref="prFiltersTrigger" data-pr-button aria-label="{{ additionalFiltersLabel }}" :aria-label="prFiltersName()" @click="closePrToolbarSibling(false)">
               <span class="inline-block size-4 i-hugeicons-filter" aria-hidden="true"></span>
               Filters
-              @if(activeFilterCount)
-                <span data-pr-filter-count aria-hidden="true">{{ activeFilterCount }}</span>
-              @endif
+              <span data-pr-filter-count aria-hidden="true" @if(!activeFilterCount) hidden @endif
+                :hidden="!prFilterCount()" :text="prFilterCount()">{{ activeFilterCount }}</span>
             </summary>
             <div data-pr-advanced-fields>
               <label>
@@ -1050,8 +1077,8 @@ function closeSavedPrEditor() {
               <label>
                 <span>Draft</span>
                 <input type="hidden" name="draft" value="{{ filters.draft }}">
-                <input type="hidden" name="shownDraft" value="{{ draftChoice }}">
-                <select name="chooseDraft">
+                <input ref="prShownDraft" type="hidden" name="shownDraft" value="{{ draftChoice }}">
+                <select ref="prDraftChoice" name="chooseDraft">
                   @foreach(draftOptions as option)
                     <option value="{{ option.value }}" @if(option.value === draftChoice) selected @endif>{{ option.label }}</option>
                   @endforeach
@@ -1125,17 +1152,22 @@ function closeSavedPrEditor() {
               @endif
               <div data-pr-filter-actions>
                 @if(menuFilterCount)
-                  <a href="{{ clearFiltersHref }}" data-pr-button>Clear additional filters</a>
+                  <a href="{{ clearFiltersHref }}" data-pr-button data-pr-clear-filters>Clear additional filters</a>
                 @endif
                 <button type="submit" data-pr-button data-pr-filter-submit>Apply filters</button>
               </div>
             </div>
           </details>
           <details ref="savedPrViewsMenu" data-pr-views hidden :hidden="!savedPrViewsReady()" @keydown="savedPrMenuKeydown">
-            <summary ref="savedPrViewsTrigger" data-pr-button aria-label="Saved pull request views" aria-describedby="pr-active-view-name" :title="activeSavedPrView()?.name || 'Saved pull request views'" @click="closePrToolbarSibling(true)">
+            <summary ref="savedPrViewsTrigger" data-pr-button aria-label="Saved pull request views" aria-describedby="pr-active-view-name"
+              :aria-describedby="savedPrViewModified() ? 'pr-active-view-name pr-active-view-state' : 'pr-active-view-name'"
+              :title="activeSavedPrView()?.name || 'Saved pull request views'" @click="closePrToolbarSibling(true)">
               <span class="inline-block shrink-0 size-4 i-hugeicons-bookmark-01" aria-hidden="true"></span>
               <span id="pr-active-view-name" data-pr-view-name :text="activeSavedPrView()?.name || 'Views'">Views</span>
-              <span data-pr-view-modified :hidden="!savedPrViewModified()">Modified</span>
+              <span id="pr-active-view-state" data-pr-view-modified :hidden="!savedPrViewModified()" title="Modified view">
+                <span data-pr-view-modified-mark aria-hidden="true">*</span>
+                <span data-pr-view-modified-label>Modified</span>
+              </span>
               <span class="inline-block shrink-0 size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
             </summary>
             <div data-pr-view-panel>
@@ -1169,52 +1201,10 @@ function closeSavedPrEditor() {
           </div>
         </form>
       </dialog>
-      @if(incompleteSearch)
-        <p role="status" data-pr-filter-feedback>GitHub returned partial results. Refresh to retry the search.</p>
-      @endif
-      @if(cappedSearch)
-        <p role="status" data-pr-filter-feedback>GitHub search shows up to 1,000 results per repository. Narrow your filters for more specific matches.</p>
-      @endif
-      @if(failures.length)
-        <details data-pr-list-problems>
-          <summary>Some repositories could not be loaded</summary>
-          @foreach(failures as failure)
-            <p>{{ failure.repository }}. {{ failure.reason }}</p>
-          @endforeach
-        </details>
-      @endif
-      @if(pulls.length)
-        <ul data-pr-list>
-          @foreach(pulls as pull)
-            <li>
-              <a href="{{ pull.href }}" data-pr-row @if(pull.selected) aria-current="page"@endif>
-                <span class="inline-block size-4 i-hugeicons-git-pull-request" data-pr-state="{{ pull.status }}" aria-hidden="true"></span>
-                <span data-pr-row-copy>
-                  <strong><span data-pr-number>#{{ pull.number }}</span> {{ pull.title }}</strong>
-                  <span>{{ pull.repository }} @if(pull.author) · {{ pull.author }}@endif</span>
-                </span>
-                <span data-pr-row-status>
-                  {{ pull.status }}
-                  @if(pull.updated)
-                    <time datetime="{{ pull.updated }}">{{ dateLabel(pull.updated) }}</time>
-                  @endif
-                </span>
-              </a>
-            </li>
-          @endforeach
-        </ul>
-      @elseif(!repositories.length)
-        <p data-pr-empty>Add a trusted project with a GitHub remote to see its pull requests here.</p>
-      @elseif(!failures.length)
-        <p data-pr-empty>No pull requests match these filters.</p>
-      @endif
-      @if(pageBack || pageNext)
-        <nav data-pr-pagination aria-label="Pull request pages">
-          @if(pageBack)<a href="{{ pageBack }}">Previous page</a>@endif
-          <span>Page {{ page }}</span>
-          @if(pageNext)<a href="{{ pageNext }}">Next page</a>@endif
-        </nav>
-      @endif
+      <p role="status" data-pr-search-status :class="{ 'sr-only': !prSearchStatus().startsWith('Could not') }" :text="prSearchPending() ? 'Searching pull requests…' : prSearchStatus()"></p>
+      <div ref="prListResults" :aria-busy="prSearchPending() ? 'true' : null">
+        @include('../partials/harness-pr-results')
+      </div>
     </section>
     @if(hasDetail)
       <section aria-labelledby="pr-detail-title" data-pr-workspace-detail>

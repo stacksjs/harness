@@ -6792,6 +6792,7 @@ try {
       const typed = 'draft:true author:me label:"Release reporting",unused -label:wip draft pull request'
       await search.fill(typed)
       await search.press('Enter')
+      await clonePage.waitForURL(url => url.searchParams.get('q') === typed)
       await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
       check('typed PR search handles OR labels, exclusions, viewer alias, and literal title words',
         await reviewList.locator('[data-pr-row]').count() === 1 && await search.inputValue() === typed)
@@ -6843,6 +6844,29 @@ try {
       await clonePage.setViewportSize({ width: 1280, height: 800 })
       await clonePage.goto(mergeReviewUrl)
       await clonePage.getByRole('link', { name: 'Timeline', exact: true }).click()
+      const currentReview = clonePage.locator('[data-pr-workspace-detail]')
+      const reviewInstance = await currentReview.elementHandle()
+      await search.focus()
+      await search.dispatchEvent('compositionstart')
+      await search.fill('まだ編集中')
+      await search.fill('draft:false unmatched live review')
+      const liveResponse = clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/results' && response.ok())
+      await search.dispatchEvent('compositionend')
+      await liveResponse
+      await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
+      const liveUrl = new URL(clonePage.url())
+      const back = currentReview.getByRole('link', { name: 'Back to list', exact: true })
+      const liveBack = new URL((await back.getAttribute('href'))!, liveUrl)
+      check('search updates the PR results after composition while keeping focus and the open Timeline',
+        liveUrl.searchParams.get('q') === 'draft:false unmatched live review'
+        && liveUrl.searchParams.get('selectedUrl') === address && liveUrl.searchParams.get('tab') === 'timeline'
+        && liveBack.searchParams.get('q') === liveUrl.searchParams.get('q')
+        && await search.evaluate(element => element === element.ownerDocument.activeElement)
+        && await reviewInstance?.evaluate(element => element.isConnected) === true)
+      await search.press('Escape')
+      await clonePage.waitForURL(url => !url.searchParams.has('q'))
+      check('Escape clears live PR search while retaining its selected review', await search.inputValue() === ''
+        && new URL(clonePage.url()).searchParams.get('selectedUrl') === address)
       await search.fill('preserve an independently selected request')
       await search.press('Enter')
       await clonePage.waitForURL(url => url.searchParams.get('q') === 'preserve an independently selected request')

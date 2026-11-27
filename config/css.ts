@@ -551,6 +551,11 @@ const RESPONSIVE_SHELL = `
 [data-pr-views] summary { max-inline-size: 100%; }
 [data-pr-view-name] { min-inline-size: 0; max-inline-size: 10rem; overflow: hidden; text-overflow: ellipsis; }
 [data-pr-view-modified] { font-size: 11px; opacity: .78; }
+[data-pr-view-modified-mark] { display: none; }
+@container pr-list (max-width: 26rem) {
+  [data-pr-view-modified-mark] { display: inline; font-size: 14px; }
+  [data-pr-view-modified-label] { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
+}
 [data-pr-view-panel], [data-pr-advanced-fields] {
   position: absolute; inset-block-start: calc(100% - 10px); inset-inline-end: 0; z-index: 2; overflow-y: auto;
   border: 1px solid var(--workspace-line); border-radius: 8px; background: var(--workspace-surface);

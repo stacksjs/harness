@@ -282,7 +282,9 @@ function message(error: unknown) {
   return error instanceof RepositoryPullRequestError ? error.message : 'GitHub could not respond. Try again.'
 }
 
-export async function pullRequestWorkspace(state: HarnessState, query: URLSearchParams, signal: AbortSignal) {
+const pullRequestDates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+
+export async function pullRequestWorkspace(state: HarnessState, query: URLSearchParams, signal: AbortSignal, listOnly = false) {
   const profiles = [...state.profiles.values()].map(profile => ({ id: profile.id, name: profile.name }))
   const requestedProfile = integer(query.get('profile'))
   const profile = profiles.some(item => item.id === requestedProfile) ? requestedProfile : profiles[0]?.id || 0
@@ -295,6 +297,8 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const filter = listStates.find(value => value === query.get('state')) ?? 'open'
   const sort = listSorts.find(value => value === query.get('sort')) ?? 'updated'
   const { search, text, filters, menu } = readPullRequestListSearch(query)
+  const activeFilterCount = [menu.involvement, filters.draft, menu.review, menu.checks, menu.author, repository,
+    filter !== 'open', profiles[0] && profile !== profiles[0].id].filter(Boolean).length + menu.label.length
   const lookup = readFilterLookup(query)
   const tab = tabs.find(value => value === query.get('tab')) ?? 'summary'
   const page = Math.min(integer(query.get('page')) || 1, MAX_LIST_PAGE)
@@ -317,9 +321,9 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   let nextPage = false
   let incompleteSearch = false
   let cappedSearch = false
-  const filterChoices = lookup ? readPullRequestFilterChoices(list, lookup, signal)
+  const filterChoices = !listOnly && lookup ? readPullRequestFilterChoices(list, lookup, signal)
     .catch(() => ({ ...lookup, options: [], more: false, failed: list.length })) : Promise.resolve(null)
-  const detail = selection && selectionRepo ? (async () => {
+  const detail = !listOnly && selection && selectionRepo ? (async () => {
     const editingLabels = tab === 'summary' && query.get('labels') === 'edit'
     const editingReviewers = tab === 'summary' && query.get('reviewers') === 'edit'
     const credential = editingLabels || editingReviewers ? await repositoryGitHubCredential(selectionRepo.path, signal).catch(() => undefined) : undefined
@@ -428,7 +432,14 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     carryReviewView(query, actionParams)
     return '/pull-requests/' + action + '?' + actionParams
   }
-  const marks = (row: Pull) => ({ ...row, selected: row.url.toLowerCase() === selectedUrl.toLowerCase(), href: href({ selectedUrl: row.url }) })
+  const marks = (row: Pull) => ({ ...row, selected: row.url.toLowerCase() === selectedUrl.toLowerCase(), href: href({ selectedUrl: row.url }),
+    updatedLabel: Number.isFinite(Date.parse(row.updated)) ? pullRequestDates.format(new Date(row.updated)) : '' })
+  const pageHref = (number: number) => {
+    const target = new URLSearchParams(params)
+    target.set('page', String(number))
+    for (const [name, value] of savedViewDetail) target.set(name, value)
+    return '/pull-requests?' + target
+  }
   rows.sort((a, b) => {
     const time = sort === 'updated' ? b.updated.localeCompare(a.updated)
       : sort === 'oldest' ? a.created.localeCompare(b.created) : b.created.localeCompare(a.created)
@@ -437,10 +448,11 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   return {
     profiles, profile, backHref: profile ? '/?profile=' + profile : '/', repository: repository?.name ?? '',
     repositories: [...repositories.values()].map(item => ({ name: item.name })),
-    filter, filters: menu, draftChoice: filters.draft, choices, clearFiltersHref: '/pull-requests?' + clearFilters,
+    filter, filters: menu, draftChoice: filters.draft, choices, clearFiltersHref: '/pull-requests?' + clearFilters, activeFilterCount,
     incompleteSearch, cappedSearch, sort, search, page, tab, detailPage, rows: rows.map(marks), failures,
-    pageBack: page > 1 ? href({ page: page - 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
-    pageNext: nextPage && page < MAX_LIST_PAGE ? href({ page: page + 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
+    listUnavailable: viewer === null || (list.length > 0 && failures.length === list.length),
+    pageBack: page > 1 ? pageHref(page - 1) : '',
+    pageNext: nextPage && page < MAX_LIST_PAGE ? pageHref(page + 1) : '',
     selected, savedViewScope, savedViewDetail: savedViewDetail.toString(), listSelectionFields,
     selectionError: selectionInProfile && query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
     listHref: href(), summaryHref: detailsHref('summary'), timelineHref: detailsHref('timeline'), codeHref: detailsHref('code'),
