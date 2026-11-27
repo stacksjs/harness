@@ -3999,6 +3999,38 @@ try {
   await headerTerminal.click()
   await waitForTerminalLine('Harness test terminal')
   await terminalHost.focus()
+  const localTerminalUrl = `http://${loopback}/`
+  const linkedTerminalUrl = `http://${loopback}/second`
+  await page.keyboard.type(`printf '%s\\n' '${localTerminalUrl}'; printf '\\033]8;;${linkedTerminalUrl}\\007Preview build\\033]8;;\\007\\n'`)
+  await page.keyboard.press('Enter')
+  const printedLink = terminalHost.getByRole('link', { name: localTerminalUrl, exact: true }).last()
+  const linkedLabel = terminalHost.getByRole('link', { name: 'Preview build', exact: true })
+  await linkedLabel.waitFor()
+  check('terminal output links use the printed target or the OSC 8 destination',
+    await printedLink.getAttribute('href') === localTerminalUrl && await linkedLabel.getAttribute('href') === linkedTerminalUrl
+    && await linkedLabel.getAttribute('rel') === 'noopener noreferrer')
+  await capture('workspace-terminal-links-desktop')
+  await linkedLabel.focus()
+  const [externalLinkPage] = await Promise.all([
+    page.context().waitForEvent('page', { timeout: 12_000 }),
+    linkedLabel.click({ modifiers: ['ControlOrMeta'] }),
+  ])
+  await externalLinkPage.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  check('a modified terminal link opens in a separate browser tab', !await browserPane.isVisible())
+  await externalLinkPage.close()
+  await linkedLabel.focus()
+  await page.keyboard.press('Enter')
+  await activeFrame.getByRole('heading', { name: 'Second preview page' }).waitFor()
+  check('keyboard activation opens an OSC 8 terminal link in the workspace Browser', true)
+  await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await printedLink.click()
+  await activeFrame.getByRole('heading', { name: 'Local development preview' }).waitFor()
+  await capture('workspace-terminal-link-preview-phone')
+  await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
+  check('closing a phone terminal-link preview returns to the same terminal', await printedLink.isVisible())
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await terminalHost.focus()
   await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${ownedPreviewScript}"`)
   await page.keyboard.press('Enter')
   for (let attempt = 0; attempt < 100 && !existsSync(ownedPreviewPort); attempt++) await Bun.sleep(50)
