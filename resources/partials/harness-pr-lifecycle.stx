@@ -35,7 +35,7 @@
               @elseif(item.action === 'revert')
                 <button type="button" popovertarget="pr-revert-confirmation" data-pr-lifecycle-action data-pr-revert-trigger>{{ item.label }}</button>
               @elseif(item.action === 'delete-branch')
-                <button type="button" commandfor="pr-delete-branch-dialog" command="show-modal" data-pr-lifecycle-action data-pr-delete-branch-trigger
+                <button type="button" commandfor="pr-delete-branch-dialog" command="show-modal" ref="deleteBranchTrigger" data-pr-lifecycle-action data-pr-delete-branch-trigger
                   aria-haspopup="dialog" @click="openDeleteBranchDialog">{{ item.label }}</button>
               @else
                 <button type="submit" name="action" value="{{ item.action }}" data-pr-lifecycle-action>{{ item.label }}</button>

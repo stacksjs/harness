@@ -6742,6 +6742,7 @@ try {
 
     github.configureBranchDeletion({ mode: 'lost-response' })
     await clonePage.goto(mergedPullUrl, { waitUntil: 'domcontentloaded' })
+    await clonePage.getByRole('link', { name: 'Summary', exact: true }).click()
     const deleteBranch = lifecycleMenu.getByRole('button', { name: 'Delete branch', exact: true })
     const deleteBranchPanel = clonePage.getByRole('dialog', { name: 'Delete remote branch?', exact: true })
     await actions.press('Enter')
@@ -6756,7 +6757,13 @@ try {
     check('deleting a branch focuses Cancel and Escape returns focus without writing', focusesCancel
       && modal && await deleteBranchPanel.isHidden() && pullState().deleteBranchWrites === undefined)
     if (!await deleteBranch.isVisible()) await actions.press('Enter')
+    await deleteBranch.evaluate((element) => {
+      Reflect.deleteProperty(HTMLButtonElement.prototype, 'commandForElement')
+      element.removeAttribute('command')
+    })
     await deleteBranch.press('Enter')
+    await deleteBranchPanel.waitFor()
+    check('older WebViews can open the modal from the pull request summary', await deleteBranchPanel.evaluate(element => element.matches(':modal')))
     await deleteBranchPanel.getByRole('button', { name: 'Delete branch', exact: true }).click()
     await checkLifecycle.waitFor()
     github.configureBranchDeletion({ mode: 'normal' })
