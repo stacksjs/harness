@@ -4078,6 +4078,8 @@ try {
   await filePanel.locator('[data-view-line="1"]').waitFor()
   check('OSC 8 file links carry their exact line and column', await filePanel.getByText('Column 2', { exact: true }).isVisible())
   await filePanel.getByRole('button', { name: 'Close workspace files' }).click()
+  await filePanel.waitFor({ state: 'hidden' })
+  await page.waitForFunction(() => document.activeElement?.closest('[data-terminal-host]'))
   const wrappedUrl = `http://${loopback}${wrappedPreviewPath}`
   const printWrapped = join(driveRoot, 'print-wrapped-terminal-url.ts')
   writeFileSync(printWrapped, `process.stdout.write(${JSON.stringify(wrappedUrl + '  \n')})\n`)
