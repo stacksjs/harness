@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { release, tmpdir } from 'node:os'
 import { delimiter, join, sep } from 'node:path'
 import process from 'node:process'
+import { pathToFileURL } from 'node:url'
 import { chromium, webkit } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
 import { PREVIEW_THREAD_ENV } from '../packages/drivers/src/index'
@@ -4055,6 +4056,28 @@ try {
   await capture('workspace-terminal-link-preview-phone')
   await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
   check('closing a phone terminal-link preview returns to the same terminal', await printedLink.isVisible())
+  const fileLinkScript = join(driveRoot, 'print-terminal-file-links.ts')
+  const ledgerFileUri = pathToFileURL(join(ledgerRepo, 'ledger.txt'))
+  ledgerFileUri.hash = 'L1C2'
+  const fileLinkOutput = `ledger.txt:2:3: fixture\n\x1b]8;;${ledgerFileUri.href}\x07Ledger source\x1b]8;;\x07\n`
+  writeFileSync(fileLinkScript, `process.stdout.write(${JSON.stringify(fileLinkOutput)})\n`)
+  await terminalHost.focus()
+  await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${fileLinkScript}"`)
+  await page.keyboard.press('Enter')
+  const terminalFile = terminalHost.locator('[data-terminal-file="ledger.txt:2:3"]')
+  const filePanel = page.getByRole('region', { name: 'Files', exact: true })
+  await terminalFile.focus()
+  await page.keyboard.press('Enter')
+  await filePanel.locator('[data-view-line="2"]').waitFor()
+  check('keyboard activation opens a terminal source location inside the thread',
+    !(await terminalFile.getAttribute('href')) && await filePanel.getByText('Column 3', { exact: true }).isVisible())
+  await capture('workspace-terminal-file-link-phone')
+  await filePanel.getByRole('button', { name: 'Close workspace files' }).click()
+  await page.waitForFunction(() => document.activeElement?.closest('[data-terminal-host]'))
+  await terminalHost.getByRole('link', { name: 'Ledger source', exact: true }).click()
+  await filePanel.locator('[data-view-line="1"]').waitFor()
+  check('OSC 8 file links carry their exact line and column', await filePanel.getByText('Column 2', { exact: true }).isVisible())
+  await filePanel.getByRole('button', { name: 'Close workspace files' }).click()
   const wrappedUrl = `http://${loopback}${wrappedPreviewPath}`
   const printWrapped = join(driveRoot, 'print-wrapped-terminal-url.ts')
   writeFileSync(printWrapped, `process.stdout.write(${JSON.stringify(wrappedUrl + '  \n')})\n`)
