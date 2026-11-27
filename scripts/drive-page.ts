@@ -6544,6 +6544,67 @@ try {
       await replyInput.inputValue() === 'A second unsent review draft.' && await postedReply.count() === 1
       && await conversation.getByText('History comment 38.', { exact: true }).count() === 1
       && await conversation.locator('[data-pr-conversation-comment]').count() === 46)
+
+    const editor = clonePage.locator('[data-pr-review-composer]')
+    const reviewDialog = clonePage.getByRole('dialog', { name: 'Review pull request' })
+    const afterThree = filePatch.getByRole('link', { name: 'After line 3', exact: true })
+    await afterLine.click()
+    await afterThree.click({ modifiers: ['Shift'] })
+    await lineTools.getByRole('button', { name: 'Add inline comment', exact: true }).click()
+    const inlineText = editor.getByRole('textbox')
+    await inlineText.fill('Verify **these report lines**.')
+    check('the draft opens directly below the last selected line with textarea focus',
+      await editor.evaluate(element => element.previousElementSibling?.hasAttribute('data-selected')
+        && element.contains(document.activeElement)))
+    await capture('pull-requests-inline-review-editor-390x844', clonePage)
+    await inlineText.press('Control+Enter')
+    await beforeLine.click()
+    await lineTools.getByRole('button', { name: 'Add inline comment', exact: true }).click()
+    await inlineText.fill('Keep this deletion on the left side.')
+    await editor.getByRole('button', { name: 'Add to review', exact: true }).click()
+    await clonePage.reload()
+    const openReview = clonePage.getByRole('button', { name: 'Review pull request, 2 comments pending', exact: true })
+    await openReview.click()
+    await reviewDialog.getByText('Keep this deletion on the left side.', { exact: true }).waitFor()
+    check('both anchors survive reload and a PR author can only comment',
+      await reviewDialog.getByText('Verify **these report lines**.', { exact: true }).isVisible()
+      && await reviewDialog.getByText('Comment as fixture-user', { exact: true }).isVisible()
+      && await reviewDialog.getByRole('radio').count() === 0
+      && await reviewDialog.evaluate(element => element.matches(':modal') && element.contains(document.activeElement)))
+    await clonePage.keyboard.press('Escape')
+    await reviewDialog.waitFor({ state: 'hidden' })
+    check('closing the review returns focus to the toolbar', await openReview.evaluate(element => element === document.activeElement))
+    await openReview.click()
+    await reviewDialog.getByRole('listitem').filter({ hasText: 'Verify **these report lines**.' }).getByRole('button', { name: 'Edit', exact: true }).click()
+    await inlineText.waitFor()
+    check('editing a staged comment reopens its diff range with the staged text',
+      await filePatch.locator('[data-pr-line-row][data-selected]').count() === 2
+      && await inlineText.inputValue() === 'Verify **these report lines**.')
+    await inlineText.fill('Verify the **updated range**.')
+    await editor.getByRole('button', { name: 'Save comment', exact: true }).click()
+    await openReview.click()
+    await reviewDialog.getByRole('textbox', { name: /Summary/ }).fill('Review the exported report.')
+    await capture('pull-requests-inline-review-submit-390x844', clonePage)
+    github.configureInlineReviews('unconfirmed')
+    await reviewDialog.getByRole('button', { name: 'Submit review', exact: true }).click()
+    await reviewDialog.getByText('GitHub has yet to confirm this review.', { exact: false }).waitFor()
+    await clonePage.reload()
+    await openReview.click()
+    const checkReview = reviewDialog.getByRole('button', { name: 'Check GitHub', exact: true })
+    await checkReview.click()
+    await reviewDialog.getByText('GitHub has yet to confirm this review.', { exact: false }).waitFor()
+    check('an unconfirmed review is locked and retrying does not post again',
+      await reviewDialog.getByRole('textbox', { name: /Summary/ }).getAttribute('readonly') !== null
+      && JSON.parse(readFileSync(github.state, 'utf8')).reviewRequests === 1)
+    github.revealInlineReview()
+    await checkReview.click()
+    await clonePage.getByText('Review submitted to GitHub.', { exact: true }).waitFor()
+    const posted = JSON.parse(readFileSync(github.state, 'utf8'))
+    check('the confirmed review contains both validated anchors and clears the local queue',
+      posted.reviewRequests === 1 && posted.inlineReviews[0].comments.length === 2
+      && posted.inlineReviews[0].comments[0].start_line === 2 && posted.inlineReviews[0].comments[0].line === 3
+      && posted.inlineReviews[0].comments[1].side === 'LEFT'
+      && await clonePage.getByRole('button', { name: 'Review pull request', exact: true }).isVisible())
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()

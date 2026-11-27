@@ -51,6 +51,12 @@ export const commentsAction = $props.commentsAction
 export const replyDraft = $props.replyDraft?.viewer === selected?.conversationViewer && $props.replyDraft?.head === selected?.head ? $props.replyDraft : null
 export const initialReplyDrafts = replyDraft ? { [replyDraft.anchor]: { text: replyDraft.text, token: replyDraft.token, pending: replyDraft.pending } } : {}
 export const replyDraftStorage = 'harness.pr-reply.v1:' + JSON.stringify([activeProfileId, selected?.url, selected?.head, selected?.conversationViewer])
+export const inlineReviewAvailable = Boolean(selected?.reviewViewer && selected?.head && selected?.baseSha)
+export const inlineReviewAuthor = selected?.reviewViewer?.login.toLowerCase() === selected?.author?.toLowerCase()
+export const inlineReviewStorage = 'harness.pr-review.v1:' + JSON.stringify([activeProfileId, selected?.url, selected?.reviewViewer?.id])
+export const inlineReviewNotice = $props.inlineReviewNotice
+export const inlineReviewAction = $props.inlineReviewAction
+export const inlineReviewEditId = $props.inlineReviewEdit
 export const conversations = (selected?.files || []).flatMap(file => file.sections.flatMap(section => section.conversations)).concat(selected?.detachedConversations || [])
 export const initialConversationStates = Object.fromEntries(conversations.map(thread => [thread.anchor, {
   isResolved: thread.isResolved, viewerCanResolve: thread.viewerCanResolve, viewerCanUnresolve: thread.viewerCanUnresolve,
@@ -103,6 +109,258 @@ const patchBase = @json(commentsBase)
 const patchHead = @json(selected?.head || '')
 const patchBaseSha = @json(selected?.baseSha || '')
 const patchDesktop = useNativeDesktop()
+const inlineReviewApi = @json(inlineReviewAction)
+const inlineReviewViewer = @json(selected?.reviewViewer?.id || '')
+const inlineReviewReady = state(Boolean(inlineReviewViewer))
+const inlineReviewPage = @json(detailPage)
+const requestedReviewEdit = @json(inlineReviewEditId)
+const reviewComposerBox = useRef('reviewComposerBox')
+const reviewPreviewBox = useRef('reviewPreviewBox')
+const reviewDialogBox = useRef('reviewDialogBox')
+const reviewOpenButton = useRef('reviewOpenButton')
+const emptyInlineReview = { head: patchHead, base: patchBaseSha, comments: [], summary: '', verdict: 'COMMENT', intent: '' }
+const inlineReview = useLocalStorage(@json(inlineReviewStorage), emptyInlineReview)
+const reviewEditor = state(null)
+const reviewEditorError = state('')
+const submittingInlineReview = state(false)
+const inlineReviewMessage = state('')
+const draftHasReview = value => Boolean(value.comments.length || value.summary.trim() || value.verdict !== 'COMMENT' || value.intent)
+const reviewIsStale = derived(() => draftHasReview(inlineReview()) && (inlineReview().head !== patchHead || inlineReview().base !== patchBaseSha))
+const reviewIsLocked = derived(() => Boolean(inlineReview().intent || submittingInlineReview()))
+
+function reviewButtonLabel() {
+  const count = inlineReview().comments.length
+  return count ? 'Review pull request, ' + count + (count === 1 ? ' comment pending' : ' comments pending') : 'Review pull request'
+}
+
+function reviewLocation(comment) {
+  return patchLabel(comment.start) + (comment.line === comment.start ? '' : ' to ' + patchLabel(comment.line).toLowerCase())
+}
+
+function matchingReviewComment(selection) {
+  return inlineReview().comments.find(comment =>
+    (comment.line === selection.line && comment.start === selection.start) || (comment.start === selection.line && comment.line === selection.start))
+}
+
+const selectedReviewDraft = derived(() => {
+  const selection = patchSelection()
+  return selection && !reviewIsStale() ? matchingReviewComment(selection) : null
+})
+
+function placeReviewPreview(draft) {
+  const preview = reviewPreviewBox.current
+  if (!preview) return
+  const line = draft && preview.closest('[data-pr-detail-content]').querySelector('#' + draft.line)
+  preview.hidden = !line || Boolean(reviewEditor())
+  if (line) line.closest('[data-pr-line-row]').after(preview)
+}
+
+effect(() => {
+  const draft = selectedReviewDraft()
+  const editor = reviewEditor()
+  void nextTick(() => placeReviewPreview(editor ? null : draft))
+})
+
+function placeReviewEditor(draft) {
+  const composer = reviewComposerBox.current
+  const line = composer?.closest('[data-pr-detail-content]').querySelector('#' + draft.line)
+  if (!line || reviewIsLocked() || reviewIsStale()) return false
+  line.closest('[data-pr-line-row]').after(composer)
+  reviewEditor.set(draft)
+  reviewEditorError.set('')
+  composer.hidden = false
+  const input = composer.querySelector('textarea')
+  input.value = draft.body
+  input.focus({ preventScroll: true })
+  composer.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  return true
+}
+
+function openReviewEditor(event) {
+  const selection = patchSelection()
+  if (!selection) return
+  const file = event.currentTarget.closest('[data-pr-detail-content]').querySelector('#' + selection.file)
+  if (!file) return
+  placeReviewEditor(matchingReviewComment(selection) || { id: crypto.randomUUID(), path: file.dataset.prFilePath, page: inlineReviewPage,
+    line: selection.line, start: selection.start, body: '' })
+}
+
+function closeReviewEditor() {
+  const draft = reviewEditor()
+  const composer = reviewComposerBox.current
+  if (!composer || !draft) return
+  composer.hidden = true
+  reviewEditor.set(null)
+  const scope = composer.closest('[data-pr-detail-content]')
+  scope.querySelector('#' + draft.line)?.focus({ preventScroll: true })
+}
+
+function reviewEditorKeys(event) {
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeReviewEditor()
+  }
+  else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    event.currentTarget.form.requestSubmit()
+  }
+}
+
+function saveReviewComment(event) {
+  const draft = reviewEditor()
+  if (!draft || reviewIsLocked() || reviewIsStale()) return
+  const body = event.currentTarget.elements.namedItem('body').value.trim()
+  if (!body || new TextEncoder().encode(body).byteLength > 8192) {
+    reviewEditorError.set('Enter a comment of up to 8 KB.')
+    return
+  }
+  const current = inlineReview()
+  const comments = current.comments.some(comment => comment.id === draft.id)
+    ? current.comments.map(comment => comment.id === draft.id ? { ...draft, body } : comment)
+    : [...current.comments, { ...draft, body }]
+  if (comments.length > 50) {
+    reviewEditorError.set('A review can contain up to 50 comments.')
+    return
+  }
+  const bytes = new TextEncoder().encode(current.summary.trim() + comments.map(comment => comment.body).join('')).byteLength
+  if (bytes > 65_536) {
+    reviewEditorError.set('Keep the review and its comments within 64 KB.')
+    return
+  }
+  inlineReview.set({ ...current, head: patchHead, base: patchBaseSha, comments })
+  patchMessage.set('Comment added to review.')
+  closeReviewEditor()
+}
+
+function openInlineReview() {
+  const dialog = reviewDialogBox.current
+  if (dialog?.open) return
+  closeReviewEditor()
+  const form = dialog?.querySelector('form')
+  if (!form) return
+  const current = inlineReview()
+  form.elements.namedItem('summary').value = current.summary
+  form.querySelectorAll('input[name="verdict"]').forEach(option => { option.checked = option.value === current.verdict })
+  inlineReviewMessage.set(current.intent ? 'Check GitHub for the outcome of the submitted review.' : '')
+  dialog.showModal()
+}
+
+function closeInlineReview() {
+  reviewDialogBox.current?.close()
+}
+
+function finishInlineReviewClose() {
+  reviewOpenButton.current?.focus()
+}
+
+function editStagedComment(id) {
+  const draft = inlineReview().comments.find(comment => comment.id === id)
+  if (!draft || reviewIsLocked() || reviewIsStale()) return
+  const view = reviewDialogBox.current.ownerDocument.defaultView
+  const target = new URL(patchBase, view.location.origin)
+  target.searchParams.set('detailPage', String(draft.page))
+  target.searchParams.set('reviewHead', patchHead)
+  target.searchParams.set('reviewBase', patchBaseSha)
+  target.searchParams.set('reviewLine', draft.line)
+  if (draft.line !== draft.start) target.searchParams.set('reviewStart', draft.start)
+  target.searchParams.set('reviewEdit', id)
+  target.hash = draft.line
+  view.location.assign(target.href)
+}
+
+if (requestedReviewEdit) void nextTick(() => {
+  const draft = inlineReview().comments.find(comment => comment.id === requestedReviewEdit)
+  if (draft && placeReviewEditor(draft)) {
+    const view = reviewComposerBox.current.ownerDocument.defaultView
+    const address = new URL(view.location.href)
+    address.searchParams.delete('reviewEdit')
+    view.history.replaceState(view.history.state, '', address)
+  }
+})
+
+function removeStagedComment(id) {
+  if (reviewIsLocked()) return
+  inlineReview.update(value => ({ ...value, comments: value.comments.filter(comment => comment.id !== id) }))
+  reviewDialogBox.current?.querySelector('[data-pr-review-close]')?.focus()
+}
+
+function updateReviewSummary(event) {
+  if (reviewIsLocked() || reviewIsStale()) return
+  inlineReview.update(value => ({ ...value, head: patchHead, base: patchBaseSha, summary: event.currentTarget.value }))
+}
+
+function chooseReviewVerdict(event) {
+  if (reviewIsLocked() || reviewIsStale()) return
+  inlineReview.update(value => ({ ...value, head: patchHead, base: patchBaseSha, verdict: event.currentTarget.value }))
+}
+
+function resetInlineReview() {
+  if (reviewIsLocked()) return
+  inlineReview.set(emptyInlineReview)
+  const form = reviewDialogBox.current.querySelector('form')
+  form.elements.namedItem('summary').value = ''
+  const verdict = form.querySelector('[name="verdict"][value="COMMENT"]')
+  if (verdict) verdict.checked = true
+  inlineReviewMessage.set('Draft discarded.')
+}
+
+function inlineReviewCanSubmit() {
+  const value = inlineReview()
+  return !submittingInlineReview() && Boolean(value.intent || (!reviewIsStale()
+    && (value.verdict === 'APPROVE' || value.summary.trim() || value.comments.length)))
+}
+
+function reviewSummaryKeys(event) {
+  if (event.isComposing || event.keyCode === 229 || event.repeat) return
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    event.currentTarget.form.requestSubmit()
+  }
+}
+
+async function submitInlineReview(event) {
+  if (!inlineReviewCanSubmit()) return
+  const form = event.currentTarget
+  const current = inlineReview()
+  const summary = current.summary.trim()
+  const encode = new TextEncoder()
+  if (encode.encode(summary).byteLength > 16_384 || encode.encode(summary + current.comments.map(comment => comment.body).join('')).byteLength > 65_536) {
+    inlineReviewMessage.set('Keep the summary within 16 KB and the full review within 64 KB.')
+    return
+  }
+  const intent = current.intent || crypto.randomUUID()
+  inlineReview.set({ ...current, intent })
+  submittingInlineReview.set(true)
+  inlineReviewMessage.set(current.intent ? 'Checking GitHub…' : 'Submitting review…')
+  const view = form.ownerDocument.defaultView
+  const target = new URL(inlineReviewApi, view.location.origin)
+  const selection = patchSelection()
+  if (selection) {
+    target.searchParams.set('reviewLine', selection.line)
+    target.searchParams.set('reviewStart', selection.start)
+    target.searchParams.set('reviewHead', patchHead)
+    target.searchParams.set('reviewBase', patchBaseSha)
+  }
+  const body = new URLSearchParams({ intent, head: current.head, base: current.base, viewer: inlineReviewViewer,
+    verdict: current.verdict, summary, drafts: JSON.stringify(current.comments) })
+  try {
+    const response = await fetch(target.href, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const result = await response.json()
+    if (result.result === 'posted' && result.location?.startsWith('/pull-requests?')) {
+      if (inlineReview().intent === intent) inlineReview.set(emptyInlineReview)
+      view.location.assign(result.location)
+      return
+    }
+    if (!result.result) throw new Error('Missing review outcome')
+    if (result.result !== 'pending' && (!current.intent || ['denied', 'invalid'].includes(result.result)) && inlineReview().intent === intent)
+      inlineReview.update(value => ({ ...value, intent: '' }))
+    inlineReviewMessage.set(result.message)
+  }
+  catch { inlineReviewMessage.set('Could not confirm this review. Check GitHub again.') }
+  finally { submittingInlineReview.set(false) }
+}
 
 function patchLabel(anchor) {
   const side = anchor.split('-').at(-1)
@@ -628,6 +886,15 @@ async function sendReviewReply(event) {
               @endforeach
             </ol>
           @else
+            @if(inlineReviewAvailable)
+              <div id="inline-review-controls" data-pr-review-controls>
+                <span role="status">{{ inlineReviewNotice }}</span>
+                <button type="button" data-pr-button data-pr-review-open ref="reviewOpenButton" hidden :hidden="!inlineReviewReady()"
+                  :aria-label="reviewButtonLabel()" @click="openInlineReview">Review pull request
+                  <span :hidden="!inlineReview().comments.length" :text="String(inlineReview().comments.length)" aria-hidden="true"></span>
+                </button>
+              </div>
+            @endif
             @if(!selected.files?.length)<p>No files on this page.</p>@endif
             <p data-pr-viewed-notice role="status" @if(!viewedNotice) hidden@endif :hidden="!viewedMessage()" :text="viewedMessage()">{{ viewedNotice }}</p>
             @if(trackedFiles.length)
@@ -646,6 +913,12 @@ async function sendReviewReply(event) {
             @if(selected.files?.some(file => file.sections.some(section => section.rows.length)))
               <div data-pr-line-tools @if(!linkedPatch) hidden@endif :hidden="!patchSelection()">
                 <span :text="patchSelectionLabel()">{{ linkedPatchLabel }}</span>
+                @if(inlineReviewAvailable)
+                  <button type="button" data-pr-button data-pr-review-add hidden
+                    :hidden="!patchSelection() || reviewIsLocked() || reviewIsStale()"
+                    :text="patchSelection() && matchingReviewComment(patchSelection()) ? 'Edit inline comment' : 'Add inline comment'"
+                    @click="openReviewEditor">Add inline comment</button>
+                @endif
                 <button type="button" data-pr-button hidden :hidden="!patchSelection()" :aria-pressed="String(extendPatch())"
                   :text="extendPatch() ? 'Choose end line' : 'Select range'" @click="extendPatch.set(!extendPatch())">Select range</button>
                 <a href="{{ linkedPatchHref }}" :href="patchSelectionHref()" data-pr-button data-pr-open-line-link
@@ -659,7 +932,7 @@ async function sendReviewReply(event) {
             @endif
             <ul data-pr-files>
               @foreach(selected.files || [] as file)
-                <li id="{{ file.anchor }}" @click="clickPatchLine" @keydown="navigatePatchLines">
+                <li id="{{ file.anchor }}" data-pr-file-path="{{ file.path }}" @click="clickPatchLine" @keydown="navigatePatchLines">
                   <details data-pr-file-patch @if(file.lineSelection || file.anchor === viewedAnchor || file.sections.some(section => section.conversations.some(thread => thread.anchor === conversationAnchor))) open@endif>
                     <summary>
                       <code>{{ file.path }}</code>
@@ -693,6 +966,9 @@ async function sendReviewReply(event) {
                 </li>
               @endforeach
             </ul>
+            @if(inlineReviewAvailable)
+              @include('../partials/harness-pr-inline-review')
+            @endif
             @if(selected.detachedConversations?.length)
               <details data-pr-other-conversations @if(selected.detachedConversations.some(thread => thread.anchor === conversationAnchor)) open@endif>
                 <summary>Conversations outside this file page</summary>
