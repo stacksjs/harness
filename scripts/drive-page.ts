@@ -6385,6 +6385,25 @@ try {
   rmSync(workingAdded)
   await clonePage.waitForLoadState('networkidle')
 
+  const previousCommitBranch = fixtureGit('branch', '--show-current')
+  const previousCommitHead = fixtureGit('rev-parse', 'HEAD')
+  writeFileSync(fixturePath, 'Reviewed feature branch note\n')
+  await openWorkingCommit.click()
+  const commitToFeature = workingDialog.getByRole('button', { name: 'Commit on new branch', exact: true })
+  await commitToFeature.waitFor()
+  await workingMessage.fill('Review working files on a feature branch')
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-working-commit-branch-${width}x${height}`, clonePage)
+  }
+  const featureBranch = 'feature/review-working-files-on-a-feature-branch'
+  await commitToFeature.click()
+  await workingDialog.waitFor({ state: 'hidden' })
+  await clonePage.getByText(new RegExp('^Committed [0-9a-f]{7} on ' + featureBranch + '\\.$', 'u')).waitFor()
+  check('committing on a new branch switches the managed checkout and leaves its previous branch unchanged',
+    fixtureGit('branch', '--show-current') === featureBranch && fixtureGit('rev-parse', 'refs/heads/' + previousCommitBranch) === previousCommitHead
+    && fixtureGit('show', 'HEAD:review.txt') === 'Reviewed feature branch note')
+
   const syncRemote = join(driveRoot, 'sync-fixture.git')
   const syncPeer = join(driveRoot, 'sync-peer')
   execFileSync('git', ['init', '--bare', '-q', syncRemote])

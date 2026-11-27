@@ -1,6 +1,6 @@
 <dialog data-repository-commit-dialog ref="repositoryCommitDialogBox" aria-labelledby="harness-repository-commit-title"
   @cancel.prevent="closeRepositoryCommit" @click.self="closeRepositoryCommit">
-  <form data-share-dialog-body @submit.prevent="submitRepositoryCommit">
+  <form data-share-dialog-body @submit.prevent="submitRepositoryCommit()">
     <h2 id="harness-repository-commit-title" :text="repositoryCommitStaged() ? 'Commit staged changes' : 'Commit changes'">Commit staged changes</h2>
     <p :hidden="!repositoryCommitPreview()?.branch" :text="'Branch ' + repositoryCommitPreview()?.branch"></p>
     <p hidden :hidden="repositoryCommitStaged()" class="text-neutral-600 dark:text-neutral-300">This commits the current working contents of the selected files.</p>
@@ -46,12 +46,15 @@
     <label for="harness-repository-commit-message" class="font-medium">Commit message</label>
     <textarea id="harness-repository-commit-message" rows="3" maxlength="4096" required autofocus
       :value="repositoryCommitMessage()" :disabled="repositoryCommitBusy()" @input="repositoryCommitMessage.set($event.target.value)"></textarea>
-    <div data-share-dialog-actions>
+    <div data-share-dialog-actions class="flex-wrap">
       <button type="button" @click="closeRepositoryCommit" :disabled="repositoryCommitBusy()">Cancel</button>
       <button type="button" @click="loadRepositoryCommit" :hidden="!repositoryCommitError()" :disabled="repositoryCommitBusy() || repositoryCommitLoading()"
         :text="repositoryCommitStaged() ? 'Refresh staged files' : 'Refresh changed files'">Refresh staged files</button>
+      <button type="button" hidden :hidden="repositoryCommitStaged() || !repositoryCommitPreview()?.canCreateBranch"
+        @click="submitRepositoryCommit(true)" :disabled="repositoryCommitBusy() || repositoryCommitLoading() || Boolean(repositoryCommitError()) || !repositoryCommitMessage().trim() || !repositoryCommitIncludedCount()"
+        :text="repositoryCommitBusy() && repositoryCommitNewBranch() ? 'Committing…' : 'Commit on new branch'">Commit on new branch</button>
       <button type="submit" data-share-primary :disabled="repositoryCommitBusy() || repositoryCommitLoading() || Boolean(repositoryCommitError()) || !repositoryCommitMessage().trim() || !repositoryCommitIncludedCount()"
-        :text="repositoryCommitBusy() ? 'Committing…' : 'Commit'">Commit</button>
+        :text="repositoryCommitBusy() && !repositoryCommitNewBranch() ? 'Committing…' : 'Commit'">Commit</button>
     </div>
   </form>
 </dialog>

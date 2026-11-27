@@ -2517,6 +2517,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const repositoryCommitStaged = derived(() => repositoryCommitScope() === 'staged')
   const repositoryCommitPreview = state(null)
   const repositoryCommitMessage = state('')
+  const repositoryCommitNewBranch = state(false)
   const repositoryCommitLimit = state(40)
   const repositoryCommitEditing = state(false)
   const repositoryCommitExcluded = state(new Set())
@@ -5146,6 +5147,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     repositoryCommitKey = diffRepository()
     repositoryCommitScope.set(scope)
     repositoryCommitMessage.set('')
+    repositoryCommitNewBranch.set(false)
     repositoryCommitResult.set('')
     repositoryCommitPreview.set(null)
     repositoryCommitExcluded.set(new Set())
@@ -5208,22 +5210,24 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
   }
 
-  async function submitRepositoryCommit() {
+  async function submitRepositoryCommit(newBranch = false) {
     const preview = repositoryCommitPreview()
     const message = repositoryCommitMessage().trim()
     if (!preview || !repositoryCommitIncludedCount() || !message || repositoryCommitLoading() || repositoryCommitBusy() || repositoryCommitError()) return
     const request = new AbortController()
     repositoryCommitRequest = request
+    repositoryCommitNewBranch.set(newBranch)
     repositoryCommitBusy.set(true)
     try {
       const response = await fetch(repositoryCommitAddress(), {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message, revision: preview.revision, excluded: [...repositoryCommitExcluded()] }), signal: request.signal,
+        body: JSON.stringify({ message, revision: preview.revision, excluded: [...repositoryCommitExcluded()],
+          newBranch }), signal: request.signal,
       })
       const value = await response.json().catch(() => ({}))
       if (request.signal.aborted) return
       if (!response.ok || !value.commit) throw new Error(value.error || 'Could not confirm the commit.')
-      repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + '.' + (value.warning ? ' ' + value.warning : ''))
+      repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + (value.branch ? ' on ' + value.branch : '') + '.' + (value.warning ? ' ' + value.warning : ''))
       repositoryCommitBusy.set(false)
       repositoryCommitDialog.current?.close()
       diffClose.current?.focus()
@@ -7891,6 +7895,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       }
       if (payload.type === 'session.pull-request-linked') rememberRepositoryPullRequest(payload.pullRequest)
       if (payload.type === 'session.worktree-reserved') worktreeSetup.set(Boolean(payload.intent?.layout))
+      if (payload.type === 'session.git-branch-resolved') {
+        if (payload.worktreeBranch) workspaceBranch.set(payload.worktreeBranch)
+        if (diffOpen()) refreshWorkspaceDiff()
+      }
       if (payload.type === 'session.isolated') {
         if (sessionPullRequest && !turns.length && !liveTurns().length && uiState() === 'failed') {
           setSessionState('idle')
