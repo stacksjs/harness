@@ -15,10 +15,11 @@
  */
 import type { ConversationRewindInput, Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from '../packages/server/test/fixtures/git-http'
+import { fixtureGitHubCli } from '../packages/server/test/fixtures/github-cli'
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { delimiter, join, sep } from 'node:path'
 import process from 'node:process'
 import { chromium, webkit } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
@@ -6235,6 +6236,72 @@ try {
     && execFileSync('git', ['--git-dir', syncRemote, 'rev-parse', 'refs/heads/' + syncBranch], { encoding: 'utf8' }).trim() === upstreamHead
     && fixtureGit('rev-parse', '--abbrev-ref', '@{upstream}') === 'origin/' + syncBranch)
   await clonePage.waitForLoadState('networkidle')
+
+  const githubRemote = 'https://github.com/fixture/workspace-pr-review.git'
+  fixtureGit('remote', 'set-url', 'publish', githubRemote)
+  fixtureGit('config', 'url.' + publishRemote + '.insteadOf', githubRemote)
+  execFileSync('git', ['--git-dir', publishRemote, 'update-ref', 'refs/heads/main', upstreamHead])
+  const github = fixtureGitHubCli(driveRoot, { 'fixture/workspace-pr-review': { bare: publishRemote } })
+  const toolPath = process.env.PATH
+  process.env.PATH = github.bin + delimiter + toolPath
+  try {
+    writeFileSync(fixturePath, 'Contents approved for PR review\n')
+    fixtureGit('commit', '-qam', 'Add a release note')
+    const head = fixtureGit('rev-parse', 'HEAD')
+    const openPr = clonePage.locator('[data-repository-pull-request-open]')
+    const prDialog = clonePage.getByRole('dialog', { name: 'Create pull request' })
+    const account = prDialog.getByText('fixture-user', { exact: true })
+    await openPr.click()
+    await account.waitFor()
+    await clonePage.keyboard.press('Escape')
+    await prDialog.waitFor({ state: 'hidden' })
+    check('cancelling the PR review leaves the published head unchanged and returns focus',
+      execFileSync('git', ['--git-dir', publishRemote, 'rev-parse', 'refs/heads/' + syncBranch], { encoding: 'utf8' }).trim() !== head
+      && await openPr.evaluate(button => button === document.activeElement))
+    await openPr.click()
+    await account.waitFor()
+    const baseInput = prDialog.getByRole('textbox', { name: 'Base branch' })
+    await baseInput.fill('missing')
+    await prDialog.getByRole('button', { name: 'Refresh review' }).click()
+    await prDialog.getByRole('alert').getByText('GitHub could not find the selected base branch.').waitFor()
+    await baseInput.fill('main')
+    await prDialog.getByRole('button', { name: 'Refresh review' }).click()
+    const createPr = prDialog.getByRole('button', { name: 'Push and create' })
+    const title = prDialog.getByRole('textbox', { name: 'Title' })
+    await title.fill('Verify the draft pull request')
+    await prDialog.getByRole('textbox', { name: /Description/ }).fill('Synthetic branch content for review.')
+    await prDialog.getByRole('checkbox', { name: 'Open as draft' }).check()
+    await clonePage.waitForFunction(() => {
+      const button = document.querySelector<HTMLButtonElement>('[data-repository-pull-request-confirm]')
+      return button && !button.disabled
+    })
+    check('the PR inputs use the workspace appearance', await title.evaluate(input =>
+      getComputedStyle(input).backgroundColor === getComputedStyle(input.closest('form')!.querySelector('textarea')!).backgroundColor))
+    for (const [width, height] of workspaceViewports) {
+      await clonePage.setViewportSize({ width, height })
+      await capture(`workspace-create-pull-request-${width}x${height}`, clonePage)
+    }
+    await createPr.click()
+    await prDialog.waitFor({ state: 'hidden' })
+    const linkedPr = clonePage.locator('[data-repository-pull-request-link]')
+    const address = 'https://github.com/fixture/workspace-pr-review/pull/1'
+    const data = JSON.parse(readFileSync(github.state, 'utf8'))
+    check('the reviewed branch is published and a draft PR is created with its entered title',
+      data.posts === 1 && data.pulls[0].draft === true && data.pulls[0].head.sha === head
+      && data.pulls[0].title === 'Verify the draft pull request'
+      && await linkedPr.getAttribute('href') === address)
+    await clonePage.setViewportSize({ width: 1280, height: 800 })
+    await clonePage.reload()
+    await clonePage.getByRole('button', { name: 'Changes', exact: true }).click()
+    await linkedPr.waitFor()
+    await openPr.click()
+    await prDialog.getByRole('link', { name: 'Open existing pull request #1' }).waitFor()
+    await prDialog.getByRole('button', { name: 'Link pull request' }).click()
+    await prDialog.waitFor({ state: 'hidden' })
+    check('reload restores the scoped PR link and linking again does not create another PR',
+      await linkedPr.getAttribute('href') === address && JSON.parse(readFileSync(github.state, 'utf8')).posts === 1)
+  }
+  finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 
 }
 finally {

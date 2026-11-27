@@ -1056,6 +1056,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   @include('../partials/harness-prompt-link-dialogs')
   @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-commit')
   @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-sync')
+  @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-pull-request')
   @include('../partials/harness-project-clone')
 
   <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
@@ -2425,6 +2426,31 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let repositorySyncKey
   let repositorySyncRequest
   let repositoryCommitRequest
+  const repositoryPullRequestDialog = useRef('repositoryPullRequestDialogBox')
+  const repositoryPullRequestBase = useRef('repositoryPullRequestBaseBox')
+  const repositoryPullRequestTitle = useRef('repositoryPullRequestTitleBox')
+  const repositoryPullRequestBody = useRef('repositoryPullRequestBodyBox')
+  const repositoryPullRequestDraft = useRef('repositoryPullRequestDraftBox')
+  const repositoryPullRequestPreview = state(null)
+  const repositoryPullRequestBaseText = state('')
+  const repositoryPullRequestTitleText = state('')
+  const repositoryPullRequestError = state('')
+  const repositoryPullRequestLoading = state(false)
+  const repositoryPullRequestBusy = state(false)
+  const repositoryPullRequestResult = state(null)
+  const linkedRepositoryPullRequests = state(@json(activeSession?.linkedPullRequests || []))
+  const selectedRepositoryPullRequest = derived(() => linkedRepositoryPullRequests().findLast(link => link.repositoryKey === diffRepository()))
+  const repositoryPullRequestBaseChanged = derived(() => Boolean(repositoryPullRequestPreview()
+    && repositoryPullRequestBaseText().trim() !== repositoryPullRequestPreview().baseRef))
+  const repositoryPullRequestCanSubmit = derived(() => Boolean(repositoryPullRequestPreview()?.revision
+    && !repositoryPullRequestBaseChanged() && !repositoryPullRequestLoading() && !repositoryPullRequestBusy() && !repositoryPullRequestError()
+    && (repositoryPullRequestPreview().existing || repositoryPullRequestTitleText().trim())))
+  const repositoryPullRequestSubmitLabel = derived(() => repositoryPullRequestBusy() ? 'Working…'
+    : repositoryPullRequestPreview()?.existing ? 'Link pull request'
+      : repositoryPullRequestPreview()?.publish ? 'Push and create' : 'Create pull request')
+  let repositoryPullRequestTrigger
+  let repositoryPullRequestKey
+  let repositoryPullRequestRequest
   const changesPane = useRef('changesPane')
   const workspaceFilesOpen = state(false)
   const workspaceFileState = state(null)
@@ -2913,6 +2939,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     diffGitStatusStop?.()
     repositoryCommitRequest?.abort()
     repositorySyncRequest?.abort()
+    repositoryPullRequestRequest?.abort()
     providerCatalogRequest?.abort()
     draftWorktreeRequest?.abort()
     shareRepositoryRequest?.abort()
@@ -4616,6 +4643,111 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function showMoreDiffRows(path) {
     setDiffFileLimit(path, (diffFileLimits().get(path) || 0) + diffPageSize)
+  }
+
+  function rememberRepositoryPullRequest(link) {
+    linkedRepositoryPullRequests.update(current => current.some(item => item.repositoryKey === link.repositoryKey
+      && item.repository === link.repository && item.number === link.number) ? current : current.concat(link))
+  }
+
+  function pullRequestLink(link) {
+    return link ? 'https://github.com/' + link.repository + '/pull/' + link.number : undefined
+  }
+
+  function openRepositoryPullRequest(event) {
+    repositoryPullRequestTrigger = event.currentTarget
+    repositoryPullRequestKey = diffRepository()
+    repositoryPullRequestPreview.set(null)
+    repositoryPullRequestResult.set(null)
+    repositoryPullRequestBaseText.set('')
+    repositoryPullRequestTitleText.set('')
+    if (repositoryPullRequestBase.current) repositoryPullRequestBase.current.value = ''
+    if (repositoryPullRequestTitle.current) repositoryPullRequestTitle.current.value = ''
+    if (repositoryPullRequestBody.current) repositoryPullRequestBody.current.value = ''
+    if (repositoryPullRequestDraft.current) repositoryPullRequestDraft.current.checked = false
+    repositoryPullRequestDialog.current?.showModal()
+    void runRepositoryPullRequest()
+  }
+
+  function closeRepositoryPullRequest() {
+    if (repositoryPullRequestBusy()) return
+    repositoryPullRequestRequest?.abort()
+    repositoryPullRequestDialog.current?.close()
+    if (repositoryPullRequestTrigger?.offsetWidth) repositoryPullRequestTrigger.focus()
+    else diffClose.current?.focus()
+  }
+
+  function setRepositoryPullRequestBase(value) {
+    repositoryPullRequestBaseText.set(value)
+  }
+
+  function setRepositoryPullRequestTitle(value) {
+    repositoryPullRequestTitleText.set(value)
+  }
+
+  async function runRepositoryPullRequest(input) {
+    repositoryPullRequestRequest?.abort()
+    const request = new AbortController()
+    repositoryPullRequestRequest = request
+    repositoryPullRequestError.set('')
+    repositoryPullRequestLoading.set(!input)
+    repositoryPullRequestBusy.set(Boolean(input))
+    const params = new URLSearchParams()
+    if (repositoryPullRequestKey) params.set('repository', repositoryPullRequestKey)
+    const base = repositoryPullRequestBaseText().trim()
+    if (base && !input) params.set('base', base)
+    try {
+      const response = await fetch('/s/' + sessionId + '/git/pull-request?' + params, {
+        signal: request.signal,
+        ...(input ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) } : {}),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(data.error || 'Could not prepare the pull request.')
+      if (input) {
+        const link = data.pullRequest
+        if (data.linked) rememberRepositoryPullRequest({ repository: link.repository, number: link.number, repositoryKey: repositoryPullRequestKey })
+        repositoryPullRequestResult.set({ repository: repositoryPullRequestKey, url: link.url, number: link.number,
+          message: data.headChanged ? 'The pull request is open. GitHub reports a different head commit.'
+            : data.linked ? (data.existing ? 'Linked pull request' : 'Opened pull request')
+              : 'Pull request open on GitHub. Refresh the review to link it to this thread.' })
+        repositoryPullRequestBusy.set(false)
+        closeRepositoryPullRequest()
+        diffClose.current?.focus()
+        refreshWorkspaceDiff()
+      }
+      else {
+        repositoryPullRequestPreview.set(data)
+        repositoryPullRequestBaseText.set(data.baseRef)
+        if (repositoryPullRequestBase.current) repositoryPullRequestBase.current.value = data.baseRef
+        if (!repositoryPullRequestTitleText().trim() && repositoryPullRequestTitle.current) {
+          repositoryPullRequestTitleText.set(data.title)
+          repositoryPullRequestTitle.current.value = data.title
+        }
+        repositoryPullRequestError.set(data.problem || '')
+      }
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositoryPullRequestError.set(error.message || 'Could not complete the pull request.')
+    }
+    finally {
+      if (repositoryPullRequestRequest === request) {
+        repositoryPullRequestLoading.set(false)
+        repositoryPullRequestBusy.set(false)
+        repositoryPullRequestRequest = undefined
+      }
+    }
+  }
+
+  function refreshRepositoryPullRequest() {
+    if (!repositoryPullRequestLoading() && !repositoryPullRequestBusy()) void runRepositoryPullRequest()
+  }
+
+  function submitRepositoryPullRequest() {
+    if (!repositoryPullRequestCanSubmit()) return
+    const { revision, baseRef } = repositoryPullRequestPreview()
+    void runRepositoryPullRequest({ revision, baseRef, title: repositoryPullRequestTitle.current?.value || '',
+      body: repositoryPullRequestBody.current?.value || '', draft: repositoryPullRequestDraft.current?.checked === true })
   }
 
   function openRepositorySync(action, event) {
@@ -6874,6 +7006,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     if (event.defaultPrevented) return
+    if (repositoryPullRequestDialog.current?.open) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeRepositoryPullRequest()
+      }
+      return
+    }
     if (repositorySyncDialog.current?.open) {
       if (event.key === 'Escape') {
         event.preventDefault()
@@ -7223,6 +7362,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
         if (typeof payload.changes.settledAt === 'number') void refreshProjectSettlement()
       }
+      if (payload.type === 'session.pull-request-linked') rememberRepositoryPullRequest(payload.pullRequest)
       if (payload.type === 'session.worktree-reserved') worktreeSetup.set(Boolean(payload.intent?.layout))
       if (payload.type === 'session.isolated') {
         if (sessionPullRequest && !turns.length && !liveTurns().length && uiState() === 'failed') {

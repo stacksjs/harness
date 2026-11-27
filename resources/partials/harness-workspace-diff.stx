@@ -83,12 +83,21 @@
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('pull', $event)" class="min-h-10 font-medium underline underline-offset-2">Pull</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('push', $event)" class="min-h-10 font-medium underline underline-offset-2">Push</button>
+        <button type="button" data-repository-pull-request-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryPullRequest" class="min-h-10 font-medium underline underline-offset-2">Create pull request</button>
       </div>
     @endif
   </section>
   <p role="status" data-repository-commit-result hidden :hidden="!repositoryCommitResult()" :text="repositoryCommitResult()" class="px-3 py-1 text-xs"></p>
   <p role="status" data-repository-sync-result hidden :hidden="!repositorySyncResult() || repositorySyncResult()?.repository !== diffRepository()"
     :text="repositorySyncResult()?.message" class="px-3 py-1 text-xs"></p>
+  <div class="flex flex-wrap gap-x-2 items-baseline px-3 py-1 text-xs"
+    :hidden="!selectedRepositoryPullRequest() && repositoryPullRequestResult()?.repository !== diffRepository()">
+    <p role="status" :hidden="repositoryPullRequestResult()?.repository !== diffRepository()" :text="repositoryPullRequestResult()?.message"></p>
+    <a data-repository-pull-request-link target="_blank" rel="noopener noreferrer" class="content-center min-h-8 underline underline-offset-2"
+      :href="repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().url : pullRequestLink(selectedRepositoryPullRequest())"
+      :text="'GitHub #' + (repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().number : selectedRepositoryPullRequest()?.number)"></a>
+  </div>
   <div data-diff-body>
     <div data-diff-overview>
       <p data-diff-status role="status" :text="diffStatus()">Loading…</p>

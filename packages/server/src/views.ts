@@ -221,6 +221,7 @@ export function viewProps(state: HarnessState, options: {
           id: active.id,
           title: threadTitle(active),
           navigation: active.navigation,
+          linkedPullRequests: active.linkedPullRequests,
           pullRequest: active.pullRequest ? {
             url: 'https://github.com/' + active.pullRequest.repository + '/pull/' + active.pullRequest.number,
             label: active.pullRequest.repository + '#' + active.pullRequest.number,
