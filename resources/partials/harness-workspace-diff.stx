@@ -76,11 +76,19 @@
     <span :hidden="!diffStatusTracking()" :text="diffStatusTracking()"></span>
     <span role="status" :text="diffStatusChanges()"></span>
     @if(workspaceEditorAllowed)
-      <button type="button" data-repository-commit-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.staged || !diffGitStatus()?.branch || Boolean(diffGitStatus()?.conflicted)"
-        :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit" class="ms-auto min-h-10 font-medium underline underline-offset-2">Commit staged</button>
+      <div data-repository-actions aria-label="Git actions" role="group" class="flex flex-wrap gap-x-3 ms-auto">
+        <button type="button" data-repository-commit-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.staged || !diffGitStatus()?.branch || Boolean(diffGitStatus()?.conflicted)"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit" class="min-h-10 font-medium underline underline-offset-2">Commit staged</button>
+        <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.upstream || !diffGitStatus()?.branch"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('pull', $event)" class="min-h-10 font-medium underline underline-offset-2">Pull</button>
+        <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('push', $event)" class="min-h-10 font-medium underline underline-offset-2">Push</button>
+      </div>
     @endif
   </section>
   <p role="status" data-repository-commit-result hidden :hidden="!repositoryCommitResult()" :text="repositoryCommitResult()" class="px-3 py-1 text-xs"></p>
+  <p role="status" data-repository-sync-result hidden :hidden="!repositorySyncResult() || repositorySyncResult()?.repository !== diffRepository()"
+    :text="repositorySyncResult()?.message" class="px-3 py-1 text-xs"></p>
   <div data-diff-body>
     <div data-diff-overview>
       <p data-diff-status role="status" :text="diffStatus()">Loading…</p>

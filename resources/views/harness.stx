@@ -1055,6 +1055,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   @include('../partials/harness-prompt-link-dialogs')
   @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-commit')
+  @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-sync')
   @include('../partials/harness-project-clone')
 
   <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
@@ -2404,6 +2405,26 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const repositoryCommitBusy = state(false)
   let repositoryCommitTrigger
   let repositoryCommitKey
+  const repositorySyncDialog = useRef('repositorySyncDialogBox')
+  const repositorySyncAction = state('push')
+  const repositorySyncPreview = state(null)
+  const repositorySyncError = state('')
+  const repositorySyncResult = state(null)
+  const repositorySyncLoading = state(false)
+  const repositorySyncBusy = state(false)
+  const repositorySyncTarget = derived(() => {
+    const preview = repositorySyncPreview()
+    return preview?.remote ? preview.remote + '/' + preview.ref.replace(/^refs\/heads\//u, '') : ''
+  })
+  const repositorySyncDescription = derived(() => repositorySyncAction() === 'pull'
+    ? 'Fast-forward the checked-out branch from its remote.'
+    : repositorySyncPreview()?.firstPush
+      ? 'Publish this branch and set its upstream.'
+      : repositorySyncPreview()?.defaultTarget ? 'Send local commits directly to the remote’s default branch.'
+        : 'Send local commits to the named remote branch.')
+  let repositorySyncTrigger
+  let repositorySyncKey
+  let repositorySyncRequest
   let repositoryCommitRequest
   const changesPane = useRef('changesPane')
   const workspaceFilesOpen = state(false)
@@ -2892,6 +2913,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     workspaceStatusPaused = true
     diffGitStatusStop?.()
     repositoryCommitRequest?.abort()
+    repositorySyncRequest?.abort()
     providerCatalogRequest?.abort()
     draftWorktreeRequest?.abort()
     shareRepositoryRequest?.abort()
@@ -4593,6 +4615,73 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function showMoreDiffRows(path) {
     setDiffFileLimit(path, (diffFileLimits().get(path) || 0) + diffPageSize)
+  }
+
+  function openRepositorySync(action, event) {
+    repositorySyncTrigger = event.currentTarget
+    repositorySyncKey = diffRepository()
+    repositorySyncAction.set(action)
+    repositorySyncResult.set(null)
+    repositorySyncDialog.current?.showModal()
+    void loadRepositorySync()
+  }
+
+  function closeRepositorySync() {
+    if (repositorySyncBusy()) return
+    repositorySyncRequest?.abort()
+    repositorySyncDialog.current?.close()
+    if (repositorySyncTrigger?.offsetWidth) repositorySyncTrigger.focus()
+    else diffClose.current?.focus()
+  }
+
+  async function runRepositorySync(revision) {
+    repositorySyncRequest?.abort()
+    const request = new AbortController()
+    repositorySyncRequest = request
+    repositorySyncError.set('')
+    repositorySyncBusy.set(Boolean(revision))
+    repositorySyncLoading.set(!revision)
+    if (!revision) repositorySyncPreview.set(null)
+    const query = repositorySyncKey ? '?' + new URLSearchParams({ repository: repositorySyncKey }) : ''
+    try {
+      const response = await fetch('/s/' + sessionId + '/git/' + repositorySyncAction() + query, {
+        signal: request.signal,
+        ...(revision ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ revision }) } : {}),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(body.error || 'Could not complete the Git action.')
+      if (revision) {
+        repositorySyncResult.set({ repository: repositorySyncKey, message: body.message })
+        repositorySyncBusy.set(false)
+        closeRepositorySync()
+        diffClose.current?.focus()
+        refreshWorkspaceDiff()
+      }
+      else {
+        repositorySyncPreview.set(body)
+        repositorySyncError.set(body.problem || '')
+      }
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositorySyncError.set(error.message || 'Could not complete the Git action.')
+    }
+    finally {
+      if (repositorySyncRequest === request) {
+        repositorySyncBusy.set(false)
+        repositorySyncLoading.set(false)
+        repositorySyncRequest = undefined
+      }
+    }
+  }
+
+  function loadRepositorySync() {
+    if (!repositorySyncBusy()) void runRepositorySync()
+  }
+
+  function submitRepositorySync() {
+    const revision = repositorySyncPreview()?.revision
+    if (revision && !repositorySyncBusy() && !repositorySyncError()) void runRepositorySync(revision)
   }
 
   function repositoryCommitAddress() {
@@ -6784,6 +6873,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     if (event.defaultPrevented) return
+    if (repositorySyncDialog.current?.open) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeRepositorySync()
+      }
+      return
+    }
     if (repositoryCommitDialog.current?.open) {
       if (event.key === 'Escape') {
         event.preventDefault()

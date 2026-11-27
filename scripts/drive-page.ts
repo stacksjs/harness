@@ -6150,6 +6150,57 @@ try {
     fixtureGit('show', 'HEAD:review.txt') === 'Staged review note' && readFileSync(fixturePath, 'utf8') === 'Newer working note\n')
   await clonePage.waitForLoadState('networkidle')
 
+  const syncRemote = join(driveRoot, 'sync-fixture.git')
+  const syncPeer = join(driveRoot, 'sync-peer')
+  execFileSync('git', ['init', '--bare', '-q', syncRemote])
+  fixtureGit('remote', 'set-url', 'origin', syncRemote)
+  writeFileSync(fixturePath, 'Staged review note\n')
+  const syncBranch = fixtureGit('branch', '--show-current')
+  const gitActions = clonePage.getByRole('group', { name: 'Git actions' })
+  const openPush = gitActions.getByRole('button', { name: 'Push', exact: true })
+  const openPull = gitActions.getByRole('button', { name: 'Pull', exact: true })
+  const pushDialog = clonePage.getByRole('dialog', { name: 'Push commits' })
+  const pullDialog = clonePage.getByRole('dialog', { name: 'Pull changes' })
+  await openPush.click()
+  await pushDialog.getByText('origin/' + syncBranch, { exact: true }).waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-sync-push-${width}x${height}`, clonePage)
+  }
+  await clonePage.keyboard.press('Escape')
+  await pushDialog.waitFor({ state: 'hidden' })
+  check('cancelling a push preserves the empty remote',
+    execFileSync('git', ['--git-dir', syncRemote, 'for-each-ref'], { encoding: 'utf8' }).trim() === ''
+    && await openPush.evaluate(button => button === document.activeElement))
+  await openPush.click()
+  await pushDialog.getByRole('button', { name: 'Push', exact: true }).click()
+  await clonePage.getByText('Pushed to origin/' + syncBranch + '.', { exact: true }).waitFor()
+  check('a first push publishes only the selected branch and sets its upstream',
+    fixtureGit('rev-parse', '--abbrev-ref', '@{upstream}') === 'origin/' + syncBranch
+    && execFileSync('git', ['--git-dir', syncRemote, 'for-each-ref', '--format=%(refname)'], { encoding: 'utf8' }).trim() === 'refs/heads/' + syncBranch)
+  fixtureGit('remote', 'set-head', 'origin', syncBranch)
+  await clonePage.setViewportSize({ width: 1280, height: 800 })
+  await openPush.click()
+  const defaultPush = clonePage.getByRole('dialog', { name: 'Push to default branch?' })
+  await defaultPush.getByText('origin/' + syncBranch, { exact: true }).waitFor()
+  await capture('workspace-sync-default-push-1280x800', clonePage)
+  await defaultPush.getByRole('button', { name: 'Cancel', exact: true }).click()
+  execFileSync('git', ['clone', '-qb', syncBranch, '--', syncRemote, syncPeer])
+  writeFileSync(join(syncPeer, 'review.txt'), 'Upstream review note\n')
+  execFileSync('git', ['-C', syncPeer, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'Peer review note'])
+  execFileSync('git', ['-C', syncPeer, 'push', '-q'])
+  await openPull.click()
+  await pullDialog.getByText('origin/' + syncBranch, { exact: true }).waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-sync-pull-${width}x${height}`, clonePage)
+  }
+  await pullDialog.getByRole('button', { name: 'Pull', exact: true }).click()
+  await clonePage.getByText('Pulled from origin/' + syncBranch + '.', { exact: true }).waitFor()
+  check('pull fast-forwards the isolated thread without changing its source checkout',
+    readFileSync(fixturePath, 'utf8') === 'Upstream review note\n' && !existsSync(join(linkDestination, 'review.txt')))
+  await clonePage.waitForLoadState('networkidle')
+
 }
 finally {
   delayGit = false
