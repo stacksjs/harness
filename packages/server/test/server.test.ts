@@ -756,6 +756,101 @@ describe('harness serve — HTTP', () => {
     }
   }, 60_000)
 
+  it.skipIf(process.platform === 'win32')('combines GitHub pull request filters, discovers choices, and preserves the query through review navigation', async () => {
+    const { project, cli, url, readState } = seedPullRequestLifecycle('Small report with checks', false)
+    const fixture = readState()
+    const original = fixture.pulls[0]
+    const compliance = { id: 41, node_id: 'LA_fixture_41', name: 'Release / Lång, phase 2', color: '224488', description: 'Validate the staged export' }
+    const report = { id: 31, node_id: 'LA_fixture_31', name: 'Report & analysis', color: '298265' }
+    Object.assign(original, {
+      labels: [compliance, report], filterReview: 'approved', filterChecks: 'success',
+      requested_reviewers: [{ login: 'fixture-user' }],
+    })
+    fixture.pulls.push(
+      { ...original, number: 2, html_url: url.replace(/1$/u, '2'), title: 'Draft report with checks', draft: true },
+      { ...original, number: 3, html_url: url.replace(/1$/u, '3'), title: 'External report with checks', user: { login: 'alix' }, filterReview: 'changes_requested', filterChecks: 'failure' },
+      { ...original, number: 4, html_url: url.replace(/1$/u, '4'), title: 'Another report with checks', labels: [report] },
+    )
+    fixture.labelPages = [[report], [compliance]]
+    fixture.filterAuthors = [{ login: 'alix', name: 'Alix Coder' }]
+    fixture.filterListIncomplete = 'fixture/notebook'
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pull-request-filters-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const host = 'http://127.0.0.1:' + port
+      const list = (params: URLSearchParams | Record<string, string>) => fetch(host + '/pull-requests?' + new URLSearchParams(params))
+      const filters = new URLSearchParams({ draft: 'hide', involvement: 'reviewing', review: 'approved', checks: 'passing', author: '@me', q: 'report' })
+      for (const name of [compliance.name, report.name, report.name.toUpperCase()]) filters.append('label', name)
+      const response = await list(filters)
+      expect(response.status).toBe(200)
+      const page = await response.text()
+      expect(page).toContain('Small report with checks')
+      expect(page).not.toContain('Draft report with checks')
+      expect(page).not.toContain('External report with checks')
+      expect(page).not.toContain('Another report with checks')
+      expect(page).toContain('GitHub returned partial results.')
+      const selection = [...page.matchAll(/href="([^"]*selectedUrl=[^"]+)"/gu)][0]?.[1]
+      expect(selection).toBeDefined()
+      const selected = new URL(selection!.replaceAll('&amp;', '&'), host)
+      expect(selected.searchParams.getAll('label')).toEqual([compliance.name, report.name])
+      for (const name of ['draft', 'involvement', 'review', 'checks', 'author']) expect(selected.searchParams.get(name)).toBe(filters.get(name))
+      const detail = await (await fetch(selected)).text()
+      const timeline = [...detail.matchAll(/href="([^"]*tab=timeline[^"]+)"/gu)][0]?.[1]
+      expect(timeline).toBeDefined()
+      expect(new URL(timeline!.replaceAll('&amp;', '&'), host).searchParams.getAll('label')).toEqual([compliance.name, report.name])
+
+      const labels = await (await list({ find: 'labels', findQuery: 'phase 2', draft: 'hide' })).text()
+      expect(labels).toContain('Validate the staged export')
+      expect(labels).toMatch(/value="hide"\s+selected/u)
+      const authors = await (await list({ find: 'authors', findQuery: 'alix' })).text()
+      expect(authors).toContain('Alix Coder')
+      const chosen = await (await list({ chooseAuthor: 'alix', author: 'fixture-user', review: 'changes-requested', checks: 'failing' })).text()
+      expect(chosen).toContain('External report with checks')
+      expect(chosen).not.toContain('Small report with checks')
+      expect(await (await list({ involvement: 'authored', author: 'alix' })).text()).toContain('No pull requests match these filters.')
+
+      for (let number = 10; number < 32; number++) fixture.pulls.push({ ...original, number, html_url: url.replace(/1$/u, String(number)),
+        title: 'Paged report ' + number, labels: [report] })
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const firstPage = await (await list({ addLabel: report.name, author: 'fixture-user' })).text()
+      expect([...firstPage.matchAll(/<a\b[^>]*\bdata-pr-row\b/gu)]).toHaveLength(20)
+      const next = /<a href="([^"]+)"[^>]*>Next page<\/a>/u.exec(firstPage)?.[1]
+      expect(next).toBeDefined()
+      const nextPage = new URL(next!.replaceAll('&amp;', '&'), host)
+      expect(nextPage.searchParams.get('page')).toBe('2')
+      expect(nextPage.searchParams.getAll('label')).toEqual([report.name])
+      expect(nextPage.searchParams.get('author')).toBe('fixture-user')
+
+      const appendix = join(dir, 'filter-appendix')
+      mkdirSync(appendix)
+      for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/fixture/appendix']])
+        expect(Bun.spawnSync(['git', ...args], { cwd: appendix }).success).toBe(true)
+      await harness.engine.dispatch({ id: 'pull-request-filters-appendix', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(appendix), trusted: true } })
+      fixture.repositories['fixture/appendix'] = { bare: join(appendix, '.git') }
+      fixture.filterListFailure = 'fixture/appendix'
+      fixture.filterAuthorFailure = 'fixture/appendix'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const partialList = await (await list({ author: '@me', label: compliance.name, q: 'Small report' })).text()
+      expect(partialList).toContain('Small report with checks')
+      expect(partialList).toContain('fixture/appendix')
+      expect(partialList).not.toContain('Private list search diagnostics')
+      const partialChoices = await (await list({ find: 'authors', findQuery: 'alix' })).text()
+      expect(partialChoices).toContain('Alix Coder')
+      expect(partialChoices).toContain('Could not search all selected repositories.')
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
+
   it.skipIf(process.platform === 'win32')('searches a large GitHub label catalog and verifies the selected identities before saving', async () => {
     const { project, cli, local, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
     const tag = (id: number, name: string) => ({ id: 13_000_000_000 + id, node_id: 'LA_fixture_' + id, name, color: '336611', description: '' })

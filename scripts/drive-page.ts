@@ -6727,6 +6727,36 @@ try {
       new URL(clonePage.url()).searchParams.get('q') === 'draft pull request'
       && await reviewList.getByRole('combobox', { name: 'Sort' }).inputValue() === 'oldest')
 
+    const beforeFilters = pullState()
+    const filterLabel = { id: 413, node_id: 'LA_fixture_reporting', name: 'Release reporting', color: '298265' }
+    writeFileSync(github.state, JSON.stringify({ ...beforeFilters,
+      labelPages: [[filterLabel]], pulls: beforeFilters.pulls.map((pull: { number: number }) => pull.number === 1
+        ? { ...pull, filterChecks: 'success', filterReview: 'none', labels: [filterLabel] } : pull),
+    }))
+    try {
+      await clonePage.setViewportSize({ width: 390, height: 844 })
+      const filters = reviewList.locator('[data-pr-filters]')
+      await filters.locator('summary').press('Enter')
+      await filters.getByRole('combobox', { name: 'Draft', exact: true }).selectOption('only')
+      await filters.getByRole('combobox', { name: 'Review', exact: true }).selectOption('none')
+      await filters.getByRole('combobox', { name: 'Checks', exact: true }).selectOption('passing')
+      await filters.getByLabel('Author', { exact: true }).fill('@me')
+      await filters.getByRole('searchbox', { name: 'Find a label or author' }).fill('release reporting')
+      await filters.getByRole('button', { name: 'Find labels', exact: true }).click()
+      const match = filters.getByRole('checkbox', { name: 'Release reporting', exact: true })
+      await match.check()
+      await capture('pull-requests-advanced-filters-390x844', clonePage)
+      await filters.getByRole('button', { name: 'Apply filters' }).click()
+      await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
+      await reviewList.locator('[data-pr-row]').first().click()
+      await clonePage.getByRole('link', { name: 'Timeline', exact: true }).click()
+      const url = new URL(clonePage.url())
+      check('advanced list filters combine and stay on the selected pull request across its tabs',
+        url.searchParams.get('label') === filterLabel.name && url.searchParams.get('draft') === 'only'
+        && url.searchParams.get('review') === 'none' && url.searchParams.get('checks') === 'passing' && url.searchParams.get('author') === '@me')
+    }
+    finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
+
     github.configureMerge('ready', ['MERGE', 'SQUASH'])
     await clonePage.setViewportSize({ width: 390, height: 844 })
     await clonePage.goto(mergeReviewUrl, { waitUntil: 'domcontentloaded' })
