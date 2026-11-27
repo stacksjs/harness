@@ -175,7 +175,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 @if(codecUrl)
   <link rel="modulepreload" href="{{ codecUrl }}">
 @endif
-<div data-harness-shell :data-sidebar-collapsed="sidebarCollapsed()" class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
+<div data-harness-shell :data-sidebar-collapsed="sidebarCollapsed()" :data-terminal-keyboard-visible="Boolean(terminalKeyboardViewport())"
+  :style="terminalKeyboardViewport() ? { '--terminal-keyboard-viewport': terminalKeyboardViewport() + 'px' } : {}"
+  class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
   {{--
     `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
     component's own marker, and putting it on a wrapper made two elements claim
@@ -793,7 +795,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     @endif
 
     @if(canCompose)
-    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerFileActions()?.drop($event)" class="grid gap-2 items-end shrink-0">
+    <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(terminalKeyboardViewport() || inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerFileActions()?.drop($event)" class="grid gap-2 items-end shrink-0">
       <div data-linked-prompt-notice hidden :hidden="!sharedPromptNotice()">
         <span role="status" :text="sharedPromptNotice()"></span>
         <button type="button" @click="dismissLinkedPromptNotice" aria-label="Dismiss linked prompt notice" class="harness-icon-button">
@@ -929,6 +931,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <button type="button" aria-label="End terminal session" :title="terminalShortcutTitle('terminal.close')" :aria-keyshortcuts="shortcutKeys('terminal.close')" hidden :hidden="!activeTerminalTab()" :disabled="terminalBusy() || !sessionOnline()" @click="endTerminal" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-stop" aria-hidden="true"></span>
           </button>
+          <button type="button" data-terminal-keyboard-toggle aria-label="Terminal keyboard" title="Terminal keyboard"
+            aria-controls="harness-terminal-keys" :aria-expanded="terminalKeyboardOpen() ? 'true' : 'false'"
+            :disabled="!activeTerminalTab() || !sessionOnline() || canRestartTerminal()"
+            @mousedown="keepTerminalKeyboard" @click="toggleTerminalKeyboard" class="harness-icon-button">
+            <span class="inline-block size-4 i-hugeicons-keyboard" aria-hidden="true"></span>
+          </button>
           <button type="button" data-terminal-actions-trigger aria-label="Terminal actions" title="Terminal actions" aria-haspopup="menu"
             aria-controls="harness-terminal-actions" :aria-expanded="terminalActionsOpen() ? 'true' : 'false'"
             @click="openTerminalActions(terminalTabs().activeKey, $event)" class="harness-icon-button">
@@ -954,6 +962,21 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <div data-terminal-screen></div>
           </div>
         </div>
+      </div>
+      <textarea ref="terminalKeyboardInput" data-terminal-keyboard-input rows="1" tabindex="-1"
+        aria-label="Terminal input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="enter"
+        @focus="terminalKeyboardFocused" @blur="terminalKeyboardBlurred" @input="terminalKeyboardEdited"
+        @compositionend="terminalKeyboardEdited" @keydown="terminalKeyboardKeydown" @paste="terminalKeyboardPaste"></textarea>
+      <div id="harness-terminal-keys" data-terminal-keys role="group" aria-label="Terminal keys" hidden :hidden="!terminalKeyboardOpen()"
+        @mousedown="keepTerminalKeyboard">
+        <button type="button" @click="terminalKeyboardSend('\x1b')" aria-label="Escape">Esc</button>
+        <button type="button" @click="terminalKeyboardSend('\t')" aria-label="Tab">Tab</button>
+        <button type="button" @click="terminalKeyboardSend('\x1b[D')" aria-label="Left arrow">←</button>
+        <button type="button" @click="terminalKeyboardSend('\x1b[A')" aria-label="Up arrow">↑</button>
+        <button type="button" @click="terminalKeyboardSend('\x1b[B')" aria-label="Down arrow">↓</button>
+        <button type="button" @click="terminalKeyboardSend('\x1b[C')" aria-label="Right arrow">→</button>
+        <button type="button" @click="terminalKeyboardSend('\x03')" aria-label="Interrupt command">Ctrl+C</button>
+        <button type="button" @click="terminalKeyboardSend('\r')" aria-label="Return">↵</button>
       </div>
       <div id="harness-terminal-actions" data-terminal-actions popover="manual" tabindex="-1"
         role="menu" aria-label="Terminal actions" @toggle="terminalActionsToggled" @keydown="terminalActionsKeydown">
@@ -3076,6 +3099,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const termSurface = useRef('termSurface')
   const termHeaderToggle = useRef('termHeaderToggle')
   const terminalTabStrip = useRef('terminalTabStrip')
+  const terminalKeyboardInput = useRef('terminalKeyboardInput')
 
   function toggleSidebar() {
     if (desktopSidebar()) {
@@ -7203,6 +7227,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const terminalActionWritable = state(false)
   const terminalClipboardNotice = state('')
   const terminalReadableText = state('')
+  const terminalKeyboardOpen = state(false)
+  const terminalKeyboardViewport = state(0)
+  let terminalKeyboardRestingHeight = 0
   let terminalActionKey = ''
   let terminalActionOrigin = null
   let terminalTrigger = null
@@ -7332,7 +7359,87 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function blurTerminalInput(event) {
-    if (!event.relatedTarget?.closest?.('[data-terminal-host]')) terminalInputFocused.set(false)
+    if (!event.relatedTarget?.closest?.('[data-terminal-host], [data-terminal-keyboard-input]')) terminalInputFocused.set(false)
+  }
+
+  function keepTerminalKeyboard(event) {
+    if (terminalKeyboardOpen()) event.preventDefault()
+  }
+
+  function toggleTerminalKeyboard() {
+    if (terminalKeyboardOpen()) {
+      terminalKeyboardInput.current?.blur()
+      focusActiveTerminalTab()
+    }
+    else terminalKeyboardInput.current?.focus({ preventScroll: true })
+  }
+
+  function terminalKeyboardFocused(event) {
+    // Keep one space before the caret so a soft Backspace can emit an input
+    // event even though the shell, rather than the textarea, holds the line.
+    event.currentTarget.value = ' '
+    event.currentTarget.setSelectionRange(1, 1)
+    const owner = event.currentTarget.ownerDocument
+    terminalKeyboardRestingHeight = owner.defaultView?.visualViewport?.height || owner.documentElement.clientHeight
+    terminalKeyboardOpen.set(true)
+    terminalInputFocused.set(true)
+  }
+
+  function terminalKeyboardBlurred(event) {
+    event.currentTarget.value = ''
+    terminalKeyboardOpen.set(false)
+    terminalKeyboardViewport.set(0)
+    blurTerminalInput(event)
+  }
+
+  function fitTerminalKeyboardViewport() {
+    const input = terminalKeyboardInput.current
+    if (!input || !terminalKeyboardOpen()) return
+    const view = input.ownerDocument.defaultView?.visualViewport
+    if (!view || view.scale !== 1) return
+    const height = Math.round(view.height)
+    if (terminalKeyboardRestingHeight - height > 100) terminalKeyboardViewport.set(height)
+    else if (terminalKeyboardViewport()) {
+      input.blur()
+      focusActiveTerminalTab()
+    }
+  }
+
+  onMount(() => {
+    const view = terminalKeyboardInput.current?.ownerDocument.defaultView?.visualViewport
+    if (view) useEventListener('resize', fitTerminalKeyboardViewport, { target: view })
+  })
+
+  function terminalKeyboardSend(data) {
+    const tab = activeTerminalTab()
+    if (tab) terminalController()?.input(tab, data)
+  }
+
+  function terminalKeyboardEdited(event) {
+    if (event.isComposing || !terminalKeyboardOpen()) return
+    const input = event.currentTarget
+    const text = input.value.startsWith(' ') ? input.value.slice(1) : input.value
+    input.value = ' '
+    input.setSelectionRange(1, 1)
+    if (event.inputType === 'deleteContentBackward') terminalKeyboardSend('\x7f')
+    else if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') terminalKeyboardSend('\r')
+    else if (event.inputType === 'insertFromPaste') {
+      const tab = activeTerminalTab()
+      if (tab) terminalController()?.pasteText(tab.key, text)
+    }
+    else if (text) terminalKeyboardSend(text)
+  }
+
+  function terminalKeyboardKeydown(event) {
+    // Printable and composing input reaches the PTY through the edit event.
+    if (event.isComposing || event.keyCode === 229 || (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey)) return
+    const tab = activeTerminalTab()
+    if (tab) termKeydown(tab, event)
+  }
+
+  function terminalKeyboardPaste(event) {
+    const tab = activeTerminalTab()
+    if (tab) pasteTerminalEvent(tab.key, event)
   }
 
   function terminalPanelElement(selector) {

@@ -1363,6 +1363,28 @@ const TERMINAL_PANEL = `
 [data-terminal-toolbar] button:disabled { opacity: .46; cursor: default; }
 [data-terminal-restart-icon] { display: none; }
 [data-terminal-activity] { white-space: nowrap; }
+[data-terminal-toolbar] [data-terminal-keyboard-toggle] { display: none; }
+[data-terminal-keyboard-input] {
+  position: absolute; inset: 10px 10px auto auto; width: 2px; height: 2px;
+  opacity: 0; pointer-events: none; font-size: 16px;
+}
+[data-harness-shell][data-terminal-keyboard-visible="true"] { height: var(--terminal-keyboard-viewport); }
+[data-terminal-keyboard-visible="true"] [data-workspace-lane]:has(> [data-terminal]) > :not([data-terminal]),
+[data-terminal-keyboard-visible="true"] [data-terminal-resize] { display: none; }
+[data-terminal-keyboard-visible="true"] .terminal-panel { flex: 1 1 0; }
+[data-terminal-keys] {
+  display: flex; flex: 0 0 auto; justify-content: space-between; gap: 2px;
+  padding-inline: 4px; overflow-x: auto; border-block-start: 1px solid rgb(255 255 255 / 16%);
+}
+[data-terminal-keys] button {
+  min-width: 34px; min-height: 44px; padding-inline: 5px; flex: 1 0 auto;
+  color: #d7dae0; font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+[data-terminal-keys] button:active,
+[data-terminal-toolbar] [data-terminal-keyboard-toggle][aria-expanded="true"] {
+  color: #eef1f7; background: #353e4f;
+}
+[data-terminal-keys] button:focus-visible { outline: 1px solid #8db1ee; outline-offset: -2px; }
 [data-terminal-output] {
   display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden;
 }
@@ -1425,12 +1447,16 @@ const TERMINAL_PANEL = `
 }
 @media (pointer: coarse) {
   [data-terminal-actions] button { min-height: 44px; }
+  [data-terminal-toolbar] [data-terminal-keyboard-toggle] {
+    display: grid; width: 44px; height: 44px; flex-basis: 44px;
+  }
 }
 @media (max-width: 47.999rem) {
   [data-terminal-output] [data-terminal-pane]:not([data-active="true"]) { display: none; }
   [data-terminal-pane-picker] button { min-height: 36px; padding-inline: 10px; }
   [data-terminal-toolbar] .harness-icon-button { width: 34px; height: 36px; flex-basis: 34px; }
-  [data-terminal-toolbar] [data-terminal-actions-trigger] { width: 44px; height: 44px; flex-basis: 44px; }
+  [data-terminal-toolbar] [data-terminal-actions-trigger],
+  [data-terminal-toolbar] [data-terminal-keyboard-toggle] { width: 44px; height: 44px; flex-basis: 44px; }
   [data-terminal-restart] { width: 34px; height: 36px; padding: 0; }
   [data-terminal-restart-icon] { display: inline-block; vertical-align: middle; }
   [data-terminal-restart-label] { display: none; }
