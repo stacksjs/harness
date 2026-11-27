@@ -4080,6 +4080,25 @@ try {
   await filePanel.getByRole('button', { name: 'Close workspace files' }).click()
   await filePanel.waitFor({ state: 'hidden' })
   await page.waitForFunction(() => document.activeElement?.closest('[data-terminal-host]'))
+  const nestedSource = join(ledgerRepo, 'compiler output & notes')
+  mkdirSync(nestedSource)
+  writeFileSync(join(nestedSource, 'ledger.txt'), 'Nested ledger source\n')
+  const nestedMarker = pathToFileURL(nestedSource).href
+  const restoredMarker = pathToFileURL(ledgerRepo).href
+  const nestedLinkScript = join(driveRoot, 'print-directory-file-link.ts')
+  const nestedLinkOutput = '\x1b]7;' + nestedMarker + '\x07ledger.txt:1:4: nested fixture\n\x1b]7;' + restoredMarker + '\x07'
+  writeFileSync(nestedLinkScript, `process.stdout.write(${JSON.stringify(nestedLinkOutput)})\n`)
+  await terminalHost.focus()
+  await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${nestedLinkScript}"`)
+  await page.keyboard.press('Enter')
+  await terminalHost.locator(`[data-terminal-file="ledger.txt:1:4"][data-terminal-cwd="${nestedMarker}"]`).click()
+  await filePanel.getByText('Nested ledger source', { exact: true }).waitFor()
+  check('a relative file link opens the directory recorded on its output', await filePanel.getByText('Column 4', { exact: true }).isVisible())
+  await capture('workspace-terminal-directory-file-phone')
+  await filePanel.getByRole('button', { name: 'Close workspace files' }).click()
+  await filePanel.waitFor({ state: 'hidden' })
+  await page.waitForFunction(() => document.activeElement?.closest('[data-terminal-host]'))
+  rmSync(nestedSource, { recursive: true })
   const wrappedUrl = `http://${loopback}${wrappedPreviewPath}`
   const printWrapped = join(driveRoot, 'print-wrapped-terminal-url.ts')
   writeFileSync(printWrapped, `process.stdout.write(${JSON.stringify(wrappedUrl + '  \n')})\n`)
