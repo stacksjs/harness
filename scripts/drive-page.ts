@@ -6385,9 +6385,16 @@ try {
     await reviewList.waitFor()
     await capture('pull-requests-code-1280x800', clonePage)
     const viewedFile = clonePage.getByRole('button', { name: 'Viewed report.txt' })
+    await clonePage.locator('[data-pr-viewed-form] button[aria-disabled="false"]').waitFor()
     const openingReviewUrl = clonePage.url()
-    await viewedFile.focus()
-    await clonePage.keyboard.press('Enter')
+    const viewedResponse = (desired: boolean) => clonePage.waitForResponse(response => {
+      const request = response.request()
+      return request.method() === 'POST' && new URL(response.url()).pathname === '/pull-requests/viewed'
+        && new URLSearchParams(request.postData() ?? '').get('viewed') === String(desired)
+    })
+    await clonePage.bringToFront()
+    const [marked] = await Promise.all([viewedResponse(true), viewedFile.press('Enter')])
+    if (!marked.ok()) throw new Error(`Mark Viewed returned HTTP ${marked.status()}: ${await marked.text()}`)
     await clonePage.getByText('File marked as viewed.', { exact: true }).waitFor()
     check('mark viewed preserves the exact file, expanded patch and selected request',
       await viewedFile.getAttribute('aria-pressed') === 'true'
@@ -6400,7 +6407,9 @@ try {
       && JSON.parse(readFileSync(github.state, 'utf8')).fileViewed === true)
     await clonePage.setViewportSize({ width: 390, height: 844 })
     await capture('pull-requests-viewed-390x844', clonePage)
-    await viewedFile.click()
+    await clonePage.locator('[data-pr-viewed-form] button[aria-disabled="false"]').waitFor()
+    const [unmarked] = await Promise.all([viewedResponse(false), viewedFile.click()])
+    if (!unmarked.ok()) throw new Error(`Unmark Viewed returned HTTP ${unmarked.status()}: ${await unmarked.text()}`)
     await clonePage.getByText('File marked as unviewed.', { exact: true }).waitFor()
     check('unmark viewed restores the unchecked file without changing the pull request',
       await viewedFile.getAttribute('aria-pressed') === 'false' && JSON.parse(readFileSync(github.state, 'utf8')).fileViewed === false)
