@@ -2548,9 +2548,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (checkbox) checkbox.indeterminate = mixed
   })
   const repositoryCommitError = state('')
+  const repositoryCommitGenerationFailed = state(false)
   const repositoryCommitResult = state('')
   const repositoryCommitLoading = state(false)
   const repositoryCommitBusy = state(false)
+  const repositoryCommitCanSubmit = derived(() => Boolean(repositoryCommitIncludedCount()
+    && (repositoryCommitMessage().trim() || repositoryCommitPreview()?.generation)
+    && !repositoryCommitBusy() && !repositoryCommitLoading()
+    && (!repositoryCommitError() || repositoryCommitGenerationFailed())))
+  const repositoryCommitPendingLabel = derived(() => repositoryCommitMessage().trim() ? 'Committing…' : 'Generating message…')
   let repositoryCommitTrigger
   let repositoryCommitKey
   const repositorySyncDialog = useRef('repositorySyncDialogBox')
@@ -5184,6 +5190,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     repositoryCommitRequest = request
     repositoryCommitLoading.set(true)
     repositoryCommitError.set('')
+    repositoryCommitGenerationFailed.set(false)
     const fallback = repositoryCommitStaged() ? 'Could not read the staged changes.' : 'Could not read the working-tree changes.'
     try {
       const response = await fetch(repositoryCommitAddress(), { signal: request.signal })
@@ -5213,20 +5220,25 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function submitRepositoryCommit(newBranch = false) {
     const preview = repositoryCommitPreview()
     const message = repositoryCommitMessage().trim()
-    if (!preview || !repositoryCommitIncludedCount() || !message || repositoryCommitLoading() || repositoryCommitBusy() || repositoryCommitError()) return
+    if (!preview || !repositoryCommitCanSubmit()) return
     const request = new AbortController()
     repositoryCommitRequest = request
     repositoryCommitNewBranch.set(newBranch)
     repositoryCommitBusy.set(true)
+    repositoryCommitError.set('')
+    repositoryCommitGenerationFailed.set(false)
     try {
       const response = await fetch(repositoryCommitAddress(), {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message, revision: preview.revision, excluded: [...repositoryCommitExcluded()],
-          newBranch }), signal: request.signal,
+          newBranch, ...(!message && { generate: preview.generation }) }), signal: request.signal,
       })
       const value = await response.json().catch(() => ({}))
       if (request.signal.aborted) return
-      if (!response.ok || !value.commit) throw new Error(value.error || 'Could not confirm the commit.')
+      if (!response.ok || !value.commit) {
+        repositoryCommitGenerationFailed.set(value.generationFailed === true)
+        throw new Error(value.error || 'Could not confirm the commit.')
+      }
       repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + (value.branch ? ' on ' + value.branch : '') + '.' + (value.warning ? ' ' + value.warning : ''))
       repositoryCommitBusy.set(false)
       repositoryCommitDialog.current?.close()

@@ -323,10 +323,17 @@ const providerPreviewScript = join(driveRoot, 'provider-preview.ts')
 const providerPreviewPort = join(driveRoot, 'provider-preview-port')
 let providerPreviewProcess: Bun.Subprocess | undefined
 const providerPreviewPrompt = 'Start the provider preview fixture.'
+let rejectCommitGeneration = false
+const commitGenerationPatches: string[] = []
 
 const driver: Driver = {
   kind: 'claude',
   async probe() { return { status: 'ready' } },
+  async generateCommitMessage(_config, input) {
+    commitGenerationPatches.push(input.patch)
+    if (rejectCommitGeneration) throw new Error('Fixture provider disconnected')
+    return { subject: 'Summarize the reviewed edit', body: '', branch: 'feature/generated-review' }
+  },
   async create(config) {
     if (config.workspacePath.startsWith(`${scratchDirectory}/`)) writeFileSync(join(config.workspacePath, 'kept.txt'), 'scratch fixture')
     return {
@@ -6403,6 +6410,41 @@ try {
   check('committing on a new branch switches the managed checkout and leaves its previous branch unchanged',
     fixtureGit('branch', '--show-current') === featureBranch && fixtureGit('rev-parse', 'refs/heads/' + previousCommitBranch) === previousCommitHead
     && fixtureGit('show', 'HEAD:review.txt') === 'Reviewed feature branch note')
+
+  const generatedBase = fixtureGit('rev-parse', 'HEAD')
+  writeFileSync(fixturePath, 'Generate from this working edit\n')
+  writeFileSync(excludedCommitPath, 'GENERATION_EXCLUDED_FIXTURE\n')
+  fixtureGit('add', '--', 'later changes.txt')
+  await clonePage.waitForLoadState('networkidle')
+  await openWorkingCommit.click()
+  await workingDialog.getByPlaceholder('Leave blank to generate from the included files').waitFor()
+  await workingDialog.getByRole('button', { name: 'Edit files', exact: true }).click()
+  const excludedFromGeneration = workingDialog.getByRole('checkbox', { name: 'Include later changes.txt' })
+  await excludedFromGeneration.uncheck()
+  rejectCommitGeneration = true
+  try {
+    await commitToFeature.click()
+    await workingDialog.getByRole('alert').filter({ hasText: 'Could not generate a commit message.' }).waitFor()
+  }
+  finally { rejectCommitGeneration = false }
+  check('a generation error keeps the blank review and selected files and leaves Git untouched',
+    await workingMessage.inputValue() === '' && !await excludedFromGeneration.isChecked()
+      && fixtureGit('rev-parse', 'HEAD') === generatedBase && await commitToFeature.isEnabled())
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-generated-commit-${width}x${height}`, clonePage)
+  }
+  await commitToFeature.click()
+  await workingDialog.waitFor({ state: 'hidden' })
+  await clonePage.getByText(/^Committed [0-9a-f]{7} on feature\/generated-review\.$/u).waitFor()
+  check('blank commit uses generated text and branch from the selected working patch',
+    fixtureGit('log', '-1', '--format=%s') === 'Summarize the reviewed edit'
+      && fixtureGit('diff', '--cached', '--name-only') === 'later changes.txt'
+      && commitGenerationPatches.length === 2
+      && commitGenerationPatches.every(patch => patch.includes('Generate from this working edit') && !patch.includes('GENERATION_EXCLUDED_FIXTURE')))
+  fixtureGit('reset', '--', 'later changes.txt')
+  rmSync(excludedCommitPath)
+  await clonePage.waitForLoadState('networkidle')
 
   const syncRemote = join(driveRoot, 'sync-fixture.git')
   const syncPeer = join(driveRoot, 'sync-peer')
