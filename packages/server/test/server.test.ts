@@ -756,6 +756,227 @@ describe('harness serve — HTTP', () => {
     }
   }, 60_000)
 
+  it.skipIf(process.platform === 'win32')('combines GitHub pull request filters, discovers choices, and preserves the query through review navigation', async () => {
+    const { project, cli, url, readState } = seedPullRequestLifecycle('Small report with checks', false)
+    const fixture = readState()
+    const original = fixture.pulls[0]
+    const compliance = { id: 41, node_id: 'LA_fixture_41', name: 'Release / Lång, phase 2', color: '224488', description: 'Validate the staged export' }
+    const report = { id: 31, node_id: 'LA_fixture_31', name: 'Report & analysis', color: '298265' }
+    Object.assign(original, {
+      labels: [compliance, report], filterReview: 'approved', filterChecks: 'success',
+      requested_reviewers: [{ login: 'fixture-user' }],
+      additions: 73, deletions: 12,
+    })
+    fixture.pulls.push(
+      { ...original, number: 2, html_url: url.replace(/1$/u, '2'), title: 'Draft report with checks', draft: true },
+      { ...original, number: 3, html_url: url.replace(/1$/u, '3'), title: 'External report with checks', user: { login: 'alix' },
+        filterReview: 'changes_requested', filterChecks: 'failure', listConflict: true },
+      { ...original, number: 4, html_url: url.replace(/1$/u, '4'), title: 'Another report with checks', labels: [report],
+        user: { login: 'casey' }, requested_reviewers: [], filterChecks: 'pending', listCheckHead: 'f'.repeat(40) },
+    )
+    fixture.labelPages = [[report], [compliance]]
+    fixture.filterAuthors = [{ login: 'alix', name: 'Alix Coder' }]
+    fixture.filterListIncomplete = 'fixture/notebook'
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pull-request-filters-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const host = 'http://127.0.0.1:' + port
+      const list = (params: URLSearchParams | Record<string, string>) => fetch(host + '/pull-requests?' + new URLSearchParams(params))
+      const grouped = await (await list({})).text()
+      expect([...grouped.matchAll(/data-pr-group="([^"]+)"/gu)].map(match => match[1])).toEqual(['authored', 'reviewing', 'other'])
+      expect(grouped.indexOf('External report with checks')).toBeGreaterThan(grouped.indexOf('Small report with checks'))
+      expect(grouped.indexOf('Another report with checks')).toBeGreaterThan(grouped.indexOf('External report with checks'))
+      expect(grouped).toContain('Passing checks')
+      expect(grouped).toContain('Failing checks')
+      expect(grouped).not.toContain('Pending checks')
+      expect(grouped).toContain('Merge conflicts')
+      expect(grouped).toContain('73 additions')
+      expect(grouped).toContain('12 deletions')
+      expect(grouped).toContain('More labels include Report &amp; analysis')
+      expect(grouped).not.toContain('Some pull request details are unavailable.')
+      fixture.privateRepository = 'fixture/notebook'
+      fixture.listMetadataMode = 'partial'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const partialDetails = await (await list({})).text()
+      expect(partialDetails).toContain('Private repository')
+      expect(partialDetails).toContain('External report with checks')
+      expect(partialDetails).toContain('Some pull request details are unavailable.')
+      expect(partialDetails).toContain('Passing checks')
+      expect(partialDetails).not.toContain('Failing checks')
+      fixture.listMetadataMode = 'head-changed'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const movedHead = await (await list({ q: 'Small report' })).text()
+      expect(movedHead).toContain('Small report with checks')
+      expect(movedHead).not.toContain('Passing checks')
+      fixture.listMetadataMode = 'wrong-repo'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const withoutDetails = await (await list({})).text()
+      expect(withoutDetails).toContain('External report with checks')
+      expect(withoutDetails).toContain('Some pull request details are unavailable.')
+      expect(withoutDetails).not.toContain('Failing checks')
+      expect(withoutDetails).not.toContain('data-pr-group="authored"')
+      fixture.listMetadataMode = 'unavailable'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const failedDetails = await (await list({})).text()
+      expect(failedDetails).toContain('Small report with checks')
+      expect(failedDetails).toContain('Some pull request details are unavailable.')
+      expect(failedDetails).not.toContain('Private metadata diagnostics')
+      delete fixture.privateRepository
+      delete fixture.listMetadataMode
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const filters = new URLSearchParams({ draft: 'hide', involvement: 'reviewing', review: 'approved', checks: 'passing', author: '@me', q: 'report' })
+      for (const name of [compliance.name, report.name, report.name.toUpperCase()]) filters.append('label', name)
+      const response = await list(filters)
+      expect(response.status).toBe(200)
+      const page = await response.text()
+      expect(page).toContain('Small report with checks')
+      expect(page).not.toContain('Draft report with checks')
+      expect(page).not.toContain('External report with checks')
+      expect(page).not.toContain('Another report with checks')
+      expect(page).toContain('GitHub returned partial results.')
+      expect(page).toContain('data-pr-group="filtered"')
+      expect(page).not.toContain('data-pr-group-heading')
+      const selection = [...page.matchAll(/href="([^"]*selectedUrl=[^"]+)"/gu)][0]?.[1]
+      expect(selection).toBeDefined()
+      const selected = new URL(selection!.replaceAll('&amp;', '&'), host)
+      expect(selected.searchParams.getAll('label')).toEqual([compliance.name, report.name])
+      for (const name of ['draft', 'involvement', 'review', 'checks', 'author']) expect(selected.searchParams.get(name)).toBe(filters.get(name))
+      const detail = await (await fetch(selected)).text()
+      const timeline = [...detail.matchAll(/href="([^"]*tab=timeline[^"]+)"/gu)][0]?.[1]
+      expect(timeline).toBeDefined()
+      expect(new URL(timeline!.replaceAll('&amp;', '&'), host).searchParams.getAll('label')).toEqual([compliance.name, report.name])
+      const profile = selected.searchParams.get('profile')!
+      expect(detail).toContain(`name="selectionProfile" value="${profile}"`)
+      const formScope = { selectedUrl: url, tab: 'timeline', selectionProfile: profile }
+      const withSelection = await (await list({ ...formScope, profile, q: 'unmatched search', draft: 'hide' })).text()
+      expect(withSelection).toContain('data-detail="true"')
+      expect(withSelection).toContain('No pull requests match these filters.')
+      const clearLink = /href="([^"]+)" data-pr-button data-pr-clear-filters>Clear additional filters<\/a>/u.exec(withSelection)?.[1]
+      expect(clearLink).toBeDefined()
+      const clearParams = new URL(clearLink!.replaceAll('&amp;', '&'), host).searchParams
+      expect(clearParams.get('selectedUrl')).toBe(url)
+      expect(clearParams.get('tab')).toBe('timeline')
+      expect(clearParams.has('draft')).toBe(false)
+      await harness.engine.dispatch({ id: 'pull-request-filters-other-profile', at: Date.now(),
+        command: { type: 'profile.create', name: 'Other reviews' } })
+      const otherProfile = [...harness.engine.current.profiles.values()].find(item => item.name === 'Other reviews')!
+      const switched = await (await list({ ...formScope, profile: String(otherProfile.id) })).text()
+      expect(switched).toContain('data-detail="false"')
+      expect(switched).not.toContain('Choose a pull request in a trusted GitHub project in this profile.')
+      const liveResults = (params: Record<string, string>, init?: RequestInit) =>
+        fetch(host + '/pull-requests/results?' + new URLSearchParams(params), init)
+      const liveQuery = 'draft:false "Small report"'
+      const liveResponse = await liveResults({ ...formScope, profile, q: liveQuery })
+      expect(liveResponse.status).toBe(200)
+      expect(liveResponse.headers.get('cache-control')).toBe('private, no-store')
+      const live = await liveResponse.json()
+      expect(live).toMatchObject({ search: liveQuery, draft: 'hide', filterCount: 1 })
+      expect(new URLSearchParams(live.scope).get('q')).toBe(liveQuery)
+      expect(new URLSearchParams(live.scope).has('selectedUrl')).toBe(false)
+      expect(live.html).toContain('data-pr-results-fragment')
+      expect(live.html).toContain('Small report with checks')
+      expect(live.html).toContain('aria-current="page"')
+      expect(live.html).not.toContain('Draft report with checks')
+      expect(live.html).not.toMatch(/<script|<html|data-pr-workspace-detail/u)
+      const otherResults = await (await liveResults({ ...formScope, profile: String(otherProfile.id), q: liveQuery })).json()
+      expect(otherResults.html).not.toContain('Small report with checks')
+      expect((await liveResults({}, { headers: { 'sec-fetch-site': 'cross-site' } })).status).toBe(403)
+      expect((await liveResults({}, { method: 'POST' })).status).toBe(405)
+
+      const labels = await (await list({ find: 'labels', findQuery: 'phase 2', draft: 'hide' })).text()
+      expect(labels).toContain('Validate the staged export')
+      expect(labels).toMatch(/value="hide"\s+selected/u)
+      const authors = await (await list({ find: 'authors', findQuery: 'alix' })).text()
+      expect(authors).toContain('Alix Coder')
+      expect(authors).toContain('<strong>@alix</strong>')
+      const chosen = await (await list({ chooseAuthor: 'alix', author: 'fixture-user', review: 'changes-requested', checks: 'failing' })).text()
+      expect(chosen).toContain('External report with checks')
+      expect(chosen).not.toContain('Small report with checks')
+      expect(await (await list({ involvement: 'authored', author: 'alix' })).text()).toContain('No pull requests match these filters.')
+
+      for (let number = 10; number < 32; number++) fixture.pulls.push({ ...original, number, html_url: url.replace(/1$/u, String(number)),
+        title: 'Paged report ' + number, labels: [report] })
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const firstPage = await (await list({ addLabel: report.name, author: 'fixture-user' })).text()
+      expect([...firstPage.matchAll(/<a\b[^>]*\bdata-pr-row\b/gu)]).toHaveLength(20)
+      const next = /<a href="([^"]+)"[^>]*>Next page<\/a>/u.exec(firstPage)?.[1]
+      expect(next).toBeDefined()
+      const nextPage = new URL(next!.replaceAll('&amp;', '&'), host)
+      expect(nextPage.searchParams.get('page')).toBe('2')
+      expect(nextPage.searchParams.getAll('label')).toEqual([report.name])
+      expect(nextPage.searchParams.get('author')).toBe('fixture-user')
+
+      original.labels.push({ id: 51, name: 'size:S' })
+      original.body = 'The ledger needs a checksum.'
+      original.searchComments = ['An earlier result was redacted.']
+      fixture.pulls[1].labels = [compliance, report, { id: 52, name: 'size:XS' }]
+      fixture.pulls.push({ ...original, number: 5, html_url: url.replace(/1$/u, '5'), title: 'Ignored report with checks',
+        labels: [...original.labels, { id: 53, name: 'wip' }] })
+      fixture.filterListTotal = 1001
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const typed = 'repo:fixture/elsewhere is:closed label:"Release / Lång, phase 2",unused size:S,XS -label:wip draft:false author:me review:approved checks:success "report with checks"'
+      const typedPage = await (await list({ q: typed, label: 'incompatible menu label', draft: 'only', author: 'alix',
+        review: 'changes-requested', checks: 'failing' })).text()
+      expect(typedPage).toContain('Small report with checks')
+      expect(typedPage).not.toContain('Draft report with checks')
+      expect(typedPage).not.toContain('Ignored report with checks')
+      expect(typedPage).toMatch(/value="hide"\s+selected/u)
+      expect(typedPage).toContain('GitHub search shows up to 1,000 results')
+      const typedOnly = await (await list({ q: 'draft:false "Small report"' })).text()
+      expect(typedOnly).toContain('aria-label="Filters (1)"')
+      expect(typedOnly).not.toContain('Clear additional filters')
+      for (const text of ['ledger needs a checksum', 'earlier result was redacted']) {
+        const contentSearch = await (await list({ q: 'size:S -label:wip "' + text + '"' })).text()
+        expect(contentSearch).toContain('Small report with checks')
+        expect(contentSearch).not.toContain('Ignored report with checks')
+      }
+      const typedHref = /href="([^"]*selectedUrl=[^"]+)"/u.exec(typedPage)?.[1]
+      expect(new URL(typedHref!.replaceAll('&amp;', '&'), host).searchParams.get('q')).toBe(typed)
+      const changedDraft = await (await list({ q: typed, chooseDraft: 'only', shownDraft: 'hide' })).text()
+      expect(changedDraft).toContain('Draft report with checks')
+      expect(changedDraft).not.toContain('Small report with checks')
+      const changedHref = /href="([^"]*selectedUrl=[^"]+)"/u.exec(changedDraft)?.[1]
+      const changedParams = new URL(changedHref!.replaceAll('&amp;', '&'), host).searchParams
+      expect(changedParams.get('q')).toBe(typed.replace(' draft:false', ''))
+      expect(changedParams.get('draft')).toBe('only')
+
+      fixture.filterListFailure = 'fixture/notebook'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await liveResults({ q: 'report' })).status).toBe(503)
+      const beyondIndex = await (await list({ q: 'label:bug', page: '51' })).text()
+      expect(beyondIndex).toContain('GitHub search shows up to 1,000 results')
+      expect(beyondIndex).not.toContain('GitHub could not list this repository.')
+
+      const appendix = join(dir, 'filter-appendix')
+      mkdirSync(appendix)
+      for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/fixture/appendix']])
+        expect(Bun.spawnSync(['git', ...args], { cwd: appendix }).success).toBe(true)
+      await harness.engine.dispatch({ id: 'pull-request-filters-appendix', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(appendix), trusted: true } })
+      fixture.repositories['fixture/appendix'] = { bare: join(appendix, '.git') }
+      fixture.filterListFailure = 'fixture/appendix'
+      fixture.filterAuthorFailure = 'fixture/appendix'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const partialList = await (await list({ author: '@me', label: compliance.name, q: 'Small report' })).text()
+      expect(partialList).toContain('Small report with checks')
+      expect(partialList).toContain('fixture/appendix')
+      expect(partialList).not.toContain('Private list search diagnostics')
+      const partialChoices = await (await list({ find: 'authors', findQuery: 'alix' })).text()
+      expect(partialChoices).toContain('Alix Coder')
+      expect(partialChoices).toContain('Could not search all selected repositories.')
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
+
   it.skipIf(process.platform === 'win32')('searches a large GitHub label catalog and verifies the selected identities before saving', async () => {
     const { project, cli, local, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
     const tag = (id: number, name: string) => ({ id: 13_000_000_000 + id, node_id: 'LA_fixture_' + id, name, color: '336611', description: '' })

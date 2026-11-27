@@ -2640,7 +2640,14 @@ await steeringReady.waitFor()
 await originalTurn.getByText('Steer from a queued row.').waitFor()
 check('the original turn retains its steer after a reload', await originalTurn.locator('[data-steered-message]').count() === 1)
 await pressChord('Control+,')
+await page.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
 await page.locator('#settings-follow-up').selectOption('steer')
+const followUpSaveDeadline = performance.now() + 10_000
+while (harness.engine.current.settings.followUpBehavior !== 'steer' && performance.now() < followUpSaveDeadline) await Bun.sleep(50)
+if (harness.engine.current.settings.followUpBehavior !== 'steer') {
+  const error = await page.locator('[data-settings-error]').textContent()
+  throw new Error('The host did not save the steering preference.' + (error ? ' ' + error : ''))
+}
 await page.keyboard.press('Escape')
 await promptBox.focus()
 await promptBox.press('Control+f')
@@ -4959,10 +4966,20 @@ const settingsThreadPane = page.locator('[data-settings-section="threads"]').loc
 const autoSettleSwitch = settingsThreadPane.getByLabel('Auto-settle inactive threads')
 const autoSettleDays = settingsThreadPane.getByLabel('Days before auto-settle')
 await autoSettleDays.waitFor()
+await page.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready', undefined, { timeout: 10_000 })
 check('inactive threads default to seven days on the host', await autoSettleSwitch.isChecked() && await autoSettleDays.inputValue() === '7')
 await autoSettleDays.fill('14')
 await autoSettleDays.press('Tab')
-for (let attempt = 0; attempt < 80 && harness.engine.current.settings.autoSettleAfterDays !== 14; attempt++) await Bun.sleep(50)
+await page.waitForFunction(() => document.activeElement?.id !== 'settings-auto-settle-days', undefined, { timeout: 5_000 })
+const durationSaveDeadline = performance.now() + 12_000
+while (performance.now() < durationSaveDeadline && harness.engine.current.settings.autoSettleAfterDays !== 14) await Bun.sleep(50)
+if (harness.engine.current.settings.autoSettleAfterDays !== 14) {
+  console.error('Auto-settle settings fixture', {
+    host: harness.engine.current.settings.autoSettleAfterDays,
+    input: await autoSettleDays.inputValue(),
+    status: await settingsThreadPane.getByRole('alert').allTextContents(),
+  })
+}
 check('the inactivity duration is stored on the host', harness.engine.current.settings.autoSettleAfterDays === 14)
 await page.reload()
 await page.waitForFunction(() => (document.querySelector('#settings-auto-settle-days') as HTMLInputElement)?.value === '14')
@@ -5523,15 +5540,24 @@ await modelBatchPage.waitForFunction(() => document.querySelector<HTMLTextAreaEl
 await batchNotice.getByRole('button', { name: 'Retry pending' }).click()
 await batchNotice.getByRole('link', { name: 'Fixture Balanced' }).waitFor()
 const batchThreads = () => [...harness.engine.current.sessions.values()].filter(thread => thread.turns.some(turn => turn.prompt === batchText))
-for (let attempt = 0; attempt < 160 && batchThreads().filter(thread => thread.turns.at(-1)?.status === 'complete').length < 2; attempt++) await Bun.sleep(50)
+const batchCompletionDeadline = performance.now() + 20_000
+while (performance.now() < batchCompletionDeadline && batchThreads().filter(thread => thread.turns.at(-1)?.status === 'complete').length < 2)
+  await Bun.sleep(50)
 const finishedBatchThreads = batchThreads()
-check('the two models run the same prompt and file in independent checkouts',
+const independentBatchThreads =
   finishedBatchThreads.length === 2
   && finishedBatchThreads.every(thread => thread.turns.length === 1 && thread.turns[0]?.status === 'complete'
     && thread.turns[0].attachments?.[0]?.name === 'comparison-notes.txt' && thread.providerInstanceId === 4 && thread.worktreePath)
   && new Set(finishedBatchThreads.map(thread => thread.worktreePath)).size === 2
   && finishedBatchThreads.find(thread => thread.model === 'fixture-fast')?.codexTurnOptions?.effort === 'high'
-  && finishedBatchThreads.some(thread => thread.model === 'fixture-balanced'))
+  && finishedBatchThreads.some(thread => thread.model === 'fixture-balanced')
+if (!independentBatchThreads) {
+  console.error('Model comparison fixture', finishedBatchThreads.map(thread => ({
+    model: thread.model, status: thread.turns.at(-1)?.status, turns: thread.turns.length,
+    provider: thread.providerInstanceId, isolated: Boolean(thread.worktreePath), attachments: thread.turns[0]?.attachments?.length,
+  })))
+}
+check('the two models run the same prompt and file in independent checkouts', independentBatchThreads)
 const batchFiles = await Promise.all(finishedBatchThreads.map(thread => {
   const file = thread.turns[0]?.attachments?.[0]
   return file ? fetch(`${baseUrl}/composer-attachments/${file.id}?session=${thread.id}`).then(response => response.text()) : null
@@ -6722,16 +6748,187 @@ try {
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
-    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('unmatched review')
-    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.getByRole('searchbox', { name: 'Search pull requests' }).fill('unmatched review')
+    await reviewList.getByRole('button', { name: 'Search', exact: true }).click()
     await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
-    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('draft pull request')
+    await reviewList.getByRole('searchbox', { name: 'Search pull requests' }).fill('draft pull request')
     await reviewList.getByRole('combobox', { name: 'Sort' }).selectOption('oldest')
-    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.getByRole('button', { name: 'Search', exact: true }).click()
     await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
     check('review search reopens a matching title and restores the selected sort from its address',
       new URL(clonePage.url()).searchParams.get('q') === 'draft pull request'
       && await reviewList.getByRole('combobox', { name: 'Sort' }).inputValue() === 'oldest')
+
+    const beforeFilters = pullState()
+    const filterLabel = { id: 413, node_id: 'LA_fixture_reporting', name: 'Release reporting', color: '298265' }
+    writeFileSync(github.state, JSON.stringify({ ...beforeFilters,
+      labelPages: [[filterLabel]], pulls: beforeFilters.pulls.map((pull: { number: number }) => pull.number === 1
+        ? { ...pull, filterChecks: 'success', filterReview: 'none', labels: [filterLabel] } : pull),
+    }))
+    try {
+      await clonePage.setViewportSize({ width: 390, height: 844 })
+      const filters = reviewList.locator('[data-pr-filters]')
+      const additionalFilters = filters.locator('[data-pr-additional-filters] > summary')
+      const resultRow = reviewList.locator('[data-pr-row]').first()
+      await clonePage.reload()
+      await resultRow.getByText('Passing checks', { exact: true }).waitFor()
+      check('the grouped phone list exposes author, label, and check state on its review row',
+        await reviewList.getByRole('heading', { name: 'Authored 1' }).isVisible()
+        && await resultRow.getByText('Release reporting', { exact: true }).isVisible()
+        && await resultRow.getByText('fixture-user', { exact: true }).isVisible())
+      await capture('pull-requests-grouped-phone-390x844', clonePage)
+      await clonePage.setViewportSize({ width: 360, height: 800 })
+      await clonePage.locator('html').evaluate(root => { root.style.zoom = '1.5' })
+      try {
+        const enlargedViews = filters.locator('[data-pr-views] > summary')
+        check('enlarged list controls keep the saved views icons inside their trigger',
+          await enlargedViews.evaluate((trigger) => {
+            const bounds = trigger.getBoundingClientRect()
+            return [...trigger.children].every((child) => {
+              const icon = child.getBoundingClientRect()
+              return !icon.width || icon.left >= bounds.left && icon.right <= bounds.right
+            }) && bounds.right <= innerWidth
+          }))
+        await capture('pull-requests-grouped-zoom-360x800', clonePage)
+      }
+      finally {
+        await clonePage.locator('html').evaluate(root => { root.style.zoom = '' })
+        await clonePage.setViewportSize({ width: 390, height: 844 })
+      }
+      const initialRow = await resultRow.boundingBox()
+      await additionalFilters.press('Enter')
+      const openRow = await resultRow.boundingBox()
+      check('the phone filters panel exposes list scope without shifting the results',
+        await filters.getByRole('combobox', { name: 'Repository' }).isVisible()
+        && Boolean(initialRow && openRow && Math.abs(initialRow.y - openRow.y) < 1))
+      await filters.getByRole('combobox', { name: 'Profile' }).focus()
+      await clonePage.keyboard.press('Escape')
+      check('Escape closes pull request filters and returns focus to their trigger',
+        await filters.getByRole('combobox', { name: 'Profile' }).isHidden()
+        && await additionalFilters.evaluate(element => element === element.ownerDocument.activeElement))
+      await additionalFilters.press('Enter')
+      await filters.getByRole('combobox', { name: 'Draft', exact: true }).selectOption('only')
+      await filters.getByRole('combobox', { name: 'Review', exact: true }).selectOption('none')
+      await filters.getByRole('combobox', { name: 'Checks', exact: true }).selectOption('passing')
+      await filters.getByLabel('Author', { exact: true }).fill('@me')
+      await filters.getByRole('searchbox', { name: 'Find a label or author' }).fill('release reporting')
+      await filters.getByRole('button', { name: 'Find labels', exact: true }).click()
+      const match = filters.getByRole('checkbox', { name: 'Release reporting', exact: true })
+      await match.check()
+      await capture('pull-requests-advanced-filters-390x844', clonePage)
+      await filters.getByRole('button', { name: 'Apply filters' }).click()
+      await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
+      await reviewList.locator('[data-pr-row]').first().click()
+      await clonePage.getByRole('link', { name: 'Timeline', exact: true }).click()
+      const url = new URL(clonePage.url())
+      check('advanced list filters combine and stay on the selected pull request across its tabs',
+        url.searchParams.get('label') === filterLabel.name && url.searchParams.get('draft') === 'only'
+        && url.searchParams.get('review') === 'none' && url.searchParams.get('checks') === 'passing' && url.searchParams.get('author') === '@me')
+
+      await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
+      const search = filters.getByRole('searchbox', { name: 'Search pull requests' })
+      const typed = 'draft:true author:me label:"Release reporting",unused -label:wip draft pull request'
+      await search.fill(typed)
+      await search.press('Enter')
+      await clonePage.waitForURL(url => url.searchParams.get('q') === typed)
+      await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
+      check('typed PR search handles OR labels, exclusions, viewer alias, and literal title words',
+        await reviewList.locator('[data-pr-row]').count() === 1 && await search.inputValue() === typed)
+      const savedViews = filters.locator('[data-pr-views] > summary')
+      const saveView = filters.getByRole('button', { name: 'Save current view…', exact: true })
+      const viewName = clonePage.getByRole('textbox', { name: 'Name', exact: true })
+      const viewSave = clonePage.getByRole('button', { name: 'Save view', exact: true })
+      await savedViews.press('ArrowDown')
+      check('the saved PR views disclosure can be opened and navigated by keyboard',
+        await saveView.evaluate(element => element === element.ownerDocument.activeElement))
+      await saveView.press('Enter')
+      await viewName.waitFor()
+      check('opening the saved-view editor focuses its name field', await viewName.evaluate(element => element === element.ownerDocument.activeElement))
+      await capture('pull-requests-save-view-390x844', clonePage)
+      await viewName.fill('Draft release reviews')
+      await viewSave.click()
+      await reviewList.getByText('View saved.', { exact: true }).waitFor()
+      await clonePage.reload()
+      await savedViews.getByText('Draft release reviews', { exact: true }).waitFor()
+      await savedViews.click()
+      await capture('pull-requests-saved-views-390x844', clonePage)
+      await saveView.click()
+      await viewName.fill('draft release reviews')
+      await viewSave.click()
+      await clonePage.getByRole('dialog').getByText('A view with this name already exists.', { exact: true }).waitFor()
+      await clonePage.keyboard.press('Escape')
+      await viewName.waitFor({ state: 'hidden' })
+      check('cancelling a duplicate saved name returns focus to the Views control',
+        await savedViews.evaluate(element => element === element.ownerDocument.activeElement))
+
+      await additionalFilters.press('Enter')
+      const draftFilter = filters.getByRole('combobox', { name: 'Draft', exact: true })
+      await draftFilter.selectOption('hide')
+      await filters.getByRole('button', { name: 'Apply filters' }).click()
+      await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
+      check('changing the draft menu removes its typed qualifier and preserves the rest of the PR search',
+        await search.inputValue() === typed.replace('draft:true ', '')
+        && new URL(clonePage.url()).searchParams.get('chooseDraft') === 'hide')
+      await savedViews.getByText('Modified', { exact: true }).waitFor()
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Update saved view', exact: true }).click()
+      await savedViews.getByText('Modified', { exact: true }).waitFor({ state: 'hidden' })
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Rename view…', exact: true }).click()
+      await viewName.fill('Reviewed release drafts')
+      await viewSave.click()
+      await savedViews.getByText('Reviewed release drafts', { exact: true }).waitFor()
+
+      await clonePage.setViewportSize({ width: 1280, height: 800 })
+      await clonePage.goto(mergeReviewUrl)
+      await clonePage.getByRole('link', { name: 'Timeline', exact: true }).click()
+      const currentReview = clonePage.locator('[data-pr-workspace-detail]')
+      const reviewInstance = await currentReview.elementHandle()
+      await search.focus()
+      await search.dispatchEvent('compositionstart')
+      await search.fill('まだ編集中')
+      await search.fill('draft:false unmatched live review')
+      const liveResponse = clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/results' && response.ok())
+      await search.dispatchEvent('compositionend')
+      await liveResponse
+      await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
+      const liveUrl = new URL(clonePage.url())
+      const back = currentReview.getByRole('link', { name: 'Back to list', exact: true })
+      const liveBack = new URL((await back.getAttribute('href'))!, liveUrl)
+      check('search updates the PR results after composition while keeping focus and the open Timeline',
+        liveUrl.searchParams.get('q') === 'draft:false unmatched live review'
+        && liveUrl.searchParams.get('selectedUrl') === address && liveUrl.searchParams.get('tab') === 'timeline'
+        && liveBack.searchParams.get('q') === liveUrl.searchParams.get('q')
+        && await search.evaluate(element => element === element.ownerDocument.activeElement)
+        && await reviewInstance?.evaluate(element => element.isConnected) === true)
+      await capture('pull-requests-live-search-1280x800', clonePage)
+      await search.press('Escape')
+      await clonePage.waitForURL(url => !url.searchParams.has('q'))
+      check('Escape clears live PR search while retaining its selected review', await search.inputValue() === ''
+        && new URL(clonePage.url()).searchParams.get('selectedUrl') === address)
+      await search.fill('preserve an independently selected request')
+      await search.press('Enter')
+      await clonePage.waitForURL(url => url.searchParams.get('q') === 'preserve an independently selected request')
+      check('submitting a pull request search preserves an independently selected request',
+        new URL(clonePage.url()).searchParams.get('selectedUrl') === address
+        && new URL(clonePage.url()).searchParams.get('tab') === 'timeline')
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Reviewed release drafts', exact: true }).click()
+      await savedViews.getByText('Reviewed release drafts', { exact: true }).waitFor()
+      const appliedView = new URL(clonePage.url()).searchParams
+      check('applying a saved PR view restores the updated filters and keeps the selected request and tab',
+        appliedView.get('selectedUrl') === address && appliedView.get('tab') === 'timeline'
+        && appliedView.get('q') === typed.replace('draft:true ', '') && appliedView.get('draft') === 'hide'
+        && appliedView.get('sort') === 'oldest' && !appliedView.has('page'))
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Delete view', exact: true }).click()
+      await reviewList.getByText('View deleted.', { exact: true }).waitFor()
+      await clonePage.reload()
+      await savedViews.getByText('Views', { exact: true }).waitFor()
+      check('deleting a saved view clears the local preset and leaves its applied filters in place',
+        await search.inputValue() === typed.replace('draft:true ', ''))
+    }
+    finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
 
     github.configureMerge('ready', ['MERGE', 'SQUASH'])
     await clonePage.setViewportSize({ width: 390, height: 844 })

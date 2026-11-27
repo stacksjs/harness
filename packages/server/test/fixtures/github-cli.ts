@@ -145,6 +145,30 @@ if (url.pathname === '/graphql' && method === 'POST') {
     reply(200, { data: { [marked ? 'markFileAsViewed' : 'unmarkFileAsViewed']: { clientMutationId: null } } })
   }
   const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
+  if (query.includes('query HarnessPullRequestListDetails')) {
+    const repository = variables.owner + '/' + variables.name
+    if (!state.repositories[repository]) reply(404, {})
+    const mode = state.listMetadataMode
+    if (mode === 'unavailable') reply(503, { message: 'Private metadata diagnostics' })
+    const selected = Object.fromEntries([...query.matchAll(/pr(\\d+): pullRequest\\(number: \\d+\\)/g)].map(([, number]) => {
+      const pull = state.pulls.find(pull => pull.base.repo.full_name === repository && String(pull.number) === number)
+      if (!pull || (mode === 'partial' && number === '3')) return ['pr' + number, null]
+      const sha = mode === 'head-changed' && number === '1' ? 'e'.repeat(40) : pull.head.sha
+      const decisions = { approved: 'APPROVED', changes_requested: 'CHANGES_REQUESTED', required: 'REVIEW_REQUIRED' }
+      return ['pr' + number, {
+        number: pull.number, headRefOid: sha, isDraft: Boolean(pull.draft),
+        mergeable: pull.listConflict ? 'CONFLICTING' : 'MERGEABLE',
+        reviewDecision: decisions[pull.filterReview] ?? null,
+        additions: pull.additions, deletions: pull.deletions,
+        reviewRequests: { nodes: (pull.requested_reviewers ?? []).map(user => ({ requestedReviewer: user })) },
+        commits: { nodes: [{ commit: { oid: pull.listCheckHead ?? sha,
+          statusCheckRollup: pull.filterChecks ? { state: pull.filterChecks.toUpperCase() } : null } }] },
+      }]
+    }))
+    reply(200, { data: { viewer: { ...viewer, login: state.listViewer ?? viewer.login }, repository: {
+      nameWithOwner: mode === 'wrong-repo' ? 'fixture/unrelated' : repository, isPrivate: state.privateRepository === repository, ...selected,
+    } } })
+  }
   const branchDeletion = state.branchDeletion
   const branchPull = state.pulls[0]
   const sourceRepository = branchDeletion && branchPull ? {
@@ -308,6 +332,14 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const nodes = labels.slice(0, 100).map(label => ({ id: label.node_id ?? String(label.id), name: label.name, color: label.color, description: label.description }))
     reply(200, { data: { repository: { nameWithOwner: name, labels: { nodes, pageInfo: { hasNextPage: labels.length > 100 } } } } })
   }
+  if (query.includes('query HarnessSearchPullRequestAuthors')) {
+    const name = variables.owner + '/' + variables.name
+    if (!state.repositories[name] || state.filterAuthorFailure === name) reply(503, { message: 'Private author search diagnostics' })
+    const needle = variables.search.toLowerCase()
+    const nodes = (state.filterAuthors ?? []).filter(user => (user.login + ' ' + user.name).toLowerCase().includes(needle))
+    reply(200, { data: { repository: { nameWithOwner: name, mentionableUsers: { nodes: nodes.slice(0, 50),
+      pageInfo: { hasNextPage: nodes.length > 50 } } } } })
+  }
   if (query.includes('query HarnessReviewerIdentities')) {
     if (!process.env.GH_TOKEN) reply(403, {})
     reply(200, { data: { nodes: variables.ids.map(id => state.reviewerPeople?.find(person => person.id === id) ?? null) } })
@@ -412,8 +444,37 @@ if (url.pathname === '/graphql' && method === 'POST') {
 if (url.pathname === '/search/issues') {
   const keyword = url.searchParams.get('q') ?? ''
   const selected = /repo:([^ ]+)/.exec(keyword)?.[1]
-  const title = keyword.split(String.fromCharCode(34))[1] ?? ''
-  reply(200, { items: state.pulls.filter(pull => pull.base.repo.full_name === selected && pull.title.toLowerCase().includes(title.toLowerCase())) })
+  const phrase = /in:title(?:,body,comments)? "([^"]+)"/.exec(keyword)?.[1]?.toLowerCase() ?? ''
+  const withoutText = keyword.replace(/in:title(?:,body,comments)? "[^"]+"/, '')
+  const labelsMatcher = /(?:^| )(-?)label:("[^"]+"(?:,"[^"]+")*)/g
+  const labels = [...withoutText.matchAll(labelsMatcher)].map(match => ({ exclude: match[1] === '-',
+    names: [...match[2].matchAll(/"([^"]+)"/g)].map(label => label[1].toLowerCase()) }))
+  const terms = new Set(withoutText.replace(labelsMatcher, ' ').split(' '))
+  const author = /(?:^| )author:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
+  const reviewer = /(?:^| )review-requested:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
+  const review = /(?:^| )review:([^ ]+)/.exec(withoutText)?.[1]
+  const checks = /(?:^| )status:([^ ]+)/.exec(withoutText)?.[1]
+  if (state.filterListFailure === selected) reply(503, { message: 'Private list search diagnostics' })
+  const matching = state.pulls.filter(pull => {
+    const applied = new Set((pull.labels ?? []).map(label => label.name.toLowerCase()))
+    const searchable = [pull.title, pull.body ?? '', ...(pull.searchComments ?? [])]
+    return pull.base.repo.full_name === selected && searchable.some(value => value.toLowerCase().includes(phrase))
+      && (!terms.has('is:open') || pull.state === 'open') && (!terms.has('is:closed') || pull.state === 'closed')
+      && (!terms.has('is:merged') || pull.merged_at) && (!terms.has('is:unmerged') || !pull.merged_at)
+      && (!terms.has('draft:true') || pull.draft) && (!terms.has('draft:false') || !pull.draft)
+      && (!author || pull.user?.login.toLowerCase() === author)
+      && (!reviewer || (pull.requested_reviewers ?? []).some(user => user.login.toLowerCase() === reviewer))
+      && (!review || review === (pull.filterReview ?? 'none')) && (!checks || checks === pull.filterChecks)
+      && labels.every(group => group.exclude !== group.names.some(name => applied.has(name)))
+  })
+  const field = url.searchParams.get('sort') === 'created' ? 'created_at' : 'updated_at'
+  const order = url.searchParams.get('order') === 'asc' ? 1 : -1
+  matching.sort((a, b) => order * (a[field] ?? '').localeCompare(b[field] ?? ''))
+  const size = Number(url.searchParams.get('per_page') || 20)
+  const page = Number(url.searchParams.get('page') || 1)
+  const more = matching.length > page * size ? 'link: <' + endpoint + '>; rel="next"\\r\\n' : ''
+  reply(200, { items: matching.slice((page - 1) * size, page * size), total_count: state.filterListTotal ?? matching.length,
+    incomplete_results: state.filterListIncomplete === selected }, more)
 }
 if (!repo) reply(404, {})
 if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs') {

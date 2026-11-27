@@ -1949,13 +1949,23 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels', '/pull-requests/reviewers'].includes(url.pathname)) {
+      if (['/pull-requests', '/pull-requests/results', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels', '/pull-requests/reviewers'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
         if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
           || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(120_000)])
+        if (url.pathname === '/pull-requests/results') {
+          if (request.method !== 'GET') return new Response(null, { status: 405, headers })
+          srv.timeout(request, 150)
+          return pullRequestWorkspace(engine.current, url.searchParams, signal, true).then(async (view) => {
+            if (view.listUnavailable) return new Response(null, { status: 503, headers })
+            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/partials/harness-pr-results.stx'), view, { autoShell: false })
+            return Response.json({ html, scope: view.savedViewScope, search: view.search, draft: view.draftChoice,
+              filterCount: view.activeFilterCount }, { headers: { ...headers, 'content-type': 'application/json' } })
+          }).catch(() => new Response(null, { status: 503, headers }))
+        }
         if (url.pathname === '/pull-requests/comments') {
           if (request.method !== 'GET') return new Response(null, { status: 405, headers })
           srv.timeout(request, 150)

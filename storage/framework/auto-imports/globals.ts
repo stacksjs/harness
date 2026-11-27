@@ -17,6 +17,7 @@ declare global {
   const toggleDark: typeof autoImports.toggleDark
   const isDark: typeof autoImports.isDark
   const preferredDark: typeof autoImports.preferredDark
+  const openLegacyBranchDeletion: typeof autoImports.openLegacyBranchDeletion
 }
 
 export {}

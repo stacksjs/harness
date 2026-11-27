@@ -56,7 +56,7 @@ async function readAppliedPullRequestLabels({ path, repository, number, credenti
   return result && !result.more ? result.labels : null
 }
 
-async function searchRepositoryLabels({ path, repository, credential, signal }: LabelContext, search: string) {
+export async function searchRepositoryLabels({ path, repository, credential, signal }: Omit<LabelContext, 'number'>, search: string) {
   const [owner, name] = repository.split('/')
   const response = await repositoryGitHubRequest(path, 'graphql', {
     query: `query HarnessSearchRepositoryLabels($owner: String!, $name: String!, $search: String!) {
