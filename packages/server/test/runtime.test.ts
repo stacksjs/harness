@@ -2,7 +2,7 @@ import type { Command, HostSettings, InputAnswer, WorktreeSelection } from '@har
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance, StartTurnInput } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -3342,6 +3342,78 @@ describe('thread wake scheduling', () => {
     expect(harness.engine.current.sessions.get(sessionId)?.navigation?.snoozedUntil).toBeNull()
     expect(harness.engine.current.sessions.get(sessionId)?.turns).toHaveLength(0)
     second.close()
+  })
+})
+
+describe('the projects this host has already worked in', () => {
+  /** A Claude Code history tree, whose directory names cannot be decoded. */
+  function history(root: string, entries: Array<{ path: string, conversations?: number }>): string {
+    const historyDirectory = join(root, '.claude', 'projects')
+    for (const { path, conversations = 1 } of entries) {
+      const directory = join(historyDirectory, path.replaceAll('/', '-'))
+      mkdirSync(directory, { recursive: true })
+      for (let index = 0; index < conversations; index++)
+        writeFileSync(join(directory, `c${index}.jsonl`), `${JSON.stringify({ type: 'user', cwd: path })}\n`)
+    }
+    return historyDirectory
+  }
+
+  it('offers what the agents have used, leaves out what is registered, and stays on the host', async () => {
+    const home = realpathSync(mkdtempSync(join(dir, 'history-home-')))
+    const registered = join(home, 'registered')
+    const offered = join(home, 'offered')
+    const scratch = join(home, 'Downloads', 'cloned')
+    for (const path of [registered, offered, scratch]) mkdirSync(join(path, '.git'), { recursive: true })
+    const historyDirectory = history(home, [
+      { path: registered, conversations: 4 },
+      { path: offered, conversations: 3 },
+      { path: scratch },
+    ])
+
+    const { driver } = fakeDriver([])
+    harness = await serve({
+      port,
+      databasePath: join(dir, 'test.sqlite'),
+      localTokenPath: join(dir, 'host-token'),
+      remote: true,
+      agentHistoryDirectory: historyDirectory,
+      agentHistoryHome: home,
+      resolveDriver: () => driver,
+    })
+    const endpoint = `http://127.0.0.1:${port}/project-history`
+    const host = await Client.connect(`ws://127.0.0.1:${port}/ws`, harness.access!.localToken)
+    host.send({ t: 'dispatch', envelope: { id: 'h_p', at: 1, command: { type: 'profile.create', name: 'P' } } })
+    host.send({
+      t: 'dispatch',
+      envelope: { id: 'h_w', at: 2, command: { type: 'workspace.add', profileId: derivedId('h_p'), path: registered } },
+    })
+    expect((await host.waitForDispatch('h_w'))?.t).toBe('dispatched')
+
+    const auth = (token = harness.access!.localToken) => ({ authorization: `Bearer ${token}` })
+    const body = await (await fetch(endpoint, { headers: auth() })).json() as { projects: Array<Record<string, unknown>> }
+    expect(body.projects.map(entry => entry.name)).toEqual(['offered'])
+    expect(body.projects[0]).toMatchObject({ path: offered, git: true, conversations: 3, recommended: true })
+
+    // A paired phone has no business learning what is on the laptop's disk,
+    // so this one needs host privileges even with remote access enabled.
+    const paired = await harness.access!.redeem(harness.access!.openPairing().code, 'Fixture remote')
+    if (!paired.ok) throw new Error('Fixture pairing failed.')
+    expect((await fetch(endpoint, { headers: auth(paired.token) })).status).toBe(403)
+    expect((await fetch(endpoint, { headers: { ...auth(), origin: 'https://unrelated.test' } })).status).toBe(403)
+    host.close()
+  })
+
+  it('answers with an empty list when the host has no agent history', async () => {
+    const home = realpathSync(mkdtempSync(join(dir, 'empty-home-')))
+    const { driver } = fakeDriver([])
+    harness = await serve({
+      port,
+      databasePath: join(dir, 'test.sqlite'),
+      agentHistoryDirectory: join(home, '.claude', 'projects'),
+      agentHistoryHome: home,
+      resolveDriver: () => driver,
+    })
+    expect(await (await fetch(`http://127.0.0.1:${port}/project-history`)).json()).toEqual({ projects: [] })
   })
 })
 

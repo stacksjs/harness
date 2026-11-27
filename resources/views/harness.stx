@@ -131,6 +131,9 @@ export const projectSettingsName = activeWorkspace?.name || ''
 // which the host computes for a thread even when that thread is scratch.
 export const projectWorkspaceId = activeWorkspace?.id || 0
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
+// Whether the welcome state is the thing on screen, which is the only place
+// the discovered projects are offered.
+export const showProjectHistory = !activeSession && !draftProject && !draftWithoutProject && !missingThread
 export const projectCloneAllowed = Boolean($props.canLaunchWorkspaceEditor)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
 export const previewDiscoveryAllowed = Boolean(activeSession && $props.canLaunchWorkspaceEditor)
@@ -413,6 +416,38 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Add a folder from the host to start working with an agent.</p>
             <button type="button" data-first-project @click="openProjectPicker" class="mt-2 px-4 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
             <button type="button" data-start-without-project @click="startWithoutProject" class="px-3 h-9 text-[13px] underline underline-offset-4">Start without a project</button>
+            {{--
+              What the agents on this host have already worked in, so the
+              first question is not "type an absolute path". Registering one
+              from here leaves it untrusted, exactly as the dialog does: the
+              trust gate above is still the only way to let an agent in.
+            --}}
+            <section data-project-history hidden :hidden="!projectHistory().length" aria-labelledby="project-history-heading" class="grid gap-2 mt-6 p-3 max-w-[52ch] w-full text-start border border-black/10 rounded-[10px] dark:border-white/15">
+              <div class="flex gap-2 items-baseline justify-between">
+                <h2 id="project-history-heading" class="font-medium text-[13px]">Projects on this host</h2>
+                <div class="flex gap-2 shrink-0 text-[12px]">
+                  <button type="button" data-history-select="all" @click="pickAllProjectHistory(true)" class="underline underline-offset-4">Select all</button>
+                  <button type="button" data-history-select="none" @click="pickAllProjectHistory(false)" class="underline underline-offset-4">Select none</button>
+                </div>
+              </div>
+              <p class="text-[12px] text-neutral-600 dark:text-neutral-300">Found in the agent history on this computer. Adding one does not trust it.</p>
+              <ul class="grid gap-1">
+                <li :for="entry in projectHistory()" :key="entry.path">
+                  <p :hidden="!entry.group" data-history-group :text="entry.group" class="mb-1 mt-2 text-[11px] text-neutral-500 tracking-wide uppercase dark:text-neutral-400"></p>
+                  <label data-history-row :data-history-git="String(entry.git)" class="flex gap-2 items-start py-1 text-[13px] cursor-pointer">
+                    <input type="checkbox" data-history-pick :data-history-path="entry.path" :checked="projectHistoryPicked()[entry.path] === true" @change="pickProjectHistory(entry.path, $event)" class="mt-[3px] accent-neutral-900 dark:accent-neutral-100" />
+                    <span class="grid min-w-0">
+                      <span data-history-name class="truncate" :text="entry.name"></span>
+                      <span data-history-note class="text-[11px] text-neutral-600 truncate dark:text-neutral-300" :text="entry.note"></span>
+                    </span>
+                  </label>
+                </li>
+              </ul>
+              <div class="flex gap-2 items-center">
+                <button type="button" data-history-add :disabled="!projectHistoryPickCount() || projectBusy()" @click="addPickedProjectHistory" :text="projectHistoryAddLabel()" class="px-3 h-8 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px] disabled:opacity-40"></button>
+                <p data-history-error role="alert" :hidden="!projectHistoryError()" :text="projectHistoryError()" class="text-[12px] text-red-700 dark:text-red-300"></p>
+              </div>
+            </section>
           @endif
         </div>
       @endif
@@ -2394,6 +2429,85 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const startPending = state(false)
   const projectBusy = state(false)
   const projectError = state('')
+  // What the agents on this host have worked in, read when the welcome state
+  // is the thing on screen rather than on every page load.
+  const projectHistory = state([])
+  const projectHistoryPicked = state({})
+  const projectHistoryError = state('')
+  const projectHistoryPickCount = derived(() => Object.values(projectHistoryPicked()).filter(Boolean).length)
+  const projectHistoryAddLabel = derived(() => projectHistoryPickCount() > 1
+    ? `Add ${projectHistoryPickCount()} projects`
+    : 'Add project')
+
+  /** Whole days, because an exact hour is noise for a thirty-day window. */
+  function projectHistoryAge(lastActivity) {
+    const days = Math.floor((Date.now() - lastActivity) / 86_400_000)
+    if (days <= 0) return 'today'
+    return days === 1 ? 'yesterday' : `${days} days ago`
+  }
+
+  function projectHistoryNote(entry) {
+    const conversations = entry.conversations === 1 ? '1 conversation' : `${entry.conversations} conversations`
+    return `${conversations} · ${projectHistoryAge(entry.lastActivity)} · ${entry.path}`
+  }
+
+  async function loadProjectHistory() {
+    projectHistoryError.set('')
+    try {
+      const response = await fetch('/project-history')
+      if (!response.ok) {
+        projectHistory.set([])
+        return
+      }
+      const body = await response.json()
+      const entries = Array.isArray(body?.projects) ? body.projects : []
+      let grouped = false
+      projectHistory.set(entries.map((entry) => {
+        // The first folder that is not a repository opens the second group,
+        // the way the reference separates them.
+        const group = !entry.git && !grouped ? 'Other folders' : ''
+        if (group) grouped = true
+        return { ...entry, group, note: projectHistoryNote(entry) }
+      }))
+      projectHistoryPicked.set(Object.fromEntries(entries.filter(entry => entry.recommended).map(entry => [entry.path, true])))
+    }
+    catch {
+      projectHistory.set([])
+    }
+  }
+
+  function pickProjectHistory(path, event) {
+    const picked = event.currentTarget.checked === true
+    projectHistoryPicked.update(current => ({ ...current, [path]: picked }))
+  }
+
+  function pickAllProjectHistory(all) {
+    projectHistoryPicked.set(all ? Object.fromEntries(projectHistory().map(entry => [entry.path, true])) : {})
+  }
+
+  async function addPickedProjectHistory() {
+    const paths = projectHistory().map(entry => entry.path).filter(path => projectHistoryPicked()[path])
+    if (!paths.length || projectBusy()) return
+    projectBusy.set(true)
+    projectHistoryError.set('')
+    try {
+      const profileId = Number(visibleProfile()) || undefined
+      let first = 0
+      for (const path of paths) {
+        const id = newCommandId()
+        // Untrusted, like the dialog: the trust gate stays the only way in.
+        await sendCommand({ type: 'workspace.register', ...(profileId ? { profileId } : {}), path, trusted: false }, id)
+        first ||= derivedSessionId(id)
+      }
+      navigate(`/?workspace=${first}`)
+    }
+    catch (error) {
+      projectHistoryError.set(error.message || 'Could not add that project.')
+    }
+    finally {
+      projectBusy.set(false)
+    }
+  }
   const visibleProfile = state(activeProfile)
   const desktop = useNativeDesktop()
   const hasFolderPicker = state(typeof desktop()?.dialog?.showOpenDialog === 'function')
@@ -8123,6 +8237,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     void refreshProjectSetup()
     void refreshProjectSettlement()
   }, { target: window })
+  if (showProjectHistory) void loadProjectHistory()
   if (codecUrl) void connectComposerDrafts().catch(() => {})
   if ((sessionId || activeProfile || initialSettingsSection) && serverUrl && codecUrl)
     void connectLiveSession().catch(() => sessionConnecting.set(false))

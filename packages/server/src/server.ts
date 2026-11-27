@@ -48,6 +48,7 @@ import type { RepositorySyncAction } from './repository-sync'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
+import { discoverHistoryProjects } from './project-history'
 import { settingsSection, workspaceReturn } from './settings-location'
 import { searchThreads } from './thread-search'
 import { respondWorkspaceEditor } from './workspace-editors'
@@ -71,6 +72,10 @@ export interface ServeOptions {
   /** Host-owned storage for projectless sessions. */
   scratchDirectory?: string
   chatGptCredentialDirectory?: string
+  /** Where the welcome screen looks for projects the agents have used. */
+  agentHistoryDirectory?: string
+  /** The home the excluded scratch folders are relative to. */
+  agentHistoryHome?: string
   /** Injectable so tests bind a fake driver instead of spawning a real agent. */
   resolveDriver?: (kind: DriverKind) => Driver | null
   /**
@@ -213,6 +218,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const projectSetup = new ProjectSetup(databasePath)
   const settlementAbort = new AbortController()
   const chatGptCredentials = new ChatGptCredentialStore(options.chatGptCredentialDirectory ?? chatGptCredentialDirectory())
+  const historyScan = {
+    ...(options.agentHistoryDirectory === undefined ? {} : { historyDirectory: options.agentHistoryDirectory }),
+    ...(options.agentHistoryHome === undefined ? {} : { home: options.agentHistoryHome }),
+  }
   const engine = new Engine({
     store,
     reducer: reduce,
@@ -1832,6 +1841,22 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const root = workspaceFileRoot(url.searchParams)
         if (!root) return Response.json({ error: 'Open a trusted workspace to launch an editor.' }, { status: 404, headers })
         return respondWorkspaceEditor(root, url, request.method)
+      }
+
+      // Projects this host's agents have worked in, for the welcome screen.
+      //
+      // Host privileges always, not merely when remote access is off: unlike
+      // the reads below it, this one lists folder names from the user's home
+      // that no client has been granted, and a paired phone has no business
+      // learning what is on the laptop's disk.
+      if (request.method === 'GET' && url.pathname === '/project-history') {
+        const headers = { 'cache-control': 'private, no-store' }
+        if (!canUseHostPrivileges(request, url)) return new Response(null, { status: 403, headers })
+        const registered = [...engine.current.workspaces.values()].filter(workspace => !workspace.scratch)
+        return Promise.all(registered.map(workspace => realpath(workspace.path).catch(() => workspace.path)))
+          .then(paths => discoverHistoryProjects({ ...historyScan, registered: paths }))
+          .then(projects => Response.json({ projects }, { headers }))
+          .catch(() => Response.json({ error: 'Could not read the agent history on this host.' }, { status: 503, headers }))
       }
 
       if (request.method === 'GET' && url.pathname === '/workspace-repositories') {

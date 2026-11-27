@@ -17,7 +17,7 @@ import type { ConversationRewindInput, Driver, ForkInput, ProviderEvent, Provide
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from '../packages/server/test/fixtures/git-http'
 import { fixtureGitHubCli } from '../packages/server/test/fixtures/github-cli'
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
 import { delimiter, join, sep } from 'node:path'
 import process from 'node:process'
@@ -68,15 +68,21 @@ execSync('git init -q && git add notes.txt && git -c user.email=t@t -c user.name
 
 // --- db schema
 const { Database } = await import('bun:sqlite')
+
+/** The schema a Harness database arrives with, for each one this drive boots. */
+function prepareDriveDatabase(path: string): void {
+  const database = new Database(path)
+  database.exec('PRAGMA foreign_keys = ON')
+  database.exec('CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT)')
+  database.exec('CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT)')
+  database.exec('CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, turn_id INTEGER, seq INTEGER NOT NULL, type TEXT NOT NULL, payload TEXT, command_id TEXT, at INTEGER, created_at TEXT, updated_at TEXT, uuid TEXT)')
+  database.exec('CREATE TABLE command_receipts (id INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, seqs TEXT, at INTEGER, created_at TEXT, updated_at TEXT, uuid TEXT)')
+  database.exec('CREATE TABLE provider_instances (id INTEGER PRIMARY KEY, profile_id INTEGER, driver_kind TEXT, binary_path TEXT, resolved_home TEXT, config TEXT)')
+  database.close()
+}
+
 const databasePath = join(driveRoot, 'h.sqlite')
-const db = new Database(databasePath)
-db.exec('PRAGMA foreign_keys = ON')
-db.exec('CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT)')
-db.exec('CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT)')
-db.exec('CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, turn_id INTEGER, seq INTEGER NOT NULL, type TEXT NOT NULL, payload TEXT, command_id TEXT, at INTEGER, created_at TEXT, updated_at TEXT, uuid TEXT)')
-db.exec('CREATE TABLE command_receipts (id INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, seqs TEXT, at INTEGER, created_at TEXT, updated_at TEXT, uuid TEXT)')
-db.exec('CREATE TABLE provider_instances (id INTEGER PRIMARY KEY, profile_id INTEGER, driver_kind TEXT, binary_path TEXT, resolved_home TEXT, config TEXT)')
-db.close()
+prepareDriveDatabase(databasePath)
 
 // --- fake driver: delta → approval (blocks) → tool call → delta → complete
 let releaseGate: () => void
@@ -7442,6 +7448,116 @@ check('handing the agent back to the host forgets the project override entirely'
 await openProjectDraft(scopedService)
 check('the project follows the host again once it pins nothing',
   ((await composerAgent.textContent()) ?? '').includes('Claude'))
+
+// 17. The welcome screen's known projects: a second host, because this one
+// needs a database with no projects in it and a home whose agent history is
+// the fixture's rather than this machine's.
+{
+  const historyHome = join(driveRoot, 'history-home')
+  const historyDirectory = join(historyHome, '.claude', 'projects')
+  const ledger = join(historyHome, 'ledger-api')
+  const notes = join(historyHome, 'notes')
+  const cloned = join(historyHome, 'Downloads', 'cloned')
+  for (const path of [ledger, cloned]) mkdirSync(join(path, '.git'), { recursive: true })
+  mkdirSync(notes, { recursive: true })
+
+  /**
+   * Conversations the way Claude Code records them: the directory is named
+   * after the project path with dashes for separators, which cannot be
+   * decoded back, so the path is only in the transcript.
+   */
+  const conversations = (path: string, count: number, ageDays: number): void => {
+    const directory = join(historyDirectory, path.replaceAll(sep, '-'))
+    mkdirSync(directory, { recursive: true })
+    for (let index = 0; index < count; index++) {
+      const file = join(directory, `c${index}.jsonl`)
+      writeFileSync(file, `${JSON.stringify({ type: 'user', cwd: path, sessionId: `c${index}` })}\n`)
+      const when = (Date.now() - ageDays * 86_400_000) / 1000
+      utimesSync(file, when, when)
+    }
+  }
+  conversations(ledger, 3, 2)
+  conversations(notes, 1, 5)
+  conversations(cloned, 4, 1)
+
+  const welcomePort = port + 1
+  const welcomeDatabase = join(driveRoot, 'welcome.sqlite')
+  prepareDriveDatabase(welcomeDatabase)
+  const welcomeHarness = await serve({
+    port: welcomePort,
+    databasePath: welcomeDatabase,
+    scratchDirectory: join(driveRoot, 'welcome-scratch'),
+    agentHistoryDirectory: historyDirectory,
+    agentHistoryHome: historyHome,
+    resolveDriver: () => driver,
+  })
+  const welcomePage = await browserContext.newPage()
+  welcomePage.on('pageerror', error => pageErrors.push(error.message))
+  // Earlier sections pin the clock to a fixed date for snooze previews, and
+  // that install reaches pages opened later in the same context: this page
+  // read "today" on CI for a transcript stamped two days ago. Pinning it to
+  // now makes the age the fixture's own doing rather than the runner's.
+  await welcomePage.clock.setFixedTime(new Date())
+  try {
+    await welcomePage.setViewportSize({ width: 1280, height: 800 })
+    await welcomePage.goto(`http://localhost:${welcomePort}/`, { waitUntil: 'commit' })
+    const historyList = welcomePage.locator('[data-project-history]')
+    const historyRows = welcomePage.locator('[data-history-row]')
+    const addButton = welcomePage.locator('[data-history-add]')
+    // Both rows, not just the first: `allTextContents` does not wait, so
+    // reading while the list is still arriving saw one row on CI and passed
+    // locally, which is the least useful way for a check to be wrong.
+    await historyRows.nth(1).waitFor({ timeout: 8000 })
+    const names = (await historyRows.locator('[data-history-name]').allTextContents()).map(name => name.trim())
+    // The group label sits above its row rather than inside it, and every
+    // other one is hidden, so this reads the shown labels without waiting.
+    const groups = (await welcomePage.locator('[data-history-group]:not([hidden])').allTextContents()).map(group => group.trim())
+    const note = (await historyRows.first().locator('[data-history-note]').textContent()) ?? ''
+    const noteParts = note.split(' · ')
+    // Printed when it is not what it should be, so a failure explains itself
+    // in the same run rather than costing another.
+    if (noteParts[1] !== '2 days ago') console.log('[welcome] note read as', JSON.stringify(note))
+    check('the welcome screen lists the repository before the plain folder', names.join() === 'ledger-api,notes')
+    check('folders that are not repositories get their own group', groups.join() === 'Other folders')
+    check('each row says how many conversations it has and how long ago',
+      noteParts[0] === '3 conversations' && noteParts[1] === '2 days ago')
+    // Downloads is someone else's scratch space, not a project of theirs.
+    check('a clone under Downloads is left out of the list',
+      !names.some(name => name.includes('cloned')) && !(await historyList.textContent())?.includes('Downloads'))
+    check('the active repository arrives selected and the quiet folder does not',
+      await historyRows.first().locator('[data-history-pick]').isChecked()
+      && !await historyRows.nth(1).locator('[data-history-pick]').isChecked()
+      && (await addButton.textContent())?.trim() === 'Add project')
+    await capture('welcome-project-history-desktop', welcomePage)
+
+    await welcomePage.locator('[data-history-select="none"]').click()
+    check('select none clears the choice and disables adding',
+      !await historyRows.first().locator('[data-history-pick]').isChecked() && await addButton.isDisabled())
+    await welcomePage.locator('[data-history-select="all"]').click()
+    check('select all takes both and the button counts them',
+      await historyRows.nth(1).locator('[data-history-pick]').isChecked()
+      && (await addButton.textContent())?.trim() === 'Add 2 projects')
+
+    await addButton.click()
+    await welcomePage.waitForURL(/\?workspace=/)
+    const registered = [...welcomeHarness.engine.current.workspaces.values()]
+    check('adding registers both folders untrusted, leaving the trust gate in the way',
+      registered.map(workspace => workspace.path).sort().join() === [ledger, notes].sort().join()
+      && registered.every(workspace => !workspace.trusted)
+      && await welcomePage.locator('[data-project-trust]').isVisible())
+    await capture('welcome-project-history-added', welcomePage)
+
+    // Nothing left to offer: both are registered here now.
+    await welcomePage.goto(`http://localhost:${welcomePort}/?project=none`, { waitUntil: 'commit' })
+    await welcomePage.goto(`http://localhost:${welcomePort}/`, { waitUntil: 'commit' })
+    await welcomePage.locator('[data-project-trust], [data-composer]').first().waitFor({ timeout: 8000 })
+    check('a registered project is not offered again', await historyList.isHidden())
+  }
+  finally {
+    await welcomePage.close()
+    welcomeHarness.stop()
+  }
+}
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)
