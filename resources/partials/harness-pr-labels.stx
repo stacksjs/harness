@@ -1,7 +1,7 @@
 <section id="pr-labels" data-pr-label-section aria-labelledby="pr-label-title">
   <div data-pr-label-heading>
     <h3 id="pr-label-title">Labels</h3>
-    @if(selected.canEditLabels && !selected.labelEditor && !labelDraft)
+    @if(selected.canEditLabels && !labelEditor && !labelDraft)
       <a href="{{ labelsHref }}" data-pr-button>Change labels</a>
     @endif
   </div>
@@ -34,25 +34,39 @@
       @endforeach
       <button type="submit" data-pr-button>Check GitHub and finish labels</button>
     </form>
-  @elseif(selected.labelEditor)
+  @elseif(labelEditor)
     <form method="post" action="{{ labelsEndpoint }}" aria-labelledby="pr-label-editor-title" data-pr-label-editor>
       <h4 id="pr-label-editor-title">Change labels</h4>
-      @if(labelOptions.length)
-        <input type="hidden" name="head" value="{{ selected.head }}">
-        <input type="hidden" name="viewer" value="{{ selected.labelEditor.viewer }}">
-        <input type="hidden" name="scope" value="{{ selected.labelEditor.scope }}">
-        <input type="hidden" name="revision" value="{{ selected.labelEditor.revision }}">
-        <input type="hidden" name="intent" value="{{ selected.labelEditor.intent }}">
-        <label data-pr-label-search>
+      <input type="hidden" name="head" value="{{ labelEditor.head }}">
+      <input type="hidden" name="viewer" value="{{ labelEditor.viewer }}">
+      <input type="hidden" name="scope" value="{{ labelEditor.scope }}">
+      <input type="hidden" name="revision" value="{{ labelEditor.revision }}">
+      <input type="hidden" name="intent" value="{{ labelEditor.intent }}">
+      <div data-pr-label-search>
+        <label>
           <span class="sr-only">Search labels</span>
-          <input type="search" placeholder="Search labels" maxlength="120" autofocus @input="labelSearch.set($event.target.value)">
+          <input type="search" name="query" value="{{ labelEditor.search }}" placeholder="Search labels" maxlength="120" autofocus @input="labelSearch.set($event.target.value)">
         </label>
+        @if(labelEditor.more || labelEditor.search || labelEditor.matches < 0)
+          <button type="submit" name="operation" value="search" data-pr-button>Search GitHub</button>
+        @else
+          <button type="submit" hidden disabled></button>
+        @endif
+      </div>
+      @if(labelEditor.more)
+        <p>More labels are available on GitHub. Refine your search.</p>
+      @elseif(labelEditor.matches === 0 && labelEditor.search)
+        <p>No labels matched your GitHub search.</p>
+      @elseif(!labelOptions.length && !labelError)
+        <p>This repository has no labels.</p>
+      @endif
+      @if(labelOptions.length)
         <p hidden :hidden="matchingLabelIds().size !== 0">No labels match your search.</p>
         <fieldset data-pr-label-options>
           <legend class="sr-only">Repository labels</legend>
           @foreach(labelOptions as label)
-            <label data-pr-label-option :hidden="!matchingLabelIds().has({{ label.id }})">
-              <input type="checkbox" name="label" value="{{ label.id }}" @if(label.applied) checked @endif>
+            <label data-pr-label-option :hidden="!matchingLabelIds().has('{{ label.key }}')">
+              <input type="checkbox" name="label" value="{{ label.key }}" @if(label.checked) checked @endif>
               <span>
                 <strong>{{ label.name }}</strong>
                 @if(label.archived)<span data-pr-label-archive>Archived</span>@endif
@@ -61,13 +75,11 @@
             </label>
           @endforeach
         </fieldset>
-      @else
-        <p>This repository has no labels.</p>
       @endif
       <div data-pr-review-actions>
         <a href="{{ summaryHref }}#pr-labels" data-pr-button>Cancel</a>
         @if(labelOptions.length)
-          <button type="submit" data-pr-button data-pr-label-save>Save labels</button>
+          <button type="submit" name="operation" value="save" data-pr-button data-pr-label-save>Save labels</button>
         @endif
       </div>
     </form>

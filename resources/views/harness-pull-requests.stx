@@ -65,7 +65,8 @@ export const labelsEndpoint = $props.labelsEndpoint
 export const labelsNotice = $props.labelsNotice
 export const labelDraft = $props.labelDraft
 export const labelError = $props.labelError
-export const labelOptions = selected?.labelEditor?.labels || []
+export const labelEditor = $props.labelEditor || selected?.labelEditor
+export const labelOptions = labelEditor?.labels || []
 export const reviewersHref = $props.reviewersHref
 export const reviewersEndpoint = $props.reviewersEndpoint
 export const reviewersNotice = $props.reviewersNotice
@@ -727,7 +728,7 @@ async function sendReviewReply(event) {
   finally { replySending.update(value => ({ ...value, [anchor]: false })) }
 }
 </script>
-@elseif(selected?.lifecycle?.branchToDelete || selected?.workflowApproval || selected?.labelEditor)
+@elseif(selected?.lifecycle?.branchToDelete || selected?.workflowApproval || labelEditor)
 <script client>
 import { openLegacyBranchDeletion } from '../functions/pull-request-dialogs'
 
@@ -750,7 +751,7 @@ function dismissWorkflowApproval(event) {
 }
 
 const labelSearch = state('')
-const searchableLabels = @json(labelOptions.map(label => [label.id, (label.name + ' ' + label.description).toLowerCase()]))
+const searchableLabels = @json(labelOptions.map(label => [label.key, (label.name + ' ' + label.description).toLowerCase()]))
 const matchingLabelIds = derived(() => {
   const search = labelSearch().trim().toLowerCase()
   return new Set(searchableLabels.filter(([, text]) => text.includes(search)).map(([id]) => id))

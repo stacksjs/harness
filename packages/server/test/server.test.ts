@@ -1,5 +1,6 @@
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -8,6 +9,7 @@ import { Terminal } from '@harness/ansi'
 import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
 import { ProjectScripts } from '../src/project-scripts'
+import { PullRequestReplyReceipts } from '../src/pull-request-reply-receipts'
 import { repositoryGitHubRequest } from '../src/repository-pull-request'
 import { serve } from '../src/server'
 import { fixtureGitHubCli } from './fixtures/github-cli'
@@ -51,8 +53,10 @@ async function pullRequestLifecycleForm(view: string, label = 'Update pull reque
   const forms = [...html.matchAll(/<form method="post" action="([^"]+)" (aria-label|aria-labelledby)="([^"]+)"[^>]*>([\s\S]*?)<\/form>/gu)]
   const form = forms.find(candidate => candidate[3] === label)
   if (!form) throw new Error('Missing pull request lifecycle form')
+  const entities: Record<string, string> = { amp: '&', quot: '"', '#34': '"', apos: "'", '#39': "'", lt: '<', gt: '>' }
   const values = Object.fromEntries(
-    [...form[4]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
+    [...form[4]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!,
+      field[2]!.replace(/&(amp|quot|#34|apos|#39|lt|gt);/gu, (_, entity: string) => entities[entity]!)]),
   )
   return { endpoint: new URL(form[1]!.replaceAll('&amp;', '&'), view), values, html }
 }
@@ -578,8 +582,7 @@ describe('harness serve — HTTP', () => {
       expect(first.html).toContain('More people match on GitHub.')
       expect(first.html).toContain('Alix Example')
       expect(first.html).not.toContain('Dorian Reviewer')
-      const values = Object.fromEntries(Object.entries(first.values).map(([key, value]) => [key,
-        value.replaceAll('&quot;', '"').replaceAll('&#34;', '"').replaceAll('&amp;', '&')]))
+      const values = first.values
       expect(JSON.parse(values.scope!)).toHaveLength(3)
       const post = (fields: Record<string, string>, ids: string[], options: { search?: string, origin?: string, target?: string, accept?: string } = {}) => {
         const endpoint = new URL(first.endpoint.pathname + first.endpoint.search, host)
@@ -683,7 +686,7 @@ describe('harness serve — HTTP', () => {
       expect(original.html).toContain('legacy/needs review')
       expect(original.html).toContain('Review the CSV export')
       expect(original.html).not.toContain('Unused archived')
-      expect(original.values.scope.split(',')).toHaveLength(3)
+      expect(JSON.parse(original.values.scope)).toHaveLength(3)
       const save = (form: typeof original, selected: string[], overrides: Record<string, string> = {}, accept = 'application/json') => {
         const endpoint = new URL(form.endpoint.pathname + form.endpoint.search, host)
         if (overrides.selectedUrl) endpoint.searchParams.set('selectedUrl', overrides.selectedUrl)
@@ -745,6 +748,108 @@ describe('harness serve — HTTP', () => {
       writeFileSync(cli.state, JSON.stringify(done))
       expect((await save(fresh, ['31', '41'])).status).toBe(200)
       expect(readState().labelWrites).toEqual([...done.labelWrites, [1, 'POST', 31, add.name]])
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 60_000)
+
+  it.skipIf(process.platform === 'win32')('searches a large GitHub label catalog and verifies the selected identities before saving', async () => {
+    const { project, cli, local, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
+    const tag = (id: number, name: string) => ({ id: 13_000_000_000 + id, node_id: 'LA_fixture_' + id, name, color: '336611', description: '' })
+    const old = { ...tag(1, 'legacy/needs review'), archived_at: '2026-11-10T15:00:00Z' }
+    const staged = { ...tag(2, 'Reports & QA'), description: 'For "monthly" reviews' }
+    const outside = tag(1201, 'Release / Lång, phase 2')
+    const other = tag(1202, 'Concurrent approval')
+    const fixture = readState()
+    fixture.labelPermission = 'TRIAGE'
+    fixture.pulls[0].labels = [old]
+    fixture.labelPages = [[old, staged, ...Array.from({ length: 98 }, (_, i) => tag(i + 3, 'Queue ' + (i + 3)))],
+      ...Array.from({ length: 11 }, (_, page) => Array.from({ length: 100 }, (_, i) => {
+        const id = 101 + page * 100 + i
+        return tag(id, 'Queue ' + id)
+      })), [outside, other]]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      const projectCommand = 'large-label-catalog-project'
+      await harness.engine.dispatch({ id: projectCommand, at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const host = 'http://127.0.0.1:' + port
+      const editor = host + '/pull-requests?' + new URLSearchParams({ selectedUrl: url, labels: 'edit' })
+      const original = await pullRequestLifecycleForm(editor, 'pr-label-editor-title')
+      expect(original.html).toContain('More labels are available on GitHub.')
+      expect(original.html).toContain('Search GitHub')
+      expect(original.html).not.toContain(outside.node_id)
+      expect(JSON.parse(original.values.scope)).toHaveLength(200)
+
+      const post = (fields: Record<string, string>, selected: string[], search?: string) => {
+        const body = new URLSearchParams(fields)
+        for (const id of selected) body.append('label', id)
+        if (search !== undefined) {
+          body.set('operation', 'search')
+          body.set('query', search)
+        }
+        return fetch(original.endpoint, { method: 'POST', redirect: 'manual', headers: {
+          origin: host, accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded',
+        }, body })
+      }
+      const checked = [staged.node_id]
+      fixture.labelSearchFailure = true
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const unavailable = await post(original.values, checked, 'phase 2')
+      expect(unavailable.status).toBe(503)
+      expect(await unavailable.json()).toMatchObject({ editor: { search: 'phase 2', labels: expect.arrayContaining([
+        expect.objectContaining({ key: old.node_id, checked: false }), expect.objectContaining({ key: staged.node_id, checked: true }),
+      ]) } })
+      fixture.labelSearchFailure = false
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const broad = await post(original.values, checked, 'queue')
+      expect(broad.status).toBe(200)
+      expect(await broad.json()).toMatchObject({ editor: { more: true, matches: 100 } })
+      const narrow = await post(original.values, checked, 'phase 2')
+      expect(narrow.status).toBe(200)
+      const { editor: found } = await narrow.json() as { editor: Record<string, string> & { labels: { key: string, checked: boolean }[] } }
+      expect(found.labels.map(({ key, checked }) => [key, checked])).toEqual([[outside.node_id, false], [old.node_id, false], [staged.node_id, true]])
+      const { head, viewer, intent, scope, revision } = found
+      const reviewed = { head, viewer, intent, scope, revision }
+
+      fixture.labelPages[12][0] = { ...outside, node_id: 'LA_recreated', id: outside.id + 1_000 }
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await post(reviewed, [...checked, outside.node_id])).status).toBe(409)
+      fixture.labelPages[12][0] = { ...outside, archived_at: '2026-11-11T15:00:00Z' }
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await post(reviewed, [...checked, outside.node_id])).status).toBe(409)
+      expect(readState().labelWrites).toBeUndefined()
+      fixture.labelPages[12][0] = outside
+      fixture.pulls[0].labels.push(other)
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await post(reviewed, [...checked, outside.node_id])).status).toBe(200)
+      const saved = readState()
+      expect(saved.pulls[0].labels.map(({ id }: { id: number }) => id)).toEqual([other.id, outside.id, staged.id])
+      expect(saved.labelWrites).toHaveLength(3)
+
+      const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+      const legacyScope = [outside, old].map(label => `${label.id}:${label === old ? 1 : 0}:${createHash('sha256').update(label.name).digest('hex').slice(0, 24)}`).join(',')
+      const profile = Number(original.endpoint.searchParams.get('profile'))
+      const legacyRevision = hash(['pr-label-review', profile, derivedId(projectCommand), 'fixture/notebook', 'fixture-pull-1', viewer, legacyScope])
+      const legacyIntent = crypto.randomUUID()
+      const fingerprint = hash(['pr-label-changes', legacyRevision, [String(outside.id)]])
+      const receipts = new PullRequestReplyReceipts(join(dir, 'test.sqlite'))
+      receipts.claim(legacyIntent, fingerprint, true)
+      const priorItem = hash(['pr-label', legacyIntent, outside.id])
+      receipts.claim(priorItem, fingerprint, true)
+      receipts.confirm(priorItem, fingerprint)
+      saved.pulls[0].labels = [...saved.pulls[0].labels.filter((label: { id: number }) => label.id !== outside.id), old]
+      writeFileSync(cli.state, JSON.stringify(saved))
+      const legacy = await post({ head: local, viewer, intent: legacyIntent, scope: legacyScope, revision: legacyRevision }, [String(outside.id)])
+      expect(legacy.status).toBe(200)
+      expect(readState().labelWrites).toEqual([...saved.labelWrites, [1, 'DELETE', old.id, old.name]])
     }
     finally {
       process.chdir(cwd)

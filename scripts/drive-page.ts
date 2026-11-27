@@ -6969,9 +6969,10 @@ try {
     await newLabel.waitFor()
     await legacyLabel.waitFor({ state: 'hidden' })
     await capture('pull-requests-labels-390x844', clonePage)
+    await labelSearch.press('Enter')
     check('label search retains an unchecked reviewed choice and fits on the phone',
       await labelEditor.locator('input[name=label][value="11"]').evaluate((node: HTMLInputElement) => node.closest('label')?.hidden && !node.checked) === true
-      && await clonePage.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth === innerWidth) && pullState().labelWrites === undefined)
     await labelEditor.getByRole('link', { name: 'Cancel', exact: true }).click()
     await changeLabels.click()
     check('closing the label editor cancels draft changes without writing', await legacyLabel.isChecked() && pullState().labelWrites === undefined)
@@ -6990,6 +6991,29 @@ try {
     check('label recovery preserves a concurrent label and mutates only the reviewed add and removal once',
       JSON.stringify(finalLabels.labelWrites.map(([, method, id]: [number, string, number]) => [method, id])) === '[["POST",31],["DELETE",11]]'
       && JSON.stringify(finalLabels.pulls[1].labels.map((label: { id: number }) => label.id)) === '[41,31]')
+
+    const farLabel = { id: 13_000_042_107, node_id: 'LA_fixture_far', name: 'Long-range release', color: '225588', description: 'Review the release record' }
+    finalLabels.labelPages = [[reportLabel, concurrentLabel], ...Array.from({ length: 11 }, (_, page) =>
+      Array.from({ length: 100 }, (_, i) => ({ id: 10_000 + 100 * page + i, name: 'Queue item ' + (100 * page + i), color: '118899' }))), [farLabel]]
+    writeFileSync(github.state, JSON.stringify(finalLabels))
+    await changeLabels.click()
+    await labelEditor.getByText('More labels are available on GitHub. Refine your search.', { exact: true }).waitFor()
+    const far = labelEditor.getByRole('checkbox', { name: /Long-range release/u })
+    check('a large repository opens a bounded label picker with a host search', await far.isHidden()
+      && await labelEditor.getByRole('button', { name: 'Search GitHub', exact: true }).isVisible())
+    await newLabel.uncheck()
+    await labelSearch.fill('Long-range release')
+    await labelSearch.press('Enter')
+    await far.waitFor()
+    check('GitHub label search finds an off-catalog label and retains the staged removal', !await newLabel.isChecked()
+      && pullState().labelWrites.length === 2)
+    await capture('pull-requests-large-label-search-390x844', clonePage)
+    await far.check()
+    await labelEditor.getByRole('button', { name: 'Save labels', exact: true }).click()
+    await clonePage.getByRole('status').filter({ hasText: 'Labels updated on GitHub.' }).waitFor()
+    check('saving searched labels applies only their reviewed additions and removals',
+      JSON.stringify(pullState().labelWrites.slice(2).map(([, method, id]: [number, string, number]) => [method, id])) === `[["POST",${farLabel.id}],["DELETE",31]]`
+      && JSON.stringify(pullState().pulls[1].labels.map((label: { id: number }) => label.id)) === `[41,${farLabel.id}]`)
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

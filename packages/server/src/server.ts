@@ -59,7 +59,7 @@ import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
 import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLabels, updateWorkspacePullRequestLifecycle, updateWorkspacePullRequestReviewers, updateWorkspaceReviewConversation } from './pull-request-workspace'
-import type { PullRequestLabelDraft, PullRequestLifecycleDraft, PullRequestReplyDraft, PullRequestReviewerDraft, PullRequestReviewerEditor } from './pull-request-workspace'
+import type { PullRequestLabelDraft, PullRequestLabelEditor, PullRequestLifecycleDraft, PullRequestReplyDraft, PullRequestReviewerDraft, PullRequestReviewerEditor } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -1942,6 +1942,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           lifecycleDraft?: PullRequestLifecycleDraft
           lifecycleError?: string
           labelDraft?: PullRequestLabelDraft
+          labelEditor?: PullRequestLabelEditor
           labelError?: string
           reviewerDraft?: PullRequestReviewerDraft
           reviewerEditor?: PullRequestReviewerEditor
@@ -1970,11 +1971,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
                 const message = 'Invalid label selection. Open Change labels and try again.'
                 return acceptsJson ? Response.json({ message }, { status: 400, headers: jsonHeaders }) : new Response(message, { status: 400, headers })
               }
-              const { result, message, location, params, fallback } = submission
-              const statuses = { updated: 200, confirmed: 200, pending: 202, denied: 403, changed: 409, refused: 422, unavailable: 503 }
-              if (acceptsJson) return Response.json({ result, message, location }, { status: statuses[result], headers: jsonHeaders })
-              if (statuses[result] === 200) return new Response(null, { status: 303, headers: { ...headers, location } })
-              return render(params, statuses[result], { labelDraft: fallback, labelError: message })
+              const { result, message, location, params, fallback, editor } = submission
+              const statuses = { updated: 200, confirmed: 200, search: 200, pending: 202, denied: 403, changed: 409, refused: 422, unavailable: 503 }
+              if (acceptsJson) return Response.json({ result, message, location, ...(editor && { editor }) }, { status: statuses[result], headers: jsonHeaders })
+              if (result === 'updated' || result === 'confirmed') return new Response(null, { status: 303, headers: { ...headers, location } })
+              return render(params, statuses[result], { labelDraft: fallback, labelEditor: editor, labelError: message })
             })
           }
           if (url.pathname === '/pull-requests/reviewers') {

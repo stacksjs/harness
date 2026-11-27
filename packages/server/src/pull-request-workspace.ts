@@ -344,11 +344,9 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
       ? { revision: workflowApprovalRevision(lifecycle.revision, approvalRuns), runs: workflowRunSelection(approvalRuns), repository: fork.repository }
       : null
     const canEditLabels = tab === 'summary' && Boolean(lifecycle && current?.canTriage)
-    const labelReview = editingLabels && canEditLabels && credential
-      ? await readPullRequestLabelEditor({ path: selectionRepo.path, repository: selectionRepo.name, number: data.number, credential, signal }).catch(() => null)
+    const labelEditor = editingLabels && canEditLabels && credential && current
+      ? await reviewLabelEditor(selectionRepo, data.number, current, profile, credential, signal).catch(() => null)
       : null
-    const labelEditor = labelReview && current && lifecycle ? { ...labelReview, viewer: current.viewer.id, intent: crypto.randomUUID(),
-      revision: labelReviewRevision(profile, selectionRepo.workspace.id, selectionRepo.name, current.id, current.viewer.id, labelReview.scope) } : null
     const canEditReviewers = tab === 'summary' && Boolean(lifecycle && current?.canRequestReviewers)
     const reviewerEditor = editingReviewers && canEditReviewers && credential && current
       ? await reviewReviewerEditor(selectionRepo, data.number, current, profile, credential, signal).catch(() => null)
@@ -421,7 +419,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     lifecycleEndpoint: '/pull-requests/lifecycle?' + lifecycleParams,
     lifecycleNotice: lifecycleSuccess(query.get('lifecycleResult')),
     labelsHref: href({ selectedUrl, tab: 'summary', labels: 'edit' }) + '#pr-labels',
-    labelsEndpoint: detailsHref('summary').replace('/pull-requests?', '/pull-requests/labels?'),
+    labelsEndpoint: detailsHref('summary').replace('/pull-requests?', '/pull-requests/labels?') + '#pr-labels',
     labelsNotice: query.get('labelsResult') === 'updated' ? 'Labels updated on GitHub.' : '',
     reviewersHref: href({ selectedUrl, tab: 'summary', reviewers: 'edit' }) + '#pr-reviewers',
     reviewersEndpoint: detailsHref('summary').replace('/pull-requests?', '/pull-requests/reviewers?') + '#pr-reviewers',
@@ -535,11 +533,20 @@ function labelReviewRevision(profile: number, workspace: number, repository: str
   return createHash('sha256').update(JSON.stringify(['pr-label-review', profile, workspace, repository.toLowerCase(), pull, viewer, scope])).digest('hex')
 }
 
+async function reviewLabelEditor(repository: Repository, number: number, current: LifecycleSnapshot, profile: number, credential: string, signal: AbortSignal,
+  search = '', staged: NonNullable<ReturnType<typeof parseLabelSelection>>['changes'] = [], intent: string = crypto.randomUUID()) {
+  const editor = await readPullRequestLabelEditor({ path: repository.path, repository: repository.name, number, credential, signal }, search, staged)
+  return editor ? { ...editor, head: current.headRefOid, viewer: current.viewer.id, intent,
+    revision: labelReviewRevision(profile, repository.workspace.id, repository.name, current.id, current.viewer.id, editor.scope) } : null
+}
+
+export type PullRequestLabelEditor = NonNullable<Awaited<ReturnType<typeof reviewLabelEditor>>>
 export type PullRequestLabelDraft = { viewer: string, head: string, intent: string, scope: string, revision: string, checked: string[] }
 
 const labelMessages = {
   updated: 'Labels updated on GitHub.',
   confirmed: 'GitHub already confirmed the earlier label changes.',
+  search: '',
   denied: 'This GitHub account cannot change these labels.',
   changed: 'The pull request, account, or reviewed labels changed. Open Change labels to review again.',
   unavailable: 'Could not load the labels from GitHub. Try again.',
@@ -549,22 +556,23 @@ const labelMessages = {
 
 export async function updateWorkspacePullRequestLabels(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
   receipts: PullRequestReplyReceipts) {
-  const submission = await readReviewSubmission(state, query, request, 90_000)
+  const submission = await readReviewSubmission(state, query, request, 3_300_000)
   if (!submission) return null
   const { profile, selection, values, head, viewer } = submission
   const scope = values.get('scope') ?? ''
   const revision = values.get('revision') ?? ''
   const intent = values.get('intent') ?? ''
+  const operation = values.get('operation') ?? 'save'
   const labels = parseLabelSelection(scope, values.getAll('label'))
-  if (!labels || !/^[0-9a-f]{64}$/u.test(revision)
+  if (!labels || !['save', 'search'].includes(operation) || (operation === 'search' && labels.legacy) || !/^[0-9a-f]{64}$/u.test(revision)
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(intent)) return null
   const params = reviewReturnParams(query, profile, selection.url, 'summary')
-  const finish = (result: keyof typeof labelMessages) => {
+  const finish = (result: keyof typeof labelMessages, editor?: PullRequestLabelEditor) => {
     const target = new URLSearchParams(params)
     if (result === 'updated' || result === 'confirmed') target.set('labelsResult', 'updated')
     const fallback: PullRequestLabelDraft | undefined = result === 'pending'
       ? { viewer, head, intent, scope, revision, checked: labels.checked } : undefined
-    return { result, message: labelMessages[result], params, fallback, location: '/pull-requests?' + target + '#pr-labels' }
+    return { result, message: labelMessages[result], params, fallback, editor, location: '/pull-requests?' + target + '#pr-labels' }
   }
   try {
     const repository = await reviewRepository(state, profile, selection.repository, signal)
@@ -575,6 +583,12 @@ export async function updateWorkspacePullRequestLabels(state: HarnessState, quer
     if (current.viewer.id !== viewer || revision !== labelReviewRevision(profile, repository.workspace.id, repository.name, current.id, viewer, scope))
       return finish('changed')
     if (!current.canTriage) return finish('denied')
+    if (operation === 'search') {
+      if (receipts.inspect(intent, revision)) return finish('changed')
+      const search = (values.get('query') ?? '').slice(0, 120).replace(/\p{Cc}/gu, '').trim()
+      const editor = await reviewLabelEditor(repository, selection.number, current, profile, credential, signal, search, labels.changes, intent).catch(() => null)
+      return editor ? finish('search', editor) : finish('unavailable', { scope, intent, revision, viewer, head, search, more: false, matches: -1, labels: labels.labels })
+    }
     const fingerprint = createHash('sha256').update(JSON.stringify(['pr-label-changes', revision, labels.checked])).digest('hex')
     const result = await applyPullRequestLabelChanges({
       path: repository.path, repository: repository.name, number: selection.number, credential, signal, receipts,

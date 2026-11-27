@@ -300,6 +300,14 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query HarnessSearchRepositoryLabels')) {
+    if (!process.env.GH_TOKEN || !state.repositories[name]) reply(403, {})
+    if (state.labelSearchFailure) reply(503, { message: 'Private label search diagnostics' })
+    const needle = (variables.search ?? '').toLowerCase()
+    const labels = (state.labelPages?.flat() ?? state.labelCatalog ?? []).filter(label => label.name.toLowerCase().includes(needle))
+    const nodes = labels.slice(0, 100).map(label => ({ id: label.node_id ?? String(label.id), name: label.name, color: label.color, description: label.description }))
+    reply(200, { data: { repository: { nameWithOwner: name, labels: { nodes, pageInfo: { hasNextPage: labels.length > 100 } } } } })
+  }
   if (query.includes('query HarnessReviewerIdentities')) {
     if (!process.env.GH_TOKEN) reply(403, {})
     reply(200, { data: { nodes: variables.ids.map(id => state.reviewerPeople?.find(person => person.id === id) ?? null) } })
@@ -470,6 +478,11 @@ if (parts[4] === 'pulls' && parts[6] === 'requested_reviewers' && detail) {
   reply(request ? 201 : 200, detail)
 }
 if (parts[4] === 'labels' && method === 'GET') {
+  if (parts[5]) {
+    const requested = decodeURIComponent(parts[5])
+    const label = (state.labelPages?.flat() ?? state.labelCatalog ?? []).find(label => label.name === requested)
+    reply(label ? 200 : 404, label ?? {})
+  }
   const page = Number(url.searchParams.get('page')) || 1
   const pages = state.labelPages
   const next = pages && page < pages.length ? 'Link: <https://api.github.com' + url.pathname + '?page=' + (page+1) + '>; rel="next"\\r\\n' : ''

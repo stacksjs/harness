@@ -621,8 +621,8 @@ const RESPONSIVE_SHELL = `
 [data-pr-detail-content] h3 { font-size: 13px; font-weight: 650; margin-block: 8px; }
 [data-pr-detail-content] h3:not(:first-child) { margin-block-start: 20px; }
 [data-pr-reviewers] { margin-block-end: 14px; display: grid; gap: 6px; min-inline-size: 0; }
-[data-pr-reviewer-search] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-[data-pr-reviewer-search] label { flex: 1 1 10rem; min-inline-size: 0; }
+:is([data-pr-label-search], [data-pr-reviewer-search]) { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+:is([data-pr-label-search], [data-pr-reviewer-search]) label { flex: 1 1 10rem; min-inline-size: 0; }
 [data-pr-reviewer-list] { display: flex; flex-wrap: wrap; gap: 6px 12px; }
 [data-pr-reviewer-list] li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; min-inline-size: 0; overflow-wrap: anywhere; }
 [data-pr-review-decision] strong { margin-inline-start: 4px; }
