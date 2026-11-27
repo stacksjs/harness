@@ -33,7 +33,7 @@ export function withCurrentPullRequestQuery(address: string, current: Location) 
   return target.pathname + target.search + target.hash
 }
 
-function appendPullRequestPage(current: Element, incoming: Element, link: HTMLAnchorElement, keyboard: boolean) {
+function appendPullRequestPage(current: Element, incoming: Element, link: HTMLAnchorElement, keyboard: boolean, partial: boolean) {
   const loaded = new Set(Array.from(current.querySelectorAll('[data-pr-entry]'), row => row.getAttribute('data-pr-entry')))
   const newRows = Array.from(incoming.querySelectorAll('[data-pr-entry]')).filter(row => !loaded.has(row.getAttribute('data-pr-entry')))
   if (loaded.size + newRows.length > MAX_LOADED_ROWS) return false
@@ -72,7 +72,7 @@ function appendPullRequestPage(current: Element, incoming: Element, link: HTMLAn
   }
   const count = pagination?.querySelector('span')
   if (count) count.textContent = loaded.size + ' shown'
-  const next = incoming.querySelector('[data-pr-next]')?.getAttribute('href')
+  const next = partial ? link.getAttribute('href') : incoming.querySelector('[data-pr-next]')?.getAttribute('href')
   if (next) link.setAttribute('href', next)
   else link.remove()
   const first = newRows[0] ?? (!next ? Array.from(current.querySelectorAll('[data-pr-entry]')).at(-1) : null)
@@ -119,7 +119,10 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
       if (value !== null) params.set(key, value)
     }
     params.set('q', search)
-    if (target) params.set('page', target.searchParams.get('page') ?? '')
+    if (target) {
+      params.set('page', target.searchParams.get('page') ?? '')
+      params.set('continuation', '1')
+    }
 
     try {
       const response = await fetch('/pull-requests/results?' + params, {
@@ -133,11 +136,12 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
       if (!fragment) throw new Error('Missing pull request results')
       if (link && target) {
         const current = results.querySelector('[data-pr-results-fragment]')
-        if (!current || result.scope !== expectedScope || result.partial) throw new Error('Could not finish loading this page')
-        if (!appendPullRequestPage(current, fragment, link, keyboard)) browser.location.assign(target.href)
+        if (!current || result.scope !== expectedScope) throw new Error('Could not finish loading this page')
+        if (!appendPullRequestPage(current, fragment, link, keyboard, result.partial)) browser.location.assign(target.href)
         else {
           const count = current.querySelectorAll('[data-pr-row]').length
           status(count + ' pull requests shown.')
+          if (result.partial && pageStatus) pageStatus.textContent = 'Some repositories could not finish loading. Retry this page.'
         }
         return
       }

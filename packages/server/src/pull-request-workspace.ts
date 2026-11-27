@@ -396,6 +396,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     return '/pull-requests?' + next
   }
   const rows: ListRow[] = []
+  const continuing = listOnly && query.get('continuation') === '1'
   const failures: { repository: string, reason: string }[] = []
   let nextPage = false
   let incompleteSearch = false
@@ -487,7 +488,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const results = await Promise.allSettled(batch.map(item => listRepository(item, scope, viewer ?? '', resolveViewer, signal)))
     for (const [offset, result] of results.entries()) {
       if (result.status === 'fulfilled') {
-        rows.push(...result.value.rows)
+        if (!continuing || (!result.value.incomplete && !result.value.partitionsUnavailable)) rows.push(...result.value.rows)
         nextPage ||= result.value.more
         incompleteSearch ||= result.value.incomplete
         cappedSearch ||= result.value.capped

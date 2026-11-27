@@ -1135,6 +1135,20 @@ describe('harness serve — HTTP', () => {
       expect(typed.partial).toBe(false)
       expect(typed.html).toContain('Older team review request')
       expect(typed.html).not.toContain('Recent change')
+      delete fixture.filterPriorityFailure
+      const unreadable = join(dir, 'priority-unreadable')
+      mkdirSync(unreadable)
+      for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/fixture/unreadable']])
+        expect(Bun.spawnSync(['git', ...args], { cwd: unreadable }).success).toBe(true)
+      await harness.engine.dispatch({ id: 'pull-request-priority-unreadable', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(unreadable), trusted: true } })
+      nextUrl.searchParams.set('continuation', '1')
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const partialPage = await (await fetch(nextUrl)).json()
+      expect(partialPage.partial).toBe(true)
+      expect(keys(partialPage.html)).toHaveLength(3)
+      expect(partialPage.html).toContain('Recent change 0')
+      expect(partialPage.html).toContain('fixture/unreadable')
     }
     finally {
       process.chdir(cwd)
