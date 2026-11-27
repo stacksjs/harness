@@ -5012,6 +5012,13 @@ check('thread settings fit the phone viewport', await autoSettleDays.evaluate(in
   return rect.left >= 0 && rect.right <= innerWidth
 }))
 
+// Keep the same-day calendar option elapsed so it cannot hide the test's
+// duration when the two options happen to resolve to the same minute.
+const snoozeFixturePresets = harness.engine.current.settings.snoozePresets.map(preset =>
+  preset.kind === 'at' && preset.day === 'today' ? { ...preset, time: '00:00' } : preset)
+await harness.engine.dispatch({ id: 'snooze-editor-fixture', at: Date.now(),
+  command: { type: 'settings.update', changes: { snoozePresets: snoozeFixturePresets } } })
+await page.reload()
 const snoozeObserverContext = await browser.newContext({ colorScheme, reducedMotion })
 const snoozeObserver = await snoozeObserverContext.newPage()
 await snoozeObserver.goto(`${baseUrl}/settings/threads`)
