@@ -45,12 +45,13 @@ function prepareDatabase(path: string): void {
   db.close()
 }
 
-async function pullRequestLifecycleForm(view: string) {
+async function pullRequestLifecycleForm(view: string, label: 'Update pull request' | 'pr-delete-branch-title' = 'Update pull request') {
   const html = await fetch(view).then(response => response.text())
-  const form = html.match(/<form method="post" action="([^"]+)" aria-label="Update pull request"[^>]*>([\s\S]*?)<\/form>/u)
+  const forms = [...html.matchAll(/<form method="post" action="([^"]+)" (aria-label|aria-labelledby)="([^"]+)"[^>]*>([\s\S]*?)<\/form>/gu)]
+  const form = forms.find(candidate => candidate[3] === label)
   if (!form) throw new Error('Missing pull request lifecycle form')
   const values = Object.fromEntries(
-    [...form[2]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
+    [...form[4]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
   )
   return { endpoint: new URL(form[1]!.replaceAll('&amp;', '&'), view), values, html }
 }
@@ -1581,6 +1582,101 @@ describe('harness serve — HTTP', () => {
       expect((await revert(await readForm())).status).toBe(200)
       expect(readState().revertWrites).toHaveLength(1)
       expect(readState().pulls[0]).toMatchObject({ state: 'closed', head: { sha: local }, base: { sha: base } })
+    }
+    finally {
+      process.chdir(previousCwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
+
+  it.skipIf(process.platform === 'win32')('deletes only the reviewed GitHub source ref and recovers a lost reply without deleting a recreated branch', async () => {
+    const { project, cli, local, base, url, readState } = seedPullRequestLifecycle('Review the report changes', false)
+    const setPull = (properties: object) => {
+      const fixture = readState()
+      Object.assign(fixture.pulls[0], properties)
+      writeFileSync(cli.state, JSON.stringify(fixture))
+    }
+    setPull({ state: 'closed' })
+    cli.configureBranchDeletion({ repository: 'fixture-fork/notebook' })
+    const path = process.env.PATH
+    const previousCwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-delete-branch-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const summary = () => host + '/pull-requests?' + new URLSearchParams({ state: 'closed', selectedUrl: url })
+      const readForm = () => pullRequestLifecycleForm(summary(), 'pr-delete-branch-title')
+      const remove = (form: Awaited<ReturnType<typeof readForm>>, overrides: Record<string, string> = {}, accept = 'application/json') =>
+        fetch(new URL(form.endpoint.pathname + form.endpoint.search, host), {
+          method: 'POST', redirect: 'manual', headers: { accept, origin: host, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ ...form.values, action: 'delete-branch', ...overrides }),
+        })
+      const hidden = async () => expect(await fetch(summary()).then(response => response.text())).not.toContain('data-pr-delete-branch-trigger')
+      const form = await readForm()
+      expect(form.html).toContain('Remove <code>report</code> from <strong>fixture-fork/notebook</strong> on GitHub.')
+      expect(form.values.sourceRepositoryId).toBe('fixture-repo:fixture-fork/notebook')
+      expect((await remove(form, { sourceRepositoryId: 'fixture-repo:fixture/notebook' })).status).toBe(409)
+      expect((await remove(form, { sourceBranch: 'another-branch' })).status).toBe(409)
+      expect((await remove(form, { base: 'c'.repeat(40) })).status).toBe(409)
+      expect((await remove(form, { viewer: 'another-viewer' })).status).toBe(409)
+      setPull({ state: 'open' })
+      await hidden()
+      expect((await remove(form)).status).toBe(409)
+      setPull({ state: 'closed' })
+      cli.configureBranchDeletion({ mode: 'readonly' })
+      await hidden()
+      expect((await remove(form)).status).toBe(403)
+      cli.configureBranchDeletion({ mode: 'normal', defaultBranch: 'report' })
+      await hidden()
+      expect((await remove(form)).status).toBe(403)
+      cli.configureBranchDeletion({ defaultBranch: 'main', protected: true })
+      await hidden()
+      expect((await remove(form)).status).toBe(409)
+      cli.configureBranchDeletion({ protected: false, stacked: true })
+      await hidden()
+      expect((await remove(form)).status).toBe(409)
+      cli.configureBranchDeletion({ stacked: false, target: 'e'.repeat(40) })
+      const moved = await remove(form)
+      expect(moved.status).toBe(409)
+      expect(await moved.json()).toMatchObject({ result: 'branch-changed' })
+      cli.configureBranchDeletion({ target: local, mode: 'denied' })
+      const denied = await remove(form)
+      expect(denied.status).toBe(403)
+      expect(await denied.text()).not.toContain('Private branch deletion')
+      expect(readState().deleteBranchWrites).toBeUndefined()
+
+      cli.configureBranchDeletion({ mode: 'lost-response' })
+      const pending = await remove(form, {}, 'text/html')
+      expect(pending.status).toBe(202)
+      expect(await pending.text()).toContain('Check GitHub again')
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      cli.configureBranchDeletion({ mode: 'normal' })
+      const recovered = await remove(form, {}, 'text/html')
+      expect(recovered.status).toBe(303)
+      expect(recovered.headers.get('location')).toContain('lifecycleResult=delete-branch')
+      await hidden()
+      cli.configureBranchDeletion({ target: local })
+      expect(await (await remove(await readForm())).json()).toMatchObject({ message: 'GitHub already confirmed the earlier update.' })
+      expect(readState().branchDeletion.target).toBe(local)
+      expect(readState().deleteBranchWrites).toEqual([{ repositoryId: 'fixture-repo:fixture-fork/notebook', clientMutationId: expect.any(String),
+        refUpdates: [{ name: 'refs/heads/report', beforeOid: local, afterOid: '0'.repeat(40) }] }])
+
+      const newHead = 'f'.repeat(40)
+      setPull({ merged_at: '2026-11-01T18:00:00Z', head: { sha: newHead, ref: 'report' } })
+      cli.configureBranchDeletion({ target: newHead, mode: 'moved-on-write' })
+      const revised = await readForm()
+      const racing = await remove(revised)
+      expect(racing.status).toBe(409)
+      expect(await racing.json()).toMatchObject({ result: 'branch-changed' })
+      expect(readState().branchDeletion.target).toBe('e'.repeat(40))
+      expect((await remove(revised)).status).toBe(409)
+      expect(readState().deleteBranchWrites).toHaveLength(2)
+      expect(readState().pulls[0]).toMatchObject({ state: 'closed', head: { sha: newHead }, base: { ref: 'main', sha: base } })
     }
     finally {
       process.chdir(previousCwd)

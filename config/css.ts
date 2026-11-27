@@ -568,10 +568,15 @@ const RESPONSIVE_SHELL = `
 }
 [data-pr-lifecycle-action] { min-height: 36px; width: 100%; padding: 8px; text-align: start; border-radius: 4px; cursor: pointer; }
 [data-pr-lifecycle-action]:hover { background: var(--workspace-hover); }
-[data-pr-close-trigger], [data-pr-close-confirm] { color: var(--workspace-removed-text); }
+[data-pr-close-trigger], [data-pr-close-confirm], [data-pr-delete-branch-trigger], [data-pr-delete-branch-confirm] { color: var(--workspace-removed-text); }
 [data-pr-close-confirmation] { padding: 10px; gap: 8px; }
 [data-pr-revert-confirmation] { --pr-action-width: min(17rem, calc(100vw - 32px)); max-block-size: min(15rem, calc(100dvh - 24px)); padding: 10px; gap: 8px; font-size: 13px; overflow-wrap: anywhere; }
 [data-pr-revert-confirm] { color: var(--workspace-accent); }
+[data-pr-delete-branch-dialog] { inset: 0; margin: auto; padding: 0; width: min(25rem, calc(100vw - 32px)); max-block-size: calc(100dvh - 32px); color: inherit; background: var(--workspace-surface); border: 1px solid var(--workspace-line); border-radius: 10px; box-shadow: 0 12px 32px rgb(0 0 0 / .18); }
+[data-pr-delete-branch-dialog]::backdrop { background: rgb(0 0 0 / .44); }
+[data-pr-delete-branch-dialog] form { display: grid; gap: 12px; padding: 16px; font-size: 13px; overflow-wrap: anywhere; }
+[data-pr-delete-branch-dialog] h3 { font-size: max(1rem, 15px); font-weight: 650; }
+[data-pr-delete-branch-dialog] [data-pr-delete-branch-confirm] { border-color: currentColor; }
 :is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) { --pr-action-width: min(17rem, calc(100vw - 32px)); max-block-size: min(18rem, calc(100dvh - 24px)); padding: 10px; gap: 8px; }
 [data-pr-branch-update-panel] { max-block-size: min(21rem, calc(100dvh - 24px)); }
 [data-pr-merge-trigger] { anchor-name: --pr-merge; }
@@ -596,6 +601,11 @@ const RESPONSIVE_SHELL = `
 [data-pr-lifecycle-message] { margin-block: 8px; font-size: 13px; }
 @media (max-width: 759px) {
   [data-pr-lifecycle-action] { min-height: 44px; }
+  [data-pr-delete-branch-dialog] { inset: auto 0 0; margin: 0; width: 100%; max-width: 100%; border-radius: 10px 10px 0 0; }
+  [data-pr-delete-branch-dialog] form { padding-block-end: max(16px, env(safe-area-inset-bottom)); }
+  [data-pr-delete-branch-dialog] [data-pr-review-actions] { display: grid; grid-template-columns: minmax(0, 1fr); }
+  [data-pr-delete-branch-dialog] [data-pr-button] { justify-content: center; }
+  [data-pr-delete-branch-confirm] { grid-row: 1; }
   :is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) label { min-height: 44px; }
 }
 [data-pr-tabs] { display: flex; padding-inline: clamp(12px, 2vw, 26px); gap: 16px; border-block: 1px solid var(--workspace-line); }

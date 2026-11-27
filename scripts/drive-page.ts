@@ -6716,6 +6716,7 @@ try {
       pullState().mergeWrites.length === 1 && pullState().mergeWrites[0].input.mergeMethod === 'SQUASH'
       && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible() && await actions.isHidden())
 
+    const mergedPullUrl = clonePage.url()
     github.configureRevert('unconfirmed')
     await clonePage.reload({ waitUntil: 'domcontentloaded' })
     const revert = lifecycleMenu.getByRole('button', { name: 'Revert changes', exact: true })
@@ -6738,6 +6739,34 @@ try {
       pullState().revertWrites.length === 1 && Boolean(pullState().pulls[0].merged_at)
       && new URL(clonePage.url()).searchParams.get('selectedUrl') === pullState().pulls[1].html_url
       && await clonePage.locator('strong[data-pr-state="Open"]').isVisible())
+
+    github.configureBranchDeletion({ mode: 'lost-response' })
+    await clonePage.goto(mergedPullUrl, { waitUntil: 'domcontentloaded' })
+    const deleteBranch = lifecycleMenu.getByRole('button', { name: 'Delete branch', exact: true })
+    const deleteBranchPanel = clonePage.getByRole('dialog', { name: 'Delete remote branch?', exact: true })
+    await actions.press('Enter')
+    await deleteBranch.press('Enter')
+    await deleteBranchPanel.waitFor()
+    await capture('pull-requests-delete-branch-390x844', clonePage)
+    const focusesCancel = await deleteBranchPanel.getByRole('button', { name: 'Cancel', exact: true })
+      .evaluate(element => element === document.activeElement)
+    const modal = await deleteBranchPanel.evaluate(element => element.matches(':modal'))
+    await clonePage.keyboard.press('Escape')
+    await clonePage.waitForFunction(() => document.activeElement?.matches('[data-pr-delete-branch-trigger], [data-pr-lifecycle-trigger]'))
+    check('deleting a branch focuses Cancel and Escape returns focus without writing', focusesCancel
+      && modal && await deleteBranchPanel.isHidden() && pullState().deleteBranchWrites === undefined)
+    if (!await deleteBranch.isVisible()) await actions.press('Enter')
+    await deleteBranch.press('Enter')
+    await deleteBranchPanel.getByRole('button', { name: 'Delete branch', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.configureBranchDeletion({ mode: 'normal' })
+    await checkLifecycle.click()
+    await lifecycleStatus('Branch deleted on GitHub.').waitFor()
+    await actions.press('Enter')
+    check('branch deletion recovers the remote result without a second write and keeps the merged PR selected',
+      pullState().deleteBranchWrites.length === 1 && pullState().branchDeletion.target === null
+      && await deleteBranch.isHidden() && await revert.isVisible()
+      && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible())
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

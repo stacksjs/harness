@@ -7,8 +7,9 @@ import { isWorkspaceGitRoot } from './diff'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
 import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewLineSelection, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
+import { deleteWorkspacePullRequestBranch } from './pull-request-delete-branch'
 import { findPullRequestThread } from './pull-request-links'
-import { availableLifecycleActions, behindBase, branchUpdateMethods, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
+import { availableLifecycleActions, behindBase, branchUpdateMethods, deletableSourceBranch, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
 import { revertWorkspacePullRequest } from './pull-request-revert'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
@@ -293,11 +294,14 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const actions = current ? availableLifecycleActions(current) : []
     const mergeAction = current?.baseRefName === data.baseRef ? actions.find(isMergeAction) : undefined
     const behind = current?.baseRefName === data.baseRef && current ? behindBase(current) : null
+    const branchToDelete = current?.headRefName === data.headRef && current ? deletableSourceBranch(current) : null
     const lifecycle = current && current.headRefOid === data.head && current.baseRefOid === data.baseSha && currentStatus === data.status
       ? { viewer: current.viewer, revision: lifecycleRevision(current), token: crypto.randomUUID(),
           mergeStatus: current.state !== 'OPEN' ? '' : current.mergeQueueEntry?.id ? 'In merge queue' : current.autoMergeRequest ? 'Auto-merge enabled' : '',
           methods: current.merge.methods.map(value => ({ value, label: mergeMethods[value] })),
-          actions: actions.filter(action => action !== 'update-branch' && !isMergeAction(action)).map(action => ({ action, label: lifecycleActions[action].label })),
+          actions: actions.filter(action => action !== 'update-branch' && !isMergeAction(action) && (action !== 'delete-branch' || branchToDelete))
+            .map(action => ({ action, label: lifecycleActions[action].label })),
+          branchToDelete,
           branchUpdate: behind === null ? null : { behind, canUpdate: actions.includes('update-branch'), methods: branchUpdateMethods },
           mergeAction: mergeAction ? { action: mergeAction, label: lifecycleActions[mergeAction].label, chooseMethod: takesMergeMethod(mergeAction) } : null }
       : null
@@ -391,6 +395,7 @@ async function reviewRepository(state: HarnessState, profile: number, repository
 
 const lifecycleMessages = {
   changed: 'The pull request or GitHub account changed. Review its current state before trying again.',
+  'branch-changed': 'The remote branch changed on GitHub. Review its current commit before trying again.',
   unavailable: 'Could not reach GitHub. Try again when the host is connected.',
   denied: 'This GitHub account cannot update the pull request.',
   refused: 'GitHub refused this transition. Check the pull request on GitHub for more details.',
@@ -405,7 +410,7 @@ function lifecycleSuccess(value: string | null) {
 }
 
 export type PullRequestLifecycleDraft = { action: LifecycleAction, revision: string, token: string, head: string, base: string,
-  baseBranch: string, method: MergeMethod | null, viewer: string, message: string }
+  baseBranch: string, sourceBranch: string, sourceRepositoryId: string, method: MergeMethod | null, viewer: string, message: string }
 
 const lifecycleWrites = new Set<string>()
 
@@ -423,19 +428,24 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
   const merging = isMergeAction(action)
   const updatingBranch = action === 'update-branch'
   const reverting = action === 'revert'
-  const scopedBranch = merging || updatingBranch || reverting
+  const deletingBranch = action === 'delete-branch'
+  const scopedBranch = merging || updatingBranch || reverting || deletingBranch
   const baseBranch = scopedBranch ? values.get('baseBranch') ?? '' : ''
+  const sourceBranch = deletingBranch ? values.get('sourceBranch') ?? '' : ''
+  const sourceRepositoryId = deletingBranch ? values.get('sourceRepositoryId') ?? '' : ''
   const methodValue = values.get('method')
   const method = mergeMethod(methodValue)
   if ((takesMergeMethod(action) || updatingBranch ? !method : Boolean(methodValue))
     || (updatingBranch && !branchUpdateMethods.some(option => option.value === method))
-    || (scopedBranch && (!baseBranch || baseBranch.length > 1024 || /\p{Cc}/u.test(baseBranch)))) return null
+    || (scopedBranch && (!baseBranch || baseBranch.length > 1024 || /\p{Cc}/u.test(baseBranch)))
+    || (deletingBranch && (!sourceBranch || sourceBranch.length > 1024 || /\p{Cc}/u.test(sourceBranch)
+      || !sourceRepositoryId || sourceRepositoryId.length > 256 || /\p{Cc}/u.test(sourceRepositoryId)))) return null
   const tab = tabs.find(value => query.get('tab') === value) ?? 'summary'
   const params = reviewReturnParams(query, profile, selection.url, tab)
   const finish = (result: 'updated' | keyof typeof lifecycleMessages, confirmedAction: LifecycleAction | 'confirmed' = action, newPull?: number) => {
     const message = result === 'updated' ? lifecycleSuccess(confirmedAction) : lifecycleMessages[result]
     const fallback: PullRequestLifecycleDraft | undefined = result === 'pending'
-      ? { action, revision, token, head, base, baseBranch, method, viewer, message }
+      ? { action, revision, token, head, base, baseBranch, sourceBranch, sourceRepositoryId, method, viewer, message }
       : undefined
     const target = newPull === undefined ? new URLSearchParams(params)
       : reviewReturnParams(query, profile, `https://github.com/${selection.repository}/pull/${newPull}`, 'summary')
@@ -465,6 +475,13 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
     const before = await read()
     if (!before) return finish('unavailable')
     if (before.viewer.id !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
+    if (deletingBranch) {
+      if (before.headRefOid !== head) return finish('changed')
+      const canStart = before.baseRefName === baseBranch && before.baseRefOid === base && revision === lifecycleRevision(before)
+      const result = await deleteWorkspacePullRequestBranch(repository.path, before, { name: sourceBranch, repositoryId: sourceRepositoryId },
+        canStart, () => Boolean(stillTrusted(state, repository.workspace)), receipts, signal, credential)
+      return result === 'confirmed' ? finish('updated', 'confirmed') : finish(result)
+    }
     if (reverting) {
       if (before.state !== 'MERGED' || before.baseRefName !== baseBranch || before.baseRefOid !== base || before.headRefOid !== head)
         return finish('changed')

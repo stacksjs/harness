@@ -122,6 +122,7 @@ const reviewComposerBox = useRef('reviewComposerBox')
 const reviewPreviewBox = useRef('reviewPreviewBox')
 const reviewDialogBox = useRef('reviewDialogBox')
 const reviewOpenButton = useRef('reviewOpenButton')
+const deleteBranchDialog = useRef('deleteBranchDialog')
 const emptyInlineReview = { head: patchHead, base: patchBaseSha, comments: [], summary: '', verdict: 'COMMENT', intent: '' }
 const inlineReview = useLocalStorage(@json(inlineReviewStorage), emptyInlineReview)
 const reviewEditor = state(null)
@@ -253,6 +254,10 @@ function openInlineReview() {
 
 function closeInlineReview() {
   reviewDialogBox.current?.close()
+}
+
+function openDeleteBranchDialog(event) {
+  if (!('commandForElement' in event.currentTarget)) deleteBranchDialog.current?.showModal()
 }
 
 function finishInlineReviewClose() {

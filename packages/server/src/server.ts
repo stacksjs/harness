@@ -1953,7 +1953,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
                 return acceptsJson ? Response.json({ message }, { status: 400, headers }) : new Response(message, { status: 400, headers })
               }
               const { result, message, location, params, fallback } = submission
-              const statuses = { updated: 200, pending: 202, denied: 403, changed: 409, busy: 409, refused: 422, unavailable: 503 }
+              const statuses = { updated: 200, pending: 202, denied: 403, changed: 409, 'branch-changed': 409, busy: 409, refused: 422, unavailable: 503 }
               if (acceptsJson) return Response.json({ result, message, location }, { status: statuses[result], headers })
               if (result === 'updated') return new Response(null, { status: 303, headers: { ...headers, location } })
               return render(params, statuses[result], { lifecycleDraft: fallback, lifecycleError: message })
