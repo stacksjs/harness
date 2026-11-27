@@ -3911,12 +3911,14 @@ await harness.engine.dispatch({ id: ledgerThread, at: Date.now(), command: { typ
 const ledgerPath = `/s/${derivedId(ledgerThread)}`
 await page.setViewportSize({ width: 1440, height: 900 })
 await page.goto(new URL(ledgerPath, baseUrl).href)
+const wrappedPreviewPath = `/${'project-'.repeat(27)}wrapped-destination`
 const previewSite = Bun.serve({
   hostname: '127.0.0.1', port: 0,
   fetch(request) {
     const path = new URL(request.url).pathname
     if (path === '/counter.js') return new Response("const button = document.querySelector('button'); button.disabled = false; button.addEventListener('click', () => { button.textContent = 'Updated' })", { headers: { 'content-type': 'text/javascript' } })
-    const heading = path === '/second' ? 'Second preview page' : 'Local development preview'
+    const heading = path === wrappedPreviewPath ? 'Wrapped destination reached'
+      : path === '/second' ? 'Second preview page' : 'Local development preview'
     return new Response(`<h1>${heading}</h1><button disabled>Update</button><script type="module" src="/counter.js"></script>`, { headers: { 'content-type': 'text/html' } })
   },
 })
@@ -4053,6 +4055,30 @@ try {
   await capture('workspace-terminal-link-preview-phone')
   await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
   check('closing a phone terminal-link preview returns to the same terminal', await printedLink.isVisible())
+  const wrappedUrl = `http://${loopback}${wrappedPreviewPath}`
+  const printWrapped = join(driveRoot, 'print-wrapped-terminal-url.ts')
+  writeFileSync(printWrapped, `process.stdout.write(${JSON.stringify(wrappedUrl + '  \n')})\n`)
+  await terminalHost.focus()
+  await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${printWrapped}"`)
+  await page.keyboard.press('Enter')
+  const wrappedLink = terminalHost.getByRole('link', { name: wrappedUrl, exact: true })
+  await wrappedLink.waitFor()
+  await page.reload()
+  await wrappedLink.waitFor()
+  check('reattaching to the live terminal preserves the wrapped link', await wrappedLink.getAttribute('href') === wrappedUrl)
+  await wrappedLink.focus()
+  await capture('workspace-terminal-wrapped-url-phone')
+  const continuation = await wrappedLink.evaluate((element) => {
+    const rows = [...element.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0)
+    const points = rows.slice(1).reverse().map(rect => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }))
+    return points.find(({ x, y }) => element.contains(element.ownerDocument.elementFromPoint(x, y)))
+  })
+  check('soft-wrapped terminal output is one accessible link with the full destination',
+    await wrappedLink.count() === 1 && await wrappedLink.getAttribute('href') === wrappedUrl && Boolean(continuation))
+  await page.mouse.click(continuation!.x, continuation!.y)
+  await activeFrame.getByRole('heading', { name: 'Wrapped destination reached' }).waitFor()
+  check('activating a continuation row opens the full wrapped URL', true)
+  await browserPane.getByRole('button', { name: 'Close browser pane' }).click()
   await page.setViewportSize({ width: 1440, height: 900 })
   await terminalHost.focus()
   await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${ownedPreviewScript}"`)
