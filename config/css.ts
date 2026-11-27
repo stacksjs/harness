@@ -530,6 +530,12 @@ const RESPONSIVE_SHELL = `
 [data-pr-search] { flex: 1 0 min(180px, 100%); }
 [data-pr-filters] :is(input, select), [data-pr-button] { min-height: 36px; border: 1px solid var(--workspace-line); border-radius: 6px; background: var(--workspace-surface); color: inherit; padding: 0 9px; }
 [data-pr-filters] :is(input, select) { min-width: 0; max-width: 100%; }
+[data-pr-filters] label:has(> select) { position: relative; }
+[data-pr-filters] label:has(> select)::after {
+  content: ''; pointer-events: none; position: absolute; inset-inline-end: 11px; inset-block-end: 16px;
+  inline-size: 6px; block-size: 6px; border-inline-end: 1px solid; border-block-end: 1px solid; transform: rotate(45deg);
+}
+[data-pr-filters] select { appearance: none; padding-inline-end: 26px; text-overflow: ellipsis; }
 .dark [data-pr-filters] select { color-scheme: dark; }
 [data-pr-additional-filters] { flex: 1 0 100%; min-inline-size: 0; }
 [data-pr-additional-filters] summary { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; width: fit-content; }
@@ -548,13 +554,11 @@ const RESPONSIVE_SHELL = `
 [data-pr-filter-color] { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-inline-end: 4px; }
 [data-pr-filters-clear] { justify-self: start; }
 @media (pointer: coarse), (max-width: 759px) {
-  [data-pr-filters] label:has(> select) { position: relative; }
-  [data-pr-filters] label:has(> select)::after {
-    content: ''; pointer-events: none; position: absolute; inset-inline-end: 11px; inset-block-end: 20px;
-    inline-size: 6px; block-size: 6px; border-inline-end: 1px solid; border-block-end: 1px solid; transform: rotate(45deg);
-  }
-  [data-pr-filters] select { appearance: none; min-height: 44px; padding-inline-end: 26px; font-size: 16px; text-overflow: ellipsis; }
+  [data-pr-filters] label:has(> select)::after { inset-block-end: 20px; }
+  [data-pr-filters] select { min-height: 44px; font-size: 16px; }
   [data-pr-filters] input:not([type="checkbox"]) { font-size: 16px; }
+  [data-pr-filter-lookup] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  [data-pr-filter-lookup] label { grid-column: 1 / -1; }
   [data-pr-filter-choices] label { min-block-size: 44px; }
 }
 [data-pr-button] { display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 650; white-space: nowrap; }
