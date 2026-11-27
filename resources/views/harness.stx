@@ -21,6 +21,11 @@ export const settingsSections = $props.settingsSections || []
 export const keybindings = $props.keybindings || []
 // Settings this host owns, shared by every client connected to it.
 export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 }
+// What the project in view answers for itself, kept apart from the host's own
+// answers above: a row has to show which of the two it is following before it
+// can offer to stop following it.
+export const projectSettings = $props.projectSettings || {}
+export const projectSettingsId = $props.projectSettingsId || 0
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const missingThread = $props.missingThread === true
@@ -117,6 +122,9 @@ const activeWorkspace = activeSession && !activeScratchSession
   ? profiles.flatMap(profile => profile.workspaces || []).find(workspace => workspace.id === activeWorkspaceId)
   : draftProject
 export const workspaceName = activeWorkspace?.name
+// Always a string: the bridge drops an undefined export, and reading one at
+// island setup throws before anything hydrates.
+export const projectSettingsName = activeWorkspace?.name || ''
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
 export const projectCloneAllowed = Boolean($props.canLaunchWorkspaceEditor)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
@@ -1203,6 +1211,23 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <option value="grok">Grok</option>
           </select>
         </div>
+        <div data-settings-field data-project-driver-field :hidden="!projectSettingsId">
+          <label for="settings-project-driver" :text="projectDriverLabel()"></label>
+          <select
+            id="settings-project-driver"
+            data-project-driver
+            :value="projectDriverValue()"
+            @change="saveProjectDriverChoice"
+            class="px-2 text-[13px] bg-transparent border border-black/10 rounded-md dark:border-white/15"
+          >
+            <option value="">Follow the host default</option>
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="opencode">OpenCode</option>
+            <option value="cursor">Cursor</option>
+            <option value="grok">Grok</option>
+          </select>
+        </div>
         <div data-settings-field>
           <label for="settings-follow-up">Follow-up behavior</label>
           <select id="settings-follow-up" :value="followUpPreference()" @change="setFollowUpPreference" class="px-2 text-[13px] bg-transparent border border-black/10 rounded-md dark:border-white/15">
@@ -1220,6 +1245,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
       <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">New terminals use the selected shell. Den must be installed on this host.</p>
       <p data-host-settings-note class="mt-3 mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">These apply to every client of this host. Appearance and keyboard shortcuts stay with this browser.</p>
+      <p data-project-settings-note :hidden="!projectSettingsId" :text="projectSettingsNote()" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-300"></p>
       <p data-settings-error role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
       </section>
       <section :hidden="settingsSelection() !== 'threads'" data-settings-pane>
@@ -1638,6 +1664,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // the phone and the laptop pointed at one host must agree about which agent
   // a new thread starts with, and the browser store cannot give them that.
   const settings = state({ ...hostSettings })
+  // Only what this project pins. An absent key is not a default, it is "ask
+  // the host", so the row shows "Follow the host default" rather than a value.
+  const projectPins = state({ ...projectSettings })
+  const projectDriverValue = derived(() => projectPins().defaultDriver || '')
+  const projectDriverLabel = derived(() => projectSettingsName
+    ? `Agent for new sessions in ${projectSettingsName}`
+    : 'Agent for new sessions in this project')
+  const projectSettingsNote = derived(() => projectDriverValue()
+    ? `Only sessions in ${projectSettingsName || 'this project'} start with that agent. Every other project follows the host default above.`
+    : `${projectSettingsName || 'This project'} follows the host default. Choose an agent to pin it here instead.`)
   const settingsSaveError = state('')
   const snoozeEditor = state(null)
   const snoozeRows = state([])
@@ -2187,6 +2223,34 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       settingsSaveError.set(error.message || 'Could not save that setting.')
     }
   }
+  async function updateProjectSettings(changes, inherit = []) {
+    if (!projectSettingsId) return
+    const previous = projectPins()
+    const next = { ...previous, ...changes }
+    for (const key of inherit) delete next[key]
+    if (Object.keys(next).length === Object.keys(previous).length
+      && Object.entries(next).every(([key, value]) => previous[key] === value)) return
+    projectPins.set(next)
+    settingsSaveError.set('')
+    try {
+      await sendCommand({
+        type: 'settings.update',
+        workspaceId: projectSettingsId,
+        changes,
+        ...(inherit.length ? { inherit } : {}),
+      })
+    }
+    catch (error) {
+      projectPins.set(previous)
+      settingsSaveError.set(error.message || 'Could not save that setting for this project.')
+    }
+  }
+
+  function saveProjectDriverChoice(event) {
+    const chosen = event.currentTarget.value
+    void updateProjectSettings(chosen ? { defaultDriver: chosen } : {}, chosen ? [] : ['defaultDriver'])
+  }
+
   // Stop hides the moment it is clicked, before the log settles the turn.
   const stopPressed = state(false)
   function setSessionState(next) {
@@ -4242,7 +4306,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   })
 
   function defaultDriver() {
-    const stored = settings().defaultDriver
+    // The project's answer where it has one, the host's otherwise. This is
+    // where the setting actually bites: it is the agent the composer starts a
+    // new thread in this project with.
+    const stored = projectPins().defaultDriver || settings().defaultDriver
     return KNOWN_DRIVERS.includes(stored) ? stored : 'claude'
   }
 
@@ -7314,12 +7381,32 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       maxRows: codec.maxSnoozePresets,
     })
     function receiveHostSettings(frame) {
-      const changes = frame?.t === 'host-settings' ? frame.settings
-        : frame?.t === 'event' && frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated'
-          ? frame.event.payload.changes : null
-      if (!changes) return false
-      settings.update(previous => ({ ...previous, ...changes }))
-      if (changes.snoozePresets) snoozeEditor()?.receive(changes.snoozePresets)
+      if (frame?.t === 'host-settings') {
+        settings.update(previous => ({ ...previous, ...frame.settings }))
+        if (frame.settings?.snoozePresets) snoozeEditor()?.receive(frame.settings.snoozePresets)
+        // The reply carries a project's answers only when this client asked
+        // about one, and the whole set rather than a delta.
+        if (frame.workspaceId === projectSettingsId && frame.projectSettings) projectPins.set({ ...frame.projectSettings })
+        return true
+      }
+      const event = frame?.t === 'event' && frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated'
+        ? frame.event.payload
+        : null
+      if (!event) return false
+      // A change to some other project is still a settings event and not the
+      // sidebar's to read, so it is consumed here and dropped.
+      if (event.workspaceId !== undefined) {
+        if (event.workspaceId === projectSettingsId) {
+          projectPins.update((previous) => {
+            const next = { ...previous, ...event.changes }
+            for (const key of event.inherit || []) delete next[key]
+            return next
+          })
+        }
+        return true
+      }
+      settings.update(previous => ({ ...previous, ...event.changes }))
+      if (event.changes.snoozePresets) snoozeEditor()?.receive(event.changes.snoozePresets)
       return true
     }
     const sidebar = sidebarRef.current
@@ -7363,7 +7450,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         onOnline: (online) => {
           if (!online) return
           watchSidebarOrder()
-          connection.send({ t: 'read-settings' })
+          connection.send({ t: 'read-settings', ...(projectSettingsId ? { workspaceId: projectSettingsId } : {}) })
         },
       })
       watchOrder(connection)
@@ -7734,7 +7821,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         sessionConnecting.set(false)
         if (online) {
           watchSidebarOrder()
-          connection.send({ t: 'read-settings' })
+          connection.send({ t: 'read-settings', ...(projectSettingsId ? { workspaceId: projectSettingsId } : {}) })
           void followUpActions()?.flush()
           void refreshProjectSetup()
           void refreshProjectSettlement()
