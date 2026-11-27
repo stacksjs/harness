@@ -332,6 +332,8 @@ const driver: Driver = {
   async generateCommitMessage(_config, input) {
     commitGenerationPatches.push(input.patch)
     if (rejectCommitGeneration) throw new Error('Fixture provider disconnected')
+    if (input.patch.includes('Combined action reviewed note'))
+      return { subject: 'Publish selected working files', body: '', branch: 'feature/publish-selected-working-files' }
     return { subject: 'Summarize the reviewed edit', body: '', branch: 'feature/generated-review' }
   },
   async create(config) {
@@ -6442,6 +6444,66 @@ try {
       && fixtureGit('diff', '--cached', '--name-only') === 'later changes.txt'
       && commitGenerationPatches.length === 2
       && commitGenerationPatches.every(patch => patch.includes('Generate from this working edit') && !patch.includes('GENERATION_EXCLUDED_FIXTURE')))
+  fixtureGit('reset', '--', 'later changes.txt')
+  rmSync(excludedCommitPath)
+  await clonePage.waitForLoadState('networkidle')
+
+  const combinedRemote = join(driveRoot, 'commit-and-push-fixture.git')
+  execFileSync('git', ['init', '--bare', '-q', combinedRemote])
+  const combinedBase = fixtureGit('branch', '--show-current')
+  const combinedHead = fixtureGit('rev-parse', 'HEAD')
+  fixtureGit('remote', 'add', 'combined', combinedRemote)
+  fixtureGit('push', '-q', 'combined', combinedBase + ':' + combinedBase)
+  fixtureGit('remote', 'set-head', 'combined', combinedBase)
+  fixtureGit('config', 'remote.pushDefault', 'combined')
+  const rejectedPushHook = join(combinedRemote, 'hooks', 'pre-receive')
+  writeFileSync(rejectedPushHook, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  writeFileSync(fixturePath, 'Combined action reviewed note\n')
+  writeFileSync(excludedCommitPath, 'Kept outside the publication\n')
+  fixtureGit('add', '--', 'later changes.txt')
+  await clonePage.waitForLoadState('networkidle')
+  const openCombined = clonePage.getByRole('button', { name: 'Commit & push', exact: true })
+  const combinedDialog = clonePage.getByRole('dialog', { name: 'Commit & push to default branch?', exact: true })
+  const newCombined = combinedDialog.getByRole('button', { name: 'Commit & push on new branch', exact: true })
+  await openCombined.click()
+  await combinedDialog.getByText('Remote branch combined/' + combinedBase, { exact: true }).waitFor()
+  await combinedDialog.getByText('New branch remote combined', { exact: true }).waitFor()
+  await combinedDialog.getByPlaceholder('Leave blank to generate from the included files').waitFor()
+  await combinedDialog.getByRole('button', { name: 'Edit files', exact: true }).click()
+  await combinedDialog.getByRole('checkbox', { name: 'Include later changes.txt', exact: true }).uncheck()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-commit-and-push-${width}x${height}`, clonePage)
+  }
+  await combinedDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  check('cancelling Commit & push preserves the default branch and staged content',
+    fixtureGit('rev-parse', 'HEAD') === combinedHead && fixtureGit('diff', '--cached', '--name-only') === 'later changes.txt')
+  await openCombined.click()
+  await combinedDialog.getByPlaceholder('Leave blank to generate from the included files').waitFor()
+  await combinedDialog.getByRole('button', { name: 'Edit files', exact: true }).click()
+  await combinedDialog.getByRole('checkbox', { name: 'Include later changes.txt', exact: true }).uncheck()
+  await newCombined.click()
+  const combinedFeature = 'feature/publish-selected-working-files'
+  const retryPush = clonePage.getByRole('button', { name: 'Retry push', exact: true })
+  await combinedDialog.waitFor({ state: 'hidden' })
+  await retryPush.waitFor()
+  const preparedCommit = fixtureGit('rev-parse', 'HEAD')
+  check('a rejected combined push leaves the reviewed local commit and keeps excluded staging',
+    fixtureGit('branch', '--show-current') === combinedFeature && fixtureGit('rev-parse', combinedBase) === combinedHead
+    && fixtureGit('show', 'HEAD:review.txt') === 'Combined action reviewed note' && fixtureGit('diff', '--cached', '--name-only') === 'later changes.txt')
+  await capture('workspace-commit-and-push-rejected-360x800', clonePage)
+  rmSync(rejectedPushHook)
+  await retryPush.click()
+  const combinedPushDialog = clonePage.getByRole('dialog', { name: 'Push commits' })
+  await combinedPushDialog.getByText('combined/' + combinedFeature, { exact: true }).waitFor()
+  await combinedPushDialog.getByRole('button', { name: 'Push', exact: true }).click()
+  await clonePage.getByText('Pushed to combined/' + combinedFeature + '.', { exact: true }).waitFor()
+  check('Retry push publishes the exact saved commit without a second commit',
+    fixtureGit('rev-parse', 'HEAD') === preparedCommit
+    && execFileSync('git', ['--git-dir', combinedRemote, 'rev-parse', 'refs/heads/' + combinedFeature], { encoding: 'utf8' }).trim() === preparedCommit
+    && commitGenerationPatches.length === 3 && !commitGenerationPatches[2]?.includes('Kept outside the publication'))
+  fixtureGit('config', '--unset', 'remote.pushDefault')
+  fixtureGit('remote', 'remove', 'combined')
   fixtureGit('reset', '--', 'later changes.txt')
   rmSync(excludedCommitPath)
   await clonePage.waitForLoadState('networkidle')

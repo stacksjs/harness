@@ -2514,8 +2514,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const diffClose = useRef('diffCloseBox')
   const repositoryCommitDialog = useRef('repositoryCommitDialogBox')
   const repositoryCommitScope = state('staged')
+  const repositoryCommitPublishes = state(false)
   const repositoryCommitStaged = derived(() => repositoryCommitScope() === 'staged')
   const repositoryCommitPreview = state(null)
+  const repositoryCommitTitle = derived(() => {
+    if (repositoryCommitPublishes())
+      return repositoryCommitPreview()?.publish?.current.defaultTarget ? 'Commit & push to default branch?' : 'Commit & push'
+    return repositoryCommitStaged() ? 'Commit staged changes' : 'Commit changes'
+  })
   const repositoryCommitMessage = state('')
   const repositoryCommitNewBranch = state(false)
   const repositoryCommitLimit = state(40)
@@ -2549,14 +2555,26 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   })
   const repositoryCommitError = state('')
   const repositoryCommitGenerationFailed = state(false)
-  const repositoryCommitResult = state('')
+  const repositoryCommitFeedback = state(null)
+  const repositoryCommitResult = derived(() => {
+    const feedback = repositoryCommitFeedback()
+    return feedback && feedback.repository === diffRepository() ? feedback.message : ''
+  })
+  const repositoryPublication = state(null)
+  const repositoryPublicationReady = derived(() => repositoryPublication()?.repository === diffRepository()
+    && repositoryPublication()?.commit === diffGitStatus()?.head)
   const repositoryCommitLoading = state(false)
   const repositoryCommitBusy = state(false)
   const repositoryCommitCanSubmit = derived(() => Boolean(repositoryCommitIncludedCount()
     && (repositoryCommitMessage().trim() || repositoryCommitPreview()?.generation)
     && !repositoryCommitBusy() && !repositoryCommitLoading()
     && (!repositoryCommitError() || repositoryCommitGenerationFailed())))
-  const repositoryCommitPendingLabel = derived(() => repositoryCommitMessage().trim() ? 'Committing…' : 'Generating message…')
+  const repositoryCommitCurrentAllowed = derived(() => repositoryCommitCanSubmit()
+    && (!repositoryCommitPublishes() || (repositoryCommitPreview()?.publish?.current.revision && !repositoryCommitPreview()?.publish?.current.problem)))
+  const repositoryCommitFeatureAllowed = derived(() => repositoryCommitCanSubmit()
+    && (!repositoryCommitPublishes() || (repositoryCommitPreview()?.publish?.feature?.revision && !repositoryCommitPreview()?.publish?.feature?.problem)))
+  const repositoryCommitPendingLabel = derived(() => !repositoryCommitMessage().trim() ? 'Generating message…'
+    : repositoryCommitPublishes() ? 'Committing and pushing…' : 'Committing…')
   let repositoryCommitTrigger
   let repositoryCommitKey
   const repositorySyncDialog = useRef('repositorySyncDialogBox')
@@ -5074,9 +5092,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       body: repositoryPullRequestBody.current?.value || '', draft: repositoryPullRequestDraft.current?.checked === true })
   }
 
-  function openRepositorySync(action, event) {
+  let repositorySyncPublication
+
+  function openRepositorySync(action, event, publication) {
     repositorySyncTrigger = event.currentTarget
     repositorySyncKey = diffRepository()
+    repositorySyncPublication = publication
     repositorySyncAction.set(action)
     repositorySyncResult.set(null)
     repositorySyncDialog.current?.showModal()
@@ -5099,7 +5120,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     repositorySyncBusy.set(Boolean(revision))
     repositorySyncLoading.set(!revision)
     if (!revision) repositorySyncPreview.set(null)
-    const query = repositorySyncKey ? '?' + new URLSearchParams({ repository: repositorySyncKey }) : ''
+    const params = new URLSearchParams()
+    if (repositorySyncKey) params.set('repository', repositorySyncKey)
+    if (repositorySyncPublication) params.set('publication', repositorySyncPublication)
+    const query = params.size ? '?' + params : ''
     try {
       const response = await fetch('/s/' + sessionId + '/git/' + repositorySyncAction() + query, {
         signal: request.signal,
@@ -5109,6 +5133,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (request.signal.aborted) return
       if (!response.ok) throw new Error(body.error || 'Could not complete the Git action.')
       if (revision) {
+        if (repositorySyncPublication && repositoryPublication()?.id === repositorySyncPublication) {
+          repositoryPublication.set(null)
+          repositoryCommitFeedback.set(null)
+        }
         repositorySyncResult.set({ repository: repositorySyncKey, message: body.message })
         repositorySyncBusy.set(false)
         closeRepositorySync()
@@ -5117,6 +5145,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       }
       else {
         repositorySyncPreview.set(body)
+        repositorySyncPublication = repositorySyncPublication || body.publication
         repositorySyncError.set(body.problem || '')
       }
     }
@@ -5145,16 +5174,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const query = new URLSearchParams()
     if (repositoryCommitKey) query.set('repository', repositoryCommitKey)
     if (!repositoryCommitStaged()) query.set('scope', 'working')
+    if (repositoryCommitPublishes()) query.set('publish', '1')
     return '/s/' + sessionId + '/git/commit' + (query.size ? '?' + query : '')
   }
 
-  function openRepositoryCommit(scope, event) {
+  function openRepositoryCommit(scope, event, publish = false) {
     repositoryCommitTrigger = event.currentTarget
     repositoryCommitKey = diffRepository()
     repositoryCommitScope.set(scope)
+    repositoryCommitPublishes.set(publish)
     repositoryCommitMessage.set('')
     repositoryCommitNewBranch.set(false)
-    repositoryCommitResult.set('')
+    repositoryCommitFeedback.set(null)
     repositoryCommitPreview.set(null)
     repositoryCommitExcluded.set(new Set())
     repositoryCommitEditing.set(false)
@@ -5181,6 +5212,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     repositoryCommitDialog.current?.close()
     if (repositoryCommitTrigger?.offsetWidth) repositoryCommitTrigger.focus()
     else diffClose.current?.focus()
+  }
+
+  function retryRepositoryPublication(event, fromReview = false) {
+    const publication = fromReview ? repositoryCommitPreview()?.pendingPublication : repositoryPublication()
+    if (!publication || (fromReview && repositoryCommitBusy())) return
+    if (fromReview) {
+      repositoryPublication.set({ ...publication, repository: repositoryCommitKey })
+      repositoryCommitDialog.current?.close()
+    }
+    openRepositorySync('push', event, publication.id)
   }
 
   async function loadRepositoryCommit() {
@@ -5220,7 +5261,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function submitRepositoryCommit(newBranch = false) {
     const preview = repositoryCommitPreview()
     const message = repositoryCommitMessage().trim()
-    if (!preview || !repositoryCommitCanSubmit()) return
+    if (!preview || !(newBranch ? repositoryCommitFeatureAllowed() : repositoryCommitCurrentAllowed())) return
+    const target = newBranch ? preview.publish?.feature : preview.publish?.current
     const request = new AbortController()
     repositoryCommitRequest = request
     repositoryCommitNewBranch.set(newBranch)
@@ -5231,7 +5273,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const response = await fetch(repositoryCommitAddress(), {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message, revision: preview.revision, excluded: [...repositoryCommitExcluded()],
-          newBranch, ...(!message && { generate: preview.generation }) }), signal: request.signal,
+          newBranch, ...(!message && { generate: preview.generation }),
+          ...(target && { publication: { id: crypto.randomUUID(), revision: target.revision } }),
+        }), signal: request.signal,
       })
       const value = await response.json().catch(() => ({}))
       if (request.signal.aborted) return
@@ -5239,7 +5283,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         repositoryCommitGenerationFailed.set(value.generationFailed === true)
         throw new Error(value.error || 'Could not confirm the commit.')
       }
-      repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + (value.branch ? ' on ' + value.branch : '') + '.' + (value.warning ? ' ' + value.warning : ''))
+      repositoryCommitFeedback.set({ repository: repositoryCommitKey,
+        message: 'Committed ' + value.commit.slice(0, 7) + (value.branch ? ' on ' + value.branch : '') + '.'
+          + (value.warning ? ' ' + value.warning : '') + (value.publication ? ' ' + value.publication.message : ''),
+      })
+      if (value.publication?.retryable)
+        repositoryPublication.set({ id: value.publication.id, commit: value.commit, repository: repositoryCommitKey })
       repositoryCommitBusy.set(false)
       repositoryCommitDialog.current?.close()
       diffClose.current?.focus()

@@ -1,11 +1,20 @@
 <dialog data-repository-commit-dialog ref="repositoryCommitDialogBox" aria-labelledby="harness-repository-commit-title"
   @cancel.prevent="closeRepositoryCommit" @click.self="closeRepositoryCommit">
   <form data-share-dialog-body @submit.prevent="submitRepositoryCommit()">
-    <h2 id="harness-repository-commit-title" :text="repositoryCommitStaged() ? 'Commit staged changes' : 'Commit changes'">Commit staged changes</h2>
-    <p :hidden="!repositoryCommitPreview()?.branch" :text="'Branch ' + repositoryCommitPreview()?.branch"></p>
+    <h2 id="harness-repository-commit-title" :text="repositoryCommitTitle()">Commit staged changes</h2>
+    <p :hidden="!repositoryCommitPreview()?.branch" :text="'Branch ' + repositoryCommitPreview()?.branch" class="break-all"></p>
     <p hidden :hidden="repositoryCommitStaged()" class="text-neutral-600 dark:text-neutral-300">This commits the current working contents of the selected files.</p>
     <p role="status" :hidden="!repositoryCommitLoading()" :text="repositoryCommitStaged() ? 'Reading the staged changes…' : 'Reading the working-tree changes…'"></p>
     <p role="alert" :hidden="!repositoryCommitError()" :text="repositoryCommitError()"></p>
+    <div hidden :hidden="!repositoryCommitPreview()?.publish" class="grid gap-1">
+      <p :hidden="!repositoryCommitPreview()?.publish?.current.remote"
+        :text="'Remote branch ' + repositoryCommitPreview()?.publish?.current.remote + '/' + repositoryCommitPreview()?.publish?.current.ref.slice(11)" class="break-all"></p>
+      <p :hidden="!repositoryCommitPreview()?.publish?.current.defaultTarget" class="text-amber-700 dark:text-amber-300">This is the remote’s default branch.</p>
+      <p :hidden="!repositoryCommitPreview()?.publish?.current.problem" :text="repositoryCommitPreview()?.publish?.current.problem"></p>
+      <p :hidden="!repositoryCommitPreview()?.publish?.feature?.remote || Boolean(repositoryCommitPreview()?.publish?.feature?.problem)"
+        :text="'New branch remote ' + repositoryCommitPreview()?.publish?.feature?.remote" class="break-all"></p>
+      <p :hidden="!repositoryCommitPreview()?.publish?.feature?.problem" :text="repositoryCommitPreview()?.publish?.feature?.problem"></p>
+    </div>
     <div :hidden="!repositoryCommitFileCount()" class="grid gap-1 min-w-0">
       <div class="flex flex-wrap gap-2 items-center justify-between">
         <div class="flex gap-2 items-center">
@@ -52,11 +61,13 @@
       <button type="button" @click="closeRepositoryCommit" :disabled="repositoryCommitBusy()">Cancel</button>
       <button type="button" @click="loadRepositoryCommit" :hidden="!repositoryCommitError() || repositoryCommitGenerationFailed()" :disabled="repositoryCommitBusy() || repositoryCommitLoading()"
         :text="repositoryCommitStaged() ? 'Refresh staged files' : 'Refresh changed files'">Refresh staged files</button>
+      <button type="button" hidden :hidden="!repositoryCommitPreview()?.pendingPublication" :disabled="repositoryCommitBusy()"
+        @click="retryRepositoryPublication($event, true)">Retry push</button>
       <button type="button" hidden :hidden="repositoryCommitStaged() || !repositoryCommitPreview()?.canCreateBranch"
-        @click="submitRepositoryCommit(true)" :disabled="!repositoryCommitCanSubmit()"
-        :text="repositoryCommitBusy() && repositoryCommitNewBranch() ? repositoryCommitPendingLabel() : 'Commit on new branch'">Commit on new branch</button>
-      <button type="submit" data-share-primary :disabled="!repositoryCommitCanSubmit()"
-        :text="repositoryCommitBusy() && !repositoryCommitNewBranch() ? repositoryCommitPendingLabel() : 'Commit'">Commit</button>
+        @click="submitRepositoryCommit(true)" :disabled="!repositoryCommitFeatureAllowed()"
+        :text="repositoryCommitBusy() && repositoryCommitNewBranch() ? repositoryCommitPendingLabel() : (repositoryCommitPublishes() ? 'Commit &amp; push on new branch' : 'Commit on new branch')">Commit on new branch</button>
+      <button type="submit" data-share-primary :disabled="!repositoryCommitCurrentAllowed()"
+        :text="repositoryCommitBusy() && !repositoryCommitNewBranch() ? repositoryCommitPendingLabel() : (repositoryCommitPublishes() ? 'Commit &amp; push' : 'Commit')">Commit</button>
     </div>
   </form>
 </dialog>

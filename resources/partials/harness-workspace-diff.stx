@@ -82,6 +82,9 @@
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event)" class="min-h-10 font-medium underline underline-offset-2">Commit changes</button>
         <button type="button" data-repository-commit-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.staged || !diffGitStatus()?.branch || Boolean(diffGitStatus()?.conflicted)"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('staged', $event)" class="min-h-10 font-medium underline underline-offset-2">Commit staged</button>
+        <button type="button" aria-haspopup="dialog"
+          :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head || Boolean(diffGitStatus()?.conflicted) || !(diffGitStatus()?.staged || diffGitStatus()?.unstaged || diffGitStatus()?.untracked)"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event, true)" class="min-h-10 font-medium underline underline-offset-2">Commit &amp; push</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.upstream || !diffGitStatus()?.branch"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('pull', $event)" class="min-h-10 font-medium underline underline-offset-2">Pull</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
@@ -91,7 +94,11 @@
       </div>
     @endif
   </section>
-  <p role="status" data-repository-commit-result hidden :hidden="!repositoryCommitResult()" :text="repositoryCommitResult()" class="px-3 py-1 text-xs"></p>
+  <div hidden :hidden="!repositoryCommitResult() && !repositoryPublicationReady()" class="flex flex-wrap gap-x-2 items-baseline px-3 py-1 text-xs">
+    <p role="status" data-repository-commit-result :hidden="!repositoryCommitResult()" :text="repositoryCommitResult()"></p>
+    <button type="button" aria-haspopup="dialog" hidden :hidden="!repositoryPublicationReady()"
+      @click="retryRepositoryPublication($event)" class="min-h-9 font-medium underline underline-offset-2">Retry push</button>
+  </div>
   <p role="status" data-repository-sync-result hidden :hidden="!repositorySyncResult() || repositorySyncResult()?.repository !== diffRepository()"
     :text="repositorySyncResult()?.message" class="px-3 py-1 text-xs"></p>
   <div class="flex flex-wrap gap-x-2 items-baseline px-3 py-1 text-xs"
