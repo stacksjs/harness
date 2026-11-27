@@ -765,11 +765,14 @@ describe('harness serve — HTTP', () => {
     Object.assign(original, {
       labels: [compliance, report], filterReview: 'approved', filterChecks: 'success',
       requested_reviewers: [{ login: 'fixture-user' }],
+      additions: 73, deletions: 12,
     })
     fixture.pulls.push(
       { ...original, number: 2, html_url: url.replace(/1$/u, '2'), title: 'Draft report with checks', draft: true },
-      { ...original, number: 3, html_url: url.replace(/1$/u, '3'), title: 'External report with checks', user: { login: 'alix' }, filterReview: 'changes_requested', filterChecks: 'failure' },
-      { ...original, number: 4, html_url: url.replace(/1$/u, '4'), title: 'Another report with checks', labels: [report] },
+      { ...original, number: 3, html_url: url.replace(/1$/u, '3'), title: 'External report with checks', user: { login: 'alix' },
+        filterReview: 'changes_requested', filterChecks: 'failure', listConflict: true },
+      { ...original, number: 4, html_url: url.replace(/1$/u, '4'), title: 'Another report with checks', labels: [report],
+        user: { login: 'casey' }, requested_reviewers: [], filterChecks: 'pending', listCheckHead: 'f'.repeat(40) },
     )
     fixture.labelPages = [[report], [compliance]]
     fixture.filterAuthors = [{ login: 'alix', name: 'Alix Coder' }]
@@ -784,6 +787,27 @@ describe('harness serve — HTTP', () => {
         command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
       const host = 'http://127.0.0.1:' + port
       const list = (params: URLSearchParams | Record<string, string>) => fetch(host + '/pull-requests?' + new URLSearchParams(params))
+      const grouped = await (await list({})).text()
+      expect([...grouped.matchAll(/data-pr-group="([^"]+)"/gu)].map(match => match[1])).toEqual(['authored', 'reviewing', 'other'])
+      expect(grouped.indexOf('External report with checks')).toBeGreaterThan(grouped.indexOf('Small report with checks'))
+      expect(grouped.indexOf('Another report with checks')).toBeGreaterThan(grouped.indexOf('External report with checks'))
+      expect(grouped).toContain('Passing checks')
+      expect(grouped).toContain('Failing checks')
+      expect(grouped).not.toContain('Pending checks')
+      expect(grouped).toContain('Merge conflicts')
+      expect(grouped).toContain('73 additions')
+      expect(grouped).toContain('12 deletions')
+      expect(grouped).toContain('More labels include Report &amp; analysis')
+      expect(grouped).not.toContain('Some pull request details are unavailable.')
+      fixture.listMetadataMode = 'wrong-repo'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const withoutDetails = await (await list({})).text()
+      expect(withoutDetails).toContain('External report with checks')
+      expect(withoutDetails).toContain('Some pull request details are unavailable.')
+      expect(withoutDetails).not.toContain('Failing checks')
+      expect(withoutDetails).not.toContain('data-pr-group="authored"')
+      delete fixture.listMetadataMode
+      writeFileSync(cli.state, JSON.stringify(fixture))
       const filters = new URLSearchParams({ draft: 'hide', involvement: 'reviewing', review: 'approved', checks: 'passing', author: '@me', q: 'report' })
       for (const name of [compliance.name, report.name, report.name.toUpperCase()]) filters.append('label', name)
       const response = await list(filters)
@@ -794,6 +818,8 @@ describe('harness serve — HTTP', () => {
       expect(page).not.toContain('External report with checks')
       expect(page).not.toContain('Another report with checks')
       expect(page).toContain('GitHub returned partial results.')
+      expect(page).toContain('data-pr-group="filtered"')
+      expect(page).not.toContain('data-pr-group-heading')
       const selection = [...page.matchAll(/href="([^"]*selectedUrl=[^"]+)"/gu)][0]?.[1]
       expect(selection).toBeDefined()
       const selected = new URL(selection!.replaceAll('&amp;', '&'), host)

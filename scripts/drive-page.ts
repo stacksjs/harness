@@ -6757,6 +6757,13 @@ try {
       const filters = reviewList.locator('[data-pr-filters]')
       const additionalFilters = filters.locator('[data-pr-additional-filters] > summary')
       const resultRow = reviewList.locator('[data-pr-row]').first()
+      await clonePage.reload()
+      await resultRow.getByText('Passing checks', { exact: true }).waitFor()
+      check('the grouped phone list exposes author, label, and check state on its review row',
+        await reviewList.getByRole('heading', { name: 'Authored 1' }).isVisible()
+        && await resultRow.getByText('Release reporting', { exact: true }).isVisible()
+        && await resultRow.getByText('fixture-user', { exact: true }).isVisible())
+      await capture('pull-requests-grouped-phone-390x844', clonePage)
       const initialRow = await resultRow.boundingBox()
       await additionalFilters.press('Enter')
       const openRow = await resultRow.boundingBox()

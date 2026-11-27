@@ -1936,8 +1936,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           srv.timeout(request, 150)
           return pullRequestWorkspace(engine.current, url.searchParams, signal, true).then(async (view) => {
             if (view.listUnavailable) return new Response(null, { status: 503, headers })
-            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/partials/harness-pr-results.stx'),
-              { ...view, pulls: view.rows }, { autoShell: false })
+            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/partials/harness-pr-results.stx'), view, { autoShell: false })
             return Response.json({ html, scope: view.savedViewScope, search: view.search, draft: view.draftChoice,
               filterCount: view.activeFilterCount }, { headers: { ...headers, 'content-type': 'application/json' } })
           }).catch(() => new Response(null, { status: 503, headers }))

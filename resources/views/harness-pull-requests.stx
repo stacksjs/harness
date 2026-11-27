@@ -2,7 +2,6 @@
 export const profiles = $props.profiles || []
 export const repositories = $props.repositories || []
 export const selected = $props.selected || null
-export const pulls = $props.rows || []
 export const failures = $props.failures || []
 export const tab = $props.tab || 'summary'
 export const selectionError = $props.selectionError || ''

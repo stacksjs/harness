@@ -145,6 +145,30 @@ if (url.pathname === '/graphql' && method === 'POST') {
     reply(200, { data: { [marked ? 'markFileAsViewed' : 'unmarkFileAsViewed']: { clientMutationId: null } } })
   }
   const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
+  if (query.includes('query HarnessPullRequestListDetails')) {
+    const repository = variables.owner + '/' + variables.name
+    if (!state.repositories[repository]) reply(404, {})
+    const mode = state.listMetadataMode
+    if (mode === 'unavailable') reply(503, { message: 'Private metadata diagnostics' })
+    const selected = Object.fromEntries([...query.matchAll(/pr(\\d+): pullRequest\\(number: \\d+\\)/g)].map(([, number]) => {
+      const pull = state.pulls.find(pull => pull.base.repo.full_name === repository && String(pull.number) === number)
+      if (!pull || (mode === 'partial' && number === '3')) return ['pr' + number, null]
+      const sha = mode === 'head-changed' && number === '1' ? 'e'.repeat(40) : pull.head.sha
+      const decisions = { approved: 'APPROVED', changes_requested: 'CHANGES_REQUESTED', required: 'REVIEW_REQUIRED' }
+      return ['pr' + number, {
+        number: pull.number, headRefOid: sha, isDraft: Boolean(pull.draft),
+        mergeable: pull.listConflict ? 'CONFLICTING' : 'MERGEABLE',
+        reviewDecision: decisions[pull.filterReview] ?? null,
+        additions: pull.additions, deletions: pull.deletions,
+        reviewRequests: { nodes: (pull.requested_reviewers ?? []).map(user => ({ requestedReviewer: user })) },
+        commits: { nodes: [{ commit: { oid: pull.listCheckHead ?? sha,
+          statusCheckRollup: pull.filterChecks ? { state: pull.filterChecks.toUpperCase() } : null } }] },
+      }]
+    }))
+    reply(200, { data: { viewer: { ...viewer, login: state.listViewer ?? viewer.login }, repository: {
+      nameWithOwner: mode === 'wrong-repo' ? 'fixture/unrelated' : repository, isPrivate: state.privateRepository === repository, ...selected,
+    } } })
+  }
   const branchDeletion = state.branchDeletion
   const branchPull = state.pulls[0]
   const sourceRepository = branchDeletion && branchPull ? {
