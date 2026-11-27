@@ -4003,7 +4003,7 @@ describe('terminals over the socket', () => {
 
 describe('the render cache', () => {
   // The real template renders here — slow, so one test carries the whole
-  // contract: miss, hit with identical bytes, invalidation on the next event.
+  // contract: concurrent miss, equivalent URL hit, state invalidation.
   // The view resolves from cwd, which under `bun test` is the package dir.
   it('renders once per state change and invalidates on the next event', async () => {
     const root = join(import.meta.dir, '../../..')
@@ -4011,10 +4011,16 @@ describe('the render cache', () => {
     process.chdir(root)
     try {
       const base = `http://127.0.0.1:${port}`
-      const first = await fetch(`${base}/`)
+      const [first, duplicate] = await Promise.all([
+        fetch(`${base}/`),
+        fetch(`${base}/?tracking=concurrent`),
+      ])
       expect(first.status).toBe(200)
-      expect(first.headers.get('x-render-cache')).toBe('miss')
+      expect(duplicate.status).toBe(200)
+      expect([first, duplicate].map(response => response.headers.get('x-render-cache')).sort())
+        .toEqual(['coalesced', 'miss'])
       const body = await first.text()
+      expect(await duplicate.text()).toBe(body)
       const assets = [...new Set(Array.from(
         body.matchAll(/(?:src|href)="(\/_stx\/(?:runtime|router|modules|css)\.[0-9a-f]{16}\.(?:js|css))"/gu),
         match => match[1]!,
@@ -4030,11 +4036,11 @@ describe('the render cache', () => {
       }
       expect((await fetch(`${base}/_stx/runtime.0000000000000000.js`)).status).toBe(404)
 
-      const second = await fetch(`${base}/`)
+      const second = await fetch(`${base}/?ignored=tracking&draft=invalid`)
       expect(second.headers.get('x-render-cache')).toBe('hit')
       expect(await second.text()).toBe(body)
 
-      // A different URL is a different page, never the cached one.
+      // A request with a different render input gets its own cache entry.
       const other = await fetch(`${base}/?profile=1`)
       expect(other.headers.get('x-render-cache')).toBe('miss')
 

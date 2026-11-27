@@ -59,7 +59,7 @@ import { respondWorkspaceFile } from './workspace-files'
 import { threadSidebarLayout } from './thread-sidebar'
 import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
-import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
+import { parseFreshDraftId, renderHarnessTemplate, renderHarnessView, viewProps } from './views'
 import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLabels, updateWorkspacePullRequestLifecycle, updateWorkspacePullRequestReviewers, updateWorkspaceReviewConversation } from './pull-request-workspace'
 import type { PullRequestLabelDraft, PullRequestLabelEditor, PullRequestLifecycleDraft, PullRequestReplyDraft, PullRequestReviewerDraft, PullRequestReviewerEditor } from './pull-request-workspace'
@@ -1194,13 +1194,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    * SSR of an unchanged projection re-does megabytes of allocator churn per
    * render for byte-identical output (issue #11) — a control surface polling
    * `/` should pay the render exactly once per state change. The revision
-   * bumps in `broadcast`, the one path every applied event already takes, so
-   * a stale page cannot outlive the event that invalidated it. Keys embed
-   * the revision, which makes entries self-expiring; the cap only bounds the
-   * window between events.
+   * advances in `broadcast`. In-flight renders may finish for their original
+   * requests, but neither they nor their output belong to the next revision.
    */
   let stateRev = 0
   const renderCache = new Map<string, string>()
+  const pendingRenders = new Map<string, Promise<string | null>>()
   const RENDER_CACHE_CAP = 16
 
   function sidebarSnapshot(profileId: number, pinsOnly: boolean) {
@@ -1223,7 +1222,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    * relevant to every open client, and none of them subscribe to it.
    */
   function broadcast(events: Awaited<ReturnType<Engine['dispatch']>>['events']): void {
-    if (events.length > 0) stateRev++
+    if (events.length > 0) {
+      stateRev++
+      renderCache.clear()
+      pendingRenders.clear()
+    }
     const changedProfiles = new Set<number>()
     let reschedule = false
     for (const event of events) {
@@ -2420,16 +2423,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }
         const canLaunchWorkspaceEditor = canUseHostPrivileges(request, url)
           && (!remote || isLoopbackHost(srv?.requestIP(request)?.address ?? ''))
-        // The socket URL embedded in the page depends on both host and scheme.
-        const cacheKey = `${url.pathname}${url.search}|${url.origin}|${stateRev}|${canLaunchWorkspaceEditor}`
-        const cached = shared ? undefined : renderCache.get(cacheKey)
-        if (cached !== undefined) {
-          return new Response(cached, {
-            status: missingThread ? 404 : 200,
-            headers: { ...pageHeaders, 'x-render-cache': 'hit' },
-          })
-        }
-        return renderHarnessView(viewProps(engine.current, {
+        const viewOptions = {
           sessionId: id,
           missingThread,
           // `?profile=` opens the sidebar on a given space. Swiping past the
@@ -2438,29 +2432,49 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           profileId: Number(workspaceUrl.searchParams.get('profile')) || undefined,
           workspaceId: Number(workspaceUrl.searchParams.get('workspace')) || undefined,
           withoutProject: sharedDraft || workspaceUrl.searchParams.get('project') === 'none',
-          freshDraftId: workspaceUrl.searchParams.get('draft'),
+          freshDraftId: id && !missingThread ? null : parseFreshDraftId(workspaceUrl.searchParams.get('draft')),
           pullRequestProfile: sharedDraft ? Number(workspaceUrl.searchParams.get('profile')) || undefined : undefined,
           settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,
           remoteEnabled: access !== null,
           canLaunchWorkspaceEditor,
-        })).then((html) => {
-          if (html === null) return new Response('view not found', { status: 404 })
+        }
+        // The rendered inputs include socket origin and editor permissions.
+        // Extra query parameters and different spellings of the same inputs
+        // must not make the renderer build another copy of the page.
+        const cacheKey = JSON.stringify(viewOptions)
+        const respond = (html: string, cache: 'hit' | 'miss' | 'coalesced') => new Response(html, {
+          status: missingThread ? 404 : 200,
+          headers: { ...pageHeaders, 'x-render-cache': cache },
+        })
+        const cached = shared ? undefined : renderCache.get(cacheKey)
+        if (cached !== undefined) return respond(cached, 'hit')
 
-          // Stored under the key captured at request time: if an event landed
-          // mid-render, the new revision's requests miss this entry and
-          // render fresh, which is the consistency renders had all along.
-          if (!shared) renderCache.set(cacheKey, html)
-          if (renderCache.size > RENDER_CACHE_CAP) {
-            const oldest = renderCache.keys().next().value
-            if (oldest !== undefined) renderCache.delete(oldest)
+        const pending = shared ? undefined : pendingRenders.get(cacheKey)
+        let render = pending
+        if (!render) {
+          const revision = stateRev
+          render = renderHarnessView(viewProps(engine.current, viewOptions))
+          if (!shared) {
+            render = render.then((html) => {
+              if (html !== null && revision === stateRev) {
+                renderCache.set(cacheKey, html)
+                if (renderCache.size > RENDER_CACHE_CAP) {
+                  const oldest = renderCache.keys().next().value
+                  if (oldest !== undefined) renderCache.delete(oldest)
+                }
+              }
+              return html
+            }).finally(() => {
+              if (revision === stateRev) pendingRenders.delete(cacheKey)
+            })
+            pendingRenders.set(cacheKey, render)
           }
-
-          return new Response(html, {
-            status: missingThread ? 404 : 200,
-            headers: { ...pageHeaders, 'x-render-cache': 'miss' },
-          })
+        }
+        return render.then((html) => {
+          if (html === null) return new Response('view not found', { status: 404 })
+          return respond(html, pending ? 'coalesced' : 'miss')
         }).catch((error: unknown) => {
           // A template error must not take the socket down with it.
           const message = error instanceof Error ? error.message : String(error)

@@ -105,6 +105,10 @@ export interface ViewProps {
   sinceSeq: number
 }
 
+export function parseFreshDraftId(value?: string | null): string | null {
+  return value && /^web_[a-z0-9]{1,16}_[a-z0-9]{1,6}$/u.test(value) ? value : null
+}
+
 /**
  * Shape the read model for the view.
  *
@@ -227,9 +231,7 @@ export function viewProps(state: HarnessState, options: {
     draftWorkspace,
     draftWithoutProject,
     pullRequestProfile: options.pullRequestProfile ?? null,
-    freshDraftId: !active && (draftWorkspace || draftWithoutProject) && /^web_[a-z0-9]{1,16}_[a-z0-9]{1,6}$/.test(options.freshDraftId ?? '')
-      ? options.freshDraftId ?? null
-      : null,
+    freshDraftId: !active && (draftWorkspace || draftWithoutProject) ? parseFreshDraftId(options.freshDraftId) : null,
     activeSession: active
       ? {
           id: active.id,
