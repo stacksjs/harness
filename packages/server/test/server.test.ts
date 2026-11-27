@@ -45,6 +45,16 @@ function prepareDatabase(path: string): void {
   db.close()
 }
 
+async function pullRequestLifecycleForm(view: string) {
+  const html = await fetch(view).then(response => response.text())
+  const form = html.match(/<form method="post" action="([^"]+)" aria-label="Update pull request"[^>]*>([\s\S]*?)<\/form>/u)
+  if (!form) throw new Error('Missing pull request lifecycle form')
+  const values = Object.fromEntries(
+    [...form[2]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
+  )
+  return { endpoint: new URL(form[1]!.replaceAll('&amp;', '&'), view), values, html }
+}
+
 /** A tiny CBOR websocket client, since that is exactly what a real one is. */
 class TestClient {
   private socket: WebSocket
@@ -1260,14 +1270,7 @@ describe('harness serve — HTTP', () => {
         selectedUrl: url, profile: String(profileId), sort: 'oldest', tab: 'code', detailPage: '1',
         reviewHead: local, reviewBase: base, reviewLine: lineAnchor!,
       })
-      const lifecycleForm = async () => {
-        const html = await fetch(lifecycleView()).then(response => response.text())
-        const form = html.match(/<form method="post" action="([^"]+)" aria-label="Update pull request"[^>]*>([\s\S]*?)<\/form>/u)
-        if (!form) throw new Error('Missing pull request lifecycle form')
-        return { endpoint: new URL(form[1]!.replaceAll('&amp;', '&'), replyHost), values: Object.fromEntries(
-          [...form[2]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
-        ), html }
-      }
+      const lifecycleForm = () => pullRequestLifecycleForm(lifecycleView())
       const changeLifecycle = (form: Awaited<ReturnType<typeof lifecycleForm>>, action: string, overrides: Record<string, string> = {},
         accept = 'application/json', origin = replyHost) => fetch(new URL(form.endpoint.pathname + form.endpoint.search, replyHost), {
         method: 'POST', redirect: 'manual', headers: { accept, origin, 'content-type': 'application/x-www-form-urlencoded' },
@@ -1333,7 +1336,47 @@ describe('harness serve — HTTP', () => {
       expect(await earlierClose.json()).toMatchObject({ message: 'GitHub already confirmed the earlier update.' })
       expect(readState().lifecycleWrites).toBe(4)
       expect(readState().pulls[0].state).toBe('open')
+    }
+    finally {
+      process.chdir(previousCwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 60_000)
 
+  it.skipIf(process.platform === 'win32')('confirms authorized GitHub merges, queue changes, and interrupted writes', async () => {
+    const project = join(dir, 'merge-project')
+    mkdirSync(project)
+    const repository = 'fixture/notebook'
+    const url = 'https://github.com/' + repository + '/pull/1'
+    for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repository]]) {
+      const result = Bun.spawnSync(['git', ...args], { cwd: project })
+      if (!result.success) throw new Error(result.stderr.toString())
+    }
+    const cli = fixtureGitHubCli(dir, { [repository]: { bare: join(project, '.git') } })
+    const local = 'a'.repeat(40)
+    const base = 'b'.repeat(40)
+    const readState = () => JSON.parse(readFileSync(cli.state, 'utf8'))
+    const state = readState()
+    state.pulls.push({ number: 1, html_url: url, title: 'Merge the reviewed report', state: 'open', draft: true,
+      updated_at: '2026-11-01T17:00:00Z', user: { login: 'fixture-user' },
+      head: { sha: local, ref: 'report' }, base: { ref: 'main', sha: base, repo: { full_name: repository } } })
+    writeFileSync(cli.state, JSON.stringify(state))
+    const path = process.env.PATH
+    const previousCwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-merge-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let replyHost = 'http://127.0.0.1:' + port
+      const lifecycleView = () => replyHost + '/pull-requests?' + new URLSearchParams({ selectedUrl: url })
+      const lifecycleForm = () => pullRequestLifecycleForm(lifecycleView())
+      const changeLifecycle = (form: Awaited<ReturnType<typeof lifecycleForm>>, action: string, overrides: Record<string, string> = {},
+        accept = 'application/json') => fetch(new URL(form.endpoint.pathname + form.endpoint.search, replyHost), {
+        method: 'POST', redirect: 'manual', headers: { accept, origin: replyHost, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ ...form.values, action, ...overrides }),
+      })
       cli.configureMerge('ready')
       const readyToMerge = await lifecycleForm()
       expect(readyToMerge.html).not.toContain('data-pr-merge-trigger')
@@ -1397,7 +1440,7 @@ describe('harness serve — HTTP', () => {
       if (path === undefined) delete process.env.PATH
       else process.env.PATH = path
     }
-  }, 90_000)
+  }, 60_000)
 
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')
