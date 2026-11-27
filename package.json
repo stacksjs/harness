@@ -81,7 +81,7 @@
     "@stacksjs/components": "^0.2.960",
     "@stacksjs/stx": "^0.2.960",
     "bun-plugin-stx": "^0.2.960",
-    "stacks": "^0.75.710"
+    "stacks": "^0.75.711"
   },
   "workspaces": [
     "packages/*",
