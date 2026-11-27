@@ -83,6 +83,7 @@ export const lifecycleActions = {
   'update-branch': { label: 'Update branch', success: 'Branch is up to date with the reviewed base.', mutation: 'updatePullRequestBranch' },
   revert: { label: 'Revert changes', success: 'Revert pull request opened on GitHub.', mutation: 'revertPullRequest' },
   'delete-branch': { label: 'Delete branch', success: 'Branch deleted on GitHub.', mutation: 'updateRefs' },
+  'approve-workflows': { label: 'Approve workflows to run', success: 'Reviewed workflows are no longer awaiting approval.', mutation: null },
 }
 
 export type LifecycleAction = keyof typeof lifecycleActions
@@ -239,7 +240,7 @@ const lifecycleInputType = {
   'update-branch': 'UpdatePullRequestBranchInput',
 } as const
 
-export async function writePullRequestLifecycle(path: string, pull: LifecycleSnapshot, action: Exclude<LifecycleAction, 'revert' | 'delete-branch'>, method: MergeMethod | null,
+export async function writePullRequestLifecycle(path: string, pull: LifecycleSnapshot, action: Exclude<LifecycleAction, 'revert' | 'delete-branch' | 'approve-workflows'>, method: MergeMethod | null,
   signal: AbortSignal, credential: string) {
   const { mutation } = lifecycleActions[action]
   const inputType = Object.hasOwn(lifecycleInputType, action) ? lifecycleInputType[action as keyof typeof lifecycleInputType] : null

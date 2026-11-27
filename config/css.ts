@@ -581,11 +581,17 @@ const RESPONSIVE_SHELL = `
 [data-pr-branch-update-panel] { max-block-size: min(21rem, calc(100dvh - 24px)); }
 [data-pr-merge-trigger] { anchor-name: --pr-merge; }
 [data-pr-branch-update-trigger] { anchor-name: --pr-branch-update; }
+[data-pr-workflow-approval-trigger] { anchor-name: --pr-workflow-approval; }
+[data-pr-workflow-approval-panel] { --pr-action-width: min(21rem, calc(100vw - 32px)); max-block-size: min(21rem, calc(100dvh - 24px)); padding: 10px; gap: 8px; overflow-wrap: anywhere; }
+[data-pr-workflow-reviewed] { list-style: disc; padding-inline-start: 18px; max-block-size: min(8rem, 20dvh); overflow: auto; }
+[data-pr-workflow-reviewed] span { opacity: .75; }
+[data-pr-workflow-approval-confirm] { color: var(--workspace-accent); }
 [data-pr-detail-actions] [data-pr-merge-trigger] { color: var(--workspace-accent); border-color: currentColor; font-weight: 650; }
 @supports (top: anchor(bottom)) {
   :is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) { inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 19rem)); }
   [data-pr-merge-confirmation] { position-anchor: --pr-merge; }
   [data-pr-branch-update-panel] { position-anchor: --pr-branch-update; inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 22rem)); }
+  [data-pr-workflow-approval-panel] { position-anchor: --pr-workflow-approval; inset-block-start: clamp(12px, calc(anchor(bottom) + 4px), calc(100dvh - 22rem)); }
 }
 [data-pr-merge-target], [data-pr-merge-status] { font-size: 12px; }
 [data-pr-merge-target] { display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; }

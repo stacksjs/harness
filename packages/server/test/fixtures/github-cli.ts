@@ -385,15 +385,35 @@ if (url.pathname === '/search/issues') {
   reply(200, { items: state.pulls.filter(pull => pull.base.repo.full_name === selected && pull.title.toLowerCase().includes(title.toLowerCase())) })
 }
 if (!repo) reply(404, {})
-if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs')
-  reply(200, { workflow_runs: state.workflowRuns ?? [] })
+if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs') {
+  if (!parts[6]) reply(200, { workflow_runs: state.workflowRuns ?? [] })
+  const run = state.workflowRuns?.find(run => run.id === Number(parts[6]))
+  if (state.workflowHiddenRead === run?.id && run) {
+    delete state.workflowHiddenRead
+    writeFileSync(stateFile, JSON.stringify(state))
+    process.exit(1)
+  }
+  if (run && state.workflowStaleRead === run.id)
+    reply(200, { ...run, status: 'completed', conclusion: 'action_required' })
+  reply(run ? 200 : 404, run && state.workflowAttemptChanged === run.id
+    ? { ...run, run_attempt: run.run_attempt + 1 } : run ?? {})
+}
 if (method === 'POST' && parts[4] === 'actions' && parts[5] === 'runs' && parts[7] === 'approve') {
   const run = state.workflowRuns?.find(run => run.id === Number(parts[6]))
   if (!run) reply(404, {})
+  state.workflowApprovalPosts = [...(state.workflowApprovalPosts ?? []), run.id]
+  writeFileSync(stateFile, JSON.stringify(state))
+  if (state.workflowDenied === run.id) reply(403, { message: 'Private workflow diagnostics must not leak' })
   if (run.status === 'action_required' || run.conclusion === 'action_required') {
     Object.assign(run, { status: 'queued', conclusion: null })
+    if (state.workflowDropReply === run.id) {
+      delete state.workflowDropReply
+      state.workflowHiddenRead = run.id
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
     writeFileSync(stateFile, JSON.stringify(state))
-    reply(204)
+    reply(state.workflowApprovalStatus ?? 204)
   }
   reply(409, { message: 'This workflow run has already been approved.' })
 }

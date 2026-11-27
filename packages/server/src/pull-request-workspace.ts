@@ -18,7 +18,7 @@ import { readRepositoryPullRequestChecks } from './repository-pull-request-check
 import { threadTitle } from './thread-search'
 import { renderPullRequestCommentMarkdown } from './transcript-markdown'
 import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-request-viewed'
-import { readWorkflowApprovals, workflowApprovalHead } from './pull-request-workflow-approvals'
+import { approveWorkspaceWorkflows, parseWorkflowRunSelection, readWorkflowApprovals, workflowApprovalHead, workflowApprovalRevision, workflowRunSelection } from './pull-request-workflow-approvals'
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
@@ -310,7 +310,11 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const approvalRuns = fork
       ? await readWorkflowApprovals(selectionRepo.path, selectionRepo.name, fork, signal).catch(() => null)
       : undefined
-    return { ...data, lifecycle, approvalRuns, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
+    const workflowApproval = lifecycle && current?.merge.canWrite && approvalRuns?.length && fork
+      && (!('checks' in extra) || extra.head === data.head)
+      ? { revision: workflowApprovalRevision(lifecycle.revision, approvalRuns), runs: workflowRunSelection(approvalRuns), repository: fork.repository }
+      : null
+    return { ...data, lifecycle, approvalRuns, workflowApproval, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
       startHref: '/new?' + new URLSearchParams({ pr: data.url, profile: String(profile) }), ...result }
   })().catch(error => ({ error: message(error) })) : Promise.resolve(null)
 
@@ -401,11 +405,18 @@ async function reviewRepository(state: HarnessState, profile: number, repository
 const lifecycleMessages = {
   changed: 'The pull request or GitHub account changed. Review its current state before trying again.',
   'branch-changed': 'The remote branch changed on GitHub. Review its current commit before trying again.',
+  'approval-changed': 'The pull request or its workflow runs changed. Review the current runs before approving.',
   unavailable: 'Could not reach GitHub. Try again when the host is connected.',
   denied: 'This GitHub account cannot update the pull request.',
   refused: 'GitHub refused this transition. Check the pull request on GitHub for more details.',
   busy: 'A pull request update is in progress. Try again shortly.',
   pending: 'GitHub has yet to confirm this update. Check GitHub again to recover its result.',
+}
+
+const workflowApprovalMessages: Partial<Record<keyof typeof lifecycleMessages, string>> = {
+  denied: 'This GitHub account cannot approve these workflow runs.',
+  refused: 'GitHub refused approval for a reviewed run. Check the workflow on GitHub.',
+  pending: 'GitHub has yet to confirm every reviewed workflow.',
 }
 
 function lifecycleSuccess(value: string | null) {
@@ -415,13 +426,14 @@ function lifecycleSuccess(value: string | null) {
 }
 
 export type PullRequestLifecycleDraft = { action: LifecycleAction, revision: string, token: string, head: string, base: string,
-  baseBranch: string, sourceBranch: string, sourceRepositoryId: string, method: MergeMethod | null, viewer: string, message: string }
+  baseBranch: string, sourceBranch: string, sourceRepositoryId: string, approvalRuns: string, approvalRevision: string,
+  method: MergeMethod | null, viewer: string, message: string }
 
 const lifecycleWrites = new Set<string>()
 
 export async function updateWorkspacePullRequestLifecycle(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
   receipts: PullRequestReplyReceipts) {
-  const submission = await readReviewSubmission(state, query, request)
+  const submission = await readReviewSubmission(state, query, request, 48_000)
   if (!submission) return null
   const { profile, selection, values, head, viewer } = submission
   const action = lifecycleAction(values.get('action'))
@@ -434,23 +446,29 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
   const updatingBranch = action === 'update-branch'
   const reverting = action === 'revert'
   const deletingBranch = action === 'delete-branch'
-  const scopedBranch = merging || updatingBranch || reverting || deletingBranch
+  const approving = action === 'approve-workflows'
+  const scopedBranch = merging || updatingBranch || reverting || deletingBranch || approving
   const baseBranch = scopedBranch ? values.get('baseBranch') ?? '' : ''
   const sourceBranch = deletingBranch ? values.get('sourceBranch') ?? '' : ''
   const sourceRepositoryId = deletingBranch ? values.get('sourceRepositoryId') ?? '' : ''
+  const approvalRuns = approving ? values.get('approvalRuns') ?? '' : ''
+  const approvalRevision = approving ? values.get('approvalRevision') ?? '' : ''
+  const runs = approving ? parseWorkflowRunSelection(approvalRuns) : null
   const methodValue = values.get('method')
   const method = mergeMethod(methodValue)
   if ((takesMergeMethod(action) || updatingBranch ? !method : Boolean(methodValue))
     || (updatingBranch && !branchUpdateMethods.some(option => option.value === method))
     || (scopedBranch && (!baseBranch || baseBranch.length > 1024 || /\p{Cc}/u.test(baseBranch)))
+    || (approving && (!runs || !/^[0-9a-f]{64}$/u.test(approvalRevision)))
     || (deletingBranch && (!sourceBranch || sourceBranch.length > 1024 || /\p{Cc}/u.test(sourceBranch)
       || !sourceRepositoryId || sourceRepositoryId.length > 256 || /\p{Cc}/u.test(sourceRepositoryId)))) return null
   const tab = tabs.find(value => query.get('tab') === value) ?? 'summary'
   const params = reviewReturnParams(query, profile, selection.url, tab)
   const finish = (result: 'updated' | keyof typeof lifecycleMessages, confirmedAction: LifecycleAction | 'confirmed' = action, newPull?: number) => {
-    const message = result === 'updated' ? lifecycleSuccess(confirmedAction) : lifecycleMessages[result]
+    const message = result === 'updated' ? lifecycleSuccess(confirmedAction)
+      : (approving ? workflowApprovalMessages[result] : undefined) ?? lifecycleMessages[result]
     const fallback: PullRequestLifecycleDraft | undefined = result === 'pending'
-      ? { action, revision, token, head, base, baseBranch, sourceBranch, sourceRepositoryId, method, viewer, message }
+      ? { action, revision, token, head, base, baseBranch, sourceBranch, sourceRepositoryId, approvalRuns, approvalRevision, method, viewer, message }
       : undefined
     const target = newPull === undefined ? new URLSearchParams(params)
       : reviewReturnParams(query, profile, `https://github.com/${selection.repository}/pull/${newPull}`, 'summary')
@@ -480,6 +498,16 @@ export async function updateWorkspacePullRequestLifecycle(state: HarnessState, q
     const before = await read()
     if (!before) return finish('unavailable')
     if (before.viewer.id !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
+    if (approving) {
+      if (!runs) return null
+      if (before.headRefOid !== head || before.baseRefOid !== base || before.baseRefName !== baseBranch) return finish('approval-changed')
+      const result = await approveWorkspaceWorkflows({
+        path: repository.path, repository: repository.name, before, read, receipts, signal, credential,
+        trusted: () => Boolean(stillTrusted(state, repository.workspace)), authority: [profile, repository.workspace.id],
+      }, { token, revision, approvalRevision, runs })
+      if (result === 'confirmed') return finish('updated', 'confirmed')
+      return finish(result === 'changed' ? 'approval-changed' : result)
+    }
     if (deletingBranch) {
       if (before.headRefOid !== head) return finish('changed')
       const canStart = before.baseRefName === baseBranch && before.baseRefOid === base && revision === lifecycleRevision(before)

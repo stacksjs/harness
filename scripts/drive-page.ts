@@ -6774,6 +6774,43 @@ try {
       pullState().deleteBranchWrites.length === 1 && pullState().branchDeletion.target === null
       && await deleteBranch.isHidden() && await revert.isVisible()
       && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible())
+
+    const workflowState = pullState()
+    const fork = { full_name: 'fixture-fork/notebook', node_id: 'fixture-repo:fixture-fork/notebook' }
+    const openPull = workflowState.pulls[1]
+    openPull.head.repo = fork
+    delete workflowState.branchDeletion
+    workflowState.workflowRuns = [41, 42].map(id => ({ id, run_attempt: 1, name: 'Review workflow ' + id, event: 'pull_request',
+      status: 'completed', conclusion: 'action_required', head_branch: openPull.head.ref, head_sha: openPull.head.sha,
+      repository: openPull.base.repo, head_repository: fork, pull_requests: [] }))
+    workflowState.workflowApprovalStatus = 201
+    workflowState.workflowDropReply = 41
+    writeFileSync(github.state, JSON.stringify(workflowState))
+    const workflowUrl = new URL(clonePage.url())
+    workflowUrl.searchParams.set('selectedUrl', openPull.html_url)
+    workflowUrl.searchParams.set('state', 'open')
+    workflowUrl.searchParams.delete('lifecycleResult')
+    workflowUrl.hash = ''
+    await clonePage.goto(workflowUrl.href, { waitUntil: 'domcontentloaded' })
+    const approve = clonePage.getByRole('button', { name: 'Approve workflows to run', exact: true })
+    const approvalPanel = clonePage.getByRole('form', { name: 'Run the reviewed workflows?', exact: true })
+    await approve.focus()
+    await approve.press('Enter')
+    await approvalPanel.waitFor()
+    await capture('pull-requests-workflow-approval-390x844', clonePage)
+    await approvalPanel.getByRole('button', { name: 'Cancel', exact: true }).press('Escape')
+    await approvalPanel.waitFor({ state: 'hidden' })
+    await clonePage.waitForFunction(() => document.activeElement?.matches('[data-pr-workflow-approval-trigger]'))
+    check('workflow approval cancellation returns focus without writing',
+      await approve.evaluate(element => document.activeElement === element) && pullState().workflowApprovalPosts === undefined)
+    await approve.press('Enter')
+    await approvalPanel.getByRole('button', { name: 'Confirm approval', exact: true }).click()
+    const recoverApproval = clonePage.getByRole('button', { name: 'Check GitHub and finish approval', exact: true })
+    await recoverApproval.waitFor()
+    await recoverApproval.click()
+    await lifecycleStatus('Reviewed workflows are no longer awaiting approval.').waitFor()
+    check('workflow recovery finishes only the reviewed runs and never repeats the accepted approval',
+      JSON.stringify(pullState().workflowApprovalPosts) === '[41,42]' && await approve.isHidden())
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

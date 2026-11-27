@@ -726,6 +726,19 @@ function openDeleteBranchDialog() {
   openLegacyBranchDeletion(deleteBranchDialog.current, deleteBranchTrigger.current)
 }
 </script>
+@elseif(selected?.workflowApproval)
+<script client>
+const workflowApprovalTrigger = useRef('workflowApprovalTrigger')
+const workflowApprovalPanel = useRef('workflowApprovalPanel')
+
+function dismissWorkflowApproval(event) {
+  if (event.type === 'keydown' && event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  workflowApprovalPanel.current?.hidePopover()
+  workflowApprovalTrigger.current?.focus()
+}
+</script>
 @endif
 <main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
   <header data-pr-workspace-header>
@@ -875,7 +888,12 @@ function openDeleteBranchDialog() {
             @if(approvalLookupFailed)
               <p role="status">GitHub could not confirm which workflows are awaiting approval for this pull request.</p>
             @elseif(approvalRuns.length)
-              <h4>{{ approvalRuns.length === 1 ? '1 workflow awaiting approval' : approvalRuns.length + ' workflows awaiting approval' }}</h4>
+              <div class="flex flex-wrap gap-2 items-center justify-between">
+                <h4>{{ approvalRuns.length === 1 ? '1 workflow awaiting approval' : approvalRuns.length + ' workflows awaiting approval' }}</h4>
+                @if(selected.workflowApproval && !lifecyclePending)
+                  @include('../partials/harness-pr-workflow-approval')
+                @endif
+              </div>
               <ul data-pr-result-list>
                 @foreach(approvalRuns as run)
                   <li>

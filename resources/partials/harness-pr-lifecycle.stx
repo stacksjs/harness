@@ -13,10 +13,14 @@
           <input type="hidden" name="sourceBranch" value="{{ lifecyclePending.sourceBranch }}">
           <input type="hidden" name="sourceRepositoryId" value="{{ lifecyclePending.sourceRepositoryId }}">
         @endif
+        @if(lifecyclePending.approvalRuns)
+          <input type="hidden" name="approvalRuns" value="{{ lifecyclePending.approvalRuns }}">
+          <input type="hidden" name="approvalRevision" value="{{ lifecyclePending.approvalRevision }}">
+        @endif
         @if(lifecyclePending.method)
           <input type="hidden" name="method" value="{{ lifecyclePending.method }}">
         @endif
-        <button type="submit" data-pr-button>Check GitHub again</button>
+        <button type="submit" data-pr-button>{{ lifecyclePending.approvalRuns ? 'Check GitHub and finish approval' : 'Check GitHub again' }}</button>
       </form>
     @else
       @if(selected.lifecycle.mergeAction)

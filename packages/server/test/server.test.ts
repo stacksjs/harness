@@ -46,7 +46,7 @@ function prepareDatabase(path: string): void {
   db.close()
 }
 
-async function pullRequestLifecycleForm(view: string, label: 'Update pull request' | 'pr-delete-branch-title' = 'Update pull request') {
+async function pullRequestLifecycleForm(view: string, label = 'Update pull request') {
   const html = await fetch(view).then(response => response.text())
   const forms = [...html.matchAll(/<form method="post" action="([^"]+)" (aria-label|aria-labelledby)="([^"]+)"[^>]*>([\s\S]*?)<\/form>/gu)]
   const form = forms.find(candidate => candidate[3] === label)
@@ -507,6 +507,104 @@ describe('harness serve — HTTP', () => {
       else process.env.PATH = path
     }
   }, 30_000)
+
+  it.skipIf(process.platform === 'win32')('approves the reviewed GitHub runs and recovers partial approval across restarts', async () => {
+    const { project, cli, local, url, readState } = seedPullRequestLifecycle('Check the report workflow', false)
+    const fixture = readState()
+    const fork = { full_name: 'contributor/notebook', node_id: 'fixture-repo:contributor/notebook' }
+    fixture.pulls[0].head.repo = fork
+    const run = (id: number) => ({ id, run_attempt: 1, name: 'Check report ' + id, event: 'pull_request',
+      status: 'completed', conclusion: 'action_required', head_branch: 'report', head_sha: local,
+      repository: { full_name: 'fixture/notebook' }, head_repository: fork, pull_requests: [] })
+    fixture.workflowRuns = [run(41), run(42), run(43)]
+    fixture.workflowApprovalStatus = 201
+    fixture.mergeMode = 'ready'
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-approve-runs-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      let host = 'http://127.0.0.1:' + port
+      const summary = () => host + '/pull-requests?' + new URLSearchParams({ selectedUrl: url })
+      const form = await pullRequestLifecycleForm(summary(), 'pr-workflow-approval-title')
+      const approve = (overrides: Record<string, string> = {}, accept = 'application/json') =>
+        fetch(new URL(form.endpoint.pathname + form.endpoint.search, host), {
+          method: 'POST', redirect: 'manual', headers: { accept, origin: host, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ ...form.values, action: 'approve-workflows', ...overrides }),
+        })
+      expect(form.values.approvalRuns).toBe('41:1,42:1,43:1')
+      expect((await approve({ approvalRuns: '41:1,41:1' })).status).toBe(400)
+      expect((await approve({ approvalRuns: '41:1,42:1' })).status).toBe(409)
+      expect((await approve({ approvalRevision: 'e'.repeat(64) })).status).toBe(409)
+      cli.configureMerge('readonly')
+      expect((await approve()).status).toBe(403)
+      expect(await fetch(summary()).then(response => response.text())).not.toContain('Confirm approval')
+      fixture.pulls[0].head.sha = 'e'.repeat(40)
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await approve()).status).toBe(409)
+      fixture.pulls[0].head.sha = local
+      fixture.workflowRuns.push(run(44))
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await approve()).status).toBe(409)
+      fixture.workflowRuns.pop()
+      fixture.workflowAttemptChanged = 41
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      expect((await approve()).status).toBe(409)
+      expect(readState().workflowApprovalPosts).toBeUndefined()
+
+      delete fixture.workflowAttemptChanged
+      fixture.workflowDropReply = 42
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const pending = await approve({}, 'text/html')
+      expect(pending.status).toBe(202)
+      const pendingHtml = await pending.text()
+      expect(pendingHtml).toContain('Check GitHub and finish approval')
+      expect(pendingHtml).toContain('name="approvalRuns" value="41:1,42:1,43:1"')
+      expect(pendingHtml).not.toContain('Confirm approval')
+      expect(readState().workflowApprovalPosts).toEqual([41, 42])
+
+      const next = readState()
+      next.workflowRuns.push(run(44))
+      next.workflowStaleRead = 42
+      writeFileSync(cli.state, JSON.stringify(next))
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      host = 'http://127.0.0.1:' + harness.server.port
+      expect((await approve()).status).toBe(202)
+      expect(readState().workflowApprovalPosts).toEqual([41, 42])
+      delete next.workflowStaleRead
+      writeFileSync(cli.state, JSON.stringify(next))
+      const recovered = await approve({}, 'text/html')
+      expect(recovered.status).toBe(303)
+      const html = await fetch(new URL(recovered.headers.get('location')!, host)).then(response => response.text())
+      expect(html).toContain('Reviewed workflows are no longer awaiting approval.')
+      expect(html).toContain('1 workflow awaiting approval')
+      expect(html).toContain('Check report 44')
+      expect((await approve()).status).toBe(200)
+      expect(readState().workflowApprovalPosts).toEqual([41, 42, 43])
+      expect(readState().workflowRuns.map((item: { status: string }) => item.status)).toEqual(['queued', 'queued', 'queued', 'completed'])
+
+      const last = readState()
+      last.workflowDenied = 44
+      writeFileSync(cli.state, JSON.stringify(last))
+      const remaining = await pullRequestLifecycleForm(summary(), 'pr-workflow-approval-title')
+      const denied = await fetch(remaining.endpoint, { method: 'POST', headers: {
+        accept: 'application/json', origin: host, 'content-type': 'application/x-www-form-urlencoded',
+      }, body: new URLSearchParams({ ...remaining.values, action: 'approve-workflows' }) })
+      expect(denied.status).toBe(403)
+      expect(await denied.json()).toMatchObject({ message: 'This GitHub account cannot approve these workflow runs.' })
+      expect(readState().workflowRuns.at(-1)?.conclusion).toBe('action_required')
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 60_000)
+
   it('reports health with the hydrated projection', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`)
     expect(response.status).toBe(200)

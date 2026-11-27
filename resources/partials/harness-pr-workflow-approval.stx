@@ -1,0 +1,19 @@
+<button type="button" popovertarget="pr-workflow-approval" ref="workflowApprovalTrigger" data-pr-button data-pr-workflow-approval-trigger>Approve workflows to run</button>
+<form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-workflow-approval-title" id="pr-workflow-approval" ref="workflowApprovalPanel"
+  data-pr-workflow-approval-panel data-pr-lifecycle-panel popover @keydown="dismissWorkflowApproval">
+  @include('./harness-pr-lifecycle-fields')
+  <input type="hidden" name="approvalRuns" value="{{ selected.workflowApproval.runs }}">
+  <input type="hidden" name="approvalRevision" value="{{ selected.workflowApproval.revision }}">
+  <p id="pr-workflow-approval-title"><strong>Run the reviewed workflows?</strong></p>
+  <p>Fork <strong>{{ selected.workflowApproval.repository }}</strong></p>
+  <p>Commit <code>{{ selected.head.slice(0, 20) }}<wbr>{{ selected.head.slice(20) }}</code></p>
+  <ul aria-label="Reviewed workflows" data-pr-workflow-reviewed>
+    @foreach(approvalRuns as run)
+      <li>{{ run.name }} <span>(attempt {{ run.attempt }})</span></li>
+    @endforeach
+  </ul>
+  <div data-pr-review-actions>
+    <button type="button" popovertarget="pr-workflow-approval" popovertargetaction="hide" data-pr-button autofocus @click="dismissWorkflowApproval">Cancel</button>
+    <button type="submit" name="action" value="approve-workflows" data-pr-button data-pr-workflow-approval-confirm>Confirm approval</button>
+  </div>
+</form>
