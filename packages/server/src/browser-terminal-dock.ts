@@ -49,6 +49,7 @@ interface TerminalDockOptions {
   closed: (key: string, action: CloseAction) => void
   updateStatus: (key: string, status: PaneStatus | null) => void
   openPreview?: (url: string) => void
+  workspaceLinks?: boolean
 }
 
 const terminalHistory = { scrollback: 5000, scrollbackBytes: 8 * 1024 * 1024 }
@@ -147,12 +148,13 @@ export function createTerminalDock(options: TerminalDockOptions) {
       // and move focus to the matching destination in its new layout.
       pane.selectionDeferred = Boolean(selection(screen) || (link && !pane.layoutChanged))
       if (pane.selectionDeferred) return
-      const href = link?.getAttribute('href')
-      const matchingLinks = () => [...screen.querySelectorAll<HTMLAnchorElement>('[data-terminal-link]')]
-        .filter(candidate => candidate.getAttribute('href') === href)
+      const targetAttribute = link?.hasAttribute('data-terminal-file') ? 'data-terminal-file' : 'href'
+      const target = link?.getAttribute(targetAttribute)
+      const matchingLinks = () => [...screen.querySelectorAll<HTMLElement>('[data-terminal-link]')]
+        .filter(candidate => candidate.getAttribute(targetAttribute) === target)
       const occurrence = link ? matchingLinks().findIndex(candidate => candidate === link) : -1
       pane.layoutChanged = false
-      screen.innerHTML = toHtml(pane.model.snapshot(true), true)
+      screen.innerHTML = toHtml(pane.model.snapshot(true), true, options.workspaceLinks === true)
       if (pane.following || pane.model.onAltScreen) viewport.scrollTop = viewport.scrollHeight
       if (link) (matchingLinks()[occurrence] ?? viewport).focus()
     })

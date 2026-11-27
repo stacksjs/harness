@@ -1050,6 +1050,7 @@ html:has(> body > [data-pr-workspace]), body:has(> [data-pr-workspace]) {
 [data-workspace-files-body] { display: grid; flex: 1; min-block-size: 0; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
 [data-workspace-files-tree], [data-workspace-file-detail]:not([hidden]) { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 [data-workspace-files-tree] input { min-height: 30px; }
+[data-workspace-opened-folder]:not([hidden]) { display: flex; align-items: center; gap: 4px; padding: 4px 8px 0; }
 [data-workspace-file-entries] { flex: 1; overflow: auto; margin: 0; padding: 0 4px 6px; }
 [data-workspace-file-row] {
   display: flex; align-items: center; gap: 5px; min-height: 30px; width: 100%; min-width: 0;
@@ -1074,6 +1075,10 @@ html:has(> body > [data-pr-workspace]), body:has(> [data-pr-workspace]) {
 [data-workspace-source][data-view-line]:not([data-view-line="0"]) [data-workspace-source-inner]::before {
   content: ''; position: absolute; inset-inline: 0; height: 19px;
   top: calc(8px + (var(--workspace-file-line) - 1) * 19px); background: var(--workspace-hover);
+}
+[data-workspace-source][data-view-column]:not([data-view-column="0"]) [data-workspace-source-inner]::after {
+  content: ''; position: absolute; pointer-events: none; inline-size: 1px; block-size: 15px;
+  left: var(--workspace-file-column-offset, -1000px); top: calc(10px + (var(--workspace-file-line) - 1) * 19px); background: currentColor;
 }
 [data-workspace-file-frame], [data-workspace-file-image] { flex: 1; min-height: 0; width: 100%; border: 0; }
 [data-workspace-file-frame][sandbox] { background-color: #fff; }
@@ -1413,6 +1418,7 @@ const TERMINAL_PANEL = `
   color: #d7dae0; white-space: pre;
 }
 [data-terminal-link] { color: #a8c6ff; text-decoration: underline; text-underline-offset: 2px; }
+[data-terminal-file] { cursor: pointer; }
 [data-terminal-link]:focus-visible { outline: 1px solid #a8c6ff; outline-offset: 1px; }
 [data-terminal-actions] {
   position: fixed; inset: auto; margin: 0; padding: 4px; min-inline-size: 152px;

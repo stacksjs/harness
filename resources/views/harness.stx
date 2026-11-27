@@ -2732,12 +2732,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const workspaceFileSelected = derived(() => workspaceFileState()?.selected || '')
   const workspaceFileMode = state('source')
   const workspaceFileLine = state(0)
+  const workspaceFileColumn = state(0)
   const workspaceFileJump = state('')
   const workspaceFileNotice = state('')
   const workspaceFileSearch = useRef('workspaceFileSearchBox')
   const workspaceFileClose = useRef('workspaceFileCloseBox')
   const workspaceFileSource = useRef('workspaceFileSourceBox')
   const workspaceFileHeading = useRef('workspaceFileHeadingBox')
+  const workspaceFolderBack = useRef('workspaceFolderBackBox')
   const workspaceFilesToggle = useRef('workspaceFilesToggle')
   const workspaceEditorHeader = useRef('workspaceEditorHeader')
   const workspaceEditorDialog = useRef('workspaceEditorDialog')
@@ -5724,6 +5726,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let workspaceFilesTools = null
   let workspaceFilesController = null
   let workspaceFilesTrigger = null
+  let workspaceFilesTerminalHost = null
+  let terminalFileRequest = null
 
   async function workspaceEditorRequest(method, params = {}) {
     const scope = sessionId ? { session: String(sessionId) } : { workspace: String(draftProject.id) }
@@ -5734,13 +5738,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return result
   }
 
-  async function chooseWorkspaceEditor(event, path = '', line = 0, usePreferred = false) {
+  async function chooseWorkspaceEditor(event, path = '', line = 0, usePreferred = false, column = 0) {
     const dialog = workspaceEditorDialog.current
     if (!workspaceEditorAllowed || !dialog || dialog.open || editorBusy()) return
     const trigger = event?.currentTarget || dialog.ownerDocument.activeElement
     editorTrigger = trigger?.hasAttribute?.('data-workspace-editor-menu') ? workspaceActionsToggle.current : trigger
     workspaceActionsOpen.set(false)
-    const target = { path, line, label: path || workspaceName || 'Workspace' }
+    const target = { path, line, column, label: path || workspaceName || 'Workspace' }
     editorTarget.set(target)
     editorError.set('')
     editorAnnouncement.set('')
@@ -5789,7 +5793,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     editorBusy.set(true)
     editorError.set('')
     try {
-      await workspaceEditorRequest('POST', { editor: choice.id, path: target.path, line: String(target.line) })
+      await workspaceEditorRequest('POST', { editor: choice.id, path: target.path, line: String(target.line), column: String(target.column || 0) })
       preferredEditor.set(choice.id)
       editorAnnouncement.set('Sent to ' + choice.label + '.')
       closeWorkspaceEditor()
@@ -5848,28 +5852,37 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function closeWorkspaceFiles(restoreFocus = true) {
+    terminalFileRequest?.abort()
     workspaceFilesOpen.set(false)
     const trigger = workspaceFilesTrigger
+    const terminalHost = workspaceFilesTerminalHost
     workspaceFilesTrigger = null
+    workspaceFilesTerminalHost = null
     if (restoreFocus) {
       void nextTick(() => {
-        const target = [trigger, workspaceFilesToggle.current, workspaceActionsToggle.current].find(element => element?.getClientRects().length)
+        const target = [trigger, terminalHost, workspaceFilesToggle.current, workspaceActionsToggle.current].find(element => element?.getClientRects().length)
         target?.focus()
       })
     }
   }
 
   async function toggleWorkspaceFiles(event) {
+    terminalFileRequest?.abort()
     if (workspaceFilesOpen()) { closeWorkspaceFiles(); return }
+    showWorkspaceFiles(workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget)
+    void nextTick(() => workspaceFileClose.current?.focus())
+    try { (await loadWorkspaceFiles())?.open() }
+    catch { workspaceFileNotice.set('Could not load workspace files. Close the pane and try again.') }
+  }
+
+  function showWorkspaceFiles(trigger, terminalHost = null) {
     if (browserPreviewOpen()) closeBrowserPreview(false)
-    workspaceFilesTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
+    workspaceFilesTrigger = trigger
+    workspaceFilesTerminalHost = terminalHost
     workspaceActionsOpen.set(false)
     diffOpen.set(false)
     diffTrigger = null
     workspaceFilesOpen.set(true)
-    void nextTick(() => workspaceFileClose.current?.focus())
-    try { (await loadWorkspaceFiles())?.open() }
-    catch { workspaceFileNotice.set('Could not load workspace files. Close the pane and try again.') }
   }
 
   function searchWorkspaceFiles(event) {
@@ -5886,9 +5899,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     else await openWorkspaceFile(row.path)
   }
 
-  async function openWorkspaceFile(path, line = 0) {
+  async function openWorkspaceFile(path, line = 0, column = 0) {
     workspaceFileMode.set('source')
     workspaceFileLine.set(0)
+    workspaceFileColumn.set(0)
     workspaceFileJump.set('')
     workspaceFileNotice.set('')
     const request = workspaceFilesController?.openFile(path)
@@ -5896,7 +5910,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     await request
     const preview = workspaceFilePreview()
     if (preview?.path !== path) return
-    if (line && preview.lines) showWorkspaceFileLine(line)
+    if (line && preview.lines) showWorkspaceFileLine(line, column)
     else if (preview.kind === 'html' && !preview.truncated) workspaceFileMode.set('rendered')
   }
 
@@ -5906,19 +5920,27 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     void nextTick(() => workspaceFileSearch.current?.focus({ preventScroll: true }))
   }
 
-  function showWorkspaceFileLine(requestedLine) {
+  function showWorkspaceFolder(path) {
+    workspaceFilesController?.openFolder(path)
+    workspaceFileNotice.set('')
+    void nextTick(() => (path ? workspaceFolderBack.current : workspaceFileClose.current)?.focus({ preventScroll: true }))
+  }
+
+  function showWorkspaceFileLine(requestedLine, requestedColumn = 0) {
     const lines = workspaceFilePreview()?.lines || 0
     if (!lines || !Number.isFinite(requestedLine)) return
     const line = Math.min(lines, Math.max(1, Math.trunc(requestedLine)))
     workspaceFileMode.set('source')
     workspaceFileLine.set(line)
+    const column = line === requestedLine && Number.isSafeInteger(requestedColumn) && requestedColumn > 0 ? requestedColumn : 0
+    workspaceFileColumn.set(column)
     workspaceFileJump.set(String(line))
-    void nextTick(() => workspaceFilesTools?.scrollWorkspaceFileLine(workspaceFileSource.current, line))
+    void nextTick(() => workspaceFilesTools?.scrollWorkspaceFileLine(workspaceFileSource.current, line, column))
   }
 
   async function copySelectedWorkspaceFileLink(event) {
     try {
-      await workspaceFilesTools.copyWorkspaceFileLink(event.currentTarget, workspaceFileSelected(), workspaceFileLine(), desktop()?.clipboard)
+      await workspaceFilesTools.copyWorkspaceFileLink(event.currentTarget, workspaceFileSelected(), workspaceFileLine(), workspaceFileColumn(), desktop()?.clipboard)
       workspaceFileNotice.set('Link copied.')
     }
     catch { workspaceFileNotice.set('Could not copy the link.') }
@@ -5935,11 +5957,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (!controller) return
       workspaceFilesOpen.set(true)
       void controller.open()
-      await openWorkspaceFile(link.path, link.line)
+      await openWorkspaceFile(link.path, link.line, link.column)
     }
     catch { workspaceFileNotice.set('Could not open the linked workspace file.') }
   })
-  onDestroy(() => workspaceFilesController?.dispose())
+  onDestroy(() => {
+    terminalFileRequest?.abort()
+    workspaceFilesController?.dispose()
+  })
 
   onMount(async () => {
     if (!sessionId || !codecUrl) return
@@ -7889,7 +7914,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function termKeydown(tab, event) {
-    if (event.target?.closest?.('[data-terminal-link]')) return
+    const link = event.target?.closest?.('[data-terminal-link]')
+    if (link) {
+      if (link.hasAttribute('data-terminal-file') && event.key === 'Enter' && !event.repeat && !event.isComposing) {
+        event.preventDefault()
+        link.click()
+      }
+      return
+    }
     if ((event.ctrlKey && event.shiftKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'c') {
       const text = terminalController()?.selectedText(tab.key)
       if (text) {
@@ -7912,13 +7944,47 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   async function openTerminalLink(event) {
     const link = event.target?.closest?.('[data-terminal-link]')
-    if (!link || !previewDiscoveryAllowed || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    if (link.hasAttribute('data-terminal-file')) {
+      event.preventDefault()
+      await openTerminalFile(link)
+      return
+    }
+    if (!previewDiscoveryAllowed) return
+    terminalFileRequest?.abort()
     const url = terminalController()?.previewAddress(link.href, link.ownerDocument.location.origin)
     if (!url) return
     event.preventDefault()
     await showBrowserPreview(event, false)
     if (!browserPreviewTools() || !browserPreviewOpen()) return
     openDiscoveredPreview({ url })
+  }
+
+  async function openTerminalFile(link) {
+    terminalFileRequest?.abort()
+    const request = new AbortController()
+    terminalFileRequest = request
+    const terminalHost = link.closest('[data-terminal-host]')
+    terminalClipboardNotice.set('')
+    try {
+      const controller = await loadWorkspaceFiles()
+      if (!controller || request.signal.aborted) return
+      const target = await controller.resolveTerminalTarget(link.dataset.terminalFile, request.signal)
+      if (request.signal.aborted || !termOpen() || !terminalHost?.isConnected) return
+      if (terminalKeyboardOpen()) toggleTerminalKeyboard()
+      showWorkspaceFiles(link, terminalHost)
+      if (target.kind === 'directory') showWorkspaceFolder(target.path)
+      else {
+        void controller.open()
+        await openWorkspaceFile(target.path, target.line, target.column)
+      }
+    }
+    catch {
+      if (!request.signal.aborted && termOpen()) terminalClipboardNotice.set('Could not open this path in the workspace.')
+    }
+    finally {
+      if (terminalFileRequest === request) terminalFileRequest = null
+    }
   }
 
   function runTerminalShortcut(command) {
@@ -8102,6 +8168,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           saveTerminalTabs(dock.tabs.map(tab => tab.key === key ? { ...tab, started: true } : tab), dock.activeKey)
       },
       closed: finishTerminalClose,
+      workspaceLinks: hasWorkspaceFiles,
       openPreview: url => previewProjectScript(url, true),
       updateStatus(key, status) {
         terminalStates.update((previous) => {

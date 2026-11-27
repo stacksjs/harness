@@ -12,6 +12,12 @@
   </header>
   <div data-workspace-files-body>
     <div data-workspace-files-tree>
+      <div hidden :hidden="!workspaceFileState()?.folder" data-workspace-opened-folder>
+        <button type="button" ref="workspaceFolderBackBox" class="harness-icon-button" aria-label="Back to workspace root" title="Workspace root" @click="showWorkspaceFolder('')">
+          <span class="size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>
+        </button>
+        <span class="min-w-0 text-xs truncate" :title="workspaceFileState()?.folder || ''" :text="workspaceFileState()?.folder || ''"></span>
+      </div>
       <input type="search" ref="workspaceFileSearchBox" aria-label="Search workspace files" placeholder="Search files" :value="workspaceFileState()?.query || ''" @input="searchWorkspaceFiles" class="mx-2 my-2 px-2 py-1 min-w-0 text-xs bg-transparent border border-black/15 rounded-md dark:border-white/20">
       <p role="status" class="px-3 text-xs" hidden :hidden="!workspaceFileState()?.treeBusy">Loading files…</p>
       <p role="status" class="px-3 text-xs" hidden :hidden="!workspaceFileState()?.treeError" :text="workspaceFileState()?.treeError || ''"></p>
@@ -40,7 +46,7 @@
           <span class="size-4 i-hugeicons-link-01" aria-hidden="true"></span>
         </button>
         @if(workspaceEditorAllowed)
-          <button type="button" data-workspace-file-editor :disabled="!workspaceFilePreview()" class="harness-icon-button" @click="chooseWorkspaceEditor($event, workspaceFileSelected(), workspaceFileLine())" aria-label="Open file in editor" title="Open in editor" aria-haspopup="dialog">
+          <button type="button" data-workspace-file-editor :disabled="!workspaceFilePreview()" class="harness-icon-button" @click="chooseWorkspaceEditor($event, workspaceFileSelected(), workspaceFileLine(), false, workspaceFileColumn())" aria-label="Open file in editor" title="Open in editor" aria-haspopup="dialog">
             <span class="size-4 i-hugeicons-source-code" aria-hidden="true"></span>
           </button>
         @endif
@@ -57,11 +63,12 @@
           <input type="number" aria-label="Line number" inputmode="numeric" placeholder="Line" min="1" :max="workspaceFilePreview()?.lines || 1" required :value="workspaceFileJump()" @input="workspaceFileJump.set($event.currentTarget.value)">
           <button type="submit">Go</button>
         </form>
+        <span class="text-xs" hidden :hidden="!workspaceFileColumn()" :text="'Column ' + workspaceFileColumn()"></span>
       </div>
       <p role="status" class="px-3 py-2 text-xs" hidden :hidden="!workspaceFileState()?.previewBusy">Loading preview…</p>
       <p role="status" class="px-3 py-2 text-xs" hidden :hidden="!workspaceFileState()?.previewError" :text="workspaceFileState()?.previewError || ''"></p>
       <p class="px-3 py-1 text-xs opacity-70" hidden :hidden="!workspaceFilePreview()?.truncated">Showing the start of this file. Download it to read the rest.</p>
-      <div data-workspace-source ref="workspaceFileSourceBox" aria-label="File source" role="region" tabindex="0" hidden :hidden="!workspaceFilePreview()?.lines || workspaceFileMode() !== 'source'" :data-view-line="workspaceFileLine()" :style="{ '--workspace-file-line': workspaceFileLine() }">
+      <div data-workspace-source ref="workspaceFileSourceBox" aria-label="File source" role="region" tabindex="0" hidden :hidden="!workspaceFilePreview()?.lines || workspaceFileMode() !== 'source'" :data-view-line="workspaceFileLine()" :data-view-column="workspaceFileColumn()" :style="{ '--workspace-file-line': workspaceFileLine() }">
         <div data-workspace-source-inner>
           <pre data-workspace-source-numbers aria-hidden="true" :text="workspaceFilePreview()?.numbers || ''"></pre>
           <pre data-workspace-source-text :text="workspaceFilePreview()?.text || ''"></pre>

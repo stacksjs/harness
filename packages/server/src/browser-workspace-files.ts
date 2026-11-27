@@ -1,5 +1,5 @@
 import type { NativeClipboard } from './browser-clipboard'
-import type { WorkspaceFileEntry, WorkspaceFilePreview } from './workspace-files'
+import type { WorkspaceFileEntry, WorkspaceFilePreview, WorkspaceTerminalTarget } from './workspace-files'
 import { writeClipboardText } from './browser-clipboard'
 
 type Scope = { session: string } | { workspace: string }
@@ -11,6 +11,7 @@ type ViewFile = WorkspaceFilePreview & { content: string, download: string, numb
 export interface WorkspaceFilesState {
   rows: Row[]
   query: string
+  folder: string
   treeBusy: boolean
   treeError: string
   selected: string
@@ -27,7 +28,7 @@ export function createWorkspaceFiles(scope: Scope, changed: (state: WorkspaceFil
   let searchRequest: AbortController | undefined
   let searchDelay: ReturnType<typeof setTimeout> | undefined
   let current: WorkspaceFilesState = {
-    rows: [], query: '', treeBusy: false, treeError: '', selected: '', preview: null, previewBusy: false, previewError: '',
+    rows: [], query: '', folder: '', treeBusy: false, treeError: '', selected: '', preview: null, previewBusy: false, previewError: '',
   }
 
   function set(patch: Partial<WorkspaceFilesState>): void {
@@ -59,7 +60,7 @@ export function createWorkspaceFiles(scope: Scope, changed: (state: WorkspaceFil
       if (folder.next !== null) rows.push({ kind: 'more', path, depth })
       return truncated
     }
-    const truncated = add('', 0)
+    const truncated = add(current.folder, 0)
     set({ rows, treeBusy: loading.size > 0, treeError: truncated ? 'This folder has more entries than the browser can list.' : '' })
   }
 
@@ -148,13 +149,24 @@ export function createWorkspaceFiles(scope: Scope, changed: (state: WorkspaceFil
     set({ selected: '', preview: null, previewBusy: false, previewError: '' })
   }
 
+  function openFolder(path: string): void {
+    clearSearchRequest()
+    for (const controller of loading.values()) controller.abort()
+    loading.clear()
+    back()
+    set({ folder: path, query: '' })
+    showTree()
+    if (!folders.has(path)) void loadFolder(path)
+  }
+
   function refresh(): void {
-    const visibleFolders = [...folders.keys()].filter(path => path && expanded.has(path))
+    const base = current.folder
+    const visibleFolders = [...folders.keys()].filter(path => path && path !== base && expanded.has(path))
     for (const controller of loading.values()) controller.abort()
     loading.clear()
     folders.clear()
     if (current.query.trim()) search(current.query, true)
-    void loadFolder('')
+    void loadFolder(base)
     for (const path of visibleFolders) void loadFolder(path)
     if (current.selected) void openFile(current.selected)
   }
@@ -166,31 +178,49 @@ export function createWorkspaceFiles(scope: Scope, changed: (state: WorkspaceFil
     loading.clear()
   }
 
-  return { open: () => folders.has('') ? undefined : loadFolder(''), toggleFolder,
+  return { open: () => folders.has(current.folder) ? undefined : loadFolder(current.folder), openFolder, toggleFolder,
+    resolveTerminalTarget: (path: string, signal: AbortSignal) => request<WorkspaceTerminalTarget>('terminal-target', { path }, signal),
     loadMore: (path: string) => loadFolder(path, true), search, openFile, back, refresh, dispose }
 }
 
-export function workspaceFileLocation(element: Element | null | undefined): { path: string, line: number } | null {
+export function workspaceFileLocation(element: Element | null | undefined): { path: string, line: number, column: number } | null {
   const url = element?.ownerDocument.location
   if (!url) return null
   const params = new URLSearchParams(url.search)
   const path = params.get('file')
-  return path ? { path, line: Number(params.get('line')) || 0 } : null
+  return path ? { path, line: Number(params.get('line')) || 0, column: Number(params.get('column')) || 0 } : null
 }
 
-export function copyWorkspaceFileLink(element: Element, path: string, line: number, native?: NativeClipboard): Promise<void> {
+export function copyWorkspaceFileLink(element: Element, path: string, line: number, column: number, native?: NativeClipboard): Promise<void> {
   const location = element.ownerDocument.location
   const url = new URL(location.href)
   url.searchParams.set('file', path)
   if (line > 0) url.searchParams.set('line', String(line))
   else url.searchParams.delete('line')
+  if (line > 0 && column > 0) url.searchParams.set('column', String(column))
+  else url.searchParams.delete('column')
   url.hash = ''
   return writeClipboardText(element, url.href, native)
 }
 
-export function scrollWorkspaceFileLine(element: HTMLElement | undefined, line: number): void {
+export function scrollWorkspaceFileLine(element: HTMLElement | undefined, line: number, column = 0): void {
   const text = element?.querySelector<HTMLElement>('pre[data-workspace-source-text]')
   if (!element || !text) return
   const lineHeight = Number.parseFloat(text.ownerDocument.defaultView!.getComputedStyle(text).lineHeight)
   element.scrollTop = Math.max(0, (line - 1) * lineHeight - element.clientHeight / 3)
+  const node = text.firstChild
+  if (!column || !node || node.nodeType !== 3) return
+  const lines = (node.textContent ?? '').split('\n')
+  if (lines.length < line) return
+  let offset = 0
+  for (let index = 0; index < line - 1; index++) offset += lines[index]!.length + 1
+  offset += Math.min(lines[line - 1]!.length, column - 1)
+  const range = text.ownerDocument.createRange()
+  range.setStart(node, offset)
+  range.collapse(true)
+  const bounds = element.getBoundingClientRect()
+  const { left } = range.getBoundingClientRect()
+  const body = text.parentElement
+  if (body) body.style.setProperty('--workspace-file-column-offset', (left - body.getBoundingClientRect().left) + 'px')
+  if (left < bounds.left || left >= bounds.right) element.scrollLeft += left - bounds.left - element.clientWidth / 3
 }
