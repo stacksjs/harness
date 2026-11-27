@@ -102,6 +102,7 @@ export async function prepareRepositoryCommit(path: string, scope: RepositoryCom
     scope, base, head: status.head, entries, staged,
     preview: {
       branch: status.branch, revision,
+      canCreateBranch: Boolean(status.head && !problem),
       problem: problem ?? (entries.length ? null : scope === 'staged' ? 'Stage files in this repository before committing.' : 'There are no working-tree changes to commit.'),
       files,
       fileKeys: entries.map(entry => entry.path.toString('base64')),
@@ -127,6 +128,11 @@ function writeSelectedIndex(path: string, index: string, entries: StagedEntry[])
 
 function indexEntries(entries: StagedEntry[]) {
   return Buffer.concat(entries.flatMap(entry => [Buffer.from(`${entry.mode} ${entry.object}\t`), entry.path, pathTerminator]))
+}
+
+export function sameRepositoryCommitFiles(before: PreparedCommit, after: PreparedCommit) {
+  return before.head === after.head && before.staged.equals(after.staged)
+    && indexEntries(before.entries).equals(indexEntries(after.entries))
 }
 
 async function prepareIndexUpdate(path: string, base: string, tree: string, before: Buffer | null,
@@ -232,12 +238,14 @@ export async function readRepositoryInput(request: Request, maxBytes: number): P
   catch { return null }
 }
 
-export async function readRepositorySubmission(request: Request, commit: boolean): Promise<{ revision: string, message: string, excluded: number[] } | null> {
+export async function readRepositorySubmission(request: Request, commit: boolean) {
   const value = await readRepositoryInput(request, commit ? 131_072 : 24_576)
   const revision = value?.revision
   const message = typeof value?.message === 'string' ? value.message.trim() : ''
   const excluded = commit && value?.excluded !== undefined ? value.excluded : []
+  const newBranch = commit ? value?.newBranch ?? false : false
   return typeof revision === 'string' && /^[0-9a-f]{64}$/u.test(revision)
     && Array.isArray(excluded) && excluded.every(index => Number.isSafeInteger(index) && index >= 0)
-    && Buffer.byteLength(message) <= 4096 && !message.includes('\0') ? { revision, message, excluded } : null
+    && typeof newBranch === 'boolean' && Buffer.byteLength(message) <= 4096 && !message.includes('\0')
+    ? { revision, message, excluded, newBranch } : null
 }

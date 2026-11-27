@@ -59,6 +59,16 @@ export interface CombinedWorktreeIntent {
 
 export type WorktreeIntent = CheckoutIntent | CombinedWorktreeIntent
 
+/** A host-owned Git branch switch recorded before touching the checkout. */
+export interface GitBranchAttempt {
+  id: string
+  repositoryKey: string
+  path: string
+  from: string
+  to: string
+  base: string
+}
+
 export interface RepositoryCheckpoint {
   /** Empty for the project repository, otherwise a project-relative repository key. */
   key: string
@@ -140,6 +150,8 @@ export type EventPayload =
   | { type: 'session.worktree-reserved', intent: WorktreeIntent }
   /** This session got its own checkout and branch. */
   | { type: 'session.isolated', worktreePath: string, branch: string, combined?: CombinedWorktreeIntent }
+  | { type: 'session.git-branch-started', attempt: GitBranchAttempt }
+  | { type: 'session.git-branch-resolved', id: string, switched: boolean, worktreeBranch?: string }
   | { type: 'session.pull-request-linked', pullRequest: RepositoryPullRequest }
   | { type: 'session.worktree-restored' }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number, skipped?: string[] }

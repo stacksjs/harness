@@ -102,6 +102,10 @@ function checkoutRewindPending(state: HarnessState, session: SessionState, check
   return false
 }
 
+function checkoutBranchPending(state: HarnessState, session: SessionState): boolean {
+  return [...state.sessions.values()].some(other => other.gitBranchAttempt && sharesCheckout(state, session, other))
+}
+
 type OrganizeThreadCommand = Extract<Command, { type: 'session.organize' }>
 
 function organizeThread(state: HarnessState, command: OrganizeThreadCommand, envelope: CommandEnvelope): AppendableEvent[] {
@@ -432,6 +436,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // them was the profile.
       const workspaceIds = [...profile.workspaceIds]
       const owned = new Set(workspaceIds)
+      if ([...state.sessions.values()].some(session => session.gitBranchAttempt && owned.has(session.workspaceId)))
+        throw new InvalidCommand('Wait for the Git branch action to finish before deleting this profile.')
       if ([...state.sessions.values()].some(session => (session.pendingRewind || session.conversationRewind) && owned.has(session.workspaceId)))
         throw new InvalidCommand('Wait for the current rewind to finish before deleting this profile.')
       const sessionIds = [...state.sessions.values()]
@@ -717,6 +723,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const turn = forkResponsePoint(source, command.turnId)
       if (!source || !turn || source.conversationRewind)
         throw new InvalidCommand('Choose a completed response in an available conversation.')
+      if (checkoutBranchPending(state, source)) throw new InvalidCommand('Wait for the Git branch action to finish.')
       if (!state.workspaces.get(source.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before forking a conversation.')
 
@@ -798,6 +805,36 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       return [{ sessionId: session.id, commandId, at, payload: { type: 'session.worktree-restored' } }]
     }
 
+    case 'thread.git-branch.begin': {
+      const session = state.sessions.get(command.sessionId)
+      const workspace = session && state.workspaces.get(session.workspaceId)
+      if (!session || !workspace?.trusted || workspace.scratch || session.navigation?.archivedAt
+        || (session.isolate && !session.worktreePath) || checkoutBranchPending(state, session)
+        || checkoutRewindPending(state, session)
+        || [...state.sessions.values()].some(other => isTurnActive(other.state) && sharesCheckout(state, session, other)))
+        throw new InvalidCommand('Wait for the current checkout action or turn to finish and try again.')
+      const { attempt } = command
+      if (session.worktreePath) {
+        const combined = session.combinedWorktree
+        const checkout = combined?.checkouts.find(entry => entry.key === attempt.repositoryKey)
+        const path = combined ? checkout?.path : attempt.repositoryKey === '' ? session.worktreePath : undefined
+        const branch = combined ? checkout?.branch : session.branch
+        if (path !== attempt.path || branch !== attempt.from)
+          throw new InvalidCommand('The selected repository does not match the registered worktree.')
+      }
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'session.git-branch-started', attempt } }]
+    }
+
+    case 'thread.git-branch.resolve': {
+      const session = state.sessions.get(command.sessionId)
+      const attempt = session?.gitBranchAttempt
+      if (!session || !attempt || attempt.id !== command.id) return []
+      return [{ sessionId: session.id, commandId, at, payload: {
+        type: 'session.git-branch-resolved', id: attempt.id, switched: command.switched,
+        ...(command.switched && session.worktreePath && !attempt.repositoryKey && { worktreeBranch: attempt.to }),
+      } }]
+    }
+
     case 'thread.checkpoint.restored': {
       if (!state.sessions.has(command.sessionId))
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
@@ -851,7 +888,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('This thread is unavailable for conversation rewind.')
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before rewinding the conversation.')
-      if (isTurnActive(session.state) || session.followUps.entries.length || checkoutRewindPending(state, session, command.verifyOnly === true))
+      if (isTurnActive(session.state) || session.followUps.entries.length || checkoutBranchPending(state, session)
+        || checkoutRewindPending(state, session, command.verifyOnly === true))
         throw new InvalidCommand('Finish the active turn, queued messages, and file rewind before editing an earlier prompt.')
       const existing = session.conversationRewind
       if (command.verifyOnly === true) {
@@ -904,6 +942,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand(`no such checkpoint: ${command.checkpointId}`)
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before rewinding its files.')
+      if (checkoutBranchPending(state, session)) throw new InvalidCommand('Wait for the Git branch action to finish.')
       if (session.conversationRewind || checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if ([...state.sessions.values()].some(other => isTurnActive(other.state) && sharesCheckout(state, session, other)))
         throw new InvalidCommand('Finish the active turn in this checkout before rewinding its files.')
@@ -943,6 +982,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
         throw new InvalidCommand('This thread is unavailable for a provider switch.')
       if (!state.workspaces.get(session.workspaceId)?.trusted)
         throw new InvalidCommand('Trust this workspace before switching providers.')
+      if (checkoutBranchPending(state, session)) throw new InvalidCommand('Wait for the Git branch action to finish.')
       if (session.conversationRewind || checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if (isTurnActive(session.state) || session.followUps.entries.length)
         throw new InvalidCommand('Finish the current turn and queued messages before switching providers.')
@@ -978,6 +1018,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      if (checkoutBranchPending(state, session)) throw new InvalidCommand('Wait for the Git branch action to finish.')
       if (session.conversationRewind || checkoutRewindPending(state, session)) throw new InvalidCommand('Wait for the current rewind to finish.')
       if (session.fork && session.fork.state !== 'ready')
         throw new InvalidCommand('This fork must finish before it can accept messages.')
@@ -1013,7 +1054,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session || effectiveClaudeCompaction(state, session).idleCompaction !== 'beforeCacheExpires'
         || !state.workspaces.get(session.workspaceId)?.trusted) return []
-      if (session.conversationRewind || checkoutRewindPending(state, session)) return []
+      if (session.conversationRewind || checkoutRewindPending(state, session) || checkoutBranchPending(state, session)) return []
       const eligible = claudeIdleCompaction(session, at)
       if (!eligible || eligible.afterTurnId !== command.afterTurnId || eligible.startsAt === undefined
         || at < eligible.startsAt || eligible.expiresAt === undefined || at >= eligible.expiresAt) return []
@@ -1135,6 +1176,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const automatic = command.type === 'thread.queue.advance'
       const session = state.sessions.get(command.sessionId)
       if (automatic && (!session || session.followUps.held || !session.followUps.entries.length)) return []
+      if (session && checkoutBranchPending(state, session)) {
+        if (automatic) return []
+        throw new InvalidCommand('Wait for the Git branch action to finish.')
+      }
       if (session && (session.conversationRewind || checkoutRewindPending(state, session))) {
         if (automatic) return []
         throw new InvalidCommand('Wait for the current rewind to finish.')

@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -73,6 +73,8 @@ export interface SessionState {
   worktree?: WorktreeSelection
   worktreeIntent?: WorktreeIntent
   combinedWorktree?: CombinedWorktreeIntent
+  gitBranchAttempt?: GitBranchAttempt
+  worktreeBranchChanged?: true
   /**
    * Where the agent actually runs, once isolated.
    *
@@ -856,12 +858,41 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session) break
       session.worktreePath = p.worktreePath
       session.branch = p.branch
+      delete session.worktreeBranchChanged
       if (session.pullRequest && !session.turns.length && session.state === 'failed') {
         session.state = 'idle'
         delete session.lastError
       }
       if (p.combined) session.combinedWorktree = p.combined
       delete session.worktreeIntent
+      break
+    }
+
+    case 'session.git-branch-started': {
+      const session = state.sessions.get(event.sessionId)
+      if (session) session.gitBranchAttempt = p.attempt
+      break
+    }
+
+    case 'session.git-branch-resolved': {
+      const session = state.sessions.get(event.sessionId)
+      const attempt = session?.gitBranchAttempt
+      if (!session || !attempt || attempt.id !== p.id) break
+      delete session.gitBranchAttempt
+      if (!p.switched || !session.worktreePath) break
+      const combined = session.combinedWorktree
+      if (combined) {
+        session.combinedWorktree = {
+          ...combined,
+          ...(!attempt.repositoryKey && { branch: attempt.to }),
+          checkouts: combined.checkouts.map(checkout => checkout.key === attempt.repositoryKey
+            ? { ...checkout, branch: attempt.to } : checkout),
+        }
+      }
+      if (!attempt.repositoryKey) {
+        session.branch = attempt.to
+        session.worktreeBranchChanged = true
+      }
       break
     }
 

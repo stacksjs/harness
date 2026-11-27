@@ -2454,6 +2454,23 @@ describe('a session can have a checkout of its own', () => {
       const review = await fetch(`http://127.0.0.1:${port}/s/${sessionId}/diff/options?repository=packages%2Fweb`)
       expect(await review.json()).toMatchObject({ isRepository: true, repositories: [{ key: 'api' }, { key: 'packages/web' }] })
 
+      writeFileSync(join(first, 'branch-note.txt'), 'Only the API worktree changes branch\n')
+      const commitRoute = `http://127.0.0.1:${port}/s/${sessionId}/git/commit?scope=working&repository=api`
+      const commitReview = await fetch(commitRoute).then(response => response.json())
+      expect(commitReview).toMatchObject({ branch, canCreateBranch: true, files: ['branch-note.txt'] })
+      const committed = await fetch(commitRoute, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ revision: commitReview.revision, message: 'Isolate API change', newBranch: true }),
+      })
+      expect(committed.status).toBe(201)
+      expect(await committed.json()).toMatchObject({ branch: 'feature/isolate-api-change' })
+      const combined = harness.engine.current.sessions.get(sessionId)?.combinedWorktree
+      expect(combined?.checkouts.map(checkout => [checkout.key, checkout.branch])).toEqual([
+        ['api', 'feature/isolate-api-change'], ['packages/web', branch],
+      ])
+      expect(git(api, 'show', 'feature/isolate-api-change:branch-note.txt')).toBe('Only the API worktree changes branch')
+      expect(git(api, 'branch', '--show-current')).toBe('main')
+
       client.send({ t: 'dispatch', envelope: { id: 'multi-delete', at: 6, command: { type: 'profile.delete', profileId: derivedId('c_p') } } })
       expect(await client.waitForDispatch('multi-delete')).toMatchObject({ t: 'dispatched' })
       for (let attempt = 0; attempt < 300 && existsSync(intent.path); attempt++) await Bun.sleep(20)
@@ -2462,6 +2479,7 @@ describe('a session can have a checkout of its own', () => {
       expect(git(web, 'worktree', 'list', '--porcelain')).toContain('branch refs/heads/user/checkout')
       expect(readFileSync(join(other, 'unsaved.txt'), 'utf8')).toBe('User checkout stays\n')
       expect(git(web, 'show', `${branch}:agent.txt`)).toBe('Web changes')
+      expect(git(api, 'show', 'feature/isolate-api-change:branch-note.txt')).toBe('Only the API worktree changes branch')
     }
     finally { client.close() }
   }, 30_000)

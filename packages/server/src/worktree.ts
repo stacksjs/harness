@@ -39,6 +39,7 @@ import type { CheckoutIntent } from '@harness/contract'
 import { spawn } from 'node:child_process'
 import { lstat, mkdir, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'node:path'
+import { workspaceGitEnvironment } from './git-environment'
 
 export interface WorktreeResult {
   /** Directory the agent should run in, or null when none was made. */
@@ -52,7 +53,7 @@ function git(cwd: string, args: string[]): Promise<{ ok: boolean, out: string }>
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'] })
+      child = spawn('git', args, { cwd, env: workspaceGitEnvironment(), stdio: ['ignore', 'pipe', 'ignore'] })
     }
     catch {
       return resolve({ ok: false, out: '' })

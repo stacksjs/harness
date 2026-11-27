@@ -7,7 +7,7 @@
  * rather than being a feature bolted on later.
  */
 
-import type { CommandEnvelope, DriverKind, HarnessEvent } from '@harness/contract'
+import type { CommandEnvelope, DriverKind, GitBranchAttempt, HarnessEvent } from '@harness/contract'
 import type { Server, ServerWebSocket } from 'bun'
 import type { Driver, DriverConfig, ProbeResult } from '@harness/drivers'
 import { createHash } from 'node:crypto'
@@ -19,7 +19,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer, workspaceSettings } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, InvalidCommand, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, sharesCheckout, SqliteStore, threadUndoOffer, workspaceSettings } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
@@ -39,7 +39,8 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
-import { createRepositoryCommit, prepareRepositoryCommit, readRepositorySubmission, RepositoryCommitError } from './repository-commit'
+import { createRepositoryCommit, prepareRepositoryCommit, readRepositorySubmission, RepositoryCommitError, sameRepositoryCommitFiles } from './repository-commit'
+import { planRepositoryBranch, reconcileRepositoryBranch, startRepositoryBranch } from './repository-feature-branch'
 import { readRepositoryStatus } from './repository-status'
 import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
@@ -457,6 +458,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // Recorded as an interruption rather than quietly rewritten, so the log says
   // what happened.
   for (const session of engine.current.sessions.values()) {
+    if (session.gitBranchAttempt) await resolveRepositoryBranch(session, session.gitBranchAttempt, false).catch(() => {})
     if (session.worktreeIntent) await runtime.recoverWorktree(session.id)
     if (session.pendingRewind) await runtime.recoverRewind(session.id)
     if (session.conversationRewind) await runtime.recoverConversationRewind(session.id)
@@ -538,6 +540,32 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const repositoryActions = new Set<string>()
   type RepositoryAction = 'commit' | 'pull-request' | 'pull-request-checks' | RepositorySyncAction
 
+  async function resolveRepositoryBranch(session: SessionState, attempt: GitBranchAttempt, live: boolean): Promise<boolean> {
+    const trusted = () => engine.current.workspaces.get(session.workspaceId)?.trusted === true
+    if (!trusted()) throw new RepositoryCommitError('Trust this workspace to recover the Git branch action.')
+    const workspace = engine.current.workspaces.get(session.workspaceId)!
+    const localPath = session.worktreePath ? null
+      : await reviewRepositoryPath(workspace.path, session, attempt.repositoryKey).then(path => path && realpath(path)).catch(() => null)
+    const verify = (branch: string) => session.worktreePath ? runtime.verifyBranchAttempt(session, attempt, branch)
+      : Promise.resolve(localPath === attempt.path)
+    const switched = (localPath === attempt.path || (session.worktreePath
+      && (await verify(attempt.from) || await verify(attempt.to))))
+      ? await reconcileRepositoryBranch(attempt, verify, trusted) : false
+    const result = await engine.dispatchInternal({
+      id: 'git_branch_resolved_' + attempt.id, at: Date.now(),
+      command: { type: 'thread.git-branch.resolve', sessionId: session.id, id: attempt.id, switched },
+    })
+    if (live && !result.replayed) {
+      broadcast(result.events)
+      for (const thread of engine.current.sessions.values()) {
+        if (!sharesCheckout(engine.current, session, thread)) continue
+        advanceFollowUps(thread.id)
+        scheduleIdleCompaction(thread.id)
+      }
+    }
+    return switched
+  }
+
   async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: RepositoryAction, extendTimeout: () => void): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
     const respond = (body: object, status = 200) => Response.json(body, { headers, status })
@@ -555,12 +583,24 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request, action === 'commit') : null
     if (submitted && (!input && !pullInput || action === 'commit' && !input?.message))
       return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
+    if (input?.newBranch && scope !== 'working') return respond({ error: 'Choose working-tree changes to commit on a new branch.' }, 400)
 
     const session = engine.current.sessions.get(sessionId)
     const workspace = session && engine.current.workspaces.get(session.workspaceId)
     if (!session || !workspace?.trusted || workspace.scratch || (!readingChecks && session.navigation?.archivedAt)
       || (session.isolate && !session.worktreePath))
       return respond({ error: 'This thread needs an available, trusted checkout.' }, 404)
+    const pending = [...engine.current.sessions.values()].find(thread => thread.gitBranchAttempt && sharesCheckout(engine.current, session, thread))
+    const attempt = pending?.gitBranchAttempt
+    if (pending && attempt) {
+      if (repositoryActions.has(attempt.path)) return respond({ error: 'A Git branch action is already running in this checkout.' }, 409)
+      repositoryActions.add(attempt.path)
+      extendTimeout()
+      try { await resolveRepositoryBranch(pending, attempt, true) }
+      catch { return respond({ error: 'Could not recover the previous Git branch action. Check the checkout and try again.' }, 503) }
+      finally { repositoryActions.delete(attempt.path) }
+      if (submitted) return respond({ error: 'The previous Git branch action was recovered. Refresh the review before continuing.' }, 409)
+    }
     const worktree = session.worktreePath
     const root = worktree || workspace.path
     if (worktree && !await runtime.checkProjectWorktree({ workspaceId: workspace.id, sessionId, checkout: root }))
@@ -623,11 +663,39 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           : 'The branch or remote changed. Review the Git action again.' }, 409)
       if (!authorize())
         return respond({ error: 'The checkout changed or a turn is still active. Wait for it to finish and try again.' }, 409)
-      if (review.kind === 'commit') return respond(await createRepositoryCommit(repository, input.message, review, input.excluded, authorize), 201)
+      if (review.kind === 'commit') {
+        if (!input.newBranch) return respond(await createRepositoryCommit(repository, input.message, review, input.excluded, authorize), 201)
+        if (!review.head || !review.preview.branch)
+          return respond({ error: 'Create the first commit before starting a new branch.' }, 409)
+        if (input.excluded.some(index => index >= review.entries.length) || new Set(input.excluded).size === review.entries.length)
+          return respond({ error: 'Refresh the review and include at least one file.' }, 409)
+        const newBranch = await planRepositoryBranch(repository, key, review.preview.branch, review.head, input.message)
+        const started = await engine.dispatchInternal({
+          id: 'git_branch_started_' + newBranch.id, at: Date.now(),
+          command: { type: 'thread.git-branch.begin', sessionId, attempt: newBranch },
+        })
+        if (!started.replayed) broadcast(started.events)
+        let commit: Awaited<ReturnType<typeof createRepositoryCommit>> | undefined
+        let switched = false
+        try {
+          await startRepositoryBranch(newBranch, authorize)
+          const onBranch = await prepareRepositoryCommit(repository, scope)
+          if (onBranch.preview.branch !== newBranch.to || onBranch.preview.problem || !sameRepositoryCommitFiles(review, onBranch))
+            throw new RepositoryCommitError('The checkout or selected files changed. Refresh the review before committing.')
+          commit = await createRepositoryCommit(repository, input.message, onBranch, input.excluded, authorize)
+        }
+        finally {
+          switched = await resolveRepositoryBranch(session, newBranch, true).catch(() => false)
+        }
+        const branchWarning = switched ? '' : 'Refresh the checkout to confirm the active branch.'
+        const warning = [commit.warning, branchWarning].filter(Boolean).join(' ')
+        return respond({ commit: commit.commit, branch: newBranch.to, ...(warning && { warning }) }, 201)
+      }
       return respond(await syncRepository(repository, review.action, review.preview, authorize))
     }
     catch (error) {
-      if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError || error instanceof RepositoryCommitError)
+      if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError
+        || error instanceof RepositoryCommitError || error instanceof InvalidCommand)
         return respond({ error: error.message }, 409)
       if (readingChecks) return respond({ error: 'Could not read checks from GitHub. Try again.' }, 503)
       return respond({ error: action === 'commit' ? (input

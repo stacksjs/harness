@@ -8,7 +8,7 @@
  * ordering and one audit trail rather than two.
  */
 
-import type { ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, RepositoryPullRequest, WorktreeIntent, WorktreeSelection } from './events'
+import type { GitBranchAttempt, ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, RepositoryPullRequest, WorktreeIntent, WorktreeSelection } from './events'
 import type { SteeringOutcome } from './follow-ups'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { ComposerAttachment, ComposerUploads } from './composer-attachments'
@@ -185,6 +185,8 @@ export type InternalCommand =
   | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
   | { type: 'thread.worktree.restored', sessionId: number }
+  | { type: 'thread.git-branch.begin', sessionId: number, attempt: GitBranchAttempt }
+  | { type: 'thread.git-branch.resolve', sessionId: number, id: string, switched: boolean }
   | { type: 'thread.turn.rewind-provider-confirmed', sessionId: number, operation: string }
   | { type: 'thread.turn.rewind-result', sessionId: number, operation: string, outcome: 'rewound' | 'unchanged' | 'uncertain', message?: string }
   | { type: 'thread.checkpoint.restored', sessionId: number, checkpointId: number, restored: number, removed: number, skipped?: string[] }

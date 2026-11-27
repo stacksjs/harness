@@ -11,7 +11,9 @@ import { derivedId } from '@harness/engine'
 import { ProjectScripts } from '../src/project-scripts'
 import { PullRequestReplyReceipts } from '../src/pull-request-reply-receipts'
 import { repositoryGitHubRequest } from '../src/repository-pull-request'
+import { planRepositoryBranch, startRepositoryBranch } from '../src/repository-feature-branch'
 import { serve } from '../src/server'
+import { openReserved, plan } from '../src/worktree'
 import { fixtureGitHubCli } from './fixtures/github-cli'
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from './fixtures/git-http'
 
@@ -1687,8 +1689,8 @@ describe('harness serve — HTTP', () => {
     const staged = `http://127.0.0.1:${port}/s/${derivedId('working-commit-thread')}/git/commit`
     const route = staged + '?scope=working'
     const read = () => fetch(route).then(response => response.json())
-    const send = (revision: string, message: string, excluded: number[] = [], address = route) => fetch(address, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ revision, message, excluded }),
+    const send = (revision: string, message: string, excluded: number[] = [], address = route, newBranch = false) => fetch(address, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ revision, message, excluded, newBranch }),
     })
     const ambientIndex = join(dir, 'unrelated-index')
     writeFileSync(ambientIndex, 'Unrelated index marker')
@@ -1697,6 +1699,8 @@ describe('harness serve — HTTP', () => {
     try {
       const first = await read()
       expect(first).toMatchObject({ branch: 'main', problem: null, files: ['.gitignore', picked, 'staged.txt'] })
+      expect(first.canCreateBranch).toBe(false)
+      expect((await send(first.revision, 'Needs a parent', [], route, true)).status).toBe(409)
       expect((await send(first.revision, 'First commit')).status).toBe(201)
       expect(readFileSync(ambientIndex, 'utf8')).toBe('Unrelated index marker')
     }
@@ -1746,6 +1750,89 @@ describe('harness serve — HTTP', () => {
     expect(await committed.json()).toMatchObject({ commit: git('rev-parse', 'HEAD'), warning: expect.stringContaining('Review the Git index') })
     expect(git('show', ':other.txt')).toBe('Concurrent stage')
     expect(git('show', ':staged.txt')).toBe('Keep staged')
+
+    const source = git('rev-parse', 'HEAD')
+    writeFileSync(join(project, picked), 'Working change for the feature branch\n')
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    const stagedTree = git('write-tree')
+    const branchReview = await read()
+    const omit = branchReview.files.flatMap((file: string, index: number) => file === picked ? [] : [index])
+    expect((await send(branchReview.revision, 'Reject this branch', omit, route, true)).status).toBe(503)
+    expect(git('branch', '--show-current')).toBe('main')
+    expect(git('branch', '--list', 'feature/reject-this-branch')).toBe('')
+    expect(git('write-tree')).toBe(stagedTree)
+    expect(git('rev-parse', 'HEAD')).toBe(source)
+    rmSync(hook)
+    git('branch', 'feature/review-feature')
+    const message = 'Review feature\n\nTest the feature description.'
+    const result = await send(branchReview.revision, message, omit, route, true)
+    expect(result.status).toBe(201)
+    expect(await result.json()).toEqual({ commit: git('rev-parse', 'HEAD'), branch: 'feature/review-feature-2' })
+    expect(git('branch', '--show-current')).toBe('feature/review-feature-2')
+    expect(git('rev-parse', 'main')).toBe(source)
+    expect(git('rev-parse', 'feature/review-feature')).toBe(source)
+    expect(git('log', '-1', '--format=%B')).toBe(message)
+    expect(git('show', `HEAD:${picked}`)).toBe('Working change for the feature branch')
+    expect(git('diff', '--cached', '--name-only')).toBe('other.txt\nstaged.txt')
+    expect((await send(branchReview.revision, message, omit, route, true)).status).toBe(409)
+  }, 45_000)
+
+  it('recovers feature branch ownership on startup before and after a Git commit', async () => {
+    fixtureGitRepository(dir)
+    const project = realpathSync(join(dir, 'seed'))
+    const git = (cwd: string, ...args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd })
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    const workspaceId = derivedId('recover-branch-project')
+    const sessionId = derivedId('recover-branch-thread')
+    await harness.engine.dispatch({ id: 'recover-branch-project', at: 1, command: { type: 'workspace.register', path: project, trusted: true } })
+    await harness.engine.dispatch({ id: 'recover-branch-thread', at: 2, command: { type: 'session.create', workspaceId, driverKind: 'claude', isolate: true } })
+    const intent = await plan(project, sessionId)
+    if ('reason' in intent) throw new Error(intent.reason)
+    await harness.engine.dispatchInternal({ id: 'recover-branch-reserve', at: 3, command: { type: 'thread.worktree.reserve', sessionId, intent } })
+    expect((await openReserved(intent, true)).path).toBe(intent.path)
+    await harness.engine.dispatchInternal({ id: 'recover-branch-set', at: 4, command: {
+      type: 'thread.worktree.set', sessionId, worktreePath: intent.path, branch: intent.branch,
+    } })
+    const begin = async (name: string, activate = true) => {
+      const attempt = await planRepositoryBranch(intent.path, '', intent.branch, intent.base, name)
+      await harness.engine.dispatchInternal({ id: attempt.id, at: 5, command: { type: 'thread.git-branch.begin', sessionId, attempt } })
+      if (activate) await startRepositoryBranch(attempt, () => true)
+      return attempt
+    }
+    const restart = async () => {
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      port = harness.server.port
+    }
+    const pending = await begin('Pending branch')
+    await expect(harness.engine.dispatch({ id: 'in-flight-turn', at: 6, command: {
+      type: 'session.turn.start', sessionId, text: 'Would race the switched branch',
+    } })).rejects.toThrow('Wait for the Git branch action to finish.')
+    await restart()
+    expect(git(intent.path, 'branch', '--show-current')).toBe(intent.branch)
+    expect(git(intent.path, 'branch', '--list', pending.to)).toBe('')
+    expect(harness.engine.current.sessions.get(sessionId)?.gitBranchAttempt).toBeUndefined()
+
+    const foreign = await begin('Externally created branch', false)
+    git(intent.path, 'switch', '-qc', foreign.to)
+    await restart()
+    expect(git(intent.path, 'branch', '--show-current')).toBe(foreign.to)
+    expect(harness.engine.current.sessions.get(sessionId)).toMatchObject({ worktreePath: intent.path, branch: intent.branch })
+    expect(harness.engine.current.sessions.get(sessionId)?.gitBranchAttempt).toBeUndefined()
+    git(intent.path, 'switch', '--quiet', intent.branch)
+
+    const advanced = await begin('Committed branch')
+    git(intent.path, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'Completed before restart')
+    await restart()
+    expect(harness.engine.current.sessions.get(sessionId)).toMatchObject({ worktreePath: intent.path, branch: advanced.to })
+    expect(harness.engine.current.sessions.get(sessionId)?.gitBranchAttempt).toBeUndefined()
+    const review = await fetch(`http://127.0.0.1:${port}/s/${sessionId}/git/commit?scope=working`)
+    expect(review.status).toBe(200)
+    expect(await review.json()).toMatchObject({ branch: advanced.to })
+    expect(git(project, 'rev-parse', 'HEAD')).toBe(intent.base)
   }, 30_000)
 
   it('publishes and fast-forwards the selected branch through its configured remote', async () => {

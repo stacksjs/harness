@@ -11,7 +11,7 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { ApprovalChoice, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, HarnessEvent, InputQuestion, InputResponse, RepositoryCheckpoint, SteeringOutcome } from '@harness/contract'
+import type { ApprovalChoice, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, GitBranchAttempt, HarnessEvent, InputQuestion, InputResponse, RepositoryCheckpoint, SteeringOutcome } from '@harness/contract'
 import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState, SessionState } from '@harness/engine'
 import { existsSync } from 'node:fs'
@@ -652,13 +652,24 @@ export class ProviderRuntime {
       && isolatedRewindScope(state, session) && await this.registeredWorktree(session))
   }
 
+  /** Check the saved path even while its authorized Git branch is changing. */
+  async verifyBranchAttempt(session: SessionState, attempt: GitBranchAttempt, branch: string): Promise<boolean> {
+    const combined = session.combinedWorktree
+    if (combined) {
+      const checkout = combined.checkouts.find(entry => entry.key === attempt.repositoryKey && entry.path === attempt.path)
+      return Boolean(checkout && await openCombinedRepository(combined, { ...checkout, branch }))
+    }
+    return !attempt.repositoryKey && attempt.path === session.worktreePath
+      && this.registeredWorktree({ ...session, branch, worktreeBranchChanged: true })
+  }
+
   private async registeredWorktree(session: SessionState, mode: false | 'recover' | 'resume' = false, authorize?: () => boolean,
     beforeRestore?: () => void,
   ): Promise<boolean> {
     if (session.combinedWorktree) return openCombinedWorktree(session.combinedWorktree, mode, authorize, undefined, beforeRestore)
     const state = this.options.engine.current
     const repository = this.options.workspacePath ? this.options.workspacePath(state, session.id) : repositoryPath(state, session.id)
-    if (!repository || session.branch !== worktree.branchFor(session.id)) return false
+    if (!repository || (!session.worktreeBranchChanged && session.branch !== worktree.branchFor(session.id))) return false
     const checkout = { repository, path: session.worktreePath, branch: session.branch, base: '' }
     return Boolean((await worktree.openReserved(checkout, mode, undefined, authorize, beforeRestore)).path)
   }
