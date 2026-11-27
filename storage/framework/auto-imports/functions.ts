@@ -2,6 +2,7 @@
 
 export { increment, decrement, reset, count } from '../../../resources/functions/counter'
 export { toggleDark, isDark, preferredDark } from '../../../resources/functions/dark'
+export { openLegacyBranchDeletion } from '../../../resources/functions/pull-request-dialogs'
 export { fetchWebAnalytics, fetchSalesAnalytics, fetchCampaignAnalytics, fetchEventAnalytics, recordAnalyticsEvent, useAnalytics } from '@stacksjs/defaults/functions/analytics.ts'
 export type { AnalyticsOverview, TrafficDataPoint, PageData, ReferrerData, DeviceData, BrowserData, CountryData, AnalyticsRange, AnalyticsScope, WebAnalyticsResponse, SalesAnalyticsResponse, CampaignAnalyticsResponse, EventAnalyticsResponse, RecordAnalyticsEventInput } from '@stacksjs/defaults/functions/analytics.ts'
 export { resolveApiBaseUrl } from '@stacksjs/defaults/functions/api-url.ts'
