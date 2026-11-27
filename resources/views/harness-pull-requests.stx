@@ -46,6 +46,8 @@ export const conversationAnchor = $props.conversationAnchor
 export const conversationNotice = $props.conversationNotice
 export const replyAction = $props.replyAction
 export const replyNotice = $props.replyNotice
+export const commentsBase = $props.commentsBase
+export const commentsAction = $props.commentsAction
 export const replyDraft = $props.replyDraft?.viewer === selected?.conversationViewer && $props.replyDraft?.head === selected?.head ? $props.replyDraft : null
 export const initialReplyDrafts = replyDraft ? { [replyDraft.anchor]: { text: replyDraft.text, token: replyDraft.token, pending: replyDraft.pending } } : {}
 export const replyDraftStorage = 'harness.pr-reply.v1:' + JSON.stringify([activeProfileId, selected?.url, selected?.head, selected?.conversationViewer])
@@ -53,6 +55,15 @@ export const conversations = (selected?.files || []).flatMap(file => file.sectio
 export const initialConversationStates = Object.fromEntries(conversations.map(thread => [thread.anchor, {
   isResolved: thread.isResolved, viewerCanResolve: thread.viewerCanResolve, viewerCanUnresolve: thread.viewerCanUnresolve,
 }]))
+export const initialCommentPages = Object.fromEntries(conversations.map(thread => [thread.anchor, {
+  thread: thread.id, scope: selected.commentScopes[thread.anchor], next: thread.nextComments, existing: thread.comments.map(comment => comment.anchor),
+}]))
+export const commentsHref = (thread, direction) => {
+  const cursor = direction === 'before' ? thread.previousComments : thread.nextComments
+  const key = direction === 'before' ? 'commentsBefore' : 'commentsAfter'
+  return commentsBase + '&conversation=' + thread.anchor + '&commentScope=' + selected.commentScopes[thread.anchor]
+    + '&' + key + '=' + encodeURIComponent(cursor) + '#' + thread.anchor
+}
 export const conversationOnPage = conversations.some(thread => thread.anchor === conversationAnchor)
 </script>
 @if(tab === 'code')
@@ -67,6 +78,12 @@ const replyDrafts = useSessionStorage(@json(replyDraftStorage), @json(initialRep
 const replyMessages = state(@json(replyDraft ? { [replyDraft.anchor]: replyDraft.message } : replyNotice ? { [conversationAnchor]: replyNotice } : {}))
 const replySending = state({})
 const sentReviewReplies = state({})
+const knownCommentPages = @json(initialCommentPages)
+const commentsPageBase = @json(commentsBase)
+const commentsApi = @json(commentsAction)
+const commentsAccount = @json(selected?.conversationViewer || '')
+const commentsHead = @json(selected?.head || '')
+const reviewCommentPages = state({})
 const replyDates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 const viewedSummary = derived(() => {
   const states = Object.values(fileViewedStates())
@@ -145,6 +162,73 @@ function rememberReviewReply(form, text, pending) {
 
 function reviewReplyDate(value) {
   return value && Number.isFinite(Date.parse(value)) ? replyDates.format(new Date(value)) : ''
+}
+
+function latestCommentCursor(anchor) {
+  const page = reviewCommentPages()[anchor]
+  return page ? page.next : knownCommentPages[anchor]?.next
+}
+
+function nextReviewCommentsHref(anchor) {
+  const cursor = latestCommentCursor(anchor)
+  return cursor ? commentsPageBase + '&conversation=' + anchor + '&commentScope=' + knownCommentPages[anchor].scope
+    + '&commentsAfter=' + encodeURIComponent(cursor) + '#' + anchor : ''
+}
+
+function visibleReviewComments(anchor) {
+  const first = new Set(knownCommentPages[anchor]?.existing || [])
+  const loaded = reviewCommentPages()[anchor]?.comments || []
+  const posted = sentReviewReplies()[anchor] || []
+  const combined = new Map([...loaded, ...posted].map(comment => [comment.anchor, comment]))
+  return [...combined.values()].filter(comment => !first.has(comment.anchor))
+}
+
+async function loadReviewComments(event) {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  event.preventDefault()
+  const link = event.currentTarget
+  const anchor = link.dataset.commentAnchor
+  const cursor = latestCommentCursor(anchor)
+  const prior = reviewCommentPages()[anchor]
+  if (!cursor || prior?.pending) return
+  const update = change => reviewCommentPages.update(value => ({ ...value,
+    [anchor]: { ...value[anchor], ...change },
+  }))
+  update({ next: cursor, pending: true, message: '' })
+  const address = new URL(commentsApi, link.href)
+  address.searchParams.set('thread', knownCommentPages[anchor].thread)
+  address.searchParams.set('viewer', commentsAccount)
+  address.searchParams.set('head', commentsHead)
+  address.searchParams.set('after', cursor)
+  try {
+    const response = await fetch(address, { headers: { accept: 'application/json' }, cache: 'no-store' })
+    const page = await response.json()
+    if (!response.ok) throw new Error(page.message || 'Could not load more comments. Try again.')
+    const seen = new Set([...(prior?.seen || []), cursor])
+    const loop = page.nextComments && seen.has(page.nextComments)
+    const existing = new Set([...knownCommentPages[anchor].existing, ...visibleReviewComments(anchor).map(comment => comment.anchor)])
+    const added = page.comments.filter(comment => !existing.has(comment.anchor))
+    const shouldMoveFocus = link.matches(':focus')
+    update({
+      next: loop ? null : page.nextComments,
+      seen: [...seen],
+      pending: false,
+      comments: [...(prior?.comments || []), ...page.comments],
+      message: loop ? 'GitHub did not advance the comment list. Refresh to continue.'
+        : added.length ? 'Loaded ' + added.length + (added.length === 1 ? ' comment.' : ' comments.')
+          : 'No new comments on this page.',
+    })
+    if (shouldMoveFocus && (added.length || !latestCommentCursor(anchor))) {
+      const thread = link.closest('[data-pr-conversation]')
+      await nextTick()
+      const first = added.length ? thread?.querySelector('#' + added[0].anchor) : null
+      const target = first || thread?.querySelector('summary')
+      target?.focus()
+    }
+  }
+  catch (error) {
+    update({ pending: false, message: error.message || 'Could not load more comments. Try again.' })
+  }
 }
 
 function editReviewReply(event) {
@@ -423,6 +507,7 @@ async function sendReviewReply(event) {
             @elseif(selected.conversationsTruncated)
               <p data-pr-viewed-notice role="status">More review conversations are available on GitHub.</p>
             @endif
+            @if(selected.commentsNotice)<p role="status">{{ selected.commentsNotice }}</p>@endif
             @if(conversationNotice && !conversationOnPage)<p role="status">{{ conversationNotice }}</p>@endif
             <ul data-pr-files>
               @foreach(selected.files || [] as file)

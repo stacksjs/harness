@@ -1,10 +1,11 @@
 import type { HarnessState, WorkspaceState } from '@harness/engine'
+import type { ReviewComment, ReviewCommentWindow } from './pull-request-conversations'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { isWorkspaceGitRoot } from './diff'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
-import { placeReviewConversations, readReviewConversations, readReviewConversationState, reviewComment, ReviewConversationConflict, reviewConversationAnchor, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
+import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
 import { findPullRequestThread } from './pull-request-links'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -129,7 +130,36 @@ function stillTrusted(state: HarnessState, workspace: WorkspaceState) {
   return current?.trusted && current.path === workspace.path && current.profileId === workspace.profileId
 }
 
-async function readFiles(repository: Repository, pull: Pull, page: number, signal: AbortSignal) {
+const commentViewKeys = ['conversation', 'commentScope', 'commentsAfter', 'commentsBefore', 'commentsLatest'] as const
+
+function reviewCommentScope(head: string, viewer: string, id: string) {
+  return createHash('sha256').update(JSON.stringify([head, viewer, id])).digest('hex').slice(0, 24)
+}
+
+function commentView(query: URLSearchParams) {
+  const fields = ['commentsAfter', 'commentsBefore', 'commentsLatest'].filter(key => query.has(key))
+  if (fields.length === 0) return null
+  const field = fields.length === 1 ? fields[0] : undefined
+  const cursor = field ? reviewCommentCursor(query.get(field)) : null
+  const window: ReviewCommentWindow | null = field === 'commentsLatest' && cursor === '1' ? { direction: 'latest' }
+    : cursor && field === 'commentsAfter' ? { direction: 'after', cursor }
+      : cursor && field === 'commentsBefore' ? { direction: 'before', cursor } : null
+  return { anchor: query.get('conversation'), scope: query.get('commentScope'), window }
+}
+
+function carryCommentView(from: URLSearchParams, to: URLSearchParams) {
+  for (const key of commentViewKeys) {
+    const value = reviewCommentCursor(from.get(key))
+    if (value) to.set(key, value)
+  }
+}
+
+function selectReviewConversation(params: URLSearchParams, anchor: string) {
+  if (params.get('conversation') !== anchor) for (const key of commentViewKeys) params.delete(key)
+  params.set('conversation', anchor)
+}
+
+async function readFiles(repository: Repository, pull: Pull, page: number, signal: AbortSignal, selectedComments: ReturnType<typeof commentView>) {
   const { number, head } = pull
   const reply = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}/files?per_page=30&page=${page}`, undefined, signal)
   if (reply.status !== 200 || !Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitHub could not load changes for this request.')
@@ -141,6 +171,7 @@ async function readFiles(repository: Repository, pull: Pull, page: number, signa
     throw new RepositoryPullRequestError('The pull request head changed during the read. Refresh to load its current files.')
   let review = null
   let discussion = null
+  let commentsNotice = ''
   if (files.length || page === 1) {
     try {
       const credential = await repositoryGitHubCredential(repository.path, signal)
@@ -153,6 +184,20 @@ async function readFiles(repository: Repository, pull: Pull, page: number, signa
       review = viewed.status === 'fulfilled' ? viewed.value : null
       discussion = conversations.status === 'fulfilled' ? conversations.value : null
       if (review && discussion && review.viewer.id !== discussion.viewer) throw new ReviewConversationConflict()
+      if (selectedComments && discussion) {
+        const target = discussion.conversations.find(thread => thread.anchor === selectedComments.anchor)
+        if (!target || !selectedComments.window || selectedComments.scope !== reviewCommentScope(head, discussion.viewer, target.id))
+          commentsNotice = 'The comment page belongs to a different review. Open the current conversation to continue.'
+        else {
+          try {
+            const page = await readReviewCommentPage(repository.path, repository.name, number, head, discussion.viewer,
+              target.id, pull.url, signal, credential, selectedComments.window)
+            if (page) Object.assign(target, page)
+            else commentsNotice = 'Could not load that comment page. The first comments are shown.'
+          }
+          catch { commentsNotice = 'Could not load that comment page. The first comments are shown.' }
+        }
+      }
     }
     catch (error) {
       if (error instanceof FileViewedConflict || error instanceof ReviewConversationConflict)
@@ -169,6 +214,9 @@ async function readFiles(repository: Repository, pull: Pull, page: number, signa
     viewer: review?.viewer, more: reply.hasNextPage, conversationViewer: discussion?.viewer,
     conversationsUnavailable: !discussion, conversationsTruncated: discussion?.truncated,
     detachedConversations: page === 1 ? assigned.get(undefined) ?? [] : [],
+    commentsNotice,
+    commentScopes: discussion
+      ? Object.fromEntries(discussion.conversations.map(thread => [thread.anchor, reviewCommentScope(head, discussion.viewer, thread.id)])) : {},
   }
 }
 
@@ -209,7 +257,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const data = reply.status === 200 ? readPull(reply.body, selectionRepo.name) : null
     if (!data || data.number !== selection.number) throw new RepositoryPullRequestError('This pull request is unavailable to the GitHub account on this host.')
     const tabData = tab === 'timeline' ? readActivity(selectionRepo, data, detailPage, signal)
-      : tab === 'code' ? readFiles(selectionRepo, data, detailPage, signal)
+      : tab === 'code' ? readFiles(selectionRepo, data, detailPage, signal, commentView(query))
         : readRepositoryPullRequestChecks(selectionRepo.path, { ...selection, repositoryKey: '' }, signal)
     const extra = await tabData.catch(error => ({ error: message(error) }))
     const result = 'checks' in extra ? extra.head === data.head
@@ -239,6 +287,12 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   if ([...repositories.values()].some(item => !stillTrusted(state, item.workspace))) throw new RepositoryPullRequestError('The trusted projects changed while loading pull requests.')
   const selectedUrl = selection?.url ?? ''
   const detailsHref = (detailTab: string, nextPage = 1) => href({ selectedUrl, tab: detailTab, detailPage: nextPage })
+  const commentsBase = detailsHref('code', detailPage)
+  const reviewAction = (action: string) => {
+    const actionParams = new URLSearchParams(commentsBase.split('?')[1])
+    carryCommentView(query, actionParams)
+    return '/pull-requests/' + action + '?' + actionParams
+  }
   const marks = (row: Pull) => ({ ...row, selected: row.url.toLowerCase() === selectedUrl.toLowerCase(), href: href({ selectedUrl: row.url }) })
   rows.sort((a, b) => {
     const time = sort === 'updated' ? b.updated.localeCompare(a.updated)
@@ -254,13 +308,15 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     selected, selectionError: query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
     listHref: href(), summaryHref: detailsHref('summary'), timelineHref: detailsHref('timeline'), codeHref: detailsHref('code'),
     detailBack: detailsHref(tab, detailPage - 1), detailNext: detailsHref(tab, detailPage + 1),
-    viewedAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/viewed?'),
+    viewedAction: reviewAction('viewed'),
     viewedAnchor: query.get('file') ?? '', viewedNotice: viewedMessages.get(query.get('viewedResult') ?? '') ?? '',
-    conversationAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/conversation?'),
+    conversationAction: reviewAction('conversation'),
     conversationAnchor: query.get('conversation') ?? '',
     conversationNotice: conversationMessages.get(query.get('conversationResult') ?? '') ?? '',
-    replyAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/reply?'),
+    replyAction: reviewAction('reply'),
     replyNotice: query.get('replyResult') === 'posted' ? 'Reply posted.' : '',
+    commentsBase,
+    commentsAction: commentsBase.replace('/pull-requests?', '/pull-requests/comments?'),
   }
 }
 
@@ -270,6 +326,7 @@ function reviewReturnParams(query: URLSearchParams, profile: number, url: string
     const value = query.get(key)
     if (value && value.length <= 512) params.set(key, value)
   }
+  carryCommentView(query, params)
   return params
 }
 
@@ -287,6 +344,36 @@ async function readReviewSubmission(state: HarnessState, query: URLSearchParams,
 async function reviewRepository(state: HarnessState, profile: number, repository: string, signal: AbortSignal) {
   const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
   return (await trustedRepositories(workspaces, signal)).get(repository.toLowerCase())
+}
+
+function renderReviewComment(comment: ReviewComment) {
+  return { anchor: comment.anchor, href: comment.href, author: comment.author, time: comment.time, minimized: comment.minimized,
+    html: renderPullRequestCommentMarkdown(comment.text) }
+}
+
+export async function loadWorkspaceReviewComments(state: HarnessState, query: URLSearchParams, signal: AbortSignal) {
+  const profile = integer(query.get('profile'))
+  const selection = parsePullRequest((query.get('selectedUrl') ?? '').slice(0, 512))
+  const head = query.get('head') ?? ''
+  const viewer = query.get('viewer') ?? ''
+  const id = query.get('thread') ?? ''
+  const cursor = reviewCommentCursor(query.get('after'))
+  const fail = (status: number, message: string) => ({ status, body: { message } })
+  if (!selection || !profile || !state.profiles.has(profile) || !/^[0-9a-f]{40}$/u.test(head)
+    || !viewer || viewer.length > 256 || !reviewThreadId.test(id) || !cursor) return fail(400, 'Choose a valid comment page.')
+  const changed = () => fail(409, 'The pull request, conversation, or account changed. Refresh the Code view.')
+  const unavailable = () => fail(503, 'Could not load more comments. Try again.')
+  try {
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
+    if (!repository || !stillTrusted(state, repository.workspace)) return changed()
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const page = await readReviewCommentPage(repository.path, repository.name, selection.number, head, viewer,
+      id, selection.url, signal, credential, { direction: 'after', cursor })
+    if (!stillTrusted(state, repository.workspace)) return changed()
+    if (!page) return unavailable()
+    return { status: 200, body: { comments: page.comments.map(renderReviewComment), nextComments: page.nextComments } }
+  }
+  catch (error) { return error instanceof ReviewConversationConflict ? changed() : unavailable() }
 }
 
 const viewedMessages = new Map([
@@ -363,7 +450,7 @@ export async function updateWorkspaceReviewConversation(state: HarnessState, que
   const resolved = intent === 'true'
   const anchor = reviewConversationAnchor(id)
   const params = reviewReturnParams(query, profile, selection.url)
-  params.set('conversation', anchor)
+  selectReviewConversation(params, anchor)
   const reply = (result: ConversationResult, conversation?: { isResolved: boolean, viewerCanResolve: boolean, viewerCanUnresolve: boolean }) => {
     params.set('conversationResult', result)
     return { result, message: conversationMessages.get(result), location: '/pull-requests?' + params + '#' + anchor,
@@ -402,7 +489,6 @@ const replyMessages = {
   pending: 'GitHub has yet to confirm this reply. Check again to recover it.',
 }
 type ReplyResult = keyof typeof replyMessages
-type ReplyComment = NonNullable<ReturnType<typeof reviewComment>>
 export type PullRequestReplyDraft = { anchor: string, viewer: string, head: string, token: string, text: string, message: string, pending: boolean }
 
 export async function submitWorkspaceReviewReply(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
@@ -417,17 +503,21 @@ export async function submitWorkspaceReviewReply(state: HarnessState, query: URL
   if (!reviewThreadId.test(id) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(token)) return null
   const anchor = reviewConversationAnchor(id)
   const params = reviewReturnParams(query, profile, selection.url)
-  params.set('conversation', anchor)
-  const finish = (result: ReplyResult, comment?: ReplyComment) => {
+  selectReviewConversation(params, anchor)
+  const finish = (result: ReplyResult, comment?: ReviewComment) => {
     const message = replyMessages[result]
     const fallback: PullRequestReplyDraft = { anchor, viewer, head, token, text: draft, message, pending: result === 'pending' }
+    const returned = new URLSearchParams(params)
+    if (result === 'posted') {
+      returned.delete('commentsAfter')
+      returned.delete('commentsBefore')
+      returned.set('commentsLatest', '1')
+      returned.set('commentScope', reviewCommentScope(head, viewer, id))
+    }
     return {
       result, message, fallback, params,
-      location: '/pull-requests?' + params + '&replyResult=posted#' + anchor,
-      comment: comment && {
-        anchor: comment.anchor, href: comment.href, author: comment.author, time: comment.time,
-        html: renderPullRequestCommentMarkdown(comment.text),
-      },
+      location: '/pull-requests?' + returned + '&replyResult=posted#' + anchor,
+      comment: comment && renderReviewComment(comment),
     }
   }
   if (!text || Buffer.byteLength(text) > 16_384 || text.includes('\0')) return finish('invalid')
@@ -437,8 +527,8 @@ export async function submitWorkspaceReviewReply(state: HarnessState, query: URL
     const repository = await reviewRepository(state, profile, selection.repository, signal)
     if (!repository || !stillTrusted(state, repository.workspace)) return finish('changed')
     const credential = await repositoryGitHubCredential(repository.path, signal)
-    const read = (replies = false, before?: string) =>
-      readReviewConversationState(repository.path, repository.name, selection.number, head, id, signal, credential, replies, before)
+    const read = (window?: ReviewCommentWindow) =>
+      readReviewConversationState(repository.path, repository.name, selection.number, head, id, signal, credential, window)
     const before = await read()
     if (!before) return finish('unavailable')
     if (before.viewer !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
@@ -459,7 +549,7 @@ export async function submitWorkspaceReviewReply(state: HarnessState, query: URL
     let recovered = matches(supplied) ? supplied : null
     let cursor: string | undefined
     for (let page = 0; !recovered && page < 10; page++) {
-      const current = await read(true, cursor)
+      const current = await read({ direction: 'recovery', cursor })
       if (!current || current.viewer !== viewer || !stillTrusted(state, repository.workspace)) break
       const node = current.comments?.nodes?.find(matches)
       if (node) { recovered = node; break }

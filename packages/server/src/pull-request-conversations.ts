@@ -3,6 +3,10 @@ import { parseFilePatch } from './diff-patch'
 import { repositoryGitHubRequest } from './repository-pull-request'
 
 type Page<T> = { nodes?: (T | null)[], pageInfo?: { endCursor?: string, hasNextPage?: boolean, startCursor?: string, hasPreviousPage?: boolean } }
+export type ReviewCommentWindow =
+  | { direction: 'after' | 'before', cursor: string }
+  | { direction: 'latest' }
+  | { direction: 'recovery', cursor?: string }
 type CommentNode = { id?: string, author?: { id?: string, login?: string }, body?: string, createdAt?: string, url?: string, isMinimized?: boolean }
 type ThreadState = { id: string, isResolved: boolean, viewerCanResolve: boolean, viewerCanUnresolve: boolean, viewerCanReply: boolean }
 type ThreadNode = Partial<ThreadState> & {
@@ -28,7 +32,7 @@ const threadPageQuery = `query PullRequestReviewConversations($owner: String!, $
           ${threadFields}
           path line startLine diffSide startDiffSide originalLine originalStartLine isOutdated
           comments(first: 20) {
-            pageInfo { hasNextPage }
+            pageInfo { hasNextPage endCursor }
             nodes { id author { login } body createdAt url isMinimized }
           }
         }
@@ -39,15 +43,15 @@ const threadPageQuery = `query PullRequestReviewConversations($owner: String!, $
 }`
 const commentFields = 'id author { login ... on Node { id } } body createdAt url isMinimized'
 const replyMarker = /^<!-- harness:review-reply:[0-9a-f-]{36} -->\r?\n\r?\n/u
-const singleThreadQuery = `query PullRequestReviewConversation($id: ID!, $replies: Boolean!, $before: String) {
+const singleThreadQuery = `query PullRequestReviewConversation($id: ID!, $replies: Boolean!, $first: Int, $last: Int, $after: String, $before: String) {
   viewer { id }
   node(id: $id) {
     ... on PullRequestReviewThread {
       ${threadFields}
       pullRequest { number headRefOid repository { nameWithOwner } }
-      comments(last: 50, before: $before) @include(if: $replies) {
+      comments(first: $first, last: $last, after: $after, before: $before) @include(if: $replies) {
         nodes { ${commentFields} }
-        pageInfo { startCursor hasPreviousPage }
+        pageInfo { startCursor hasPreviousPage endCursor hasNextPage }
       }
     }
   }
@@ -58,6 +62,10 @@ export class ReviewConversationConflict extends Error {}
 
 export function reviewConversationAnchor(id: string): string {
   return 'review-' + createHash('sha256').update(id).digest('hex').slice(0, 24)
+}
+
+export function reviewCommentCursor(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(value) ? value : null
 }
 
 function threadState(node?: ThreadNode | null): ThreadState | null {
@@ -80,6 +88,18 @@ export function reviewComment(node: CommentNode | null, thread: string, address:
     minimized: Boolean(node.isMinimized) }
 }
 
+export type ReviewComment = NonNullable<ReturnType<typeof reviewComment>>
+
+function reviewCommentPage(connection: Page<CommentNode>, id: string, address: string, window?: ReviewCommentWindow) {
+  const comments = Array.isArray(connection.nodes)
+    ? connection.nodes.flatMap(comment => reviewComment(comment, id, address) ?? []) : []
+  const { startCursor, endCursor, hasPreviousPage, hasNextPage } = connection.pageInfo ?? {}
+  // GitHub may omit history in the opposite direction from a bounded request.
+  const nextComments = hasNextPage || (comments.length && window?.direction === 'before') ? reviewCommentCursor(endCursor) : null
+  const previousComments = hasPreviousPage || (comments.length && window?.direction === 'after') ? reviewCommentCursor(startCursor) : null
+  return { comments: [...new Map(comments.map(comment => [comment.anchor, comment])).values()], nextComments, previousComments }
+}
+
 function positiveLine(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
 }
@@ -96,8 +116,7 @@ function reviewConversation(node: ThreadNode | null, address: string) {
   return { ...state, anchor: reviewConversationAnchor(state.id), path: node.path, outdated, line, side,
     replyIntent: crypto.randomUUID(),
     location: location && side ? location + (side === 'before' ? ' before changes' : ' after changes') : location,
-    comments: (node.comments?.nodes ?? []).flatMap(comment => reviewComment(comment, state.id, address) ?? []),
-    moreComments: Boolean(node.comments?.pageInfo?.hasNextPage) }
+    ...reviewCommentPage(node.comments ?? {}, state.id, address) }
 }
 
 export type ReviewConversation = NonNullable<ReturnType<typeof reviewConversation>>
@@ -162,9 +181,14 @@ export async function readReviewConversations(path: string, repository: string, 
 }
 
 export async function readReviewConversationState(path: string, repository: string, number: number, head: string, id: string,
-  signal: AbortSignal, credential: string, replies = false, before?: string) {
+  signal: AbortSignal, credential: string, commentWindow?: ReviewCommentWindow) {
   type ScopedThread = ThreadNode & { pullRequest?: { headRefOid?: string, number?: number, repository?: { nameWithOwner?: string } } }
-  const reply = await repositoryGitHubRequest(path, 'graphql', { query: singleThreadQuery, variables: { id, replies, before } }, signal, credential)
+  const variables = { id, replies: Boolean(commentWindow),
+    ...(commentWindow?.direction === 'after' ? { first: 20, after: commentWindow.cursor }
+      : commentWindow && { last: commentWindow.direction === 'recovery' ? 50 : 20,
+        ...('cursor' in commentWindow && commentWindow.cursor ? { before: commentWindow.cursor } : {}) }),
+  }
+  const reply = await repositoryGitHubRequest(path, 'graphql', { query: singleThreadQuery, variables }, signal, credential)
   const result = reply.body as { data?: { viewer?: { id?: string }, node?: ScopedThread }, errors?: unknown[] } | null
   const node = result?.data?.node
   const viewer = result?.data?.viewer?.id
@@ -173,6 +197,20 @@ export async function readReviewConversationState(path: string, repository: stri
   if (!thread || thread.id !== id || node?.pullRequest?.number !== number || node.pullRequest.headRefOid !== head
     || node.pullRequest.repository?.nameWithOwner?.toLowerCase() !== repository.toLowerCase()) throw new ReviewConversationConflict()
   return { thread, viewer, comments: node.comments }
+}
+
+export async function readReviewCommentPage(path: string, repository: string, number: number, head: string, viewer: string,
+  id: string, address: string, signal: AbortSignal, credential: string, window: ReviewCommentWindow) {
+  const state = await readReviewConversationState(path, repository, number, head, id, signal, credential, window)
+  if (!state) return null
+  if (state.viewer !== viewer) throw new ReviewConversationConflict()
+  if (!Array.isArray(state.comments?.nodes) || !state.comments.pageInfo) return null
+  const page = reviewCommentPage(state.comments, id, address, window)
+  if (state.comments.pageInfo.hasNextPage && !page.nextComments
+    || state.comments.pageInfo.hasPreviousPage && !page.previousComments
+    || window.direction === 'after' && page.nextComments === window.cursor
+    || window.direction === 'before' && page.previousComments === window.cursor) return null
+  return page
 }
 
 export async function writeReviewConversation(path: string, id: string, resolved: boolean, signal: AbortSignal, credential: string) {

@@ -31,17 +31,33 @@
         @endif
       </article>
     @endforeach
-    @if(thread.moreComments)<p>More replies are available on GitHub.</p>@endif
-    <template :for="reply in (sentReviewReplies()['{{ thread.anchor }}'] || [])" :key="reply.anchor">
-      <article :id="reply.anchor" data-pr-conversation-comment>
+    <template :for="reply in visibleReviewComments('{{ thread.anchor }}')" :key="reply.anchor">
+      <article :id="reply.anchor" data-pr-conversation-comment tabindex="-1">
         <header>
           <strong :text="reply.author"></strong>
           <time :datetime="reply.time" :text="reviewReplyDate(reply.time)"></time>
           <a :href="reply.href" :hidden="!reply.href" target="_blank" rel="noopener noreferrer" aria-label="Open comment on GitHub">On GitHub</a>
         </header>
-        <div data-transcript-markdown :html="reply.html"></div>
+        <p :hidden="!reply.minimized">Comment minimized on GitHub.</p>
+        <div data-transcript-markdown :hidden="reply.minimized" :html="reply.html"></div>
       </article>
     </template>
+    @if(thread.previousComments || thread.nextComments)
+      <nav data-pr-comment-pages aria-label="Conversation comments">
+        @if(thread.previousComments)
+          <a href="{{ commentsHref(thread, 'before') }}" data-pr-button>Previous comments</a>
+        @endif
+        @if(thread.nextComments)
+          <a href="{{ commentsHref(thread, 'after') }}" :href="nextReviewCommentsHref('{{ thread.anchor }}')" data-pr-button
+            data-pr-load-comments data-comment-anchor="{{ thread.anchor }}"
+            :hidden="!latestCommentCursor('{{ thread.anchor }}')"
+            :aria-disabled="reviewCommentPages()['{{ thread.anchor }}']?.pending ? 'true' : 'false'"
+            :text="reviewCommentPages()['{{ thread.anchor }}']?.pending ? 'Loading…' : 'Load more comments'"
+            @click="loadReviewComments">Load more comments</a>
+        @endif
+        <p data-pr-comments-status role="status" :text="reviewCommentPages()['{{ thread.anchor }}']?.message || ''"></p>
+      </nav>
+    @endif
     <p data-pr-reply-message role="status" :text="replyMessages()['{{ thread.anchor }}'] || ''">@if(replyDraft?.anchor === thread.anchor){{ replyDraft.message }}@elseif(conversationAnchor === thread.anchor){{ replyNotice }}@endif</p>
     <details data-pr-reply @if(replyDraft?.anchor === thread.anchor) open@endif
       @if(!thread.viewerCanReply && replyDraft?.anchor !== thread.anchor) hidden@endif

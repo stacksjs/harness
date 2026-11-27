@@ -26,6 +26,10 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, replyMode }))
   }
+  const configureCommentPages = (commentMode: 'normal' | 'overlap' | 'unavailable' | 'stalled') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, commentMode }))
+  }
   const revealReply = () => {
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     const { invisibleReply, ...shown } = previous
@@ -57,6 +61,35 @@ function reply(status, body) {
 function head(repository, branch) {
   const command = Bun.spawnSync(['git', '--git-dir', repository.bare, 'rev-parse', '--verify', 'refs/heads/' + branch])
   return command.success ? command.stdout.toString().trim() : null
+}
+
+function commentsFor(pull) {
+  return [
+    { id: 'fixture-inline', author: { login: 'fixture-reviewer' }, createdAt: '2026-11-01T14:00:00Z',
+      url: pull.html_url + '#discussion_r4', body: 'Verify the **inline report**. <img src=x onerror=alert(1)> <!-- hidden inline marker -->' },
+    { id: 'fixture-minimized', body: 'Hidden by GitHub', isMinimized: true, url: 'https://other.example/unsafe' },
+    ...Array.from({ length: state.commentMode ? 43 : 0 }, (_, index) => ({
+      id: 'fixture-page-comment-' + (index + 1), author: { login: 'fixture-reviewer' },
+      createdAt: '2026-11-01T14:30:00Z', url: pull.html_url + '#discussion_r' + (100 + index),
+      body: 'History comment **' + (index + 1) + '**.' + (index === 18 ? ' <script>private-fake-html()</script>' : ''),
+    })),
+    ...(state.replies ?? []),
+  ]
+}
+
+function commentPage(pull, variables) {
+  const all = commentsFor(pull)
+  const prefix = 'comments:+'
+  const cursor = variables.after || variables.before
+  const index = cursor && cursor.startsWith(prefix) ? Number(cursor.slice(prefix.length)) : undefined
+  if (cursor && (!Number.isSafeInteger(index) || index < 0 || index >= all.length)) return null
+  const last = variables.before ? index : all.length
+  const start = variables.last ? Math.max(0, last - variables.last) : variables.after ? index + 1 : 0
+  const end = variables.last ? last : Math.min(all.length, start + (variables.first ?? 20))
+  return { nodes: all.slice(state.commentMode === 'overlap' && variables.after ? start - 1 : start, end), pageInfo: {
+    startCursor: prefix + start, endCursor: state.commentMode === 'stalled' && variables.after ? variables.after : prefix + (end - 1),
+    hasPreviousPage: !variables.after && start > 0, hasNextPage: !variables.before && end < all.length,
+  } }
 }
 
 if (url.pathname === '/user') reply(200, { login: 'fixture-user' })
@@ -100,10 +133,13 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   if (query.includes('query PullRequestReviewConversation(')) {
     const pull = state.pulls[0]
+    const comments = pull && variables.replies ? commentPage(pull, variables) : undefined
+    if (variables.replies && (!comments || (state.commentMode === 'unavailable' && variables.after)))
+      reply(200, { errors: [{ message: 'Private comment page diagnostics' }] })
     const node = !pull || ![thread.id, 'other-conversation'].includes(variables.id) ? null : {
       ...thread, id: variables.id, pullRequest: { number: pull.number, headRefOid: pull.head.sha,
         repository: { nameWithOwner: variables.id === thread.id ? pull.base.repo.full_name : 'fixture/another-project' } },
-      ...(variables.replies && { comments: { nodes: state.replies ?? [], pageInfo: { hasPreviousPage: false } } }),
+      ...(variables.replies && { comments }),
     }
     reply(200, { data: { viewer, node } })
   }
@@ -113,12 +149,7 @@ if (url.pathname === '/graphql' && method === 'POST') {
     if (!pull || state.conversationMode === 'unreadable') reply(200, { errors: [{ message: 'Private conversation diagnostics' }] })
     const inline = {
       ...thread, path: 'report.txt', line: 1, startLine: 1, diffSide: 'RIGHT', isOutdated: false,
-      comments: { nodes: [
-        { id: 'fixture-inline', author: { login: 'fixture-reviewer' }, createdAt: '2026-11-01T14:00:00Z',
-          url: pull.html_url + '#discussion_r4', body: 'Verify the **inline report**. <img src=x onerror=alert(1)> <!-- hidden inline marker -->' },
-        { id: 'fixture-minimized', body: 'Hidden by GitHub', isMinimized: true, url: 'https://other.example/unsafe' },
-        ...(state.replies ?? []),
-      ], pageInfo: { hasNextPage: true } },
+      comments: commentPage(pull, { first: 20 }),
     }
     const outdated = { ...thread, id: 'fixture-outdated', isResolved: true, viewerCanResolve: false, viewerCanUnresolve: false,
       path: 'report.txt', originalLine: 12, line: null, diffSide: 'LEFT', isOutdated: true,
@@ -200,5 +231,5 @@ writeFileSync(stateFile, JSON.stringify(state))
 if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
-  return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, revealReply }
+  return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages, revealReply }
 }

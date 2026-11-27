@@ -585,6 +585,10 @@ const RESPONSIVE_SHELL = `
 [data-pr-conversation-comment] header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin-block: 0 5px; }
 [data-pr-conversation-comment] time, [data-pr-conversation-comment] a, [data-pr-conversation-message] { font-size: 12px; }
 [data-pr-conversation-comment] a { color: var(--workspace-accent); }
+[data-pr-conversation-comment]:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+[data-pr-comment-pages] { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-block: 6px; }
+[data-pr-comments-status] { font-size: 12px; }
+[data-pr-comment-pages] [aria-disabled="true"] { cursor: wait; }
 [data-pr-conversation-form] { margin-block-end: 5px; }
 [data-pr-conversation-message]:not(:empty) { margin-block-end: 5px; }
 [data-pr-reply] { margin-block-start: 5px; }

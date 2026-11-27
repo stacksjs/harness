@@ -6379,6 +6379,7 @@ try {
     check('review conversation renders safe Markdown in the Timeline view',
       !await clonePage.evaluate(() => Boolean((globalThis as typeof globalThis & { __pr_html?: boolean }).__pr_html)))
     github.configureConversations('normal')
+    github.configureCommentPages('normal')
     await reviewTabs.getByRole('link', { name: 'Code' }).click()
     await clonePage.locator('[data-pr-file-patch] > summary').click()
     await clonePage.locator('pre[aria-label="Patch for report.txt"]').getByText('+Report fixture', { exact: false }).waitFor()
@@ -6481,6 +6482,32 @@ try {
     check('a reply renders in place and restores focus to Reply with one write',
       clonePage.url() === replyAddress && await openReply.evaluate(element => element === document.activeElement)
       && JSON.parse(readFileSync(github.state, 'utf8')).replyRequests === 1)
+    const loadComments = conversation.getByRole('link', { name: 'Load more comments', exact: true })
+    const postedReply = conversation.getByText('Follow up on the inline report.', { exact: true })
+    await openReply.click()
+    await replyInput.fill('A second unsent review draft.')
+    github.configureCommentPages('unavailable')
+    await loadComments.press('Enter')
+    await conversation.getByText('Could not load more comments. Try again.', { exact: true }).waitFor()
+    check('a failed comment read leaves the loaded conversation and draft available',
+      await replyInput.inputValue() === 'A second unsent review draft.' && await postedReply.count() === 1)
+    github.configureCommentPages('overlap')
+    await loadComments.press('Enter')
+    const firstAdded = conversation.locator('[data-pr-conversation-comment]').filter({ hasText: /History comment 19\./ })
+    await firstAdded.waitFor()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.textContent?.includes('History comment 19.'))
+    check('loading a page skips boundary duplicates and focuses the first added comment',
+      await conversation.getByText('History comment 18.', { exact: true }).count() === 1
+      && await firstAdded.count() === 1 && clonePage.url() === replyAddress)
+    await loadComments.scrollIntoViewIfNeeded()
+    await capture('pull-requests-inline-comment-pages-390x844', clonePage)
+    await loadComments.press('Enter')
+    await conversation.getByText('History comment 43.', { exact: true }).waitFor()
+    await loadComments.waitFor({ state: 'hidden' })
+    check('the final comment page keeps a draft and shows a concurrently posted reply only once',
+      await replyInput.inputValue() === 'A second unsent review draft.' && await postedReply.count() === 1
+      && await conversation.getByText('History comment 38.', { exact: true }).count() === 1
+      && await conversation.locator('[data-pr-conversation-comment]').count() === 46)
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()

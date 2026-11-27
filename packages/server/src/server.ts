@@ -58,7 +58,7 @@ import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
 import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
-import { pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
 import type { PullRequestReplyDraft } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
@@ -1912,13 +1912,19 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (url.pathname === '/pull-requests' || url.pathname === '/pull-requests/viewed' || url.pathname === '/pull-requests/conversation' || url.pathname === '/pull-requests/reply') {
+      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
-          'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
+          'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
         if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
           || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(120_000)])
+        if (url.pathname === '/pull-requests/comments') {
+          if (request.method !== 'GET') return new Response(null, { status: 405, headers })
+          srv.timeout(request, 150)
+          return loadWorkspaceReviewComments(engine.current, url.searchParams, signal).then(({ status, body }) =>
+            Response.json(body, { status, headers: { ...headers, 'content-type': 'application/json' } }))
+        }
         const render = async (query: URLSearchParams, status = 200, replyDraft?: PullRequestReplyDraft) => {
           try {
             const view = await pullRequestWorkspace(engine.current, query, signal)
