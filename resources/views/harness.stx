@@ -107,6 +107,7 @@ export const initialSessionModel = activeSession?.model || ''
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialFork = activeSession?.fork || null
 export const sessionPullRequest = activeSession?.pullRequest || null
+export const pullRequestProfile = $props.pullRequestProfile || 0
 export const initialCodexSelection = activeCodex && activeSession.model
   ? { model: activeSession.model, ...activeSession.codexTurnOptions } : null
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
@@ -193,6 +194,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <span class="inline-block size-4 i-hugeicons-pencil-edit-02" aria-hidden="true"></span>
           </button>
         </div>
+        @if(projectCloneAllowed)
+          <a data-navigation-pr href="/pull-requests?profile={{ activeProfile }}" :href="'/pull-requests?profile=' + visibleProfile()" class="harness-nav-search">
+            <span class="inline-block size-4 i-hugeicons-git-pull-request" aria-hidden="true"></span>Pull requests
+          </a>
+        @endif
       @endif
     </div>
     <div data-navigation-content>
@@ -4711,6 +4717,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return link ? 'https://github.com/' + link.repository + '/pull/' + link.number : undefined
   }
 
+  function reviewPullRequestHref(link) {
+    const selectedUrl = pullRequestLink(link)
+    if (!selectedUrl) return undefined
+    return '/pull-requests?' + new URLSearchParams({ profile: String(activeProfile), selectedUrl })
+  }
+
   function toggleRepositoryChecks() {
     if (repositoryChecksOpen()) {
       repositoryChecksRequest?.abort()
@@ -6191,6 +6203,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function pullRequestAddress(pullRequest, project, thread) {
     const params = new URLSearchParams({ pr: pullRequest })
+    if (pullRequestProfile) params.set('profile', String(pullRequestProfile))
     if (project) params.set('workspace', String(project))
     if (thread) params.set('session', String(thread))
     return '/prompt-link/pull-request?' + params

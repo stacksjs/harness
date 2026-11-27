@@ -3,7 +3,7 @@ import { readRepositoryInput, repositoryGit } from './repository-commit'
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
 import { repositorySyncPreview, syncRepository } from './repository-sync'
 
-type GitHubReply = { status: number, body: unknown }
+type GitHubReply = { status: number, body: unknown, hasNextPage: boolean }
 type GitHubRepository = { full_name?: string, default_branch?: string, archived?: boolean, parent?: { full_name?: string }, source?: { full_name?: string } }
 type GitHubPullRequest = { html_url?: string, number?: number, draft?: boolean, head?: { ref?: string, sha?: string, repo?: { full_name?: string } }, base?: { ref?: string } }
 
@@ -42,7 +42,8 @@ export async function repositoryGitHubRequest(path: string, endpoint: string, pa
   catch { throw new RepositoryPullRequestError('GitHub returned an unreadable response. Try again.') }
   if (status === 401) throw new RepositoryPullRequestError('GitHub authentication expired. Run gh auth login on this host.')
   if (status === 403) throw new RepositoryPullRequestError('GitHub refused this request. Check the account’s repository permissions or try again after its rate limit resets.')
-  return { status, body }
+  const links = /^link:[^\r\n]+/imu.exec(output.slice(0, json.index))?.[0] ?? ''
+  return { status, body, hasNextPage: /;\s*rel="next"/u.test(links) }
 }
 
 async function configuredGitHubRepository(path: string, remote: string, forPush: boolean) {

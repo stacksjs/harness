@@ -1,0 +1,253 @@
+<script server>
+export const profiles = $props.profiles || []
+export const repositories = $props.repositories || []
+export const selected = $props.selected || null
+export const pulls = $props.rows || []
+export const failures = $props.failures || []
+export const tab = $props.tab || 'summary'
+export const selectionError = $props.selectionError || ''
+export const hasDetail = Boolean(selected || selectionError)
+export const stateOptions = [{ value: 'open', label: 'Open' }, { value: 'closed', label: 'Closed' }, { value: 'merged', label: 'Merged' }, { value: 'all', label: 'All states' }]
+export const sortOptions = [{ value: 'updated', label: 'Recently updated' }, { value: 'newest', label: 'Newest created' }, { value: 'oldest', label: 'Oldest created' }]
+export const sort = $props.sort
+export const tabOptions = [{ value: 'summary', label: 'Summary', href: $props.summaryHref },
+  { value: 'timeline', label: 'Timeline', href: $props.timelineHref }, { value: 'code', label: 'Code', href: $props.codeHref }]
+const outcomes = { failed: 'Failed', cancelled: 'Cancelled', 'action-required': 'Action required', pending: 'Pending', passed: 'Passed', skipped: 'Skipped', neutral: 'Neutral', unknown: 'Unknown' }
+const attention = check => !['passed', 'neutral', 'skipped'].includes(check.status)
+export const checks = (selected?.checks || []).filter(attention).sort((a, b) => Number(a.status === 'pending') - Number(b.status === 'pending'))
+export const completed = (selected?.checks || []).filter(check => !attention(check))
+export const primaryChecks = checks.length ? checks : completed
+export const checksLabel = check => outcomes[check.status] || 'Unknown'
+const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+export const dateLabel = date => date && Number.isFinite(Date.parse(date)) ? dates.format(new Date(date)) : ''
+export const detailTitle = selected?.title || 'Pull request unavailable'
+export const headLabel = selected?.head ? selected.head.slice(0, 7) : ''
+
+export const backHref = $props.backHref
+export const search = $props.search
+export const activeProfileId = $props.profile
+export const repositoryFilter = $props.repository
+export const filter = $props.filter
+export const pageBack = $props.pageBack
+export const page = $props.page
+export const pageNext = $props.pageNext
+export const listHref = $props.listHref
+export const detailPage = $props.detailPage
+export const detailBack = $props.detailBack
+export const detailNext = $props.detailNext
+</script>
+<main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
+  <header data-pr-workspace-header>
+    <a href="{{ backHref }}" data-pr-back>
+      <span class="inline-block size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>Workspace
+    </a>
+    <h1>Pull requests</h1>
+  </header>
+  <div data-pr-workspace-columns data-detail="{{ hasDetail }}">
+    <section aria-label="Pull request list" data-pr-workspace-list>
+      <form method="get" action="/pull-requests" data-pr-filters>
+        <label data-pr-search>
+          <span>Search titles</span>
+          <input type="search" name="q" placeholder="Title keywords" maxlength="120" value="{{ search }}">
+        </label>
+        <label>
+          <span>Profile</span>
+          <select name="profile">
+            @foreach(profiles as profile)
+              <option value="{{ profile.id }}" @if(profile.id === activeProfileId) selected@endif>{{ profile.name }}</option>
+            @endforeach
+          </select>
+        </label>
+        <label>
+          <span>Repository</span>
+          <select name="repository">
+            <option value="">All repositories</option>
+            @foreach(repositories as repository)
+              <option value="{{ repository.name }}" @if(repository.name === repositoryFilter) selected@endif>{{ repository.name }}</option>
+            @endforeach
+          </select>
+        </label>
+        <label>
+          <span>State</span>
+          <select name="state">
+            @foreach(stateOptions as option)
+              <option value="{{ option.value }}" @if(option.value === filter) selected@endif>{{ option.label }}</option>
+            @endforeach
+          </select>
+        </label>
+        <label>
+          <span>Sort</span>
+          <select name="sort">
+            @foreach(sortOptions as option)
+              <option value="{{ option.value }}" @if(option.value === sort) selected@endif>{{ option.label }}</option>
+            @endforeach
+          </select>
+        </label>
+        <button type="submit" data-pr-button>Apply filters</button>
+      </form>
+      @if(failures.length)
+        <details data-pr-list-problems>
+          <summary>Some repositories could not be loaded</summary>
+          @foreach(failures as failure)
+            <p>{{ failure.repository }}. {{ failure.reason }}</p>
+          @endforeach
+        </details>
+      @endif
+      @if(pulls.length)
+        <ul data-pr-list>
+          @foreach(pulls as pull)
+            <li>
+              <a href="{{ pull.href }}" data-pr-row @if(pull.selected) aria-current="page"@endif>
+                <span class="inline-block size-4 i-hugeicons-git-pull-request" data-pr-state="{{ pull.status }}" aria-hidden="true"></span>
+                <span data-pr-row-copy>
+                  <strong><span data-pr-number>#{{ pull.number }}</span> {{ pull.title }}</strong>
+                  <span>{{ pull.repository }} @if(pull.author) · {{ pull.author }}@endif</span>
+                </span>
+                <span data-pr-row-status>
+                  {{ pull.status }}
+                  @if(pull.updated)
+                    <time datetime="{{ pull.updated }}">{{ dateLabel(pull.updated) }}</time>
+                  @endif
+                </span>
+              </a>
+            </li>
+          @endforeach
+        </ul>
+      @elseif(!repositories.length)
+        <p data-pr-empty>Add a trusted project with a GitHub remote to see its pull requests here.</p>
+      @elseif(!failures.length)
+        <p data-pr-empty>No pull requests match these filters.</p>
+      @endif
+      @if(pageBack || pageNext)
+        <nav data-pr-pagination aria-label="Pull request pages">
+          @if(pageBack)<a href="{{ pageBack }}">Previous page</a>@endif
+          <span>Page {{ page }}</span>
+          @if(pageNext)<a href="{{ pageNext }}">Next page</a>@endif
+        </nav>
+      @endif
+    </section>
+    @if(hasDetail)
+      <section aria-labelledby="pr-detail-title" data-pr-workspace-detail>
+        <div data-pr-detail-heading>
+          <a href="{{ listHref }}" data-pr-back>Back to list</a>
+          @if(selected?.title)
+            <span data-pr-detail-repo>{{ selected.repository }} <span data-pr-number>#{{ selected.number }}</span></span>
+          @endif
+          <h2 id="pr-detail-title">{{ detailTitle }}</h2>
+          @if(selected?.title)
+            <p data-pr-detail-meta>
+              <strong data-pr-state="{{ selected.status }}">{{ selected.status }}</strong>
+              @if(selected.author)<span>{{ selected.author }}</span>@endif
+              @if(selected.updated)<time datetime="{{ selected.updated }}">{{ dateLabel(selected.updated) }}</time>@endif
+              @if(headLabel)<code title="{{ selected.head }}">Head {{ headLabel }}</code>@endif
+            </p>
+            @if(selected.headRef && selected.baseRef)
+              <p data-pr-branches><code>{{ selected.baseRef }}</code><span aria-label="receives changes from">←</span><code>{{ selected.headRef }}</code></p>
+            @endif
+            <div data-pr-detail-actions>
+              @if(selected.thread)
+                <a href="{{ selected.thread.href }}" data-pr-button>Open linked thread</a>
+              @else
+                <a href="{{ selected.startHref }}" data-pr-button>Open as thread</a>
+              @endif
+              <a href="{{ selected.url }}" target="_blank" rel="noopener noreferrer">Open on GitHub</a>
+            </div>
+          @endif
+        </div>
+        @if(selectionError || !selected?.title)
+          <p data-pr-empty role="status">{{ selectionError || selected?.error }}</p>
+        @else
+          <nav aria-label="Pull request views" data-pr-tabs>
+            @foreach(tabOptions as item)
+              <a href="{{ item.href }}" @if(item.value === tab) aria-current="page"@endif>{{ item.label }}</a>
+            @endforeach
+          </nav>
+          <div data-pr-detail-content>
+          @if(tab === 'summary')
+            <h3>Description</h3>
+            @if(selected.description)
+              <div data-pr-markdown="description" data-transcript-markdown></div>
+            @else
+              <p>No description.</p>
+            @endif
+            <h3>Checks</h3>
+            @if(selected.error)
+              <p role="status">{{ selected.error }}</p>
+            @elseif(!checks.length && !completed.length)
+              <p>No checks reported for this commit.</p>
+            @else
+              <ul data-pr-result-list>
+                @foreach(primaryChecks as check)
+                  <li>
+                    <div>
+                      <strong>{{ check.name }}</strong>
+                      @if(check.description)<p>{{ check.description }}</p>@endif
+                    </div>
+                    <span data-check-status="{{ check.status }}">{{ checksLabel(check) }}</span>
+                    @if(check.url)<a href="{{ check.url }}" target="_blank" rel="noopener noreferrer" aria-label="Details for {{ check.name }}">Details</a>@endif
+                  </li>
+                @endforeach
+              </ul>
+              @if(checks.length && completed.length)
+                <details data-pr-completed>
+                  <summary>Completed checks ({{ completed.length }})</summary>
+                  <ul data-pr-result-list>
+                    @foreach(completed as check)
+                      <li>
+                        <div>
+                          <strong>{{ check.name }}</strong>
+                          @if(check.description)<p>{{ check.description }}</p>@endif
+                        </div>
+                        <span data-check-status="{{ check.status }}">{{ checksLabel(check) }}</span>
+                        @if(check.url)<a href="{{ check.url }}" target="_blank" rel="noopener noreferrer" aria-label="Details for {{ check.name }}">Details</a>@endif
+                      </li>
+                    @endforeach
+                  </ul>
+                </details>
+              @endif
+              @if(selected.truncated)<p>More checks are available on GitHub.</p>@endif
+            @endif
+          @elseif(selected.error)
+            <p role="status">{{ selected.error }}</p>
+          @elseif(tab === 'timeline')
+            @if(!selected.items?.length)<p>No conversation activity on this page.</p>@endif
+            <ol data-pr-activity>
+              @foreach(selected.items || [] as item)
+                <li>
+                  <p><strong>{{ item.author }}</strong> {{ item.state }} <time datetime="{{ item.time }}">{{ dateLabel(item.time) }}</time></p>
+                  @if(item.commit)<code title="{{ item.commit }}">{{ item.commit.slice(0, 7) }}</code>@endif
+                  @if(item.text)<div data-pr-markdown="{{ item.id }}" data-transcript-markdown></div>@endif
+                </li>
+              @endforeach
+            </ol>
+          @else
+            @if(!selected.files?.length)<p>No files on this page.</p>@endif
+            <ul data-pr-files>
+              @foreach(selected.files || [] as file)
+                <li>
+                  <details>
+                    <summary>
+                      <code>{{ file.path }}</code>
+                      <span>{{ file.status }} <strong data-pr-additions>+{{ file.additions }}</strong> <strong data-pr-deletions>-{{ file.deletions }}</strong></span>
+                    </summary>
+                    @if(file.previousPath)<p>Renamed from <code>{{ file.previousPath }}</code></p>@endif
+                    @if(file.patch)<pre tabindex="0" aria-label="Patch for {{ file.path }}"><code>{{ file.patch }}</code></pre>
+                    @else<p>No text patch available. Open the request on GitHub to inspect this file.</p>@endif
+                  </details>
+                </li>
+              @endforeach
+            </ul>
+          @endif
+          @if(tab !== 'summary' && (detailPage > 1 || selected.more))
+            <nav data-pr-pagination aria-label="Detail pages">
+              @if(detailPage > 1)<a href="{{ detailBack }}">Previous page</a>@endif
+              <span>Page {{ detailPage }}</span>
+              @if(selected.more && detailPage < 100)<a href="{{ detailNext }}">Next page</a>@endif
+            </nav>
+          @endif
+          </div>
+        @endif
+      </section>
+    @endif
+  </div>
+</main>

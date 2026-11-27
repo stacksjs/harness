@@ -98,6 +98,8 @@
       :href="repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().url : pullRequestLink(selectedRepositoryPullRequest())"
       :text="'GitHub #' + (repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().number : selectedRepositoryPullRequest()?.number)"></a>
     @if(workspaceEditorAllowed)
+      <a class="content-center min-h-8 underline underline-offset-2" :hidden="!selectedRepositoryPullRequest()"
+        :href="reviewPullRequestHref(selectedRepositoryPullRequest())">Review PR</a>
       <button type="button" data-pull-request-checks-toggle :hidden="!selectedRepositoryPullRequest()" aria-controls="harness-pull-request-checks"
         :aria-expanded="repositoryChecksOpen() ? 'true' : 'false'" @click="toggleRepositoryChecks" class="min-h-9 font-medium underline underline-offset-2">Checks</button>
       <span data-pull-request-checks-summary :hidden="!repositoryChecksSummary()" :text="repositoryChecksSummary()"></span>

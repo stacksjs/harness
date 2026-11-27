@@ -56,7 +56,8 @@ import { respondWorkspaceFile } from './workspace-files'
 import { threadSidebarLayout } from './thread-sidebar'
 import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
-import { renderHarnessView, viewProps } from './views'
+import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
+import { pullRequestWorkspace, renderPullRequestMarkdown } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -1003,10 +1004,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return new Response(null, { status: 403, headers })
     const pull = parsePullRequest(url.searchParams.get('pr') ?? '')
     if (!pull) return respond({ error: 'Invalid GitHub pull request.' }, 400)
-    const existing = findPullRequestThread(engine.current, pull)
+    const profileId = url.searchParams.has('profile') ? Number(url.searchParams.get('profile')) : undefined
+    if (profileId !== undefined && !engine.current.profiles.has(profileId)) return respond({ error: 'This profile is unavailable.' }, 404)
+    const existing = findPullRequestThread(engine.current, pull, profileId)
     if (request.method === 'GET') {
       if (existing) return respond({ sessionId: existing.id })
-      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true })
+      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true, profileId })
       return respond({ project: match ? linkedProject(match.workspace) : null, canCheckOut: local })
     }
     if (request.method !== 'POST') return new Response(null, { status: 405, headers })
@@ -1031,12 +1034,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     pullRequestCheckouts.add(key)
     extendTimeout()
     try {
-      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true, workspaceId })
+      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true, workspaceId, profileId })
       if (!match) return respond({ error: 'The matching project is unavailable or needs trust.' }, 409)
       const commit = await fetchPullRequest(match.path, match.remote, pull)
       if (!commit) return respond({ error: 'Git could not fetch this pull request. Check the number, network, and Git credentials.' }, 502)
       const workspace = engine.current.workspaces.get(workspaceId)
-      if (closing || !workspace?.trusted || workspace.path !== match.workspace.path)
+      if (closing || !workspace?.trusted || workspace.path !== match.workspace.path
+        || (profileId !== undefined && workspace.profileId !== profileId))
         return respond({ error: 'The project changed during checkout. Check its trust settings and try again.' }, 409)
       const result = await engine.dispatchInternal({
         id: 'pull-request_' + crypto.randomUUID(),
@@ -1905,6 +1909,22 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
+      if (url.pathname === '/pull-requests') {
+        const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
+        const site = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
+        if (request.method !== 'GET') return new Response(null, { status: 405, headers })
+        srv.timeout(request, 150)
+        return pullRequestWorkspace(engine.current, url.searchParams, AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]))
+          .then(async (view) => {
+            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-pull-requests.stx'), view)
+            return new Response(renderPullRequestMarkdown(html, view), { headers })
+          })
+          .catch(() => new Response('Could not load the pull request workspace. Try again.', { status: 503, headers }))
+      }
+
       const settings = settingsSection(url.pathname)
       if (settings === 'general' && url.pathname !== '/settings/general')
         return new Response(null, { status: 307, headers: { location: '/settings/general' + url.search } })
@@ -1941,6 +1961,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           workspaceId: Number(workspaceUrl.searchParams.get('workspace')) || undefined,
           withoutProject: sharedDraft || workspaceUrl.searchParams.get('project') === 'none',
           freshDraftId: workspaceUrl.searchParams.get('draft'),
+          pullRequestProfile: sharedDraft ? Number(workspaceUrl.searchParams.get('profile')) || undefined : undefined,
           settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,

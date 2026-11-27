@@ -8,13 +8,13 @@ type PullRequest = NonNullable<ReturnType<typeof parsePullRequest>>
 
 const exec = promisify(execFile)
 
-export function findPullRequestThread(state: HarnessState, pull: PullRequest) {
+export function findPullRequestThread(state: HarnessState, pull: PullRequest, profileId?: number) {
   let match
   for (const session of state.sessions.values()) {
     const workspace = state.workspaces.get(session.workspaceId)
     const matches = (link: { repository: string, number: number } | undefined) =>
       link?.repository.toLowerCase() === pull.repository.toLowerCase() && link.number === pull.number
-    if (!workspace?.trusted || session.navigation?.archivedAt
+    if (!workspace?.trusted || (profileId !== undefined && workspace.profileId !== profileId) || session.navigation?.archivedAt
       || (!matches(session.pullRequest) && !session.linkedPullRequests?.some(matches))) continue
     if (!match || (session.lastActivityAt ?? 0) >= (match.lastActivityAt ?? 0)) match = session
   }

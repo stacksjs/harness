@@ -6360,6 +6360,41 @@ try {
     check('refresh recovers from a GitHub read error and closing leaves the linked PR intact',
       await checksToggle.getAttribute('aria-expanded') === 'false' && await linkedPr.getAttribute('href') === address
       && JSON.parse(readFileSync(github.state, 'utf8')).posts === 1)
+
+    github.configureChecks(checks)
+    const returnThread = new URL(clonePage.url()).pathname
+    await clonePage.getByRole('link', { name: 'Review PR', exact: true }).click()
+    const reviewTitle = clonePage.getByRole('heading', { name: 'Verify the draft pull request' })
+    await reviewTitle.waitFor()
+    const reviewList = clonePage.getByRole('region', { name: 'Pull request list' })
+    const reviewTabs = clonePage.getByRole('navigation', { name: 'Pull request views' })
+    check('the Changes link opens the selected request directly with the matching thread and responsive list',
+      new URL(clonePage.url()).searchParams.get('selectedUrl') === address && !await reviewList.isVisible()
+      && await clonePage.getByRole('link', { name: 'Open linked thread' }).getAttribute('href') === returnThread)
+    await clonePage.getByText('Integration suite', { exact: true }).waitFor()
+    await capture('pull-requests-summary-390x844', clonePage)
+    await reviewTabs.getByRole('link', { name: 'Timeline' }).click()
+    await clonePage.getByText('fixture-reviewer', { exact: true }).waitFor()
+    await clonePage.locator('[data-pr-activity] strong').filter({ hasText: 'export' }).waitFor()
+    check('review conversation renders safe Markdown in the Timeline view',
+      !await clonePage.evaluate(() => Boolean((globalThis as typeof globalThis & { __pr_html?: boolean }).__pr_html)))
+    await reviewTabs.getByRole('link', { name: 'Code' }).click()
+    await clonePage.locator('[data-pr-files] summary').click()
+    await clonePage.locator('pre[aria-label="Patch for report.txt"]').getByText('+Report fixture', { exact: false }).waitFor()
+    await clonePage.setViewportSize({ width: 1280, height: 800 })
+    await reviewList.waitFor()
+    await capture('pull-requests-code-1280x800', clonePage)
+    await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
+    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('unmatched review')
+    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
+    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('draft pull request')
+    await reviewList.getByRole('combobox', { name: 'Sort' }).selectOption('oldest')
+    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
+    check('review search reopens a matching title and restores the selected sort from its address',
+      new URL(clonePage.url()).searchParams.get('q') === 'draft pull request'
+      && await reviewList.getByRole('combobox', { name: 'Sort' }).inputValue() === 'oldest')
   }
   finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
 

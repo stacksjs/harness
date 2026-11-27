@@ -44,6 +44,7 @@ export interface ViewProps {
   draftWithoutProject: boolean
   missingThread: boolean
   freshDraftId: string | null
+  pullRequestProfile: number | null
   activeSession: {
     turns: ReadonlyArray<{ id: number, response: string, status: string }>
     [key: string]: unknown
@@ -118,6 +119,7 @@ export function viewProps(state: HarnessState, options: {
   workspaceId?: number
   withoutProject?: boolean
   freshDraftId?: string | null
+  pullRequestProfile?: number
   serverUrl: string
   codecUrl?: string
   remoteEnabled?: boolean
@@ -213,6 +215,7 @@ export function viewProps(state: HarnessState, options: {
     missingThread: options.missingThread === true,
     draftWorkspace,
     draftWithoutProject,
+    pullRequestProfile: options.pullRequestProfile ?? null,
     freshDraftId: !active && (draftWorkspace || draftWithoutProject) && /^web_[a-z0-9]{1,16}_[a-z0-9]{1,6}$/.test(options.freshDraftId ?? '')
       ? options.freshDraftId ?? null
       : null,
@@ -337,30 +340,7 @@ function resolveView(): string | null {
 export async function renderHarnessView(props: ViewProps): Promise<string | null> {
   const path = resolveView()
   if (!path) return null
-  // Socket-only hosts never need the renderer. Web requests load its STX
-  // subpath directly so rendering does not also load the other SDK features.
-  const { renderView } = await import('@stacksjs/stx/build-views')
-  // The app's stx config, loaded explicitly: `renderView` builds its options
-  // from `defaultConfig` alone and never reads `config/ui.ts`, so without
-  // this spread the config was decorative — `autoShell`, `app.head` and
-  // `stateDir` all unreachable, and the page shipped as a bare fragment with
-  // no doctype, no title and no charset (stx-standards §2, §4).
-  const uiPath = join(process.cwd(), 'config/ui.ts')
-  const ui = existsSync(uiPath) ? (await import(uiPath)).default : {}
-  // `renderView` resolves components by filename, and searches only the app's
-  // own directories plus stx's built-ins — so `<Sidebar>` renders as a
-  // "component not found" block unless it is pointed at the library.
-  //
-  // It must point at `src/`, not `dist/`: the published dist ships hashed
-  // filenames (`Sidebar-56px4jha.stx`) that plain-name lookup cannot find,
-  // while `src/ui/<name>/<Name>.stx` keeps the tag name. That is also what the
-  // package's own stx plugin registers, so this matches how a configured stx
-  // build resolves them.
-  const html = await renderView(path, props as unknown as Record<string, unknown>, {
-    ...ui,
-    buildMode: 'serve',
-    componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
-  })
+  const html = await renderHarnessTemplate(path, props as unknown as Record<string, unknown>)
   const responses = props.activeSession?.turns.filter(turn => turn.response)
   if (!responses?.length) return html
 
@@ -380,4 +360,31 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
       element.setInnerContent(renderTranscriptMarkdown(turn.response), { html: true })
     },
   }).transform(html)
+}
+
+export async function renderHarnessTemplate(path: string, props: Record<string, unknown>) {
+  // Socket-only hosts never need the renderer. Web requests load its STX
+  // subpath directly so rendering does not also load the other SDK features.
+  const { renderView } = await import('@stacksjs/stx/build-views')
+  // The app's stx config, loaded explicitly: `renderView` builds its options
+  // from `defaultConfig` alone and never reads `config/ui.ts`, so without
+  // this spread the config was decorative — `autoShell`, `app.head` and
+  // `stateDir` all unreachable, and the page shipped as a bare fragment with
+  // no doctype, no title and no charset (stx-standards §2, §4).
+  const uiPath = join(process.cwd(), 'config/ui.ts')
+  const ui = existsSync(uiPath) ? (await import(uiPath)).default : {}
+  // `renderView` resolves components by filename, and searches only the app's
+  // own directories plus stx's built-ins — so `<Sidebar>` renders as a
+  // "component not found" block unless it is pointed at the library.
+  //
+  // It must point at `src/`, not `dist/`: the published dist ships hashed
+  // filenames (`Sidebar-56px4jha.stx`) that plain-name lookup cannot find,
+  // while `src/ui/<name>/<Name>.stx` keeps the tag name. That is also what the
+  // package's own stx plugin registers, so this matches how a configured stx
+  // build resolves them.
+  return renderView(path, props, {
+    ...ui,
+    buildMode: 'serve',
+    componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
+  })
 }

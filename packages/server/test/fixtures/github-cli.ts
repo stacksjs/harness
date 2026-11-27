@@ -54,15 +54,33 @@ if (url.pathname === '/graphql' && method === 'POST') {
   } } } })
 }
 
+if (url.pathname === '/search/issues') {
+  const keyword = url.searchParams.get('q') ?? ''
+  const selected = /repo:([^ ]+)/.exec(keyword)?.[1]
+  const title = keyword.split(String.fromCharCode(34))[1] ?? ''
+  reply(200, { items: state.pulls.filter(pull => pull.base.repo.full_name === selected && pull.title.toLowerCase().includes(title.toLowerCase())) })
+}
 if (!repo) reply(404, {})
 if (parts.length === 4) reply(200, { full_name: name, default_branch: 'main', parent: repo.parent && { full_name: repo.parent } })
 if (parts[4] === 'branches') {
   const sha = head(repo, decodeURIComponent(parts[5]))
   reply(sha ? 200 : 404, sha ? { commit: { sha } } : {})
 }
+const pulls = state.pulls.filter(pull => pull.base.repo.full_name === name)
+const detail = pulls.find(pull => pull.number === Number(parts[5]))
+if (parts[4] === 'issues' && parts[6] === 'timeline' && detail) reply(200, [
+  { id: 5, event: 'commented', user: { login: 'fixture-reviewer' }, created_at: '2026-11-01T13:00:00Z', body: 'Check the **export**. <script>globalThis.__pr_html = true</script>' },
+  { id: 3, event: 'reviewed', user: { login: 'fixture-approver' }, state: 'approved', submitted_at: '2026-11-01T14:00:00Z' },
+])
 if (parts[4] !== 'pulls') reply(404, {})
-if (method === 'GET') reply(200, state.pulls.filter(pull => pull.base.repo.full_name === name
-  && pull.base.ref === url.searchParams.get('base') && pull.head.label === url.searchParams.get('head')))
+if (method === 'GET' && parts[5]) {
+  if (!detail) reply(404, {})
+  if (parts[6] === 'files') reply(200, [{ filename: 'report.txt', status: 'added', additions: 1, deletions: 0,
+    patch: '@@ -0,0 +1 @@' + String.fromCharCode(10) + '+Report fixture' }])
+  reply(200, detail)
+}
+if (method === 'GET') reply(200, pulls.filter(pull => !url.searchParams.has('head')
+  || (pull.base.ref === url.searchParams.get('base') && pull.head.label === url.searchParams.get('head'))))
 
 const input = JSON.parse(await Bun.stdin.text())
 state.posts++
@@ -77,7 +95,7 @@ const headRepository = state.repositories[repositoryName]
 const sha = headRepository && head(headRepository, headRef)
 if (!sha) reply(422, {})
 const number = state.pulls.length + 1
-const pull = { ...input, number, html_url: 'https://github.com/' + name + '/pull/' + number,
+const pull = { ...input, number, state: 'open', user: { login: 'fixture-user' }, created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z', html_url: 'https://github.com/' + name + '/pull/' + number,
   base: { ref: input.base, repo: { full_name: name } },
   head: { ref: headRef, sha, label: owner + ':' + headRef, repo: { full_name: repositoryName } } }
 state.pulls.push(pull)

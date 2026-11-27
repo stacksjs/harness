@@ -32,7 +32,7 @@ export function linkedProject(workspace: WorkspaceState) {
   return { id: workspace.id, profile: workspace.profileId, name: basename(workspace.path) }
 }
 
-export async function findPromptLinkProject(state: HarnessState, repository: string, options?: { pullRequest?: boolean, workspaceId?: number }) {
+export async function findPromptLinkProject(state: HarnessState, repository: string, options?: { pullRequest?: boolean, workspaceId?: number, profileId?: number }) {
   const named = repository.toLowerCase()
   const recent = new Map<number, number>()
   for (const session of state.sessions.values()) {
@@ -40,7 +40,8 @@ export async function findPromptLinkProject(state: HarnessState, repository: str
     recent.set(session.workspaceId, Math.max(recent.get(session.workspaceId) ?? 0, activity))
   }
   const workspaces = [...state.workspaces.values()].filter(workspace => workspace.trusted && !workspace.scratch
-    && (options?.workspaceId === undefined || workspace.id === options.workspaceId))
+    && (options?.workspaceId === undefined || workspace.id === options.workspaceId)
+    && (options?.profileId === undefined || workspace.profileId === options.profileId))
     .sort((left, right) => (recent.get(right.id) ?? 0) - (recent.get(left.id) ?? 0))
   const names = options?.pullRequest ? ['origin', 'upstream'] : ['origin']
   for (const workspace of workspaces) {
