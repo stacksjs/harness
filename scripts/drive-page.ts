@@ -894,6 +894,35 @@ try {
   })
   await enter.waitFor({ state: 'hidden' })
   check('dismissing the system keyboard restores the thread composer', await touch.locator('[data-composer]').isVisible())
+
+  // Some mobile bridges answer with an empty string when they cannot read
+  // another app's clipboard. The system edit menu can still paste explicitly.
+  await touch.evaluate(() => Object.defineProperty(window, 'craft', { configurable: true, value: { clipboard: { read: () => '' } } }))
+  const actions = touch.getByRole('button', { name: 'Terminal actions', exact: true })
+  const paste = touch.getByRole('menuitem', { name: 'Paste', exact: true })
+  const pasteDialog = touch.getByRole('dialog', { name: 'Paste into terminal', exact: true })
+  const pasteText = pasteDialog.getByRole('textbox', { name: 'Terminal paste text', exact: true })
+  const insert = pasteDialog.getByRole('button', { name: 'Paste text', exact: true })
+  await actions.tap()
+  await paste.tap()
+  await pasteText.fill('echo discarded-input')
+  await pasteDialog.getByRole('button', { name: 'Cancel', exact: true }).tap()
+  await pasteDialog.waitFor({ state: 'hidden' })
+  await actions.tap()
+  await paste.tap()
+  check('terminal paste recovery clears cancelled input', await pasteText.inputValue() === '' && await insert.isDisabled())
+  const recoveredPaste = 'echo "paste-$((40+2))" # This comment makes the preview wrap at narrow phone widths.'
+  await pasteText.fill(recoveredPaste)
+  check('system paste preview wraps long lines without changing the text', await pasteText.inputValue() === recoveredPaste
+    && await pasteText.evaluate(element => element.scrollWidth <= element.clientWidth + 1))
+  await capture('terminal-touch-system-paste', touch)
+  await insert.tap()
+  await pasteDialog.waitFor({ state: 'hidden' })
+  check('system paste stages the line without executing it', !await screen.evaluate(element =>
+    element.textContent?.split('\n').some(row => row.trim() === 'paste-42')))
+  await touch.keyboard.press('Enter')
+  await touch.waitForFunction(() => document.querySelector('[data-terminal-screen]')?.textContent?.split('\n').some(row => row.trim() === 'paste-42'))
+  check('shell Return submits the recovered paste in the same terminal', !(await screen.textContent())?.includes('discarded-input'))
 }
 finally { await terminalTouchContext.close() }
 await page.setViewportSize({ width: 1280, height: 800 })
