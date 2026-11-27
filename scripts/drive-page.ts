@@ -3926,6 +3926,30 @@ try {
   const previewAddress = browserPane.getByRole('textbox', { name: 'Preview address' })
   const activeFrame = browserPane.frameLocator('iframe:not([hidden])')
   const loopback = `127.0.0.1:${previewSite.port}`
+  const legacyAndroidPage = await browser.newPage({ viewport: { width: 390, height: 844 }, colorScheme, reducedMotion })
+  try {
+    await legacyAndroidPage.addInitScript(() => Object.defineProperty(globalThis, 'CraftAndroid', { value: {} }))
+    let embeddedRequests = 0
+    legacyAndroidPage.on('request', (request) => {
+      if (new URL(request.url()).host === loopback) embeddedRequests++
+    })
+    await legacyAndroidPage.goto(new URL(ledgerPath, baseUrl).href)
+    await legacyAndroidPage.getByRole('button', { name: 'Workspace actions' }).click()
+    await legacyAndroidPage.locator('[data-preview-toggle]').click()
+    const nativePreview = legacyAndroidPage.getByRole('region', { name: 'Browser', exact: true })
+    const address = nativePreview.getByRole('textbox', { name: 'Preview address' })
+    await address.fill(loopback)
+    await address.press('Enter')
+    const external = nativePreview.getByRole('link', { name: 'Open in browser', exact: true })
+    await external.waitFor()
+    check('Android hosts with a frame-wide native interface offer an isolated browser action',
+      await external.getAttribute('href') === `http://${loopback}/` && await external.getAttribute('rel') === 'noopener noreferrer'
+      && await nativePreview.locator('iframe').count() === 0 && embeddedRequests === 0)
+    await capture('workspace-browser-android-external', legacyAndroidPage)
+  }
+  finally {
+    await legacyAndroidPage.close()
+  }
   const visitPreview = async (address: string) => {
     await previewAddress.fill(address)
     await previewAddress.press('Enter')
