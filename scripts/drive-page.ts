@@ -6863,6 +6863,7 @@ try {
         && liveBack.searchParams.get('q') === liveUrl.searchParams.get('q')
         && await search.evaluate(element => element === element.ownerDocument.activeElement)
         && await reviewInstance?.evaluate(element => element.isConnected) === true)
+      await capture('pull-requests-live-search-1280x800', clonePage)
       await search.press('Escape')
       await clonePage.waitForURL(url => !url.searchParams.has('q'))
       check('Escape clears live PR search while retaining its selected review', await search.inputValue() === ''
