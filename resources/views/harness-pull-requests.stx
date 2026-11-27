@@ -885,7 +885,10 @@ function openSavedPrEditor(rename) {
   savedPrStatus.set('')
   closeSavedPrViews(false)
   savedPrViewDialog.current?.showModal()
-  void nextTick(() => savedPrNameInput.current?.select())
+  void nextTick(() => {
+    savedPrNameInput.current?.focus()
+    savedPrNameInput.current?.select()
+  })
 }
 
 function editSavedPrName(event) {
@@ -1122,7 +1125,7 @@ function closeSavedPrEditor() {
           <h2 id="pr-view-dialog-title" :text="savedPrEditingId() ? 'Rename PR view' : 'Save PR view'">Save PR view</h2>
           <p id="pr-view-description">Save your search, filters, and sort order on this device.</p>
           <label for="pr-view-name">Name</label>
-          <input id="pr-view-name" ref="savedPrNameInput" type="text" maxlength="80" autocomplete="off" autofocus :value="savedPrName()"
+          <input id="pr-view-name" ref="savedPrNameInput" type="text" maxlength="80" autocomplete="off" :value="savedPrName()"
             :aria-invalid="savedPrError() ? 'true' : null" aria-describedby="pr-view-error" @input="editSavedPrName">
           <p id="pr-view-error" role="alert" :text="savedPrError()"></p>
           <div data-pr-view-dialog-actions>

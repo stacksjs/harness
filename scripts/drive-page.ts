@@ -6792,6 +6792,7 @@ try {
         await saveView.evaluate(element => element === element.ownerDocument.activeElement))
       await saveView.press('Enter')
       await viewName.waitFor()
+      check('opening the saved-view editor focuses its name field', await viewName.evaluate(element => element === element.ownerDocument.activeElement))
       await capture('pull-requests-save-view-390x844', clonePage)
       await viewName.fill('Draft release reviews')
       await viewSave.click()
