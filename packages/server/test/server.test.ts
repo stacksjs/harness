@@ -979,6 +979,116 @@ describe('harness serve — HTTP', () => {
     }
   }, 30_000)
 
+  it.skipIf(process.platform === 'win32')('commits and pushes reviewed changes, recovering a rejected publication without repeating Git commit', async () => {
+    const fixture = fixtureGitRepository(dir)
+    const project = realpathSync(join(dir, 'seed'))
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(['git', '-C', project, ...args])
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    const publishing = join(dir, 'publish.git')
+    const workspace = derivedId('publish-repository')
+    const thread = derivedId('publish-thread')
+    const main = git('rev-parse', 'HEAD')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('clone', '-qb', 'main', '--bare', '--', project, publishing)
+    git('remote', 'add', 'origin', fixture.bare)
+    git('remote', 'add', 'publish', publishing)
+    git('fetch', '--all', '--quiet')
+    git('remote', 'set-head', 'origin', 'main')
+    git('branch', '--set-upstream-to=origin/main')
+    git('config', 'branch.main.pushRemote', 'origin')
+    git('config', 'remote.pushDefault', 'publish')
+    await harness.engine.dispatch({ id: 'publish-repository', at: 1, command: { type: 'workspace.register', path: project, trusted: true } })
+    await harness.engine.dispatch({ id: 'publish-thread', at: 2, command: { type: 'session.create', workspaceId: workspace, driverKind: 'claude' } })
+    writeFileSync(join(project, 'README.md'), 'Reviewed for publication\n')
+    writeFileSync(join(project, 'excluded.txt'), 'Keep staged\n')
+    git('add', '--', 'excluded.txt')
+
+    const route = (action: string) => `http://127.0.0.1:${port}/s/${thread}/git/${action}`
+    const open = (action: string) => fetch(route(action)).then(response => response.json())
+    const send = (action: string, body: object) => fetch(route(action), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const action = 'commit?scope=working&publish=1'
+    const preview = await open(action)
+    expect(preview.publish).toMatchObject({
+      current: { remote: 'origin', ref: 'refs/heads/main', defaultTarget: true }, feature: { remote: 'publish' },
+    })
+    const id = crypto.randomUUID()
+    const input = { message: 'Publish reviewed change', newBranch: true, excluded: [preview.files.indexOf('excluded.txt')],
+      revision: preview.revision, publication: { id, revision: preview.publish.feature.revision } }
+    git('remote', 'set-url', '--push', 'publish', fixture.bare)
+    expect((await send(action, input)).status).toBe(409)
+    expect(git('rev-parse', 'HEAD')).toBe(main)
+    git('remote', 'set-url', '--push', 'publish', publishing)
+    const hook = join(publishing, 'hooks', 'pre-receive')
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    const first = await send(action, input)
+    expect(first.status).toBe(201)
+    const branch = 'feature/publish-reviewed-change'
+    const ref = 'refs/heads/' + branch
+    const local = git('rev-parse', 'HEAD')
+    expect(await first.json()).toMatchObject({ branch, commit: local, publication: { id, pushed: false } })
+    expect(local).not.toBe(main)
+    expect(git('branch', '--show-current')).toBe(branch)
+    expect(git('show', 'HEAD:README.md')).toBe('Reviewed for publication')
+    expect(git('diff', '--cached', '--name-only')).toBe('excluded.txt')
+    expect(git('--git-dir', publishing, 'for-each-ref', '--format=%(refname)', ref)).toBe('')
+
+    const databasePath = join(dir, 'test.sqlite')
+    harness.stop()
+    // Recreate the crash boundary after Git recorded the commit but before the receipt was updated.
+    using db = new Database(databasePath)
+    db.query("UPDATE harness_repository_publications SET receipt = json_remove(receipt, '$.commit') WHERE id = ?").run(id)
+    harness = await serve({ port: 0, databasePath })
+    port = harness.server.port
+    expect(await open('push')).toMatchObject({ head: local, remote: 'publish', publication: id })
+    expect(await open(action)).toMatchObject({ pendingPublication: { id, commit: local } })
+    rmSync(hook)
+    expect(await (await send(action, input)).json()).toMatchObject({ commit: local, publication: { id, pushed: false } })
+    expect(git('--git-dir', publishing, 'for-each-ref', '--format=%(refname)', ref)).toBe('')
+
+    const push = 'push?publication=' + id
+    const retryInput = { revision: (await open(push)).revision }
+    git('remote', 'set-url', '--push', 'publish', fixture.bare)
+    expect((await send(push, retryInput)).status).toBe(409)
+    git('remote', 'set-url', '--push', 'publish', publishing)
+    const retried = await send(push, retryInput)
+    expect(retried.status).toBe(200)
+    const result = { message: 'Pushed to publish/' + branch + '.' }
+    expect(await retried.json()).toEqual(result)
+    expect(await (await send(push, retryInput)).json()).toEqual(result)
+    expect(await (await send(action, input)).json()).toMatchObject({ commit: local, publication: { id, pushed: true } })
+    expect(git('rev-parse', 'HEAD')).toBe(local)
+    expect(git('rev-parse', '--abbrev-ref', '@{upstream}')).toBe('publish/' + branch)
+    expect(git('--git-dir', publishing, 'rev-parse', ref)).toBe(local)
+    expect(git('--git-dir', fixture.bare, 'for-each-ref', '--format=%(refname)', ref)).toBe('')
+    expect(git('--git-dir', fixture.bare, 'rev-parse', 'main')).toBe(main)
+    expect(git('--git-dir', publishing, 'rev-parse', 'main')).toBe(main)
+
+    writeFileSync(join(project, 'README.md'), 'Reviewed for direct publication\n')
+    const direct = await open(action)
+    const directResponse = await send(action, { message: 'Publish on the current branch', revision: direct.revision,
+      excluded: [direct.files.indexOf('excluded.txt')], publication: { id: crypto.randomUUID(), revision: direct.publish.current.revision } })
+    expect(directResponse.status).toBe(201)
+    const directHead = git('rev-parse', 'HEAD')
+    expect(await directResponse.json()).toMatchObject({ commit: directHead, publication: { pushed: true } })
+    expect(git('--git-dir', publishing, 'rev-parse', ref)).toBe(directHead)
+
+    git('--git-dir', publishing, 'branch', 'feature/claimed-sandbox-branch', directHead)
+    writeFileSync(join(project, 'README.md'), 'A new branch with a name already in use upstream\n')
+    const collision = await open(action)
+    const collisionResponse = await send(action, { message: 'Claimed sandbox branch', newBranch: true, revision: collision.revision,
+      excluded: [collision.files.indexOf('excluded.txt')], publication: { id: crypto.randomUUID(), revision: collision.publish.feature.revision } })
+    expect(collisionResponse.status).toBe(201)
+    expect(await collisionResponse.json()).toMatchObject({ publication: { pushed: false, message: expect.stringContaining('already has that branch') } })
+    expect(git('branch', '--show-current')).toBe('feature/claimed-sandbox-branch')
+    expect(git('--git-dir', publishing, 'rev-parse', 'refs/heads/feature/claimed-sandbox-branch')).toBe(directHead)
+  }, 50_000)
+
   it.skipIf(process.platform === 'win32')('searches a large GitHub label catalog and verifies the selected identities before saving', async () => {
     const { project, cli, local, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
     const tag = (id: number, name: string) => ({ id: 13_000_000_000 + id, node_id: 'LA_fixture_' + id, name, color: '336611', description: '' })

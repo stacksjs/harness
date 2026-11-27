@@ -41,10 +41,12 @@ import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
 import { CommitGenerationError, createRepositoryCommit, generatedCommitMessage, prepareRepositoryCommit, readRepositorySubmission, RepositoryCommitError, reviewedCommitPatch, sameRepositoryCommitFiles, verifyRepositoryCommit } from './repository-commit'
 import { planRepositoryBranch, reconcileRepositoryBranch, startRepositoryBranch } from './repository-feature-branch'
+import type { PublicationReceipt } from './repository-publications'
+import { previewCommitPublication, publicationKey, publicationMarker, RepositoryPublications } from './repository-publications'
 import { readRepositoryStatus } from './repository-status'
 import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
-import { RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
+import { featureBranchDestination, RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
 import type { RepositorySyncAction } from './repository-sync'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
@@ -207,6 +209,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
   const reviewReplies = new PullRequestReplyReceipts(databasePath)
+  const publications = new RepositoryPublications(databasePath)
   const previewDatabase = await realpath(databasePath).catch(() => resolve(databasePath))
   const previewOwner = (sessionId: number) => createHash('sha256').update(previewDatabase).update('\0').update(String(sessionId)).digest('hex')
   const savedProviders = new SavedProviderInstances(databasePath)
@@ -576,7 +579,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return switched
   }
 
-  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: RepositoryAction, extendTimeout: () => void): Promise<Response> {
+  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: RepositoryAction, extendTimeout: (seconds?: number) => void): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
     const respond = (body: object, status = 200) => Response.json(body, { headers, status })
     const site = request.headers.get('sec-fetch-site')
@@ -588,11 +591,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const key = url.searchParams.get('repository') ?? ''
     const scope = action === 'commit' ? url.searchParams.get('scope') ?? 'staged' : 'staged'
     if (scope !== 'staged' && scope !== 'working') return respond({ error: 'Choose a valid commit scope.' }, 400)
+    const publishing = action === 'commit' && url.searchParams.get('publish') === '1'
+    const retryPublication = url.searchParams.get('publication')
+    if (retryPublication !== null && (action !== 'push' || !/^[0-9a-f-]{36}$/u.test(retryPublication)))
+      return respond({ error: 'Reopen the publication to retry Push.' }, 400)
+    if (publishing && scope !== 'working') return respond({ error: 'Choose working-tree changes to commit and push.' }, 400)
     const submitted = request.method === 'POST'
     const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
     const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request, action === 'commit') : null
     if (submitted && (!input && !pullInput || action === 'commit' && !input?.message && !input?.generate))
       return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
+    if (submitted && publishing !== Boolean(input?.publication))
+      return respond({ error: 'Review the publishing destination before committing.' }, 400)
     if (input?.newBranch && scope !== 'working') return respond({ error: 'Choose working-tree changes to commit on a new branch.' }, 400)
 
     const session = engine.current.sessions.get(sessionId)
@@ -620,7 +630,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return respond({ error: 'This repository is unavailable in the thread’s checkout.' }, 404)
     if (!readingChecks && repositoryActions.has(repository)) return respond({ error: 'A Git action is already running in this repository.' }, 409)
     if (submitted) repositoryActions.add(repository)
-    if (submitted || action === 'pull-request' || readingChecks || scope === 'working') extendTimeout()
+    if (submitted || action === 'pull-request' || readingChecks || scope === 'working') extendTimeout(publishing ? 240 : 150)
 
     const authorize = () => {
       const current = engine.current.sessions.get(sessionId)
@@ -631,6 +641,29 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     try {
+      if (retryPublication) {
+        const saved = publications.read(retryPublication)
+        if (!saved || saved.sessionId !== sessionId || saved.path !== repository) return respond({ error: 'This publication is unavailable.' }, 404)
+        const receipt = await publications.recover(saved)
+        const preview = await publications.pushReview(receipt)
+        if (!submitted) return respond(preview)
+        if (receipt.outcome) return respond({ message: receipt.outcome })
+        if (preview.problem || preview.revision !== input?.revision)
+          return respond({ error: preview.problem || 'The branch or remote changed. Review the Git action again.' }, 409)
+        return respond({ message: await publications.push(receipt, () => authorize() && !request.signal.aborted) })
+      }
+      const publicationRequest = input?.publication
+      const requestKey = publicationRequest ? publicationKey([sessionId, repository, input]) : ''
+      const existingPublication = publicationRequest && publications.read(publicationRequest.id)
+      if (existingPublication) {
+        if (existingPublication.requestKey !== requestKey) return respond({ error: 'Reopen the review to start a new publication.' }, 409)
+        const receipt = await publications.recover(existingPublication)
+        if (!receipt.commit) return respond({ error: 'Git could not confirm the earlier commit. Review the checkout before starting another publication.' }, 409)
+        return respond({ commit: receipt.commit, branch: receipt.branch, publication: {
+          id: receipt.id, message: receipt.outcome ?? 'The local commit is ready. Retry Push to continue.',
+          pushed: Boolean(receipt.outcome), retryable: !receipt.outcome,
+        } }, 201)
+      }
       if (readingChecks) {
         const link = (thread: SessionState) => thread.linkedPullRequests?.findLast(pull => pull.repositoryKey === key)
           ?? (thread.pullRequest?.repositoryKey === key ? thread.pullRequest : undefined)
@@ -667,6 +700,23 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       const { preview } = review
       if (!input) {
         const generator = review.kind === 'commit' ? commitGenerator(session, workspace.profileId, root) : null
+        if (publishing && review.kind === 'commit') {
+          const [{ current, feature }, saved] = await Promise.all([
+            previewCommitPublication(repository, review.preview.canCreateBranch),
+            publications.latest(sessionId, repository),
+          ])
+          const pending = saved ? await publications.recover(saved) : null
+          return respond({ ...preview, ...(generator && { generation: generator.key }), publish: { current, feature },
+            ...(pending?.commit && pending.commit === review.head && { pendingPublication: { id: pending.id, commit: pending.commit } }),
+          })
+        }
+        if (review.kind === 'sync' && review.action === 'push' && !review.preview.problem) {
+          const saved = publications.latest(sessionId, repository)
+          const pending = saved ? await publications.recover(saved) : null
+          if (pending?.commit && pending.commit === review.preview.head && pending.branch === review.preview.branch
+            && pending.destinationKey === review.preview.destinationKey && pending.ref === review.preview.ref)
+            return respond({ ...preview, publication: pending.id })
+        }
         return respond(generator ? { ...preview, generation: generator.key } : preview)
       }
       if (preview.problem) return respond({ error: preview.problem }, 409)
@@ -682,6 +732,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return respond({ error: 'Create the first commit before starting a new branch.' }, 409)
         if (input.excluded.some(index => index >= review.entries.length) || new Set(input.excluded).size === review.entries.length)
           return respond({ error: 'Refresh the review and include at least one file.' }, 409)
+        const confirmed = publicationRequest ? await previewCommitPublication(repository, review.preview.canCreateBranch) : null
+        const destination = confirmed && (input.newBranch ? confirmed.feature : confirmed.current)
+        if (publicationRequest && (!head || !branch || !destination || destination.problem || destination.revision !== publicationRequest.revision))
+          return respond({ error: destination?.problem || 'The publication destination changed. Refresh the review before committing.' }, 409)
         let message = input.message
         let branchSuggestion: string | undefined
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
@@ -713,9 +767,48 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           branchSuggestion = generated.branch
           await verifyRepositoryCommit(repository, review, canCommit)
         }
-        if (!input.newBranch || !head || !branch)
-          return respond(await createRepositoryCommit(repository, message, review, input.excluded, canCommit), 201)
-        const newBranch = await planRepositoryBranch(repository, key, branch, head, message, branchSuggestion)
+        const newBranch = input.newBranch && head && branch
+          ? await planRepositoryBranch(repository, key, branch, head, message, branchSuggestion) : null
+        let receipt: PublicationReceipt | undefined
+        if (publicationRequest && confirmed && head && branch) {
+          const target = newBranch ? await featureBranchDestination(repository, newBranch.to) : await repositorySyncPreview(repository, 'push')
+          const ref = newBranch ? 'refs/heads/' + newBranch.to : confirmed.currentTarget.ref
+          const reviewedKey = newBranch ? confirmed.featureTarget?.destinationKey : confirmed.currentTarget.destinationKey
+          if (!target.destinationKey || target.destinationKey !== reviewedKey
+            || ('revision' in target && target.revision !== confirmed.current.revision))
+            return respond({ error: 'The publication destination changed. Refresh the review before committing.' }, 409)
+          await verifyRepositoryCommit(repository, review, canCommit)
+          receipt = {
+            id: publicationRequest.id, requestKey, path: repository, sessionId, base: head, branch: newBranch?.to ?? branch,
+            newBranch: Boolean(newBranch), remote: target.remote, destinationKey: target.destinationKey, ref,
+          }
+          publications.begin(receipt)
+        }
+        const commitReviewed = (prepared: typeof review) =>
+          createRepositoryCommit(repository, message, prepared, input.excluded, canCommit, receipt && publicationMarker(receipt))
+        const finishCommit = async (commit: Awaited<ReturnType<typeof createRepositoryCommit>>, switched = true) => {
+          const branchWarning = switched ? '' : 'Refresh the checkout to confirm the active branch.'
+          const warning = [commit.warning, branchWarning].filter(Boolean).join(' ')
+          const resultBranch = newBranch?.to ?? receipt?.branch
+          const result = { commit: commit.commit, ...(resultBranch && { branch: resultBranch }), ...(warning && { warning }) }
+          if (!receipt) return respond(result, 201)
+          let message = 'Could not confirm publication. Review the local commit before pushing.'
+          let pushed = false
+          let retryable = false
+          try {
+            const recorded = await publications.recover(receipt)
+            retryable = recorded.commit === commit.commit
+            if (switched && retryable) {
+              message = await publications.push(recorded, () => authorize() && !request.signal.aborted)
+              pushed = true
+            }
+          }
+          catch (error) {
+            message = error instanceof RepositorySyncError ? error.message : 'The commit is local. Check the remote and retry Push.'
+          }
+          return respond({ ...result, publication: { id: receipt.id, message, pushed, retryable: retryable && !pushed } }, 201)
+        }
+        if (!newBranch) return await finishCommit(await commitReviewed(review))
         const started = await engine.dispatchInternal({
           id: 'git_branch_started_' + newBranch.id, at: Date.now(),
           command: { type: 'thread.git-branch.begin', sessionId, attempt: newBranch },
@@ -728,14 +821,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           const onBranch = await prepareRepositoryCommit(repository, scope)
           if (onBranch.preview.branch !== newBranch.to || onBranch.preview.problem || !sameRepositoryCommitFiles(review, onBranch))
             throw new RepositoryCommitError('The checkout or selected files changed. Refresh the review before committing.')
-          commit = await createRepositoryCommit(repository, message, onBranch, input.excluded, canCommit)
+          commit = await commitReviewed({ kind: 'commit', ...onBranch })
         }
         finally {
           switched = await resolveRepositoryBranch(session, newBranch, true).catch(() => false)
         }
-        const branchWarning = switched ? '' : 'Refresh the checkout to confirm the active branch.'
-        const warning = [commit.warning, branchWarning].filter(Boolean).join(' ')
-        return respond({ commit: commit.commit, branch: newBranch.to, ...(warning && { warning }) }, 201)
+        return await finishCommit(commit, switched)
       }
       return respond(await syncRepository(repository, review.action, review.preview, authorize))
     }
@@ -1854,7 +1945,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       const gitRoute = /^\/s\/([1-9]\d*)\/git\/(commit|pull|push|pull-request|pull-request-checks)$/u.exec(url.pathname)
       if (gitRoute) {
         if (!isLoopbackHost(srv.requestIP(request)?.address ?? '')) return new Response(null, { status: 403 })
-        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as RepositoryAction, () => srv.timeout(request, 150))
+        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as RepositoryAction, seconds => srv.timeout(request, seconds ?? 150))
       }
 
       const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files|status))?$/u.exec(url.pathname)

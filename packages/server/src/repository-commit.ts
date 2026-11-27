@@ -17,9 +17,9 @@ function gitEnvironment(index?: string) {
   })
 }
 
-export function repositoryGit(path: string, args: string[], timeout = 5000, index?: string) {
+export function repositoryGit(path: string, args: string[], timeout = 5000, index?: string, environment?: Record<string, string>) {
   return exec('git', ['-C', path, ...args], {
-    timeout, maxBuffer: 2 * 1024 * 1024, env: gitEnvironment(index),
+    timeout, maxBuffer: 2 * 1024 * 1024, env: { ...gitEnvironment(index), ...environment },
   })
 }
 
@@ -198,10 +198,14 @@ async function prepareIndexUpdate(path: string, base: string, tree: string, befo
   return readIndex(index)
 }
 
-export async function createRepositoryCommit(path: string, message: string, prepared: PreparedCommit, excluded: number[], authorize: () => boolean) {
+export async function createRepositoryCommit(path: string, message: string, prepared: PreparedCommit, excluded: number[], authorize: () => boolean, reflogAction?: string) {
+  const commitArgs = ['commit', '--quiet', '--message', message]
+  const commitFiles = (index?: string) => repositoryGit(path,
+    reflogAction ? ['-c', 'core.logAllRefUpdates=true', ...commitArgs] : commitArgs,
+    45_000, index, reflogAction ? { GIT_REFLOG_ACTION: reflogAction } : undefined)
   if (prepared.scope === 'staged' && excluded.length === 0) {
     await verifyRepositoryCommit(path, prepared, authorize)
-    await repositoryGit(path, ['commit', '--quiet', '--message', message], 45_000)
+    await commitFiles()
     return { commit: (await repositoryGit(path, ['rev-parse', '--verify', 'HEAD'])).stdout.trim() }
   }
   const working = prepared.scope === 'working' && prepared.base !== null ? prepared.base : null
@@ -222,7 +226,7 @@ export async function createRepositoryCommit(path: string, message: string, prep
     }
     await verifyRepositoryCommit(path, prepared, authorize)
 
-    await repositoryGit(path, ['commit', '--quiet', '--message', message], 45_000, index)
+    await commitFiles(index)
     const commit = (await repositoryGit(path, ['rev-parse', '--verify', `refs/heads/${prepared.preview.branch}`])).stdout.trim()
     if (!working || !realIndex) return { commit }
     try {
@@ -282,9 +286,15 @@ export async function readRepositorySubmission(request: Request, commit: boolean
   const excluded = commit && value?.excluded !== undefined ? value.excluded : []
   const newBranch = commit ? value?.newBranch ?? false : false
   const generate = commit ? value?.generate ?? null : null
+  const publication = commit ? value?.publication ?? null : null
+  const publish = publication && typeof publication === 'object' ? publication as Record<string, unknown> : null
+  const publishing = publish && typeof publish.id === 'string' && /^[0-9a-f-]{36}$/u.test(publish.id)
+    && typeof publish.revision === 'string' && /^[0-9a-f]{64}$/u.test(publish.revision)
+    ? { id: publish.id, revision: publish.revision } : null
   return typeof revision === 'string' && /^[0-9a-f]{64}$/u.test(revision)
     && Array.isArray(excluded) && excluded.every(index => Number.isSafeInteger(index) && index >= 0)
     && typeof newBranch === 'boolean' && (generate === null || (typeof generate === 'string' && /^[0-9a-f]{64}$/u.test(generate) && !message))
+    && (publication === null || publishing)
     && Buffer.byteLength(message) <= 4096 && !message.includes('\0')
-    ? { revision, message, excluded, newBranch, generate } : null
+    ? { revision, message, excluded, newBranch, generate, publication: publishing } : null
 }

@@ -11,26 +11,52 @@ function dirty(status: RepositoryStatus) {
 
 export class RepositorySyncError extends Error {}
 
+async function gitConfig(path: string, name: string): Promise<string> {
+  return (await repositoryGit(path, ['config', '--get', name]).catch(() => null))?.stdout.trimEnd() ?? ''
+}
+
+async function pushRemoteName(path: string, branch: string, upstream = ''): Promise<string> {
+  const [list, override, fallback] = await Promise.all([
+    repositoryGit(path, ['remote']),
+    branch ? gitConfig(path, 'branch.' + branch + '.pushRemote') : '',
+    gitConfig(path, 'remote.pushDefault'),
+  ])
+  const names = list.stdout.trim().split('\n').filter(Boolean)
+  const remote = override || fallback || upstream || (names.includes('origin') ? 'origin' : names.length === 1 ? names[0]! : '')
+  return remote && !remote.startsWith('-') && names.includes(remote) ? remote : ''
+}
+
+async function remoteDestination(path: string, remote: string, action: RepositorySyncAction) {
+  const urls = (await repositoryGit(path, [
+    'remote', 'get-url', ...(action === 'push' ? ['--push'] : []), '--all', '--', remote,
+  ])).stdout.trim().split('\n')
+  return urls.length === 1 && urls[0]
+    ? createHash('sha256').update(JSON.stringify([remote, urls[0]])).digest('hex')
+    : ''
+}
+
+/** The future branch has no upstream. Its name-specific config can only be checked after generation. */
+export async function featureBranchDestination(path: string, branch = '') {
+  const remote = await pushRemoteName(path, branch)
+  const destinationKey = remote ? await remoteDestination(path, remote, 'push') : ''
+  return { remote, destinationKey, problem: !remote ? 'Configure a named Git remote before pushing a feature branch.'
+    : !destinationKey ? 'Configure a single URL for this remote.' : null }
+}
+
 export async function repositorySyncPreview(path: string, action: RepositorySyncAction) {
   const [status, operating] = await Promise.all([readRepositoryStatus(path), gitOperationInProgress(path)])
   if (!status) throw new Error('Git could not read the repository.')
   const { branch, head } = status
-  const base = { branch, trackingRef: '', head, remote: '', ref: '', revision: '', firstPush: false, defaultTarget: false }
+  const base = { branch, trackingRef: '', head, remote: '', ref: '', revision: '', destinationKey: '', firstPush: false, defaultTarget: false }
   if (!branch || !head) return { ...base, problem: 'Check out a branch with at least one commit.' }
   if (operating || status.conflicted) return { ...base, problem: 'Finish the in-progress Git operation first.' }
   const branchRef = 'refs/heads/' + branch
   const { stdout: refs } = await repositoryGit(path, [
-    'for-each-ref', '--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)%00%(push:remotename)', branchRef,
+    'for-each-ref', '--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)', branchRef,
   ])
-  const [, trackedRemote = '', trackedRef = '', upstream = '', pushRemote = ''] = refs.split('\n').map(line => line.split('\0')).find(([ref]) => ref === branchRef) ?? []
+  const [, trackedRemote = '', trackedRef = '', upstream = ''] = refs.split('\n').map(line => line.split('\0')).find(([ref]) => ref === branchRef) ?? []
   const firstPush = !status.upstream && action === 'push'
-  let remote = trackedRemote
-  if (action === 'push') {
-    const remotes = (await repositoryGit(path, ['remote'])).stdout.trim().split('\n')
-    // Git resolves branch.<name>.pushRemote ahead of remote.pushDefault and the pull remote.
-    remote = pushRemote || trackedRemote || (remotes.includes('origin') ? 'origin' : remotes.length === 1 ? remotes[0]! : '')
-    if (!remotes.includes(remote)) return { ...base, problem: 'Configure a named Git remote for this branch before pushing.' }
-  }
+  const remote = action === 'push' ? await pushRemoteName(path, branch, trackedRemote) : trackedRemote
   const isUpstreamBranch = branchRef === trackedRef || (upstream === 'refs/remotes/' + branch && trackedRemote !== '.')
   const ref = action === 'pull' || isUpstreamBranch ? trackedRef : branchRef
   const targetsUpstream = Boolean(status.upstream && remote === trackedRemote && ref === trackedRef)
@@ -39,37 +65,39 @@ export async function repositorySyncPreview(path: string, action: RepositorySync
       ? 'Configure a named Git remote for this branch before pushing.'
       : 'Set a remote upstream for this branch first.' }
   }
-  const destination = (await repositoryGit(path, [
-    'remote', 'get-url', ...(action === 'push' ? ['--push'] : []), '--all', '--', remote,
-  ])).stdout.trim().split('\n')
+  const destinationKey = await remoteDestination(path, remote, action)
   const trackingPrefix = 'refs/remotes/' + remote + '/'
   const trackingRef = targetsUpstream && upstream.startsWith(trackingPrefix) ? upstream : ''
   const remoteHead = action === 'push'
     ? (await repositoryGit(path, ['symbolic-ref', '--quiet', trackingPrefix + 'HEAD']).catch(() => null))?.stdout.trim()
     : undefined
   const defaultTarget = remoteHead === (trackingRef || trackingPrefix + ref.slice('refs/heads/'.length))
-  const problem = destination.length !== 1 || !destination[0] ? 'Configure a single URL for this remote.'
+  const problem = !destinationKey ? 'Configure a single URL for this remote.'
     : action === 'pull' && dirty(status) ? 'Commit or stash working changes before pulling.'
       : targetsUpstream && (status.behind ?? 0) > 0 && (status.ahead ?? 0) > 0
         ? 'The branch has diverged. Merge or rebase it in Git before syncing.'
         : targetsUpstream && (status.behind ?? 0) > 0 && action === 'push' ? 'Pull the upstream changes before pushing.' : null
-  const revision = createHash('sha256').update(JSON.stringify([path, action, branch, head, remote, ref, trackingRef, destination, firstPush, defaultTarget])).digest('hex')
-  return { branch, trackingRef, head, remote, ref, revision, firstPush, defaultTarget, problem }
+  const revision = createHash('sha256').update(JSON.stringify([path, action, branch, head, remote, ref, trackingRef, destinationKey, firstPush, defaultTarget])).digest('hex')
+  return { branch, trackingRef, head, remote, ref, revision, destinationKey, firstPush, defaultTarget, problem }
 }
 
-export async function syncRepository(path: string, action: RepositorySyncAction, preview: Awaited<ReturnType<typeof repositorySyncPreview>>,
-  authorize: () => boolean) {
+export async function syncRepository(path: string, action: RepositorySyncAction, preview: Pick<Awaited<ReturnType<typeof repositorySyncPreview>>,
+  'branch' | 'head' | 'remote' | 'ref' | 'trackingRef' | 'firstPush' | 'revision'>,
+  authorize: () => boolean, createRemoteBranch = false) {
   const { branch, head, remote, ref, trackingRef, firstPush } = preview
   if (!branch || !head || !authorize()) throw new RepositorySyncError('The checkout is no longer available for this Git operation.')
   if (action === 'push') {
     try {
       await repositoryGit(path, [
         '-c', 'push.followTags=false', '-c', 'push.recurseSubmodules=no', '-c', 'remote.' + remote + '.mirror=false',
-        'push', '--porcelain', '--no-follow-tags', '--', remote, head + ':' + ref,
+        'push', '--porcelain', '--no-follow-tags', ...(createRemoteBranch ? ['--force-with-lease=' + ref + ':'] : []),
+        '--', remote, head + ':' + ref,
       ], 45_000)
     }
     catch (error) {
       const output = (error as { stdout?: string })?.stdout ?? ''
+      if (createRemoteBranch && /\(stale info\)/u.test(output))
+        throw new RepositorySyncError('The remote already has that branch. Review the destination before pushing it.')
       if (/\((?:fetch first|non-fast-forward)\)/u.test(output))
         throw new RepositorySyncError('The remote branch moved. Pull or integrate its changes before pushing again.')
       throw error
