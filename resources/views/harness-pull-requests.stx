@@ -792,7 +792,7 @@ const prSearchInput = useRef('prSearchInput')
 const prListResults = useRef('prListResults')
 const prDraftChoice = useRef('prDraftChoice')
 const prShownDraft = useRef('prShownDraft')
-const prSearchPending = state(false)
+const prSearchPending = state('')
 const prSearchStatus = state('')
 const prFilterCount = state(@json(activeFilterCount))
 const prFiltersName = derived(() => prFilterCount() ? 'Filters (' + prFilterCount() + ')' : 'Filters')
@@ -1200,8 +1200,9 @@ function closeSavedPrEditor() {
           </div>
         </form>
       </dialog>
-      <p role="status" data-pr-search-status :class="{ 'sr-only': !prSearchStatus().startsWith('Could not') }" :text="prSearchPending() ? 'Searching pull requests…' : prSearchStatus()"></p>
-      <div ref="prListResults" :aria-busy="prSearchPending() ? 'true' : null">
+      <p role="status" data-pr-search-status :class="{ 'sr-only': !prSearchStatus().startsWith('Could not') }"
+        :text="prSearchPending() === 'page' ? 'Loading more pull requests…' : prSearchPending() ? 'Searching pull requests…' : prSearchStatus()"></p>
+      <div ref="prListResults" :aria-busy="prSearchPending() ? 'true' : null" @click="livePrSearch?.next($event)">
         @include('../partials/harness-pr-results')
       </div>
     </section>

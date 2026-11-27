@@ -855,6 +855,9 @@ const RESPONSIVE_SHELL = `
   [data-pr-conversation-form] { position: absolute; inset-block-start: 4px; inset-inline-end: 8px; }
 }
 [data-pr-pagination] { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-block: 12px; font-size: 12px; }
+[data-pr-pagination] a[data-pr-button] { color: inherit; text-decoration: none; }
+[data-pr-pagination] a[aria-disabled="true"] { cursor: wait; opacity: .72; }
+[data-pr-page-status]:empty { display: none; }
 [data-pr-empty] { color: inherit; opacity: .82; font-size: 13px; padding: 16px; }
 [data-pr-workspace] :is(input, select, summary, pre):focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
 @media (max-width: 759px) {

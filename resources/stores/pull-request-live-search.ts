@@ -4,10 +4,14 @@ type SearchResult = {
   search: string
   draft: string
   filterCount: number
+  partial: boolean
 }
 
 const SEARCH_DELAY_MS = 250
-const REVIEW_KEYS = ['selectedUrl', 'selectionProfile', 'tab', 'detailPage', 'reviewHead', 'reviewBase', 'reviewLine', 'reviewStart'] as const
+const MAX_LOADED_ROWS = 500
+const GROUP_ORDER = ['authored', 'reviewing', 'other', 'filtered']
+const REVIEW_KEYS = ['selectedUrl', 'selectionProfile', 'tab', 'detailPage', 'reviewHead', 'reviewBase', 'reviewLine', 'reviewStart',
+  'conversation', 'commentScope', 'commentsAfter', 'commentsBefore', 'commentsLatest'] as const
 const SEARCH_FIELDS = new Set(['q', 'shownDraft', 'chooseDraft', ...REVIEW_KEYS])
 
 function listFormScope(form: HTMLFormElement) {
@@ -29,8 +33,55 @@ export function withCurrentPullRequestQuery(address: string, current: Location) 
   return target.pathname + target.search + target.hash
 }
 
+function appendPullRequestPage(current: Element, incoming: Element, link: HTMLAnchorElement, keyboard: boolean) {
+  const loaded = new Set(Array.from(current.querySelectorAll('[data-pr-entry]'), row => row.getAttribute('data-pr-entry')))
+  const newRows = Array.from(incoming.querySelectorAll('[data-pr-entry]')).filter(row => !loaded.has(row.getAttribute('data-pr-entry')))
+  if (loaded.size + newRows.length > MAX_LOADED_ROWS) return false
+
+  const pagination = link.closest('[data-pr-result-pages]')
+  for (const list of incoming.querySelectorAll('[data-pr-group]')) {
+    const group = list.getAttribute('data-pr-group') ?? ''
+    const rows = Array.from(list.children).filter((item) => {
+      const row = item.querySelector('[data-pr-entry]')
+      const key = row?.getAttribute('data-pr-entry')
+      if (!key || loaded.has(key)) return false
+      loaded.add(key)
+      return true
+    })
+    if (!rows.length) continue
+    const currentGroups = Array.from(current.querySelectorAll('[data-pr-group]'))
+    const existing = currentGroups.find(node => node.getAttribute('data-pr-group') === group)
+    if (existing) {
+      existing.append(...rows)
+      const count = existing.previousElementSibling?.querySelector('[data-pr-group-count]')
+      if (count) count.textContent = String(existing.children.length)
+    }
+    else {
+      const nextGroup = currentGroups.find(node => GROUP_ORDER.indexOf(node.getAttribute('data-pr-group') ?? '') > GROUP_ORDER.indexOf(group))
+      const nextHeading = nextGroup?.previousElementSibling
+      const before = nextHeading?.matches('[data-pr-group-heading]') ? nextHeading : nextGroup ?? pagination
+      const heading = list.previousElementSibling
+      list.replaceChildren(...rows)
+      if (heading?.matches('[data-pr-group-heading]')) {
+        const count = heading.querySelector('[data-pr-group-count]')
+        if (count) count.textContent = String(rows.length)
+        current.insertBefore(heading, before ?? null)
+      }
+      current.insertBefore(list, before ?? null)
+    }
+  }
+  const count = pagination?.querySelector('span')
+  if (count) count.textContent = loaded.size + ' shown'
+  const next = incoming.querySelector('[data-pr-next]')?.getAttribute('href')
+  if (next) link.setAttribute('href', next)
+  else link.remove()
+  const first = newRows[0] ?? (!next ? Array.from(current.querySelectorAll('[data-pr-entry]')).at(-1) : null)
+  if (first instanceof HTMLElement && (keyboard || !next)) first.focus({ preventScroll: !keyboard })
+  return true
+}
+
 export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElement, scope: () => string,
-  applied: (result: SearchResult) => void, pending: (value: boolean) => void, status: (message: string) => void) {
+  applied: (result: SearchResult) => void, pending: (value: 'search' | 'page' | '') => void, status: (message: string) => void) {
   const view = input.ownerDocument.defaultView
   const form = input.form
   if (!view || !form) return
@@ -42,22 +93,33 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
 
   function cancel() {
     clearTimeout(timer)
+    timer = undefined
     request?.abort()
     request = undefined
-    pending(false)
+    pending('')
   }
 
-  async function load(search: string) {
+  async function load(search: string, link?: HTMLAnchorElement, keyboard = false) {
     if (!results.isConnected) return
     const controller = new AbortController()
     request = controller
-    const params = new URLSearchParams(scope())
+    const expectedScope = scope()
+    const params = new URLSearchParams(expectedScope)
+    const target = link ? new URL(link.href) : null
+    const pageStatus = link?.closest('[data-pr-result-pages]')?.querySelector('[data-pr-page-status]')
+    const linkLabel = link?.textContent ?? ''
+    if (link) {
+      link.textContent = 'Loading more pull requests…'
+      link.setAttribute('aria-disabled', 'true')
+      if (pageStatus) pageStatus.textContent = ''
+    }
     const address = new URLSearchParams(browser.location.search)
     for (const key of REVIEW_KEYS) {
       const value = address.get(key)
-      if (value) params.set(key, value)
+      if (value !== null) params.set(key, value)
     }
     params.set('q', search)
+    if (target) params.set('page', target.searchParams.get('page') ?? '')
 
     try {
       const response = await fetch('/pull-requests/results?' + params, {
@@ -69,6 +131,16 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
       const markup = new DOMParser().parseFromString(result.html, 'text/html')
       const fragment = markup.querySelector('[data-pr-results-fragment]')
       if (!fragment) throw new Error('Missing pull request results')
+      if (link && target) {
+        const current = results.querySelector('[data-pr-results-fragment]')
+        if (!current || result.scope !== expectedScope || result.partial) throw new Error('Could not finish loading this page')
+        if (!appendPullRequestPage(current, fragment, link, keyboard)) browser.location.assign(target.href)
+        else {
+          const count = current.querySelectorAll('[data-pr-row]').length
+          status(count + ' pull requests shown.')
+        }
+        return
+      }
       const url = new URL(browser.location.href)
       if (result.search) url.searchParams.set('q', result.search)
       else url.searchParams.delete('q')
@@ -89,12 +161,19 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
       status(count === 1 ? '1 pull request shown.' : count + ' pull requests shown.')
     }
     catch {
-      if (!controller.signal.aborted) status('Could not update pull requests. Edit your search or press Enter to retry.')
+      if (!controller.signal.aborted) {
+        if (pageStatus) pageStatus.textContent = 'Could not load more pull requests. Try again.'
+        else status('Could not update pull requests. Edit your search or press Enter to retry.')
+      }
     }
     finally {
+      if (link) {
+        link.textContent = linkLabel
+        link.removeAttribute('aria-disabled')
+      }
       if (request === controller) {
         request = undefined
-        pending(false)
+        pending('')
       }
     }
   }
@@ -104,13 +183,27 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
     status('')
     const search = input.value.trim()
     if (!force && search === (new URLSearchParams(scope()).get('q') ?? '')) return
-    pending(true)
+    pending('search')
     if (immediate) void load(search)
-    else timer = setTimeout(() => void load(search), SEARCH_DELAY_MS)
+    else timer = setTimeout(() => {
+      timer = undefined
+      void load(search)
+    }, SEARCH_DELAY_MS)
   }
 
   return {
     cancel,
+    next(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-pr-next]') : null
+      if (!link || results.querySelectorAll('[data-pr-entry]').length >= MAX_LOADED_ROWS) return
+      event.preventDefault()
+      if (request || timer || composing) return
+      const search = new URLSearchParams(scope()).get('q') ?? ''
+      status('')
+      pending('page')
+      void load(search, link, event.detail === 0)
+    },
     submit(event: SubmitEvent) {
       if (event.submitter?.hasAttribute('data-pr-search-submit') && listFormScope(form) === initialFormScope) {
         event.preventDefault()

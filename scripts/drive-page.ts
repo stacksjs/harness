@@ -6924,6 +6924,35 @@ try {
     }
     finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
 
+    try {
+      const original = beforeFilters.pulls.find((pull: { number: number }) => pull.number === 1)
+      writeFileSync(github.state, JSON.stringify({ ...beforeFilters, pulls: [
+        ...beforeFilters.pulls,
+        ...Array.from({ length: 23 }, (_, index) => ({ ...original, number: index + 101,
+          title: 'Continuation pull request ' + index, user: { login: 'another-author' },
+          html_url: original.html_url.replace(/1$/u, String(index + 101)),
+          updated_at: new Date(Date.UTC(2026, 11, index + 1)).toISOString(),
+        })),
+      ] }))
+      await clonePage.goto(mergeReviewUrl)
+      await reviewList.getByLabel('Saved pull request views').waitFor()
+      const nextPage = reviewList.getByRole('link', { name: 'Load more pull requests' })
+      const selectedReview = await clonePage.locator('[data-pr-workspace-detail]').elementHandle()
+      const firstResult = await reviewList.locator('[data-pr-entry]').first().elementHandle()
+      const addressBeforeAppend = clonePage.url()
+      const firstPageRowCount = await reviewList.locator('[data-pr-entry]').count()
+      await nextPage.press('Enter')
+      await reviewList.getByText('Continuation pull request 0', { exact: false }).waitFor()
+      const loadedKeys = await reviewList.locator('[data-pr-entry]').evaluateAll(rows => rows.map(row => row.getAttribute('data-pr-entry')))
+      check('loading more PRs appends unique rows and leaves the open review mounted',
+        loadedKeys.length > firstPageRowCount && new Set(loadedKeys).size === loadedKeys.length
+        && await reviewList.locator('[data-pr-entry]').filter({ hasText: 'Continuation pull request' }).count() === 23
+        && clonePage.url() === addressBeforeAppend && await selectedReview?.evaluate(node => node.isConnected) === true
+        && await firstResult?.evaluate(node => node.isConnected) === true)
+      await capture('pull-requests-load-more-1280x800', clonePage)
+    }
+    finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
+
     github.configureMerge('ready', ['MERGE', 'SQUASH'])
     await clonePage.setViewportSize({ width: 390, height: 844 })
     await clonePage.goto(mergeReviewUrl, { waitUntil: 'domcontentloaded' })
