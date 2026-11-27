@@ -11,13 +11,16 @@ export const stateOptions = [{ value: 'open', label: 'Open' }, { value: 'closed'
 export const sortOptions = [{ value: 'updated', label: 'Recently updated' }, { value: 'newest', label: 'Newest created' }, { value: 'oldest', label: 'Oldest created' }]
 export const sort = $props.sort
 export const filters = $props.filters || { involvement: '', draft: '', review: '', checks: '', author: '', label: [] }
-export const activeFilterCount = [filters.involvement, filters.draft, filters.review, filters.checks, filters.author].filter(Boolean).length + filters.label.length
+export const draftChoice = $props.draftChoice || ''
+export const menuFilterCount = [filters.involvement, filters.draft, filters.review, filters.checks, filters.author].filter(Boolean).length + filters.label.length
+export const activeFilterCount = menuFilterCount + Number(Boolean(draftChoice) && !filters.draft)
 export const additionalFiltersLabel = activeFilterCount ? 'More filters (' + activeFilterCount + ')' : 'More filters'
 export const filterChoices = $props.choices
 export const labelChoices = [...filters.label.map(value => ({ value, description: '', color: '' })),
   ...(filterChoices?.kind === 'labels' ? filterChoices.options.filter(option => !filters.label.some(value => value.toLowerCase() === option.value.toLowerCase())) : [])]
 export const clearFiltersHref = $props.clearFiltersHref
 export const incompleteSearch = $props.incompleteSearch
+export const cappedSearch = $props.cappedSearch
 export const involvementOptions = [{ value: '', label: 'Everyone' }, { value: 'authored', label: 'Authored by me' }, { value: 'reviewing', label: 'My review requested' }]
 export const draftOptions = [{ value: '', label: 'Any' }, { value: 'only', label: 'Drafts only' }, { value: 'hide', label: 'Hide drafts' }]
 export const reviewOptions = [{ value: '', label: 'Any' }, { value: 'approved', label: 'Approved' }, { value: 'changes-requested', label: 'Changes requested' }, { value: 'review-required', label: 'Review required' }, { value: 'none', label: 'No reviews' }]
@@ -781,9 +784,10 @@ const matchingLabelIds = derived(() => {
     <section aria-label="Pull request list" data-pr-workspace-list>
       <form method="get" action="/pull-requests" data-pr-filters>
         <label data-pr-search>
-          <span>Search titles</span>
-          <input type="search" name="q" placeholder="Title keywords" maxlength="120" value="{{ search }}">
+          <span>Search pull requests</span>
+          <input type="search" name="q" placeholder="Search or label:bug" maxlength="200" value="{{ search }}" aria-describedby="pr-search-syntax">
         </label>
+        <span id="pr-search-syntax" class="sr-only">Use label:, author:, draft:, review:, or checks: to filter your search. Quote labels that contain spaces or commas.</span>
         <label>
           <span>Profile</span>
           <select name="profile">
@@ -834,9 +838,11 @@ const matchingLabelIds = derived(() => {
             </label>
             <label>
               <span>Draft</span>
-              <select name="draft">
+              <input type="hidden" name="draft" value="{{ filters.draft }}">
+              <input type="hidden" name="shownDraft" value="{{ draftChoice }}">
+              <select name="chooseDraft">
                 @foreach(draftOptions as option)
-                  <option value="{{ option.value }}" @if(option.value === filters.draft) selected @endif>{{ option.label }}</option>
+                  <option value="{{ option.value }}" @if(option.value === draftChoice) selected @endif>{{ option.label }}</option>
                 @endforeach
               </select>
             </label>
@@ -906,7 +912,7 @@ const matchingLabelIds = derived(() => {
                 @endforeach
               </div>
             @endif
-            @if(activeFilterCount)
+            @if(menuFilterCount)
               <a href="{{ clearFiltersHref }}" data-pr-button data-pr-filters-clear>Clear additional filters</a>
             @endif
           </div>
@@ -914,6 +920,9 @@ const matchingLabelIds = derived(() => {
       </form>
       @if(incompleteSearch)
         <p role="status" data-pr-filter-feedback>GitHub returned partial results. Refresh to retry the search.</p>
+      @endif
+      @if(cappedSearch)
+        <p role="status" data-pr-filter-feedback>GitHub search shows up to 1,000 results per repository. Narrow your filters for more specific matches.</p>
       @endif
       @if(failures.length)
         <details data-pr-list-problems>

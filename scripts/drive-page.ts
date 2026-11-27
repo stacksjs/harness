@@ -6716,10 +6716,10 @@ try {
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
-    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('unmatched review')
+    await reviewList.getByRole('searchbox', { name: 'Search pull requests' }).fill('unmatched review')
     await reviewList.getByRole('button', { name: 'Apply filters' }).click()
     await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
-    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('draft pull request')
+    await reviewList.getByRole('searchbox', { name: 'Search pull requests' }).fill('draft pull request')
     await reviewList.getByRole('combobox', { name: 'Sort' }).selectOption('oldest')
     await reviewList.getByRole('button', { name: 'Apply filters' }).click()
     await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
@@ -6754,6 +6754,23 @@ try {
       check('advanced list filters combine and stay on the selected pull request across its tabs',
         url.searchParams.get('label') === filterLabel.name && url.searchParams.get('draft') === 'only'
         && url.searchParams.get('review') === 'none' && url.searchParams.get('checks') === 'passing' && url.searchParams.get('author') === '@me')
+
+      await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
+      const search = filters.getByRole('searchbox', { name: 'Search pull requests' })
+      const typed = 'draft:true author:me label:"Release reporting",unused -label:wip draft pull request'
+      await search.fill(typed)
+      await search.press('Enter')
+      await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
+      check('typed PR search handles OR labels, exclusions, viewer alias, and literal title words',
+        await reviewList.locator('[data-pr-row]').count() === 1 && await search.inputValue() === typed)
+      await filters.locator('summary').press('Enter')
+      const draftFilter = filters.getByRole('combobox', { name: 'Draft', exact: true })
+      await draftFilter.selectOption('hide')
+      await filters.getByRole('button', { name: 'Apply filters' }).click()
+      await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
+      check('changing the draft menu removes its typed qualifier and preserves the rest of the PR search',
+        await search.inputValue() === typed.replace('draft:true ', '')
+        && new URL(clonePage.url()).searchParams.get('chooseDraft') === 'hide')
     }
     finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
 

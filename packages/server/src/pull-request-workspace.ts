@@ -12,7 +12,7 @@ import { placeReviewConversations, readReviewCommentPage, readReviewConversation
 import { deleteWorkspacePullRequestBranch } from './pull-request-delete-branch'
 import { findPullRequestThread } from './pull-request-links'
 import { availableLifecycleActions, behindBase, branchUpdateMethods, deletableSourceBranch, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
-import { pullRequestFilterQualifiers, readFilterLookup, readFilterViewer, readPullRequestFilterChoices, readPullRequestFilters, writePullRequestFilters } from './pull-request-list-filters'
+import { pullRequestFilterQualifiers, readFilterLookup, readFilterViewer, readPullRequestFilterChoices, readPullRequestListSearch, writePullRequestFilters } from './pull-request-list-filters'
 import { applyPullRequestLabelChanges, parseLabelSelection, pullRequestLabels, readPullRequestLabelEditor } from './pull-request-labels'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
 import { mergePullRequestReviewers, pullRequestReviewDecision, pullRequestReviewParticipation, readPullRequestReviewOutcomes } from './pull-request-review-outcomes'
@@ -43,6 +43,9 @@ type ListState = typeof listStates[number]
 type ListSort = typeof listSorts[number]
 const tabs = ['summary', 'timeline', 'code'] as const
 const MAX_LIST_PAGE = 100
+const LIST_PAGE_SIZE = 20
+const MAX_GITHUB_SEARCH_RESULTS = 1000
+const MAX_GITHUB_SEARCH_PAGE = MAX_GITHUB_SEARCH_RESULTS / LIST_PAGE_SIZE
 
 function integer(value: string | null) {
   const parsed = Number(value)
@@ -107,7 +110,7 @@ async function trustedRepositories(workspaces: WorkspaceState[], signal: AbortSi
 }
 
 function listQuery(repository: string, state: ListState, search: string, page: number, sort: ListSort, filters: string[]) {
-  const params = new URLSearchParams({ page: String(page), per_page: '20', sort: sort === 'updated' ? 'updated' : 'created' })
+  const params = new URLSearchParams({ page: String(page), per_page: String(LIST_PAGE_SIZE), sort: sort === 'updated' ? 'updated' : 'created' })
   const order = sort === 'oldest' ? 'asc' : 'desc'
   const useSearch = Boolean(filters.length || search || state === 'merged' || state === 'closed')
   if (!useSearch) {
@@ -117,18 +120,24 @@ function listQuery(repository: string, state: ListState, search: string, page: n
   }
   const qualifier = state === 'all' ? '' : state === 'closed' ? ' is:closed is:unmerged' : ' is:' + state
   params.set('order', order)
-  params.set('q', ['is:pr repo:' + repository + qualifier, ...(search ? ['in:title "' + search + '"'] : []), ...filters].join(' '))
+  params.set('q', ['is:pr repo:' + repository + qualifier, ...(search ? ['in:title,body,comments "' + search + '"'] : []), ...filters].join(' '))
   return { endpoint: 'search/issues?' + params, useSearch }
 }
 
 async function listRepository(repository: Repository, state: ListState, search: string, page: number, sort: ListSort, filters: string[], signal: AbortSignal) {
   const { endpoint, useSearch } = listQuery(repository.name, state, search, page, sort, filters)
+  if (useSearch && page > MAX_GITHUB_SEARCH_PAGE) return { rows: [], more: false, incomplete: false, capped: true }
   const reply = await repositoryGitHubRequest(repository.path, endpoint, undefined, signal)
-  const indexed = useSearch ? reply.body as { items?: unknown[], incomplete_results?: boolean } | null : null
+  const indexed = useSearch ? reply.body as { items?: unknown[], incomplete_results?: boolean, total_count?: number } | null : null
   const items = useSearch ? indexed?.items : reply.body
   if (reply.status !== 200 || !Array.isArray(items))
     throw new RepositoryPullRequestError('GitHub could not list this repository. Check the host account and repository permissions.')
-  return { rows: items.flatMap(item => readPull(item, repository.name) ?? []), more: reply.hasNextPage, incomplete: indexed?.incomplete_results === true }
+  return {
+    rows: items.flatMap(item => readPull(item, repository.name) ?? []),
+    more: reply.hasNextPage && (!useSearch || page < MAX_GITHUB_SEARCH_PAGE),
+    incomplete: indexed?.incomplete_results === true,
+    capped: (indexed?.total_count ?? 0) > MAX_GITHUB_SEARCH_RESULTS,
+  }
 }
 
 const activityLabels: Record<string, string> = { commented: 'Commented', reviewed: 'Reviewed', review_dismissed: 'Dismissed a review', closed: 'Closed the request',
@@ -284,10 +293,9 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const selectionRepo = selection && repositories.get(selection.repository.toLowerCase())
   const filter = listStates.find(value => value === query.get('state')) ?? 'open'
   const sort = listSorts.find(value => value === query.get('sort')) ?? 'updated'
-  const filters = readPullRequestFilters(query)
+  const { search, text, filters, menu } = readPullRequestListSearch(query)
   const lookup = readFilterLookup(query)
   const tab = tabs.find(value => value === query.get('tab')) ?? 'summary'
-  const search = (query.get('q') ?? '').trim().slice(0, 120).replace(/["\\\u0000-\u001f]/gu, ' ').replace(/\s+/gu, ' ').trim()
   const page = Math.min(integer(query.get('page')) || 1, MAX_LIST_PAGE)
   const detailPage = Math.min(integer(query.get('detailPage')) || 1, MAX_LIST_PAGE)
   const list = repository ? [repository] : [...repositories.values()]
@@ -295,7 +303,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   if (search) params.set('q', search)
   if (repository) params.set('repository', repository.name)
   const clearFiltersHref = '/pull-requests?' + new URLSearchParams(params)
-  writePullRequestFilters(params, filters)
+  writePullRequestFilters(params, menu)
   if (page > 1) params.set('page', String(page))
   const href = (overrides: Record<string, string | number> = {}) => {
     const next = new URLSearchParams(params)
@@ -306,6 +314,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const failures: { repository: string, reason: string }[] = []
   let nextPage = false
   let incompleteSearch = false
+  let cappedSearch = false
   const filterChoices = lookup ? readPullRequestFilterChoices(list, lookup, signal)
     .catch(() => ({ ...lookup, options: [], more: false, failed: list.length })) : Promise.resolve(null)
   const detail = selection && selectionRepo ? (async () => {
@@ -384,12 +393,13 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   for (let index = 0; qualifiers && index < list.length; index += 4) {
     signal.throwIfAborted()
     const batch = list.slice(index, index + 4)
-    const results = await Promise.allSettled(batch.map(item => listRepository(item, filter, search, page, sort, qualifiers, signal)))
+    const results = await Promise.allSettled(batch.map(item => listRepository(item, filter, text, page, sort, qualifiers, signal)))
     for (const [offset, result] of results.entries()) {
       if (result.status === 'fulfilled') {
         rows.push(...result.value.rows)
         nextPage ||= result.value.more
         incompleteSearch ||= result.value.incomplete
+        cappedSearch ||= result.value.capped
       }
       else failures.push({ repository: batch[offset]!.name, reason: message(result.reason) })
     }
@@ -416,7 +426,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   return {
     profiles, profile, backHref: profile ? '/?profile=' + profile : '/', repository: repository?.name ?? '',
     repositories: [...repositories.values()].map(item => ({ name: item.name })),
-    filter, filters, choices, clearFiltersHref, incompleteSearch, sort, search, page, tab, detailPage, rows: rows.map(marks), failures,
+    filter, filters: menu, draftChoice: filters.draft, choices, clearFiltersHref, incompleteSearch, cappedSearch, sort, search, page, tab, detailPage, rows: rows.map(marks), failures,
     pageBack: page > 1 ? href({ page: page - 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
     pageNext: nextPage && page < MAX_LIST_PAGE ? href({ page: page + 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
     selected, selectionError: query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
@@ -447,11 +457,13 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
 
 function reviewReturnParams(query: URLSearchParams, profile: number, url: string, tab: typeof tabs[number] = 'code') {
   const params = new URLSearchParams({ profile: String(profile), selectedUrl: url, tab })
-  for (const key of ['state', 'sort', 'q', 'repository', 'page', 'detailPage']) {
+  for (const key of ['state', 'sort', 'repository', 'page', 'detailPage']) {
     const value = query.get(key)
     if (value && value.length <= 512) params.set(key, value)
   }
-  writePullRequestFilters(params, readPullRequestFilters(query))
+  const { search, menu } = readPullRequestListSearch(query)
+  if (search) params.set('q', search)
+  writePullRequestFilters(params, menu)
   if (tab === 'code') carryReviewView(query, params)
   return params
 }

@@ -420,25 +420,28 @@ if (url.pathname === '/graphql' && method === 'POST') {
 if (url.pathname === '/search/issues') {
   const keyword = url.searchParams.get('q') ?? ''
   const selected = /repo:([^ ]+)/.exec(keyword)?.[1]
-  const title = /in:title "([^"]+)"/.exec(keyword)?.[1] ?? ''
-  const withoutTitle = keyword.replace(/in:title "[^"]+"/, '')
-  const labels = [...withoutTitle.matchAll(/label:"([^"]+)"/g)].map(match => match[1].toLowerCase())
-  const terms = new Set(withoutTitle.replace(/label:"[^"]+"/g, '').split(' '))
-  const author = /(?:^| )author:([^ ]+)/.exec(withoutTitle)?.[1]?.toLowerCase()
-  const reviewer = /(?:^| )review-requested:([^ ]+)/.exec(withoutTitle)?.[1]?.toLowerCase()
-  const review = /(?:^| )review:([^ ]+)/.exec(withoutTitle)?.[1]
-  const checks = /(?:^| )status:([^ ]+)/.exec(withoutTitle)?.[1]
+  const phrase = /in:title(?:,body,comments)? "([^"]+)"/.exec(keyword)?.[1]?.toLowerCase() ?? ''
+  const withoutText = keyword.replace(/in:title(?:,body,comments)? "[^"]+"/, '')
+  const labelsMatcher = /(?:^| )(-?)label:("[^"]+"(?:,"[^"]+")*)/g
+  const labels = [...withoutText.matchAll(labelsMatcher)].map(match => ({ exclude: match[1] === '-',
+    names: [...match[2].matchAll(/"([^"]+)"/g)].map(label => label[1].toLowerCase()) }))
+  const terms = new Set(withoutText.replace(labelsMatcher, ' ').split(' '))
+  const author = /(?:^| )author:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
+  const reviewer = /(?:^| )review-requested:([^ ]+)/.exec(withoutText)?.[1]?.toLowerCase()
+  const review = /(?:^| )review:([^ ]+)/.exec(withoutText)?.[1]
+  const checks = /(?:^| )status:([^ ]+)/.exec(withoutText)?.[1]
   if (state.filterListFailure === selected) reply(503, { message: 'Private list search diagnostics' })
   const matching = state.pulls.filter(pull => {
     const applied = new Set((pull.labels ?? []).map(label => label.name.toLowerCase()))
-    return pull.base.repo.full_name === selected && pull.title.toLowerCase().includes(title.toLowerCase())
+    const searchable = [pull.title, pull.body ?? '', ...(pull.searchComments ?? [])]
+    return pull.base.repo.full_name === selected && searchable.some(value => value.toLowerCase().includes(phrase))
       && (!terms.has('is:open') || pull.state === 'open') && (!terms.has('is:closed') || pull.state === 'closed')
       && (!terms.has('is:merged') || pull.merged_at) && (!terms.has('is:unmerged') || !pull.merged_at)
       && (!terms.has('draft:true') || pull.draft) && (!terms.has('draft:false') || !pull.draft)
       && (!author || pull.user?.login.toLowerCase() === author)
       && (!reviewer || (pull.requested_reviewers ?? []).some(user => user.login.toLowerCase() === reviewer))
       && (!review || review === (pull.filterReview ?? 'none')) && (!checks || checks === pull.filterChecks)
-      && labels.every(label => applied.has(label))
+      && labels.every(group => group.exclude !== group.names.some(name => applied.has(name)))
   })
   const field = url.searchParams.get('sort') === 'created' ? 'created_at' : 'updated_at'
   const order = url.searchParams.get('order') === 'asc' ? 1 : -1
@@ -446,7 +449,8 @@ if (url.pathname === '/search/issues') {
   const size = Number(url.searchParams.get('per_page') || 20)
   const page = Number(url.searchParams.get('page') || 1)
   const more = matching.length > page * size ? 'link: <' + endpoint + '>; rel="next"\\r\\n' : ''
-  reply(200, { items: matching.slice((page - 1) * size, page * size), incomplete_results: state.filterListIncomplete === selected }, more)
+  reply(200, { items: matching.slice((page - 1) * size, page * size), total_count: state.filterListTotal ?? matching.length,
+    incomplete_results: state.filterListIncomplete === selected }, more)
 }
 if (!repo) reply(404, {})
 if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs') {

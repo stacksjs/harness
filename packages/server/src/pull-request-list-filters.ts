@@ -1,14 +1,19 @@
 import { searchRepositoryLabels } from './pull-request-labels'
+import { applyPullRequestDraftFilterChange, parsePullRequestQuery } from './pull-request-query'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
 
 const reviewQualifiers = { approved: 'approved', 'changes-requested': 'changes_requested', 'review-required': 'required', none: 'none' } as const
 const checksQualifiers = { passing: 'success', failing: 'failure' } as const
 const filterKeys = ['involvement', 'draft', 'review', 'checks', 'author', 'label'] as const
+const draftChoices = ['only', 'hide'] as const
 const loginPattern = /^[a-z0-9][a-z0-9-]{0,99}(?:\[bot\])?$/iu
+const labelPattern = /^[^"\\\p{Cc}]+$/u
 
 function parseAuthor(value: string | null) {
   const login = value?.trim() ?? ''
-  return login.toLowerCase() === '@me' ? '@me' : loginPattern.test(login.replace(/^@/u, '')) ? login.replace(/^@/u, '') : ''
+  if (/^@?me$/iu.test(login)) return '@me'
+  const username = login.replace(/^@/u, '')
+  return loginPattern.test(username) ? username : ''
 }
 
 function enumValue<T extends string>(value: string | null, choices: readonly T[]): T | '' {
@@ -20,12 +25,12 @@ export function readPullRequestFilters(query: URLSearchParams) {
   for (const value of [...query.getAll('label').slice(0, 100), query.get('addLabel') ?? '']) {
     const label = value.trim()
     const key = label.toLowerCase()
-    if (label && label.length <= 100 && !/["\\\p{Cc}]/u.test(label) && !labels.has(key)) labels.set(key, label)
+    if (label.length <= 100 && labelPattern.test(label) && !labels.has(key)) labels.set(key, label)
     if (labels.size === 10) break
   }
   return {
     involvement: enumValue(query.get('involvement'), ['authored', 'reviewing'] as const),
-    draft: enumValue(query.get('draft'), ['only', 'hide'] as const),
+    draft: enumValue(query.get('draft'), draftChoices),
     review: enumValue(query.get('review'), Object.keys(reviewQualifiers) as (keyof typeof reviewQualifiers)[]),
     checks: enumValue(query.get('checks'), Object.keys(checksQualifiers) as (keyof typeof checksQualifiers)[]),
     author: parseAuthor(query.get('chooseAuthor') || query.get('author')),
@@ -34,6 +39,39 @@ export function readPullRequestFilters(query: URLSearchParams) {
 }
 
 type Filters = ReturnType<typeof readPullRequestFilters>
+type EffectiveFilters = Omit<Filters, 'label'> & { labels: string[][], excludedLabels: string[] }
+
+export function readPullRequestListSearch(query: URLSearchParams) {
+  const menu = readPullRequestFilters(query)
+  const bounded = (query.get('q') ?? '').slice(0, 200).replace(/[\uD800-\uDBFF]$/u, '')
+  let search = bounded.replace(/\p{Cc}/gu, ' ').trim()
+  let parsed = parsePullRequestQuery(search)
+  // The form carries both the displayed draft setting and the saved menu setting.
+  // A newly typed draft qualifier wins when both inputs changed on the same submit.
+  if (query.has('chooseDraft')) {
+    const choice = enumValue(query.get('chooseDraft'), draftChoices)
+    const shown = enumValue(query.get('shownDraft'), draftChoices)
+    if (choice !== shown && (!parsed.filters.draft || parsed.filters.draft === shown)) {
+      const result = applyPullRequestDraftFilterChange(search, { draft: menu.draft || undefined }, { draft: choice || undefined })
+      search = result.query
+      menu.draft = result.filters.draft ?? ''
+      parsed = parsePullRequestQuery(search)
+    }
+  }
+  const typed = parsed.filters
+  const typedLabels = typed.labels?.map(group => group.filter(label => labelPattern.test(label))).filter(group => group.length > 0)
+  const filters: EffectiveFilters = {
+    involvement: menu.involvement,
+    author: parseAuthor(typed.author ?? null) || menu.author,
+    draft: typed.draft ?? menu.draft,
+    review: typed.review ?? menu.review,
+    checks: typed.checks ?? menu.checks,
+    labels: typedLabels?.length ? typedLabels : menu.label.map(label => [label]),
+    excludedLabels: typed.excludedLabels?.filter(label => labelPattern.test(label)) ?? [],
+  }
+  const text = parsed.text.replace(/["\\\p{Cc}]/gu, ' ').replace(/\s+/gu, ' ').trim()
+  return { search, text, menu, filters }
+}
 
 export function writePullRequestFilters(params: URLSearchParams, filters: Filters) {
   for (const key of filterKeys) {
@@ -53,7 +91,7 @@ export async function readFilterViewer(path: string, signal: AbortSignal) {
   return login
 }
 
-export function pullRequestFilterQualifiers(filters: Filters, viewer: string) {
+export function pullRequestFilterQualifiers(filters: EffectiveFilters, viewer: string) {
   const author = filters.author === '@me' ? viewer : filters.author
   if (filters.involvement === 'authored' && author && author.toLowerCase() !== viewer.toLowerCase()) return null
   const requiredAuthor = filters.involvement === 'authored' ? viewer : author
@@ -63,7 +101,8 @@ export function pullRequestFilterQualifiers(filters: Filters, viewer: string) {
     ...(filters.draft ? ['draft:' + (filters.draft === 'only')] : []),
     ...(filters.review ? ['review:' + reviewQualifiers[filters.review]] : []),
     ...(filters.checks ? ['status:' + checksQualifiers[filters.checks]] : []),
-    ...filters.label.map(label => 'label:"' + label + '"'),
+    ...filters.labels.map(labels => 'label:' + labels.map(label => '"' + label + '"').join(',')),
+    ...filters.excludedLabels.map(label => '-label:"' + label + '"'),
   ]
 }
 

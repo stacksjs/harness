@@ -827,6 +827,46 @@ describe('harness serve — HTTP', () => {
       expect(nextPage.searchParams.getAll('label')).toEqual([report.name])
       expect(nextPage.searchParams.get('author')).toBe('fixture-user')
 
+      original.labels.push({ id: 51, name: 'size:S' })
+      original.body = 'The ledger needs a checksum.'
+      original.searchComments = ['An earlier result was redacted.']
+      fixture.pulls[1].labels = [compliance, report, { id: 52, name: 'size:XS' }]
+      fixture.pulls.push({ ...original, number: 5, html_url: url.replace(/1$/u, '5'), title: 'Ignored report with checks',
+        labels: [...original.labels, { id: 53, name: 'wip' }] })
+      fixture.filterListTotal = 1001
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const typed = 'repo:fixture/elsewhere is:closed label:"Release / Lång, phase 2",unused size:S,XS -label:wip draft:false author:me review:approved checks:success "report with checks"'
+      const typedPage = await (await list({ q: typed, label: 'incompatible menu label', draft: 'only', author: 'alix',
+        review: 'changes-requested', checks: 'failing' })).text()
+      expect(typedPage).toContain('Small report with checks')
+      expect(typedPage).not.toContain('Draft report with checks')
+      expect(typedPage).not.toContain('Ignored report with checks')
+      expect(typedPage).toMatch(/value="hide"\s+selected/u)
+      expect(typedPage).toContain('GitHub search shows up to 1,000 results')
+      const typedOnly = await (await list({ q: 'draft:false "Small report"' })).text()
+      expect(typedOnly).toContain('More filters (1)')
+      expect(typedOnly).not.toContain('Clear additional filters')
+      for (const text of ['ledger needs a checksum', 'earlier result was redacted']) {
+        const contentSearch = await (await list({ q: 'size:S -label:wip "' + text + '"' })).text()
+        expect(contentSearch).toContain('Small report with checks')
+        expect(contentSearch).not.toContain('Ignored report with checks')
+      }
+      const typedHref = /href="([^"]*selectedUrl=[^"]+)"/u.exec(typedPage)?.[1]
+      expect(new URL(typedHref!.replaceAll('&amp;', '&'), host).searchParams.get('q')).toBe(typed)
+      const changedDraft = await (await list({ q: typed, chooseDraft: 'only', shownDraft: 'hide' })).text()
+      expect(changedDraft).toContain('Draft report with checks')
+      expect(changedDraft).not.toContain('Small report with checks')
+      const changedHref = /href="([^"]*selectedUrl=[^"]+)"/u.exec(changedDraft)?.[1]
+      const changedParams = new URL(changedHref!.replaceAll('&amp;', '&'), host).searchParams
+      expect(changedParams.get('q')).toBe(typed.replace(' draft:false', ''))
+      expect(changedParams.get('draft')).toBe('only')
+
+      fixture.filterListFailure = 'fixture/notebook'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const beyondIndex = await (await list({ q: 'label:bug', page: '51' })).text()
+      expect(beyondIndex).toContain('GitHub search shows up to 1,000 results')
+      expect(beyondIndex).not.toContain('GitHub could not list this repository.')
+
       const appendix = join(dir, 'filter-appendix')
       mkdirSync(appendix)
       for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/fixture/appendix']])
