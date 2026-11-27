@@ -799,6 +799,20 @@ describe('harness serve — HTTP', () => {
       expect(grouped).toContain('12 deletions')
       expect(grouped).toContain('More labels include Report &amp; analysis')
       expect(grouped).not.toContain('Some pull request details are unavailable.')
+      fixture.privateRepository = 'fixture/notebook'
+      fixture.listMetadataMode = 'partial'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const partialDetails = await (await list({})).text()
+      expect(partialDetails).toContain('Private repository')
+      expect(partialDetails).toContain('External report with checks')
+      expect(partialDetails).toContain('Some pull request details are unavailable.')
+      expect(partialDetails).toContain('Passing checks')
+      expect(partialDetails).not.toContain('Failing checks')
+      fixture.listMetadataMode = 'head-changed'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const movedHead = await (await list({ q: 'Small report' })).text()
+      expect(movedHead).toContain('Small report with checks')
+      expect(movedHead).not.toContain('Passing checks')
       fixture.listMetadataMode = 'wrong-repo'
       writeFileSync(cli.state, JSON.stringify(fixture))
       const withoutDetails = await (await list({})).text()
@@ -806,6 +820,13 @@ describe('harness serve — HTTP', () => {
       expect(withoutDetails).toContain('Some pull request details are unavailable.')
       expect(withoutDetails).not.toContain('Failing checks')
       expect(withoutDetails).not.toContain('data-pr-group="authored"')
+      fixture.listMetadataMode = 'unavailable'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const failedDetails = await (await list({})).text()
+      expect(failedDetails).toContain('Small report with checks')
+      expect(failedDetails).toContain('Some pull request details are unavailable.')
+      expect(failedDetails).not.toContain('Private metadata diagnostics')
+      delete fixture.privateRepository
       delete fixture.listMetadataMode
       writeFileSync(cli.state, JSON.stringify(fixture))
       const filters = new URLSearchParams({ draft: 'hide', involvement: 'reviewing', review: 'approved', checks: 'passing', author: '@me', q: 'report' })
