@@ -57,7 +57,9 @@ import { threadSidebarLayout } from './thread-sidebar'
 import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
-import { pullRequestWorkspace, renderPullRequestMarkdown, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
+import { pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import type { PullRequestReplyDraft } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -203,6 +205,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const deletionWorktrees = new WeakMap<CommandEnvelope, DoomedWorktree[]>()
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
+  const reviewReplies = new PullRequestReplyReceipts(databasePath)
   const previewDatabase = await realpath(databasePath).catch(() => resolve(databasePath))
   const previewOwner = (sessionId: number) => createHash('sha256').update(previewDatabase).update('\0').update(String(sessionId)).digest('hex')
   const savedProviders = new SavedProviderInstances(databasePath)
@@ -1909,12 +1912,21 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (url.pathname === '/pull-requests' || url.pathname === '/pull-requests/viewed' || url.pathname === '/pull-requests/conversation') {
+      if (url.pathname === '/pull-requests' || url.pathname === '/pull-requests/viewed' || url.pathname === '/pull-requests/conversation' || url.pathname === '/pull-requests/reply') {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
         const site = request.headers.get('sec-fetch-site')
         if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
           || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
+        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(120_000)])
+        const render = async (query: URLSearchParams, status = 200, replyDraft?: PullRequestReplyDraft) => {
+          try {
+            const view = await pullRequestWorkspace(engine.current, query, signal)
+            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-pull-requests.stx'), { ...view, replyDraft })
+            return new Response(renderPullRequestMarkdown(html, view), { status, headers })
+          }
+          catch { return new Response('Could not load the pull request workspace. Try again.', { status: 503, headers }) }
+        }
         if (url.pathname !== '/pull-requests') {
           if (request.method !== 'POST') return new Response(null, { status: 405, headers })
           const referer = request.headers.get('referer')
@@ -1923,8 +1935,24 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
             return new Response(null, { status: 415, headers })
           srv.timeout(request, 150)
+          if (url.pathname === '/pull-requests/reply') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            return submitWorkspaceReviewReply(engine.current, url.searchParams, request, signal, reviewReplies)
+              .then((submission) => {
+                const jsonHeaders = { ...headers, 'content-type': 'application/json' }
+                if (!submission) {
+                  const message = 'Invalid reply request. Reopen the Code view and try again.'
+                  return acceptsJson ? Response.json({ message }, { status: 400, headers: jsonHeaders }) : new Response(message, { status: 400, headers })
+                }
+                const { result, message, comment } = submission
+                const statuses = { posted: 200, pending: 202, invalid: 422, changed: 409, denied: 403, unavailable: 503 }
+                if (acceptsJson) return Response.json({ result, message, comment }, { status: statuses[result], headers: jsonHeaders })
+                if (result === 'posted') return new Response(null, { status: 303, headers: { ...headers, location: submission.location } })
+                return render(submission.params, statuses[result], submission.fallback)
+              })
+          }
           const action = url.pathname === '/pull-requests/viewed' ? updateWorkspaceFileViewed : updateWorkspaceReviewConversation
-          return action(engine.current, url.searchParams, request, AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]))
+          return action(engine.current, url.searchParams, request, signal)
             .then((update) => {
               const acceptsJson = request.headers.get('accept') === 'application/json'
               if (!update) {
@@ -1940,12 +1968,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         }
         if (request.method !== 'GET') return new Response(null, { status: 405, headers })
         srv.timeout(request, 150)
-        return pullRequestWorkspace(engine.current, url.searchParams, AbortSignal.any([request.signal, AbortSignal.timeout(120_000)]))
-          .then(async (view) => {
-            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-pull-requests.stx'), view)
-            return new Response(renderPullRequestMarkdown(html, view), { headers })
-          })
-          .catch(() => new Response('Could not load the pull request workspace. Try again.', { status: 503, headers }))
+        return render(url.searchParams)
       }
 
       const settings = settingsSection(url.pathname)

@@ -18,7 +18,7 @@
     </form>
     <p data-pr-conversation-message role="status" :text="reviewMessages()['{{ thread.anchor }}'] || ''">@if(thread.anchor === conversationAnchor){{ conversationNotice }}@endif</p>
     @foreach(thread.comments as comment)
-      <article data-pr-conversation-comment>
+      <article id="{{ comment.anchor }}" data-pr-conversation-comment>
         <header>
           <strong>{{ comment.author }}</strong>
           @if(comment.time)<time datetime="{{ comment.time }}">{{ dateLabel(comment.time) }}</time>@endif
@@ -32,5 +32,37 @@
       </article>
     @endforeach
     @if(thread.moreComments)<p>More replies are available on GitHub.</p>@endif
+    <template :for="reply in (sentReviewReplies()['{{ thread.anchor }}'] || [])" :key="reply.anchor">
+      <article :id="reply.anchor" data-pr-conversation-comment>
+        <header>
+          <strong :text="reply.author"></strong>
+          <time :datetime="reply.time" :text="reviewReplyDate(reply.time)"></time>
+          <a :href="reply.href" :hidden="!reply.href" target="_blank" rel="noopener noreferrer" aria-label="Open comment on GitHub">On GitHub</a>
+        </header>
+        <div data-transcript-markdown :html="reply.html"></div>
+      </article>
+    </template>
+    <p data-pr-reply-message role="status" :text="replyMessages()['{{ thread.anchor }}'] || ''">@if(replyDraft?.anchor === thread.anchor){{ replyDraft.message }}@elseif(conversationAnchor === thread.anchor){{ replyNotice }}@endif</p>
+    <details data-pr-reply @if(replyDraft?.anchor === thread.anchor) open@endif
+      @if(!thread.viewerCanReply && replyDraft?.anchor !== thread.anchor) hidden@endif
+      :hidden="{{ thread.viewerCanReply ? 'false' : 'true' }} && !replyDrafts()['{{ thread.anchor }}']?.pending" @toggle="showReviewReply">
+      <summary>Reply</summary>
+      <form method="post" action="{{ replyAction }}" data-pr-reply-form data-reply-anchor="{{ thread.anchor }}" @submit.prevent="sendReviewReply">
+        <input type="hidden" name="thread" value="{{ thread.id }}">
+        <input type="hidden" name="head" value="{{ selected.head }}">
+        <input type="hidden" name="viewer" value="{{ selected.conversationViewer }}">
+        <input type="hidden" name="intent" value="{{ replyDraft?.anchor === thread.anchor ? replyDraft.token : thread.replyIntent }}">
+        <label for="{{ thread.anchor }}-reply">Reply to this conversation</label>
+        <textarea id="{{ thread.anchor }}-reply" name="body" rows="3" required maxlength="16384"
+          @if(replyDraft?.anchor === thread.anchor && replyDraft.pending) readonly@endif
+          :readonly="Boolean(replyDrafts()['{{ thread.anchor }}']?.pending)" @input="editReviewReply" @keydown="reviewReplyKeys">@if(replyDraft?.anchor === thread.anchor){{ replyDraft.text }}@endif</textarea>
+        <div data-pr-reply-actions>
+          <button type="button" data-pr-button hidden
+            :hidden="Boolean(replySending()['{{ thread.anchor }}'])" @click="cancelReviewReply">Cancel</button>
+          <button type="submit" data-pr-button :aria-disabled="replySending()['{{ thread.anchor }}'] ? 'true' : 'false'"
+            :text="replyDrafts()['{{ thread.anchor }}']?.pending ? 'Check reply' : 'Reply'">@if(replyDraft?.anchor === thread.anchor && replyDraft.pending)Check reply@else Reply@endif</button>
+        </div>
+      </form>
+    </details>
   </div>
 </details>

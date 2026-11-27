@@ -587,6 +587,14 @@ const RESPONSIVE_SHELL = `
 [data-pr-conversation-comment] a { color: var(--workspace-accent); }
 [data-pr-conversation-form] { margin-block-end: 5px; }
 [data-pr-conversation-message]:not(:empty) { margin-block-end: 5px; }
+[data-pr-reply] { margin-block-start: 5px; }
+[data-pr-reply] > summary { width: fit-content; min-height: 36px; padding: 8px 0; cursor: pointer; font-size: 12px; font-weight: 650; }
+[data-pr-reply-form] { display: grid; gap: 6px; }
+[data-pr-reply-form] label, [data-pr-reply-message] { font-size: 12px; }
+[data-pr-reply-form] textarea { width: 100%; min-width: 0; padding: 8px; resize: vertical; color: inherit; background: var(--workspace-bg); border: 1px solid var(--workspace-line); border-radius: 6px; }
+[data-pr-reply-form] textarea:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+[data-pr-reply-actions] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+[data-pr-reply-message]:not(:empty) { margin-block-start: 5px; }
 @media (min-width: 760px) {
   [data-pr-conversation][open]:has([data-pr-conversation-form]:not([hidden])) > summary { padding-inline-end: 96px; min-height: 44px; }
   [data-pr-conversation-form] { position: absolute; inset-block-start: 4px; inset-inline-end: 8px; }
@@ -602,6 +610,7 @@ const RESPONSIVE_SHELL = `
   [data-navigation-pr] { min-height: 44px; }
   [data-pr-files] > li:has([data-pr-viewed-form]) [data-pr-file-patch] > summary { min-height: 48px; }
   [data-pr-conversation] > summary { min-height: 44px; }
+  [data-pr-reply] > summary { min-height: 44px; }
   [data-pr-other-conversations] > summary { min-height: 44px; }
   [data-pr-row] { gap: 7px; padding: 8px 4px; }
 }

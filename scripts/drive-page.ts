@@ -6422,7 +6422,7 @@ try {
     const comment = conversation.getByText(/Verify the inline report/)
     const resolveConversation = conversation.getByRole('button', { name: 'Resolve', exact: true })
     await comment.waitFor()
-    await conversation.locator('button[aria-disabled="false"]').waitFor()
+    await conversation.locator('[data-pr-conversation-form] button[aria-disabled="false"]').waitFor()
     check('Code anchors the current review after its line and keeps outdated comments collapsed',
       await conversation.evaluate(element => element.previousElementSibling?.textContent?.includes('+Report fixture'))
       && await oldConversation.getAttribute('open') === null)
@@ -6447,6 +6447,40 @@ try {
     await conversation.getByText('Conversation reopened.', { exact: true }).waitFor()
     check('unresolving returns the same conversation to the open state',
       await comment.isVisible() && JSON.parse(readFileSync(github.state, 'utf8')).conversationResolved === false)
+    const openReply = conversation.locator('[data-pr-reply] > summary')
+    const replyInput = conversation.getByRole('textbox', { name: 'Reply to this conversation' })
+    await openReply.click()
+    await replyInput.waitFor()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.getAttribute('name') === 'body')
+    await replyInput.fill('Follow up on the **inline report**.')
+    await replyInput.press('Escape')
+    await replyInput.waitFor({ state: 'hidden' })
+    await openReply.click()
+    check('closing the reply editor restores the draft when reopened',
+      await replyInput.inputValue() === 'Follow up on the **inline report**.')
+    await replyInput.press('Enter')
+    check('plain Enter inserts a line without posting a reply', (await replyInput.inputValue()).includes('\n')
+      && JSON.parse(readFileSync(github.state, 'utf8')).replyRequests === undefined)
+    await conversation.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await replyInput.waitFor({ state: 'hidden' })
+    const cancelledFocus = await openReply.evaluate(element => element === document.activeElement)
+    await openReply.click()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.getAttribute('name') === 'body')
+    check('Cancel keeps the draft available and returns to the reply toggle',
+      cancelledFocus && (await replyInput.inputValue()).includes('\n'))
+    await conversation.locator('[data-pr-reply-form]').scrollIntoViewIfNeeded()
+    await capture('pull-requests-inline-reply-390x844', clonePage)
+    const replyAddress = clonePage.url()
+    const [replyResponse] = await Promise.all([
+      clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/reply' && response.request().method() === 'POST'),
+      replyInput.press('Control+Enter'),
+    ])
+    if (!replyResponse.ok()) throw new Error(`Post reply returned HTTP ${replyResponse.status()}: ${await replyResponse.text()}`)
+    await conversation.getByText('Reply posted.', { exact: true }).waitFor()
+    await conversation.getByText('Follow up on the inline report.', { exact: true }).waitFor()
+    check('a reply renders in place and restores focus to Reply with one write',
+      clonePage.url() === replyAddress && await openReply.evaluate(element => element === document.activeElement)
+      && JSON.parse(readFileSync(github.state, 'utf8')).replyRequests === 1)
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()

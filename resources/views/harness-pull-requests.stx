@@ -44,6 +44,11 @@ export const initialViewedStates = Object.fromEntries(trackedFiles.map(file => [
 export const conversationAction = $props.conversationAction
 export const conversationAnchor = $props.conversationAnchor
 export const conversationNotice = $props.conversationNotice
+export const replyAction = $props.replyAction
+export const replyNotice = $props.replyNotice
+export const replyDraft = $props.replyDraft?.viewer === selected?.conversationViewer && $props.replyDraft?.head === selected?.head ? $props.replyDraft : null
+export const initialReplyDrafts = replyDraft ? { [replyDraft.anchor]: { text: replyDraft.text, token: replyDraft.token, pending: replyDraft.pending } } : {}
+export const replyDraftStorage = 'harness.pr-reply.v1:' + JSON.stringify([activeProfileId, selected?.url, selected?.head, selected?.conversationViewer])
 export const conversations = (selected?.files || []).flatMap(file => file.sections.flatMap(section => section.conversations)).concat(selected?.detachedConversations || [])
 export const initialConversationStates = Object.fromEntries(conversations.map(thread => [thread.anchor, {
   isResolved: thread.isResolved, viewerCanResolve: thread.viewerCanResolve, viewerCanUnresolve: thread.viewerCanUnresolve,
@@ -58,6 +63,11 @@ const viewedMessage = state(@json(viewedNotice))
 const reviewThreads = state(@json(initialConversationStates))
 const reviewPending = state({})
 const reviewMessages = state(@json(conversationOnPage && conversationNotice ? { [conversationAnchor]: conversationNotice } : {}))
+const replyDrafts = useSessionStorage(@json(replyDraftStorage), @json(initialReplyDrafts), { listenToStorageChanges: false })
+const replyMessages = state(@json(replyDraft ? { [replyDraft.anchor]: replyDraft.message } : replyNotice ? { [conversationAnchor]: replyNotice } : {}))
+const replySending = state({})
+const sentReviewReplies = state({})
+const replyDates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 const viewedSummary = derived(() => {
   const states = Object.values(fileViewedStates())
   return states.filter(value => value === 'VIEWED').length + ' of ' + states.length + ' viewed on this page'
@@ -123,6 +133,96 @@ async function changeConversation(event) {
     reviewMessages.update(value => ({ ...value, [anchor]: 'Could not confirm the conversation on GitHub. Try again.' }))
   }
   finally { reviewPending.update(value => ({ ...value, [anchor]: false })) }
+}
+
+function rememberReviewReply(form, text, pending) {
+  const anchor = form.dataset.replyAnchor
+  const saved = replyDrafts()[anchor]
+  const token = saved?.token || form.elements.namedItem('intent').value
+  replyDrafts.update(value => ({ ...value, [anchor]: { text, token, pending } }))
+  return token
+}
+
+function reviewReplyDate(value) {
+  return value && Number.isFinite(Date.parse(value)) ? replyDates.format(new Date(value)) : ''
+}
+
+function editReviewReply(event) {
+  const input = event.currentTarget
+  if (!replyDrafts()[input.form.dataset.replyAnchor]?.pending) rememberReviewReply(input.form, input.value, false)
+}
+
+function showReviewReply(event) {
+  const editor = event.currentTarget
+  if (!editor.open) return
+  const input = editor.querySelector('textarea')
+  const draft = replyDrafts()[input.form.dataset.replyAnchor]
+  if (draft) input.value = draft.text
+  input.focus()
+}
+
+function closeReviewReply(editor) {
+  editor.open = false
+  editor.querySelector('summary')?.focus()
+}
+
+function cancelReviewReply(event) {
+  closeReviewReply(event.currentTarget.closest('details'))
+}
+
+function reviewReplyKeys(event) {
+  if (event.isComposing || event.keyCode === 229) {
+    event.stopPropagation()
+    return
+  }
+  const form = event.currentTarget.form
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeReviewReply(form.closest('details'))
+  }
+  else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    form.requestSubmit()
+  }
+}
+
+async function sendReviewReply(event) {
+  const form = event.currentTarget
+  const anchor = form.dataset.replyAnchor
+  const input = form.elements.namedItem('body')
+  if (replySending()[anchor] || !input.value.trim()) return
+  const wasPending = Boolean(replyDrafts()[anchor]?.pending)
+  const body = new URLSearchParams(new FormData(form))
+  body.set('intent', rememberReviewReply(form, input.value, true))
+  replySending.update(value => ({ ...value, [anchor]: true }))
+  replyMessages.update(value => ({ ...value, [anchor]: wasPending ? 'Checking GitHub…' : 'Posting reply…' }))
+  try {
+    const response = await fetch(form.action, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const result = await response.json()
+    if (!result.result) throw new Error('Missing reply outcome')
+    if (result.result === 'posted') {
+      if (result.comment && !form.closest('[data-pr-conversation]').querySelector('#' + result.comment.anchor)) {
+        sentReviewReplies.update(value => ({
+          ...value, [anchor]: [...(value[anchor] || []), result.comment],
+        }))
+      }
+      input.value = ''
+      form.elements.namedItem('intent').value = crypto.randomUUID()
+      replyDrafts.update(value => {
+        const updated = { ...value }
+        delete updated[anchor]
+        return updated
+      })
+      closeReviewReply(form.closest('details'))
+    }
+    else if (result.result !== 'pending') rememberReviewReply(form, input.value, wasPending)
+    replyMessages.update(value => ({ ...value, [anchor]: result.message }))
+  }
+  catch {
+    replyMessages.update(value => ({ ...value, [anchor]: 'Could not confirm this reply. Check again to recover it.' }))
+  }
+  finally { replySending.update(value => ({ ...value, [anchor]: false })) }
 }
 </script>
 @endif

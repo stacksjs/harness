@@ -16,7 +16,7 @@ it('attaches review conversations to the matching side and preserves unanchored 
   ].join('\n')
   const conversation = (id: string, side: 'before' | 'after', line: number, outdated = false): ReviewConversation => ({
     id, anchor: id, path: 'report.txt', side, line, outdated, location: '', isResolved: false,
-    viewerCanResolve: true, viewerCanUnresolve: false, comments: [], moreComments: false,
+    viewerCanResolve: true, viewerCanUnresolve: false, viewerCanReply: true, replyIntent: id, comments: [], moreComments: false,
   })
   const sections = placeReviewConversations(patch, [
     conversation('added', 'after', 1),

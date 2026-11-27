@@ -22,6 +22,15 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, conversationMode }))
   }
+  const configureReplies = (replyMode: 'normal' | 'denied' | 'lost-response' | 'unconfirmed') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, replyMode }))
+  }
+  const revealReply = () => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    const { invisibleReply, ...shown } = previous
+    if (invisibleReply) writeFileSync(state, JSON.stringify({ ...shown, replies: [...(shown.replies ?? []), invisibleReply] }))
+  }
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bun
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -66,7 +75,20 @@ if (url.pathname === '/graphql' && method === 'POST') {
   const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
   const isResolved = Boolean(state.conversationResolved)
   const allowed = state.conversationMode !== 'readonly'
-  const thread = { id: 'fixture-conversation', isResolved, viewerCanResolve: allowed && !isResolved, viewerCanUnresolve: allowed && isResolved }
+  const thread = { id: 'fixture-conversation', isResolved, viewerCanResolve: allowed && !isResolved,
+    viewerCanUnresolve: allowed && isResolved, viewerCanReply: state.replyMode !== 'denied' && allowed }
+  if (query.includes('mutation AddPullRequestConversationReply')) {
+    const pull = state.pulls[0]
+    if (!process.env.GH_TOKEN || !pull || !thread.viewerCanReply || variables.id !== thread.id) reply(403, {})
+    state.replyRequests = (state.replyRequests || 0) + 1
+    const comment = { id: 'fixture-reply-' + state.replyRequests, author: viewer, body: variables.body,
+      createdAt: '2026-11-01T15:00:00Z', url: pull.html_url + '#discussion_r' + (20 + state.replyRequests) }
+    if (state.replyMode === 'unconfirmed') state.invisibleReply = comment
+    else state.replies = [...(state.replies ?? []), comment]
+    writeFileSync(stateFile, JSON.stringify(state))
+    if (state.replyMode === 'unconfirmed' || state.replyMode === 'lost-response') process.exit(1)
+    reply(200, { data: { addPullRequestReviewThreadReply: { comment } } })
+  }
   if (query.includes('mutation SetPullRequestConversationResolved')) {
     if (!process.env.GH_TOKEN || !allowed || variables.id !== thread.id) reply(403, {})
     const resolved = query.includes(' resolveReviewThread(')
@@ -81,6 +103,7 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const node = !pull || ![thread.id, 'other-conversation'].includes(variables.id) ? null : {
       ...thread, id: variables.id, pullRequest: { number: pull.number, headRefOid: pull.head.sha,
         repository: { nameWithOwner: variables.id === thread.id ? pull.base.repo.full_name : 'fixture/another-project' } },
+      ...(variables.replies && { comments: { nodes: state.replies ?? [], pageInfo: { hasPreviousPage: false } } }),
     }
     reply(200, { data: { viewer, node } })
   }
@@ -94,6 +117,7 @@ if (url.pathname === '/graphql' && method === 'POST') {
         { id: 'fixture-inline', author: { login: 'fixture-reviewer' }, createdAt: '2026-11-01T14:00:00Z',
           url: pull.html_url + '#discussion_r4', body: 'Verify the **inline report**. <img src=x onerror=alert(1)> <!-- hidden inline marker -->' },
         { id: 'fixture-minimized', body: 'Hidden by GitHub', isMinimized: true, url: 'https://other.example/unsafe' },
+        ...(state.replies ?? []),
       ], pageInfo: { hasNextPage: true } },
     }
     const outdated = { ...thread, id: 'fixture-outdated', isResolved: true, viewerCanResolve: false, viewerCanUnresolve: false,
@@ -176,5 +200,5 @@ writeFileSync(stateFile, JSON.stringify(state))
 if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
-  return { bin, state, configure, configureChecks, configureViewed, configureConversations }
+  return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, revealReply }
 }

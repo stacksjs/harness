@@ -1,9 +1,10 @@
 import type { HarnessState, WorkspaceState } from '@harness/engine'
+import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { isWorkspaceGitRoot } from './diff'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
-import { placeReviewConversations, readReviewConversations, readReviewConversationState, ReviewConversationConflict, reviewConversationAnchor, reviewThreadId, writeReviewConversation } from './pull-request-conversations'
+import { placeReviewConversations, readReviewConversations, readReviewConversationState, reviewComment, ReviewConversationConflict, reviewConversationAnchor, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
 import { findPullRequestThread } from './pull-request-links'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -258,6 +259,8 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     conversationAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/conversation?'),
     conversationAnchor: query.get('conversation') ?? '',
     conversationNotice: conversationMessages.get(query.get('conversationResult') ?? '') ?? '',
+    replyAction: detailsHref('code', detailPage).replace('/pull-requests?', '/pull-requests/reply?'),
+    replyNotice: query.get('replyResult') === 'posted' ? 'Reply posted.' : '',
   }
 }
 
@@ -270,10 +273,10 @@ function reviewReturnParams(query: URLSearchParams, profile: number, url: string
   return params
 }
 
-async function readReviewSubmission(state: HarnessState, query: URLSearchParams, request: Request) {
+async function readReviewSubmission(state: HarnessState, query: URLSearchParams, request: Request, maxBytes = 16_384) {
   const profile = integer(query.get('profile'))
   const selection = parsePullRequest((query.get('selectedUrl') ?? '').slice(0, 512))
-  const raw = await readRepositoryBody(request, 16_384)
+  const raw = await readRepositoryBody(request, maxBytes)
   const values = new URLSearchParams(raw ?? '')
   const head = values.get('head') ?? ''
   const viewer = values.get('viewer') ?? ''
@@ -388,6 +391,92 @@ export async function updateWorkspaceReviewConversation(state: HarnessState, que
   }
   catch (error) { return reply(error instanceof ReviewConversationConflict ? 'changed' : 'unavailable') }
   finally { conversationWrites.delete(id) }
+}
+
+const replyMessages = {
+  posted: 'Reply posted.',
+  invalid: 'Enter a reply of up to 16 KB.',
+  changed: 'The pull request, conversation, account, or submitted reply changed. Refresh to review it.',
+  denied: 'This GitHub account cannot reply to the conversation.',
+  unavailable: 'Could not reach GitHub. Your draft is still here.',
+  pending: 'GitHub has yet to confirm this reply. Check again to recover it.',
+}
+type ReplyResult = keyof typeof replyMessages
+type ReplyComment = NonNullable<ReturnType<typeof reviewComment>>
+export type PullRequestReplyDraft = { anchor: string, viewer: string, head: string, token: string, text: string, message: string, pending: boolean }
+
+export async function submitWorkspaceReviewReply(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
+  receipts: PullRequestReplyReceipts) {
+  const submission = await readReviewSubmission(state, query, request, 200_000)
+  if (!submission) return null
+  const { profile, selection, values, head, viewer } = submission
+  const id = values.get('thread') ?? ''
+  const token = values.get('intent') ?? ''
+  const draft = (values.get('body') ?? '').replace(/\r\n?/gu, '\n')
+  const text = draft.trim()
+  if (!reviewThreadId.test(id) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(token)) return null
+  const anchor = reviewConversationAnchor(id)
+  const params = reviewReturnParams(query, profile, selection.url)
+  params.set('conversation', anchor)
+  const finish = (result: ReplyResult, comment?: ReplyComment) => {
+    const message = replyMessages[result]
+    const fallback: PullRequestReplyDraft = { anchor, viewer, head, token, text: draft, message, pending: result === 'pending' }
+    return {
+      result, message, fallback, params,
+      location: '/pull-requests?' + params + '&replyResult=posted#' + anchor,
+      comment: comment && {
+        anchor: comment.anchor, href: comment.href, author: comment.author, time: comment.time,
+        html: renderPullRequestCommentMarkdown(comment.text),
+      },
+    }
+  }
+  if (!text || Buffer.byteLength(text) > 16_384 || text.includes('\0')) return finish('invalid')
+  let attempted = false
+  let confirmed = false
+  try {
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
+    if (!repository || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const read = (replies = false, before?: string) =>
+      readReviewConversationState(repository.path, repository.name, selection.number, head, id, signal, credential, replies, before)
+    const before = await read()
+    if (!before) return finish('unavailable')
+    if (before.viewer !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const fingerprint = createHash('sha256').update(JSON.stringify([profile, repository.workspace.id,
+      repository.name.toLowerCase(), selection.number, head, viewer, id, text])).digest('hex')
+    const receipt = receipts.claim(token, fingerprint, before.thread.viewerCanReply)
+    if (receipt === 'conflict') return finish('changed')
+    if (receipt === 'denied') return finish('denied')
+    confirmed = receipt === 'confirmed'
+    attempted = true
+    // GitHub echoes clientMutationId without deduplicating writes. An HTML
+    // comment lets an interrupted operation be recognized in the actual thread.
+    const postedBody = '<!-- harness:review-reply:' + token + ' -->\n\n' + text
+    const matches = (node: { author?: { id?: string }, body?: string } | null | undefined) =>
+      node?.author?.id === viewer && node.body === postedBody
+    const supplied = receipt === 'claimed'
+      ? await writeReviewReply(repository.path, id, postedBody, signal, credential).catch(() => null) : null
+    let recovered = matches(supplied) ? supplied : null
+    let cursor: string | undefined
+    for (let page = 0; !recovered && page < 10; page++) {
+      const current = await read(true, cursor)
+      if (!current || current.viewer !== viewer || !stillTrusted(state, repository.workspace)) break
+      const node = current.comments?.nodes?.find(matches)
+      if (node) { recovered = node; break }
+      const next = current.comments?.pageInfo?.startCursor
+      if (!current.comments?.pageInfo?.hasPreviousPage || !next || next === cursor) break
+      cursor = next
+    }
+    if (!stillTrusted(state, repository.workspace)) return finish('changed')
+    if (!recovered) return finish(confirmed ? 'posted' : 'pending')
+    const comment = reviewComment(recovered, id, selection.url)
+    if (!comment) return finish('pending')
+    if (!confirmed) receipts.confirm(token, fingerprint)
+    return finish('posted', comment)
+  }
+  catch (error) {
+    return finish(error instanceof ReviewConversationConflict ? 'changed' : confirmed ? 'posted' : attempted ? 'pending' : 'unavailable')
+  }
 }
 
 export function renderPullRequestMarkdown(html: string, view: Awaited<ReturnType<typeof pullRequestWorkspace>>) {

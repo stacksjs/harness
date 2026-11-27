@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto'
 import { parseFilePatch } from './diff-patch'
 import { repositoryGitHubRequest } from './repository-pull-request'
 
-type Page<T> = { nodes?: (T | null)[], pageInfo?: { endCursor?: string, hasNextPage?: boolean } }
-type CommentNode = { id?: string, author?: { login?: string }, body?: string, createdAt?: string, url?: string, isMinimized?: boolean }
-type ThreadState = { id: string, isResolved: boolean, viewerCanResolve: boolean, viewerCanUnresolve: boolean }
+type Page<T> = { nodes?: (T | null)[], pageInfo?: { endCursor?: string, hasNextPage?: boolean, startCursor?: string, hasPreviousPage?: boolean } }
+type CommentNode = { id?: string, author?: { id?: string, login?: string }, body?: string, createdAt?: string, url?: string, isMinimized?: boolean }
+type ThreadState = { id: string, isResolved: boolean, viewerCanResolve: boolean, viewerCanUnresolve: boolean, viewerCanReply: boolean }
 type ThreadNode = Partial<ThreadState> & {
   path?: string
   line?: number | null
@@ -17,7 +17,7 @@ type ThreadNode = Partial<ThreadState> & {
   comments?: Page<CommentNode>
 }
 
-const threadFields = 'id isResolved viewerCanResolve viewerCanUnresolve'
+const threadFields = 'id isResolved viewerCanResolve viewerCanUnresolve viewerCanReply'
 const threadPageQuery = `query PullRequestReviewConversations($owner: String!, $name: String!, $number: Int!, $cursor: String) {
   viewer { id }
   repository(owner: $owner, name: $name) {
@@ -37,12 +37,18 @@ const threadPageQuery = `query PullRequestReviewConversations($owner: String!, $
     }
   }
 }`
-const singleThreadQuery = `query PullRequestReviewConversation($id: ID!) {
+const commentFields = 'id author { login ... on Node { id } } body createdAt url isMinimized'
+const replyMarker = /^<!-- harness:review-reply:[0-9a-f-]{36} -->\r?\n\r?\n/u
+const singleThreadQuery = `query PullRequestReviewConversation($id: ID!, $replies: Boolean!, $before: String) {
   viewer { id }
   node(id: $id) {
     ... on PullRequestReviewThread {
       ${threadFields}
       pullRequest { number headRefOid repository { nameWithOwner } }
+      comments(last: 50, before: $before) @include(if: $replies) {
+        nodes { ${commentFields} }
+        pageInfo { startCursor hasPreviousPage }
+      }
     }
   }
 }`
@@ -57,10 +63,11 @@ export function reviewConversationAnchor(id: string): string {
 function threadState(node?: ThreadNode | null): ThreadState | null {
   if (!node?.id || !reviewThreadId.test(node.id) || typeof node.isResolved !== 'boolean'
     || typeof node.viewerCanResolve !== 'boolean' || typeof node.viewerCanUnresolve !== 'boolean') return null
-  return { id: node.id, isResolved: node.isResolved, viewerCanResolve: node.viewerCanResolve, viewerCanUnresolve: node.viewerCanUnresolve }
+  return { id: node.id, isResolved: node.isResolved, viewerCanResolve: node.viewerCanResolve, viewerCanUnresolve: node.viewerCanUnresolve,
+    viewerCanReply: node.viewerCanReply === true }
 }
 
-function reviewComment(node: CommentNode | null, thread: string, address: string) {
+export function reviewComment(node: CommentNode | null, thread: string, address: string) {
   if (!node?.id || !reviewThreadId.test(node.id)) return null
   const url = typeof node.url === 'string' ? URL.parse(node.url) : null
   const pull = new URL(address)
@@ -69,7 +76,7 @@ function reviewComment(node: CommentNode | null, thread: string, address: string
   return { anchor: reviewConversationAnchor(thread + ':' + node.id), href,
     author: node.author?.login?.slice(0, 128) || 'Unknown author',
     time: node.createdAt ?? '',
-    text: !node.isMinimized && typeof node.body === 'string' ? node.body.slice(0, 32_768) : '',
+    text: !node.isMinimized && typeof node.body === 'string' ? node.body.replace(replyMarker, '').slice(0, 32_768) : '',
     minimized: Boolean(node.isMinimized) }
 }
 
@@ -87,6 +94,7 @@ function reviewConversation(node: ThreadNode | null, address: string) {
   const rangeOnSameSide = !node.startDiffSide || node.startDiffSide === node.diffSide
   const location = line ? start && start < line && rangeOnSameSide ? 'Lines ' + start + ' to ' + line : 'Line ' + line : ''
   return { ...state, anchor: reviewConversationAnchor(state.id), path: node.path, outdated, line, side,
+    replyIntent: crypto.randomUUID(),
     location: location && side ? location + (side === 'before' ? ' before changes' : ' after changes') : location,
     comments: (node.comments?.nodes ?? []).flatMap(comment => reviewComment(comment, state.id, address) ?? []),
     moreComments: Boolean(node.comments?.pageInfo?.hasNextPage) }
@@ -154,9 +162,9 @@ export async function readReviewConversations(path: string, repository: string, 
 }
 
 export async function readReviewConversationState(path: string, repository: string, number: number, head: string, id: string,
-  signal: AbortSignal, credential: string) {
+  signal: AbortSignal, credential: string, replies = false, before?: string) {
   type ScopedThread = ThreadNode & { pullRequest?: { headRefOid?: string, number?: number, repository?: { nameWithOwner?: string } } }
-  const reply = await repositoryGitHubRequest(path, 'graphql', { query: singleThreadQuery, variables: { id } }, signal, credential)
+  const reply = await repositoryGitHubRequest(path, 'graphql', { query: singleThreadQuery, variables: { id, replies, before } }, signal, credential)
   const result = reply.body as { data?: { viewer?: { id?: string }, node?: ScopedThread }, errors?: unknown[] } | null
   const node = result?.data?.node
   const viewer = result?.data?.viewer?.id
@@ -164,11 +172,22 @@ export async function readReviewConversationState(path: string, repository: stri
   const thread = threadState(node)
   if (!thread || thread.id !== id || node?.pullRequest?.number !== number || node.pullRequest.headRefOid !== head
     || node.pullRequest.repository?.nameWithOwner?.toLowerCase() !== repository.toLowerCase()) throw new ReviewConversationConflict()
-  return { thread, viewer }
+  return { thread, viewer, comments: node.comments }
 }
 
 export async function writeReviewConversation(path: string, id: string, resolved: boolean, signal: AbortSignal, credential: string) {
   const operation = resolved ? 'resolveReviewThread' : 'unresolveReviewThread'
   const query = `mutation SetPullRequestConversationResolved($id: ID!) { ${operation}(input: { threadId: $id }) { thread { id isResolved } } }`
   await repositoryGitHubRequest(path, 'graphql', { query, variables: { id } }, signal, credential)
+}
+
+export async function writeReviewReply(path: string, id: string, body: string, signal: AbortSignal, credential: string) {
+  const query = `mutation AddPullRequestConversationReply($id: ID!, $body: String!) {
+    addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) {
+      comment { ${commentFields} }
+    }
+  }`
+  const reply = await repositoryGitHubRequest(path, 'graphql', { query, variables: { id, body } }, signal, credential)
+  const result = reply.body as { data?: { addPullRequestReviewThreadReply?: { comment?: CommentNode } } } | null
+  return reply.status === 200 ? result?.data?.addPullRequestReviewThreadReply?.comment ?? null : null
 }
