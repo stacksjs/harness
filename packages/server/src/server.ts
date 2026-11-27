@@ -41,6 +41,7 @@ import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
 import { createStagedCommit, readRepositorySubmission, stagedCommitPreview } from './repository-commit'
 import { readRepositoryStatus } from './repository-status'
+import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
 import { RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
 import type { RepositorySyncAction } from './repository-sync'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
@@ -531,7 +532,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
   const repositoryActions = new Set<string>()
 
-  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: 'commit' | RepositorySyncAction, extendTimeout: () => void): Promise<Response> {
+  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: 'commit' | 'pull-request' | RepositorySyncAction, extendTimeout: () => void): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
     const respond = (body: object, status = 200) => Response.json(body, { headers, status })
     const site = request.headers.get('sec-fetch-site')
@@ -539,8 +540,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return new Response(null, { status: 403, headers })
     if (!['GET', 'POST'].includes(request.method)) return new Response(null, { status: 405, headers })
     const key = url.searchParams.get('repository') ?? ''
-    const input = request.method === 'POST' ? await readRepositorySubmission(request) : null
-    if (request.method === 'POST' && (!input || (action === 'commit' && !input.message)))
+    const submitted = request.method === 'POST'
+    const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
+    const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request) : null
+    if (submitted && (!input && !pullInput || action === 'commit' && !input?.message))
       return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the staged review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
 
     const session = engine.current.sessions.get(sessionId)
@@ -556,10 +559,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (!repository || !await isWorkspaceGitRoot(repository))
       return respond({ error: 'This repository is unavailable in the thread’s checkout.' }, 404)
     if (repositoryActions.has(repository)) return respond({ error: 'A Git action is already running in this repository.' }, 409)
-    if (input) {
-      repositoryActions.add(repository)
-      extendTimeout()
-    }
+    if (submitted) repositoryActions.add(repository)
+    if (submitted || action === 'pull-request') extendTimeout()
 
     const authorize = () => {
       const current = engine.current.sessions.get(sessionId)
@@ -570,6 +571,24 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     try {
+      if (action === 'pull-request') {
+        const base = pullInput?.baseRef ?? url.searchParams.get('base') ?? undefined
+        if (base !== undefined && Buffer.byteLength(base) > 1024) return respond({ error: 'The base branch name is too long.' }, 400)
+        const prepared = await prepareRepositoryPullRequest(repository, base)
+        const { preview } = prepared
+        if (!pullInput) return respond(preview)
+        if (preview.revision !== pullInput.revision)
+          return respond({ error: 'The branch, remote, or pull request changed. Refresh the review before continuing.' }, 409)
+        if (preview.problem) return respond({ error: preview.problem }, 409)
+        if (!preview.existing && !pullInput.title) return respond({ error: 'Enter a pull request title.' }, 400)
+        const result = await openRepositoryPullRequest(repository, prepared, pullInput, authorize)
+        const { repository: name, number } = result.pullRequest
+        const linked = authorize() && await engine.dispatchInternal({
+          id: 'pull_request_link_' + crypto.randomUUID(), at: Date.now(),
+          command: { type: 'thread.pull-request.link', sessionId, pullRequest: { repository: name, number, repositoryKey: key } },
+        }).then(() => true, () => false)
+        return respond({ ...result, linked }, result.existing ? 200 : 201)
+      }
       const preview = action === 'commit' ? await stagedCommitPreview(repository) : await repositorySyncPreview(repository, action)
       if (!input) return respond(preview)
       if (preview.problem) return respond({ error: preview.problem }, 409)
@@ -582,13 +601,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return respond(await syncRepository(repository, action as RepositorySyncAction, preview, authorize))
     }
     catch (error) {
-      if (error instanceof RepositorySyncError) return respond({ error: error.message }, 409)
+      if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError) return respond({ error: error.message }, 409)
       return respond({ error: action === 'commit' ? (input
         ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'
         : 'Git could not read the staged changes.')
         : 'Git could not complete this action. Check the remote, connection, and Git credentials, then review the branch.' }, 503)
     }
-    finally { if (input) repositoryActions.delete(repository) }
+    finally { if (submitted) repositoryActions.delete(repository) }
   }
 
   async function renderWorkspaceReview(root: string | null, url: URL, operation: string | undefined,
@@ -1674,10 +1693,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      const gitRoute = /^\/s\/([1-9]\d*)\/git\/(commit|pull|push)$/u.exec(url.pathname)
+      const gitRoute = /^\/s\/([1-9]\d*)\/git\/(commit|pull|push|pull-request)$/u.exec(url.pathname)
       if (gitRoute) {
         if (!isLoopbackHost(srv.requestIP(request)?.address ?? '')) return new Response(null, { status: 403 })
-        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as 'commit' | RepositorySyncAction, () => srv.timeout(request, 110))
+        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as 'commit' | 'pull-request' | RepositorySyncAction, () => srv.timeout(request, 150))
       }
 
       const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files|status))?$/u.exec(url.pathname)

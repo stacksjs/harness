@@ -8,7 +8,7 @@
  * ordering and one audit trail rather than two.
  */
 
-import type { ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, WorktreeIntent, WorktreeSelection } from './events'
+import type { ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, RepositoryPullRequest, WorktreeIntent, WorktreeSelection } from './events'
 import type { SteeringOutcome } from './follow-ups'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { ComposerAttachment, ComposerUploads } from './composer-attachments'
@@ -168,6 +168,7 @@ export type InternalCommand =
   | { type: 'thread.fork.portable', sessionId: number }
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.pull-request.create', workspaceId: number, pullRequest: PullRequestCheckout }
+  | { type: 'thread.pull-request.link', sessionId: number, pullRequest: RepositoryPullRequest }
   | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
   | { type: 'thread.worktree.restored', sessionId: number }

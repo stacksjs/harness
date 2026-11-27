@@ -9,6 +9,7 @@ import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
 import { ProjectScripts } from '../src/project-scripts'
 import { serve } from '../src/server'
+import { fixtureGitHubCli } from './fixtures/github-cli'
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from './fixtures/git-http'
 
 let dir: string
@@ -776,6 +777,102 @@ describe('harness serve — HTTP', () => {
     expect(git(remote, 'rev-parse', 'refs/heads/main')).toBe(concurrent)
     expect(git(project, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/main')
   }, 45_000)
+
+  it.skipIf(process.platform === 'win32')('creates a reviewed GitHub fork pull request and recovers the link after a lost reply', async () => {
+    const fixture = fixtureGitRepository(dir)
+    const project = join(dir, 'project')
+    const fork = join(dir, 'fork.git')
+    const git = (cwd: string, ...args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd })
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    git(dir, 'clone', '-q', '--', fixture.bare, project)
+    git(dir, 'clone', '-q', '--bare', '--', fixture.bare, fork)
+    const base = git(project, 'rev-parse', 'HEAD')
+    git(project, 'remote', 'set-url', 'origin', 'https://github.com/fixture/notebook.git')
+    git(project, 'remote', 'add', 'publish', 'https://github.com/fixture/notebook-fork.git')
+    git(project, 'config', 'url.' + fixture.bare + '.insteadOf', 'https://github.com/fixture/notebook.git')
+    git(project, 'config', 'url.' + fork + '.insteadOf', 'https://github.com/fixture/notebook-fork.git')
+    git(project, 'switch', '-qc', 'review/export')
+    git(project, 'branch', '--set-upstream-to=origin/main')
+    git(project, 'config', 'branch.review/export.pushRemote', 'publish')
+    writeFileSync(join(project, 'report.txt'), 'Report fixture\n')
+    git(project, 'add', 'report.txt')
+    git(project, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Add a report')
+    const local = git(project, 'rev-parse', 'HEAD')
+    const cli = fixtureGitHubCli(dir, {
+      'fixture/notebook': { bare: fixture.bare },
+      'fixture/notebook-fork': { bare: fork, parent: 'fixture/notebook' },
+    })
+    const path = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      const workspaceId = derivedId('pr-create-project')
+      const sessionId = derivedId('pr-create-thread')
+      const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+        harness.engine.dispatch({ id, at: Date.now(), command })
+      await dispatch('pr-create-project', { type: 'workspace.register', path: realpathSync(project), trusted: true })
+      await dispatch('pr-create-thread', { type: 'session.create', workspaceId, driverKind: 'claude' })
+      const host = 'http://127.0.0.1:' + port
+      const route = host + '/s/' + sessionId + '/git/pull-request'
+      const get = (suffix = '') => fetch(route + suffix).then(response => response.json())
+      const post = async (revision: string, origin?: string) => {
+        const response = await fetch(route, {
+          method: 'POST', headers: { 'content-type': 'application/json', ...(origin && { origin }) },
+          body: JSON.stringify({ revision, baseRef: 'main', title: 'Review the report', body: 'Verify the export.', draft: true }),
+        })
+        return { status: response.status, body: await response.json().catch(() => null) }
+      }
+      const readState = () => JSON.parse(readFileSync(cli.state, 'utf8'))
+      const preview = await get()
+      expect(preview).toMatchObject({ actor: 'fixture-user', repository: 'fixture/notebook',
+        headRepository: 'fixture/notebook-fork', headRef: 'review/export', baseRef: 'main',
+        publish: true, problem: null, existing: null, title: 'Add a report' })
+      expect(await get('?base=missing')).toMatchObject({ problem: 'GitHub could not find the selected base branch.' })
+      expect(readState().posts).toBe(0)
+      expect(git(fork, 'for-each-ref', 'refs/heads/review/export')).toBe('')
+      expect((await post(preview.revision, 'https://other.example')).status).toBe(403)
+      git(project, 'reset', '--soft', 'HEAD^')
+      expect((await post(preview.revision)).status).toBe(409)
+      expect(readState().posts).toBe(0)
+      git(project, 'reset', '--soft', local)
+
+      cli.configure('denied')
+      const denied = await post(preview.revision)
+      expect(denied.status).toBe(409)
+      expect(denied.body.error).toContain('repository permissions')
+      expect(denied.body.error).not.toContain('Private forge diagnostics')
+      expect(git(fixture.bare, 'rev-parse', 'refs/heads/main')).toBe(base)
+      expect(git(fork, 'rev-parse', 'refs/heads/review/export')).toBe(local)
+      expect(git(project, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/main')
+      expect(readState().pulls).toEqual([])
+      expect((await get()).publish).toBe(false)
+
+      cli.configure('lost-response')
+      const confirmed = await post((await get()).revision)
+      const url = 'https://github.com/fixture/notebook/pull/1'
+      expect(confirmed).toMatchObject({ status: 200, body: { linked: true, existing: true, headChanged: false,
+        pullRequest: { url, number: 1, draft: true } } })
+      expect(readState().posts).toBe(2)
+      expect(readState().pulls).toMatchObject([{ head_repo: 'notebook-fork', draft: true,
+        title: 'Review the report', body: 'Verify the export.', head: { sha: local } }])
+      const reopen = await post((await get()).revision)
+      expect(reopen).toMatchObject({ status: 200, body: { linked: true, existing: true } })
+      expect(readState().posts).toBe(2)
+      const links = [{ repository: 'fixture/notebook', repositoryKey: '', number: 1 }]
+      expect(harness.engine.current.sessions.get(sessionId)?.linkedPullRequests).toEqual(links)
+      expect(harness.engine.current.sessions.get(sessionId)?.pullRequest).toBeUndefined()
+      expect(git(project, 'status', '--porcelain')).toBe('')
+
+      harness.stop()
+      harness = await serve({ port: ++portCounter, databasePath: join(dir, 'test.sqlite') })
+      expect(harness.engine.current.sessions.get(sessionId)?.linkedPullRequests).toEqual(links)
+      const result = await fetch('http://127.0.0.1:' + harness.server.port + '/prompt-link/pull-request?pr=fixture/notebook/1')
+      expect(await result.json()).toEqual({ sessionId })
+    }
+    finally { if (path === undefined) delete process.env.PATH; else process.env.PATH = path }
+  }, 60_000)
 
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')

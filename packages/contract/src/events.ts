@@ -37,10 +37,13 @@ export interface WorktreeSelection {
   baseBranch?: string
 }
 
-export interface PullRequestCheckout {
+export interface RepositoryPullRequest {
   repository: string
   number: number
   repositoryKey: string
+}
+
+export interface PullRequestCheckout extends RepositoryPullRequest {
   commit: string
 }
 
@@ -137,6 +140,7 @@ export type EventPayload =
   | { type: 'session.worktree-reserved', intent: WorktreeIntent }
   /** This session got its own checkout and branch. */
   | { type: 'session.isolated', worktreePath: string, branch: string, combined?: CombinedWorktreeIntent }
+  | { type: 'session.pull-request-linked', pullRequest: RepositoryPullRequest }
   | { type: 'session.worktree-restored' }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number, skipped?: string[] }
   | { type: 'checkpoint.restore-failed', checkpointId: number, message: string }

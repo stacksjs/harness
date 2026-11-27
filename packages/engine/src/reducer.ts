@@ -621,6 +621,17 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       return events
     }
 
+    case 'thread.pull-request.link': {
+      const session = state.sessions.get(command.sessionId)
+      const workspace = session && state.workspaces.get(session.workspaceId)
+      if (!session || !workspace?.trusted || workspace.scratch || session.navigation?.archivedAt)
+        throw new InvalidCommand('This thread cannot link a pull request.')
+      const { pullRequest } = command
+      if (session.linkedPullRequests?.some(link => link.repositoryKey === pullRequest.repositoryKey
+        && link.repository === pullRequest.repository && link.number === pullRequest.number)) return []
+      return [{ sessionId: session.id, commandId, at, payload: { type: 'session.pull-request-linked', pullRequest } }]
+    }
+
     case 'thread.pull-request.create': {
       const workspace = state.workspaces.get(command.workspaceId)
       if (!workspace?.trusted || workspace.scratch)

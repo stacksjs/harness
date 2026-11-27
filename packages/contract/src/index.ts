@@ -23,7 +23,7 @@ export type {
   ModelFavorite,
 } from './commands'
 export { codexSelectionLabel, isClearCommand, isClientCommand, isCompactCommand } from './commands'
-export type { CheckoutIntent, CombinedWorktreeIntent, ConversationRewindPoint, EventBase, EventPayload, EventType, ForkSource, HarnessEvent, ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, WorktreeIntent, WorktreeSelection } from './events'
+export type { CheckoutIntent, CombinedWorktreeIntent, ConversationRewindPoint, EventBase, EventPayload, EventType, ForkSource, HarnessEvent, ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, RepositoryPullRequest, WorktreeIntent, WorktreeSelection } from './events'
 export { GLOBAL_SESSION_ID, isGlobalEvent } from './events'
 export type { InputAnswer, InputOption, InputQuestion, InputResponse } from './input'
 export { inputResponseValues, MAX_INPUT_ANSWER_LENGTH, validInputAnswers } from './input'

@@ -12,9 +12,10 @@ export function findPullRequestThread(state: HarnessState, pull: PullRequest) {
   let match
   for (const session of state.sessions.values()) {
     const workspace = state.workspaces.get(session.workspaceId)
+    const matches = (link: { repository: string, number: number } | undefined) =>
+      link?.repository.toLowerCase() === pull.repository.toLowerCase() && link.number === pull.number
     if (!workspace?.trusted || session.navigation?.archivedAt
-      || session.pullRequest?.repository.toLowerCase() !== pull.repository.toLowerCase()
-      || session.pullRequest.number !== pull.number) continue
+      || (!matches(session.pullRequest) && !session.linkedPullRequests?.some(matches))) continue
     if (!match || (session.lastActivityAt ?? 0) >= (match.lastActivityAt ?? 0)) match = session
   }
   return match
