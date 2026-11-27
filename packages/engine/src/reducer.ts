@@ -7,8 +7,8 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
-import { acceptedClaudeAccountCompaction, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
-import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, inactivityDeadline, isTurnActive, isolatedRewindScope, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, sharesCheckout, threadShelf } from './projections'
+import { acceptedClaudeAccountCompaction, acceptedSettingKeys, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, projectSettingsDelta, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
+import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, inactivityDeadline, isTurnActive, isolatedRewindScope, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, sharesCheckout, threadShelf, workspaceSettings } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
 import type { HarnessState, SessionState } from './projections'
@@ -306,11 +306,36 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       // object on every keystroke would otherwise fill the log with events
       // that changed nothing, and "when did this change?" would stop having
       // an answer.
-      const changes = settingsDelta(state.settings, command.changes)
-      if (Object.keys(changes).length === 0)
+      if (command.workspaceId === undefined) {
+        const changes = settingsDelta(state.settings, command.changes)
+        if (Object.keys(changes).length === 0)
+          throw new InvalidCommand('settings.update changes nothing')
+
+        return [{ sessionId: GLOBAL_SESSION_ID, commandId, at, payload: { type: 'settings.updated', changes } }]
+      }
+
+      const workspace = state.workspaces.get(command.workspaceId)
+      if (!workspace) throw new InvalidCommand('That project is not open on this host.')
+      // Measured against what the project itself pins, not against the answer
+      // in force: pinning the agent the host currently defaults to is a real
+      // change, because it stops following the host.
+      const pinned = workspace.settings ?? {}
+      const changes = projectSettingsDelta(pinned, command.changes)
+      const inherit = acceptedSettingKeys(command.inherit).filter(key => pinned[key] !== undefined)
+      if (Object.keys(changes).length === 0 && inherit.length === 0)
         throw new InvalidCommand('settings.update changes nothing')
 
-      return [{ sessionId: GLOBAL_SESSION_ID, commandId, at, payload: { type: 'settings.updated', changes } }]
+      return [{
+        sessionId: GLOBAL_SESSION_ID,
+        commandId,
+        at,
+        payload: {
+          type: 'settings.updated',
+          changes,
+          workspaceId: command.workspaceId,
+          ...(inherit.length ? { inherit } : {}),
+        },
+      }]
     }
 
     case 'profile.create': {
@@ -903,7 +928,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
     case 'thread.settle.inactive': {
       const session = state.sessions.get(command.sessionId)
       if (!session || !state.workspaces.has(session.workspaceId)) return []
-      const deadline = inactivityDeadline(session, state.settings)
+      const deadline = inactivityDeadline(session, workspaceSettings(state, session.workspaceId))
       if (deadline === undefined || deadline > at) return []
       return [{ sessionId: session.id, commandId, at, payload: {
         type: 'session.navigation-changed',
