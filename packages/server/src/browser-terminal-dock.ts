@@ -27,6 +27,7 @@ interface Pane {
   following: boolean
   renderQueued: boolean
   selectionDeferred?: boolean
+  layoutChanged?: boolean
 }
 
 type TerminalFrame =
@@ -140,13 +141,20 @@ export function createTerminalDock(options: TerminalDockOptions) {
       const viewport = host(pane.tab.key)
       const screen = viewport?.querySelector<HTMLElement>('[data-terminal-screen]')
       if (!viewport || !screen) return
-      // Replacing the rows would collapse a native selection or move the
-      // keyboard away from the terminal link the user is inspecting.
       const focused = screen.ownerDocument.activeElement
-      pane.selectionDeferred = Boolean(selection(screen) || (screen.contains(focused) && focused?.matches('[data-terminal-link]')))
+      const link = focused?.matches('[data-terminal-link]') && screen.contains(focused) ? focused : null
+      // Keep text selection during output. On resize, repaint a focused link
+      // and move focus to the matching destination in its new layout.
+      pane.selectionDeferred = Boolean(selection(screen) || (link && !pane.layoutChanged))
       if (pane.selectionDeferred) return
+      const href = link?.getAttribute('href')
+      const matchingLinks = () => [...screen.querySelectorAll<HTMLAnchorElement>('[data-terminal-link]')]
+        .filter(candidate => candidate.getAttribute('href') === href)
+      const occurrence = link ? matchingLinks().findIndex(candidate => candidate === link) : -1
+      pane.layoutChanged = false
       screen.innerHTML = toHtml(pane.model.snapshot(true), true)
       if (pane.following || pane.model.onAltScreen) viewport.scrollTop = viewport.scrollHeight
+      if (link) (matchingLinks()[occurrence] ?? viewport).focus()
     })
   }
 
@@ -289,7 +297,10 @@ export function createTerminalDock(options: TerminalDockOptions) {
     }
     else if (frame.t === 'term-exit') exit(pane, frame.code)
     else {
-      if (frame.t === 'term-sized') pane.model?.resize(frame.cols, frame.rows)
+      if (frame.t === 'term-sized') {
+        pane.model?.resize(frame.cols, frame.rows)
+        pane.layoutChanged = true
+      }
       else {
         pane.model?.write(frame.data)
         activity(pane)
