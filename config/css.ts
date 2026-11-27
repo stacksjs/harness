@@ -332,7 +332,8 @@ const RESPONSIVE_SHELL = `
 [data-repository-pull-request-dialog] input:not([type="checkbox"]) {
   background: var(--workspace-hover); color: inherit;
 }
-.dark [data-repository-pull-request-dialog] { color-scheme: dark; }
+[data-repository-commit-dialog] input[type="checkbox"] { accent-color: var(--workspace-accent); }
+.dark :is([data-repository-commit-dialog], [data-repository-pull-request-dialog]) { color-scheme: dark; }
 [data-share-dialog-body] [role="alert"] { color: var(--workspace-error, #a93939); }
 .dark [data-share-dialog-body] [role="alert"] { color: #ffaba7; }
 [data-share-dialog-body] a { text-decoration: underline; min-height: 34px; align-content: center; }

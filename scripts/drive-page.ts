@@ -6314,6 +6314,8 @@ try {
   await includeAllCommitFiles.check()
   await includeLaterCommitFile.press('Space')
   await commitDialog.getByText('1 of 2 staged files included', { exact: true }).waitFor()
+  check('staged line totals reflect only the included files',
+    (await commitDialog.locator('[data-staged-selected-totals]').innerText()).replace(/\s+/g, ' ').trim() === 'Selected lines +1 −1')
   check('keyboard selection keeps focus on the changed file', await includeLaterCommitFile.evaluate(input => input === document.activeElement))
   check('the master file selection shows a mixed state', await includeAllCommitFiles.evaluate((input: HTMLInputElement) => input.indeterminate))
   for (const [width, height] of workspaceViewports) {

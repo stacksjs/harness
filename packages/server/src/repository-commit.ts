@@ -4,6 +4,7 @@ import { lstat, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { parseNumstat } from './diff'
 import { readRepositoryStatus } from './repository-status'
 
 const exec = promisify(execFile)
@@ -44,24 +45,30 @@ function stagedDiff(path: string, format: string[], index?: string) {
   }).then(result => result.stdout)
 }
 
-export async function prepareStagedCommit(path: string) {
+export async function prepareStagedCommit(path: string, includeStats = false) {
+  const raw = ['--raw', '--no-abbrev']
   const [status, diff, operating] = await Promise.all([
     readRepositoryStatus(path),
-    stagedDiff(path, ['--raw', '--no-abbrev']),
+    includeStats ? stagedDiff(path, [...raw, '--numstat']).catch(() => stagedDiff(path, raw)) : stagedDiff(path, raw),
     gitOperationInProgress(path),
   ])
   if (!status) throw new Error('Git could not read the repository.')
   const entries: StagedEntry[] = []
-  for (let start = 0; start < diff.length;) {
-    const metadataEnd = diff.indexOf(0, start)
+  const rawRecordPrefix = ':'.charCodeAt(0)
+  let offset = 0
+  // Git writes raw records before numstat. Both describe the same index read.
+  while (offset < diff.length && diff[offset] === rawRecordPrefix) {
+    const metadataEnd = diff.indexOf(0, offset)
     if (metadataEnd < 0) throw new Error('Git returned an invalid staged file.')
     const pathEnd = diff.indexOf(0, metadataEnd + 1)
-    const match = /^:\d{6} (\d{6}) [0-9a-f]+ ([0-9a-f]+) [A-Z]$/u.exec(diff.toString('ascii', start, metadataEnd))
+    const match = /^:\d{6} (\d{6}) [0-9a-f]+ ([0-9a-f]+) [A-Z]$/u.exec(diff.toString('ascii', offset, metadataEnd))
     if (!match || pathEnd <= metadataEnd + 1) throw new Error('Git returned an invalid staged file.')
     entries.push({ path: diff.subarray(metadataEnd + 1, pathEnd), mode: match[1]!, object: match[2]! })
-    start = pathEnd + 1
+    offset = pathEnd + 1
   }
-  const revision = createHash('sha256').update(JSON.stringify([path, status.branch, status.head])).update(diff).digest('hex')
+  const revision = createHash('sha256').update(JSON.stringify([path, status.branch, status.head])).update(diff.subarray(0, offset)).digest('hex')
+  const files = entries.map(entry => entry.path.toString())
+  const stats = offset < diff.length ? parseNumstat(diff.toString('utf8', offset)) : null
   const problem = operating || status.conflicted ? 'Finish the in-progress Git operation before committing here.'
     : !status.branch ? 'Switch to a branch before committing here.'
       : !entries.length ? 'Stage files in this repository before committing.' : null
@@ -69,8 +76,9 @@ export async function prepareStagedCommit(path: string) {
     head: status.head, entries,
     preview: {
       branch: status.branch, revision, problem,
-      files: entries.map(entry => entry.path.toString()),
+      files,
       fileKeys: entries.map(entry => entry.path.toString('base64')),
+      fileStats: stats ? files.map(file => stats.get(file) ?? null) : [],
     },
   }
 }

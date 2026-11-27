@@ -17,21 +17,30 @@
           :disabled="repositoryCommitBusy() || repositoryCommitLoading()" @click="repositoryCommitEditing.update(editing => !editing)"
           :text="repositoryCommitEditing() ? 'Done' : 'Edit files'" class="min-h-8 underline underline-offset-2">Edit files</button>
       </div>
-      <ul id="harness-repository-commit-files" aria-label="Staged files" class="overflow-y-auto max-h-[27dvh] list-none rounded-md">
+      <ul id="harness-repository-commit-files" aria-label="Staged files" class="overflow-y-auto max-h-[27dvh] list-none border border-[var(--workspace-line)] rounded-md">
         <template :for="file in repositoryCommitVisibleFiles()" :key="file.key">
-          <li class="flex gap-2 items-start px-2 py-1 min-w-0">
-            <label class="flex flex-1 gap-2 items-start min-w-0" :class="repositoryCommitEditing() ? 'cursor-pointer' : ''">
+          <li class="flex gap-2 items-center px-2 min-w-0">
+            <label class="flex flex-1 gap-2 items-center min-h-8 min-w-0" :class="repositoryCommitEditing() ? 'cursor-pointer' : ''">
               <input type="checkbox" :hidden="!repositoryCommitEditing()" :aria-label="'Include ' + file.path"
                 :disabled="repositoryCommitBusy() || repositoryCommitLoading()" :checked="!repositoryCommitExcluded().has(file.index)"
                 @change="chooseRepositoryCommitFile(file.index, $event)" class="shrink-0 size-4">
               <span class="min-w-0 break-all font-mono text-xs" :text="file.path"></span>
             </label>
             <span :hidden="!repositoryCommitExcluded().has(file.index)" class="shrink-0 text-neutral-600 text-xs dark:text-neutral-300">Excluded</span>
+            <span data-staged-file-totals :hidden="!file.stats || repositoryCommitExcluded().has(file.index)" class="flex gap-1 shrink-0 font-mono tabular-nums text-xs">
+              <span class="text-emerald-700 dark:text-emerald-300" :text="'+' + (file.stats?.insertions || 0)"></span>
+              <span class="text-red-700 dark:text-red-300" :text="'−' + (file.stats?.deletions || 0)"></span>
+            </span>
           </li>
         </template>
       </ul>
       <button type="button" :hidden="repositoryCommitFileCount() <= repositoryCommitLimit()"
         @click="repositoryCommitLimit.update(limit => limit + 40)" class="min-h-8 text-start underline">Show more files</button>
+      <p data-staged-selected-totals :hidden="!repositoryCommitPreview()?.fileStats.length" class="flex gap-2 justify-end font-mono tabular-nums text-xs">
+        <span class="font-sans text-neutral-600 dark:text-neutral-300">Selected lines</span>
+        <span class="text-emerald-700 dark:text-emerald-300" :text="'+' + repositoryCommitTotals().insertions"></span>
+        <span class="text-red-700 dark:text-red-300" :text="'−' + repositoryCommitTotals().deletions"></span>
+      </p>
     </div>
     <label for="harness-repository-commit-message" class="font-medium">Commit message</label>
     <textarea id="harness-repository-commit-message" rows="3" maxlength="4096" required autofocus

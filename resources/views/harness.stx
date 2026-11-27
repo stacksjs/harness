@@ -2520,8 +2520,23 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const repositoryCommitExcluded = state(new Set())
   const repositoryCommitFileCount = derived(() => repositoryCommitPreview()?.files.length || 0)
   const repositoryCommitIncludedCount = derived(() => repositoryCommitFileCount() - repositoryCommitExcluded().size)
-  const repositoryCommitVisibleFiles = derived(() => (repositoryCommitPreview()?.files || [])
-    .slice(0, repositoryCommitLimit()).map((path, index) => ({ path, index, key: repositoryCommitPreview().fileKeys[index] })))
+  const repositoryCommitVisibleFiles = derived(() => {
+    const preview = repositoryCommitPreview()
+    return (preview?.files || []).slice(0, repositoryCommitLimit())
+      .map((path, index) => ({ path, index, key: preview.fileKeys[index], stats: preview.fileStats[index] }))
+  })
+  const repositoryCommitTotals = derived(() => {
+    const stats = repositoryCommitPreview()?.fileStats || []
+    const excluded = repositoryCommitExcluded()
+    let insertions = 0
+    let deletions = 0
+    for (const [index, file] of stats.entries()) {
+      if (!file || excluded.has(index)) continue
+      insertions += file.insertions
+      deletions += file.deletions
+    }
+    return { insertions, deletions }
+  })
   const repositoryCommitAllFiles = useRef('repositoryCommitAllFilesBox')
   effect(() => {
     const included = repositoryCommitIncludedCount()

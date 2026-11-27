@@ -1635,6 +1635,9 @@ describe('harness serve — HTTP', () => {
     })
     const preview = await read()
     expect(preview.files).toEqual([selected, 'excluded.txt', 'removed.txt'])
+    expect(preview.fileStats).toEqual([
+      { insertions: 1, deletions: 1 }, { insertions: 1, deletions: 1 }, { insertions: 0, deletions: 1 },
+    ])
     expect((await send(preview.revision, [0, 1, 2])).status).toBe(409)
     expect((await send(preview.revision, [3])).status).toBe(409)
     const hook = join(project, '.git', 'hooks', 'pre-commit')

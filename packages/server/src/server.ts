@@ -610,7 +610,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return respond({ ...result, linked }, result.existing ? 200 : 201)
       }
       const review = action === 'commit'
-        ? { kind: 'commit' as const, ...await prepareStagedCommit(repository) }
+        ? { kind: 'commit' as const, ...await prepareStagedCommit(repository, !submitted) }
         : { kind: 'sync' as const, action, preview: await repositorySyncPreview(repository, action) }
       const { preview } = review
       if (!input) return respond(preview)
