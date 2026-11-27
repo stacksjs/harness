@@ -5975,7 +5975,26 @@ try {
     ])
     if (response.status() !== 202) throw new Error('Clone setup failed: ' + await response.text())
   }
+  const suggestionRoute = '**/projects/clone?remote=*'
+  const suggestionStarted = Promise.withResolvers<void>()
+  const answerSuggestion = Promise.withResolvers<void>()
+  await clonePage.route(suggestionRoute, async (route) => {
+    suggestionStarted.resolve()
+    await answerSuggestion.promise
+    await route.fulfill({ json: { destination: join(driveRoot, 'suggested-notebook'), directory: 'notebook' } })
+  })
   await urlBox.fill(remote)
+  await destinationBox.click()
+  try {
+    const requestStarted = await Promise.race([suggestionStarted.promise.then(() => true), Bun.sleep(4000).then(() => false)])
+    if (!requestStarted) throw new Error('The clone folder suggestion was not requested.')
+    await destinationBox.fill(join(driveRoot, 'typed-notebook'))
+    await destinationBox.fill('')
+  }
+  finally { answerSuggestion.resolve() }
+  await clonePage.waitForLoadState('networkidle')
+  await clonePage.unroute(suggestionRoute)
+  check('a delayed clone suggestion respects a destination the user cleared', await destinationBox.inputValue() === '')
   await destinationBox.fill(destination)
   for (const [width, height] of workspaceViewports) {
     await clonePage.setViewportSize({ width, height })

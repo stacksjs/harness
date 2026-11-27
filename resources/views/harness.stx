@@ -2306,6 +2306,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   })
   let clonePoll
   let cloneRequest
+  let cloneSuggestionRequest
+  let cloneDestinationEdited = false
   let cloneLinkedPrompt = null
   let cloneReturnToPicker = false
 
@@ -2896,6 +2898,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     linkedPromptRequest?.abort()
     clonePoll?.stop()
     cloneRequest?.abort()
+    cloneSuggestionRequest?.abort()
     projectSetupRequest?.abort()
     projectSetupPoll?.stop()
     projectSettlementPending = false
@@ -3377,6 +3380,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const operation = pendingProjectClone()
     cloneLinkedPrompt = operation?.prompt ?? prompt
     cloneRemoteText.set(operation?.input?.remote || prompt?.repository || '')
+    cloneDestinationEdited = false
     cloneDestination.set(operation?.input?.destination || '')
     cloneSuggestion.set('')
     cloneError.set('')
@@ -3392,6 +3396,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function closeProjectClone() {
     if (cloneBusy()) return
+    cloneSuggestionRequest?.abort()
     cloneDialog.current?.close()
     if (cloneReturnToPicker) {
       projectDialog.current?.showModal()
@@ -3408,12 +3413,28 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     cloneError.set('')
   }
 
+  function changeCloneDestination(value) {
+    cloneDestinationEdited = true
+    cloneDestination.set(value)
+    cloneError.set('')
+  }
+
+  function canSuggestCloneDestination() {
+    const destination = cloneDestinationInput.current?.value ?? cloneDestination()
+    return !cloneBusy() && !cloneDestinationEdited && (!destination || destination === cloneSuggestion())
+  }
+
   async function suggestCloneDestination() {
     const remote = cloneRemoteText().trim()
-    if (!remote || (cloneDestination() && cloneDestination() !== cloneSuggestion()) || cloneBusy()) return
-    const response = await fetch('/projects/clone?' + new URLSearchParams({ remote })).then(result => result.ok ? result.json() : null).catch(() => null)
-    if (response?.destination && cloneDialog.current?.open && cloneRemoteText().trim() === remote
-      && (!cloneDestination() || cloneDestination() === cloneSuggestion())) {
+    if (!remote || !canSuggestCloneDestination()) return
+    cloneSuggestionRequest?.abort()
+    const request = new AbortController()
+    cloneSuggestionRequest = request
+    const response = await fetch('/projects/clone?' + new URLSearchParams({ remote }), { signal: request.signal })
+      .then(result => result.ok ? result.json() : null).catch(() => null)
+    if (request.signal.aborted) return
+    cloneSuggestionRequest = undefined
+    if (response?.destination && cloneDialog.current?.open && cloneRemoteText().trim() === remote && canSuggestCloneDestination()) {
       cloneSuggestion.set(response.destination)
       cloneDestination.set(response.destination)
       if (cloneLinkedPrompt) cloneDestinationInput.current?.focus()
@@ -3429,7 +3450,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const parent = selection?.filePaths?.[0]
       if (!selection?.canceled && typeof parent === 'string') {
         const separator = parent.includes('\\') ? '\\' : '/'
-        cloneDestination.set(parent.replace(/[\\/]+$/, '') + separator + directory)
+        changeCloneDestination(parent.replace(/[\\/]+$/, '') + separator + directory)
       }
     }
     catch (error) { cloneError.set(error.message || 'Could not open the folder picker.') }
@@ -3493,8 +3514,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function startProjectClone() {
     if (cloneBusy() || !composerDraftTools || !projectCloneAllowed) return
     try {
-      const { remote } = composerDraftTools.cloneRemote(cloneRemoteText())
-      const operation = { input: { id: newCommandId(), remote, destination: cloneDestination().trim(), profile: Number(visibleProfile()) || null }, prompt: cloneLinkedPrompt }
+      const { remote } = composerDraftTools.cloneRemote(cloneRemoteInput.current?.value ?? cloneRemoteText())
+      const destination = (cloneDestinationInput.current?.value ?? cloneDestination()).trim()
+      const operation = { input: { id: newCommandId(), remote, destination, profile: Number(visibleProfile()) || null }, prompt: cloneLinkedPrompt }
       cloneSubmitting.set(true)
       cloneError.set('')
       pendingProjectClone.set(operation)

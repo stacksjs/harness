@@ -14,7 +14,7 @@
       <label for="clone-project-destination" class="font-medium text-[13px]">Destination folder</label>
       <div class="flex gap-2">
         <input id="clone-project-destination" data-project-clone-destination ref="projectCloneDestinationBox" type="text" required autocomplete="off" spellcheck="false"
-          :value="cloneDestination()" :disabled="cloneBusy()" @input="cloneDestination.set($event.target.value)"
+          :value="cloneDestination()" :disabled="cloneBusy()" @input="changeCloneDestination($event.target.value)"
           class="px-3 py-2 min-w-0 w-full font-mono text-[13px] bg-neutral-50 dark:bg-neutral-950 border border-black/15 rounded-[8px] dark:border-white/20" />
         <button type="button" :hidden="!hasFolderPicker()" :disabled="cloneBusy()" @click="browseCloneFolder"
           class="px-3 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Browse</button>
