@@ -179,7 +179,8 @@ export function createWorkspaceFiles(scope: Scope, changed: (state: WorkspaceFil
   }
 
   return { open: () => folders.has(current.folder) ? undefined : loadFolder(current.folder), openFolder, toggleFolder,
-    resolveTerminalTarget: (path: string, signal: AbortSignal) => request<WorkspaceTerminalTarget>('terminal-target', { path }, signal),
+    resolveTerminalTarget: (path: string, signal: AbortSignal, cwd?: string) =>
+      request<WorkspaceTerminalTarget>('terminal-target', cwd ? { path, cwd } : { path }, signal),
     loadMore: (path: string) => loadFolder(path, true), search, openFile, back, refresh, dispose }
 }
 

@@ -7969,7 +7969,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     try {
       const controller = await loadWorkspaceFiles()
       if (!controller || request.signal.aborted) return
-      const target = await controller.resolveTerminalTarget(link.dataset.terminalFile, request.signal)
+      const target = await controller.resolveTerminalTarget(link.dataset.terminalFile, request.signal, link.dataset.terminalCwd)
       if (request.signal.aborted || !termOpen() || !terminalHost?.isConnected) return
       if (terminalKeyboardOpen()) toggleTerminalKeyboard()
       showWorkspaceFiles(link, terminalHost)

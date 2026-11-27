@@ -3277,9 +3277,12 @@ describe('harness serve — HTTP', () => {
     expect(await scopedFile.json()).toMatchObject({ text: 'worktree fixture\n' })
     expect((await fetch(`${worktreeRoute}&path=parity%20notes%20%5Bdraft%5D.md`)).status).toBe(404)
     const terminalRoute = `http://127.0.0.1:${port}/workspace-files/terminal-target`
-    const terminalQuery = (path: string) => new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path })
+    const terminalQuery = (path: string, cwd?: string) =>
+      new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path, ...(cwd && { cwd }) })
     expect(await (await fetch(`${terminalRoute}?${terminalQuery('worktree-parity.md:1:3')}`)).json())
       .toEqual({ path: 'worktree-parity.md', kind: 'file', line: 1, column: 3 })
+    expect((await fetch(`${terminalRoute}?${terminalQuery('worktree-parity.md:1:3', pathToFileURL(worktree).href)}`)).status).toBe(200)
+    expect((await fetch(`${terminalRoute}?${terminalQuery('worktree-parity.md:1:3', pathToFileURL(project).href)}`)).status).toBe(404)
     expect((await fetch(`${terminalRoute}?${terminalQuery(join(project, 'parity notes [draft].md'))}`)).status).toBe(404)
 
     const launcher = join(dir, 'code')
@@ -3343,8 +3346,9 @@ describe('harness serve — HTTP', () => {
     await dispatch('preview-profile', { type: 'profile.create', name: 'File fixture' })
     const workspaceId = derivedId('preview-workspace')
     await dispatch('preview-workspace', { type: 'workspace.add', profileId: derivedId('preview-profile'), path: project })
-    const request = (action: string, path = '', headers?: HeadersInit) => {
+    const request = (action: string, path = '', headers?: HeadersInit, cwd?: string) => {
       const params = new URLSearchParams({ workspace: String(workspaceId), path })
+      if (cwd !== undefined) params.set('cwd', cwd)
       return fetch(`http://127.0.0.1:${port}/workspace-files/${action}?${params}`, { headers })
     }
     expect((await request('preview', 'print.html')).status).toBe(404)
@@ -3361,6 +3365,16 @@ describe('harness serve — HTTP', () => {
     const target = await request('terminal-target', `${path}:2:7`)
     expect(target.headers.get('cache-control')).toBe('private, no-store')
     expect(await target.json()).toEqual({ path, kind: 'file', line: 2, column: 7 })
+    const cwd = pathToFileURL(folder).href
+    expect(await (await request('terminal-target', '[draft] #1.txt:2:7', undefined, cwd)).json())
+      .toEqual({ path, kind: 'file', line: 2, column: 7 })
+    expect(await (await request('terminal-target', '../print.html:2:1', undefined, cwd)).json())
+      .toEqual({ path: 'print.html', kind: 'file', line: 2, column: 1 })
+    const remoteCwd = new URL(cwd)
+    remoteCwd.hostname = 'other.invalid'
+    for (const denied of [remoteCwd.href, pathToFileURL(dir).href, cwd + '#L2', cwd + '/missing', pathToFileURL(join(folder, 'binary.txt')).href]) {
+      expect((await request('terminal-target', 'print.html:2:1', undefined, denied)).status).toBe(404)
+    }
     const uri = pathToFileURL(join(project, path))
     uri.hostname = hostname().toLowerCase()
     uri.hash = 'L2C4'

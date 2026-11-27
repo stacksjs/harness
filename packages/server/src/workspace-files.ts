@@ -55,13 +55,19 @@ function terminalPosition(value: string | undefined): number {
   return Number.isSafeInteger(position) && position > 0 ? position : 0
 }
 
+function localTerminalFile(value: string): URL | null {
+  if (!/^file:\/\//iu.test(value) || terminalLinkUrl(value) !== value) return null
+  const url = new URL(value)
+  if (url.hostname && url.hostname !== hostname().toLowerCase()) return null
+  url.hostname = ''
+  return url
+}
+
 function readTerminalTarget(value: string): { path: string, line: number, column: number } | null {
   if (!value || /[\u0000-\u001F\u007F]/u.test(value)) return null
   if (/^file:\/\//iu.test(value)) {
-    if (terminalLinkUrl(value) !== value) return null
-    const url = new URL(value)
-    if (url.hostname && url.hostname !== hostname().toLowerCase()) return null
-    url.hostname = ''
+    const url = localTerminalFile(value)
+    if (!url) return null
     const position = /^#L(\d+)(?:C(\d+))?$/u.exec(url.hash)
     try { return { path: fileURLToPath(url), line: terminalPosition(position?.[1]), column: terminalPosition(position?.[2]) } }
     catch { return null }
@@ -76,10 +82,22 @@ function scopedRelative(root: string, absolute: string): string | null {
   return path === '..' || path.startsWith('..' + sep) || isAbsolute(path) ? null : path
 }
 
-async function resolveTerminalTarget(workspace: string, root: string, value: string): Promise<WorkspaceTerminalTarget | null> {
+async function resolveTerminalTarget(workspace: string, root: string, value: string, directory: string | null): Promise<WorkspaceTerminalTarget | null> {
   const target = readTerminalTarget(value)
   if (!target || (!isAbsolute(target.path) && win32.isAbsolute(target.path))) return null
-  const absolute = /^~[\\/]/u.test(target.path) ? resolve(homedir(), target.path.slice(2)) : resolve(root, target.path)
+  const fromHome = /^~[\\/]/u.test(target.path)
+  let base = root
+  if (directory !== null && !isAbsolute(target.path) && !fromHome) {
+    const uri = localTerminalFile(directory)
+    if (!uri || uri.hash) return null
+    try {
+      base = await realpath(fileURLToPath(uri))
+      const scoped = scopedRelative(root, base)
+      if (scoped === null || await resolveWorkspaceEntry(root, scoped) !== base || !(await stat(base)).isDirectory()) return null
+    }
+    catch { return null }
+  }
+  const absolute = fromHome ? resolve(homedir(), target.path.slice(2)) : resolve(base, target.path)
   let at = scopedRelative(root, absolute) ?? scopedRelative(resolve(workspace), absolute)
   if (at === null && isAbsolute(target.path)) {
     // The shell can report an absolute name through an alias such as macOS
@@ -166,7 +184,7 @@ export async function respondWorkspaceFile(workspace: string, url: URL, request:
   const root = await realpath(workspace).catch(() => null)
   if (!root || path.length > 4096) return unavailable()
   if (url.pathname === '/workspace-files/terminal-target') {
-    const target = await resolveTerminalTarget(workspace, root, path)
+    const target = await resolveTerminalTarget(workspace, root, path, url.searchParams.get('cwd'))
     return target ? Response.json(target, { headers }) : unavailable()
   }
   if (url.pathname === '/workspace-files/tree') return listFolder(root, path, url.searchParams)
