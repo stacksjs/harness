@@ -2513,6 +2513,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let browserPreviewTrigger = null
   const diffClose = useRef('diffCloseBox')
   const repositoryCommitDialog = useRef('repositoryCommitDialogBox')
+  const repositoryCommitScope = state('staged')
+  const repositoryCommitStaged = derived(() => repositoryCommitScope() === 'staged')
   const repositoryCommitPreview = state(null)
   const repositoryCommitMessage = state('')
   const repositoryCommitLimit = state(40)
@@ -5133,13 +5135,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function repositoryCommitAddress() {
-    const query = repositoryCommitKey ? '?' + new URLSearchParams({ repository: repositoryCommitKey }) : ''
-    return '/s/' + sessionId + '/git/commit' + query
+    const query = new URLSearchParams()
+    if (repositoryCommitKey) query.set('repository', repositoryCommitKey)
+    if (!repositoryCommitStaged()) query.set('scope', 'working')
+    return '/s/' + sessionId + '/git/commit' + (query.size ? '?' + query : '')
   }
 
-  function openRepositoryCommit(event) {
+  function openRepositoryCommit(scope, event) {
     repositoryCommitTrigger = event.currentTarget
     repositoryCommitKey = diffRepository()
+    repositoryCommitScope.set(scope)
     repositoryCommitMessage.set('')
     repositoryCommitResult.set('')
     repositoryCommitPreview.set(null)
@@ -5177,11 +5182,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     repositoryCommitRequest = request
     repositoryCommitLoading.set(true)
     repositoryCommitError.set('')
+    const fallback = repositoryCommitStaged() ? 'Could not read the staged changes.' : 'Could not read the working-tree changes.'
     try {
       const response = await fetch(repositoryCommitAddress(), { signal: request.signal })
       const value = await response.json().catch(() => ({}))
       if (request.signal.aborted) return
-      if (!response.ok) throw new Error(value.error || 'Could not read the staged changes.')
+      if (!response.ok) throw new Error(value.error || fallback)
       const previous = repositoryCommitPreview()
       const excluded = repositoryCommitExcluded()
       if (previous && excluded.size) {
@@ -5192,7 +5198,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (value.problem) repositoryCommitError.set(value.problem)
     }
     catch (error) {
-      if (!request.signal.aborted) repositoryCommitError.set(error.message || 'Could not read the staged changes.')
+      if (!request.signal.aborted) repositoryCommitError.set(error.message || fallback)
     }
     finally {
       if (repositoryCommitRequest === request) {
@@ -5217,7 +5223,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const value = await response.json().catch(() => ({}))
       if (request.signal.aborted) return
       if (!response.ok || !value.commit) throw new Error(value.error || 'Could not confirm the commit.')
-      repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + '.')
+      repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + '.' + (value.warning ? ' ' + value.warning : ''))
       repositoryCommitBusy.set(false)
       repositoryCommitDialog.current?.close()
       diffClose.current?.focus()

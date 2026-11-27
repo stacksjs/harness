@@ -77,8 +77,11 @@
     <span role="status" :text="diffStatusChanges()"></span>
     @if(workspaceEditorAllowed)
       <div data-repository-actions aria-label="Git actions" role="group" class="flex flex-wrap gap-x-3 ms-auto">
+        <button type="button" data-repository-working-commit-open aria-haspopup="dialog"
+          :hidden="!diffGitStatus()?.branch || Boolean(diffGitStatus()?.conflicted) || !(diffGitStatus()?.staged || diffGitStatus()?.unstaged || diffGitStatus()?.untracked)"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event)" class="min-h-10 font-medium underline underline-offset-2">Commit changes</button>
         <button type="button" data-repository-commit-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.staged || !diffGitStatus()?.branch || Boolean(diffGitStatus()?.conflicted)"
-          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit" class="min-h-10 font-medium underline underline-offset-2">Commit staged</button>
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('staged', $event)" class="min-h-10 font-medium underline underline-offset-2">Commit staged</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.upstream || !diffGitStatus()?.branch"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('pull', $event)" class="min-h-10 font-medium underline underline-offset-2">Pull</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"

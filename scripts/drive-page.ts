@@ -6346,16 +6346,49 @@ try {
   check('the commit dialog records only the selected blobs and keeps the remaining index and newer working changes',
     fixtureGit('show', 'HEAD:review.txt') === 'Staged review note' && readFileSync(fixturePath, 'utf8') === 'Newer working note\n'
     && fixtureGit('diff', '--cached', '--name-only') === 'later changes.txt\nnewly staged.txt')
+  const workingAdded = join(commitCheckout, 'working add.txt')
+  writeFileSync(workingAdded, 'Untracked choice\n')
+  const openWorkingCommit = clonePage.getByRole('button', { name: 'Commit changes', exact: true })
+  const workingDialog = clonePage.getByRole('dialog', { name: 'Commit changes', exact: true })
+  await openWorkingCommit.click()
+  await workingDialog.getByText('4 of 4 changed files included', { exact: true }).waitFor()
+  await workingDialog.getByRole('button', { name: 'Edit files', exact: true }).click()
+  for (const file of ['later changes.txt', 'newly staged.txt', 'working add.txt']) {
+    await workingDialog.getByRole('checkbox', { name: 'Include ' + file, exact: true }).uncheck()
+  }
+  const workingMessage = workingDialog.getByRole('textbox', { name: 'Commit message' })
+  const confirmWorking = workingDialog.getByRole('button', { name: 'Commit', exact: true })
+  await workingMessage.fill('Review working note')
+  await workingDialog.getByText('1 of 4 changed files included', { exact: true }).waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-working-commit-${width}x${height}`, clonePage)
+  }
+  writeFileSync(fixturePath, 'Latest working note\n')
+  await confirmWorking.click()
+  await workingDialog.getByRole('alert').filter({ hasText: 'working tree, or staged files changed' }).waitFor()
+  await workingDialog.getByRole('button', { name: 'Refresh changed files', exact: true }).click()
+  await workingDialog.getByText('1 of 4 changed files included', { exact: true }).waitFor()
+  check('a refreshed working-tree review keeps the commit message and selection',
+    await workingMessage.inputValue() === 'Review working note'
+    && await workingDialog.getByRole('checkbox', { name: 'Include review.txt', exact: true }).isChecked())
+  await confirmWorking.click()
+  await workingDialog.waitFor({ state: 'hidden' })
+  await clonePage.getByText(/^Committed [0-9a-f]{7}\.$/u).waitFor()
+  check('working-tree commit records only the selected working copy and preserves staged and untracked exclusions',
+    fixtureGit('show', 'HEAD:review.txt') === 'Latest working note'
+    && fixtureGit('diff', '--cached', '--name-only') === 'later changes.txt\nnewly staged.txt'
+    && fixtureGit('ls-files', '--others', '--exclude-standard') === 'working add.txt')
   fixtureGit('reset', '--', 'later changes.txt', 'newly staged.txt')
   rmSync(excludedCommitPath)
   rmSync(lateCommitPath)
+  rmSync(workingAdded)
   await clonePage.waitForLoadState('networkidle')
 
   const syncRemote = join(driveRoot, 'sync-fixture.git')
   const syncPeer = join(driveRoot, 'sync-peer')
   execFileSync('git', ['init', '--bare', '-q', syncRemote])
   fixtureGit('remote', 'set-url', 'origin', syncRemote)
-  writeFileSync(fixturePath, 'Staged review note\n')
   const syncBranch = fixtureGit('branch', '--show-current')
   const gitActions = clonePage.getByRole('group', { name: 'Git actions' })
   const openPush = gitActions.getByRole('button', { name: 'Push', exact: true })

@@ -1,23 +1,24 @@
 <dialog data-repository-commit-dialog ref="repositoryCommitDialogBox" aria-labelledby="harness-repository-commit-title"
   @cancel.prevent="closeRepositoryCommit" @click.self="closeRepositoryCommit">
   <form data-share-dialog-body @submit.prevent="submitRepositoryCommit">
-    <h2 id="harness-repository-commit-title">Commit staged changes</h2>
+    <h2 id="harness-repository-commit-title" :text="repositoryCommitStaged() ? 'Commit staged changes' : 'Commit changes'">Commit staged changes</h2>
     <p :hidden="!repositoryCommitPreview()?.branch" :text="'Branch ' + repositoryCommitPreview()?.branch"></p>
-    <p role="status" :hidden="!repositoryCommitLoading()">Reading the staged changes…</p>
+    <p hidden :hidden="repositoryCommitStaged()" class="text-neutral-600 dark:text-neutral-300">This commits the current working contents of the selected files.</p>
+    <p role="status" :hidden="!repositoryCommitLoading()" :text="repositoryCommitStaged() ? 'Reading the staged changes…' : 'Reading the working-tree changes…'"></p>
     <p role="alert" :hidden="!repositoryCommitError()" :text="repositoryCommitError()"></p>
     <div :hidden="!repositoryCommitFileCount()" class="grid gap-1 min-w-0">
       <div class="flex flex-wrap gap-2 items-center justify-between">
         <div class="flex gap-2 items-center">
-          <input type="checkbox" ref="repositoryCommitAllFilesBox" aria-label="Include all staged files" :hidden="!repositoryCommitEditing()"
+          <input type="checkbox" ref="repositoryCommitAllFilesBox" :aria-label="repositoryCommitStaged() ? 'Include all staged files' : 'Include all changed files'" :hidden="!repositoryCommitEditing()"
             :disabled="repositoryCommitBusy() || repositoryCommitLoading()" :checked="repositoryCommitIncludedCount() === repositoryCommitFileCount()"
             @change="chooseAllRepositoryCommitFiles" class="shrink-0 size-4">
-          <p class="font-medium" aria-live="polite" :text="repositoryCommitIncludedCount() + ' of ' + repositoryCommitFileCount() + ' staged files included'"></p>
+          <p class="font-medium" aria-live="polite" :text="repositoryCommitIncludedCount() + ' of ' + repositoryCommitFileCount() + (repositoryCommitStaged() ? ' staged files included' : ' changed files included')"></p>
         </div>
         <button type="button" :aria-expanded="String(repositoryCommitEditing())" aria-controls="harness-repository-commit-files"
           :disabled="repositoryCommitBusy() || repositoryCommitLoading()" @click="repositoryCommitEditing.update(editing => !editing)"
           :text="repositoryCommitEditing() ? 'Done' : 'Edit files'" class="min-h-8 underline underline-offset-2">Edit files</button>
       </div>
-      <ul id="harness-repository-commit-files" aria-label="Staged files" class="overflow-y-auto max-h-[27dvh] list-none border border-[var(--workspace-line)] rounded-md">
+      <ul id="harness-repository-commit-files" :aria-label="repositoryCommitStaged() ? 'Staged files' : 'Changed files'" class="overflow-y-auto max-h-[27dvh] list-none border border-[var(--workspace-line)] rounded-md">
         <template :for="file in repositoryCommitVisibleFiles()" :key="file.key">
           <li class="flex gap-2 items-center px-2 min-w-0">
             <label class="flex flex-1 gap-2 items-center min-h-8 min-w-0" :class="repositoryCommitEditing() ? 'cursor-pointer' : ''">
@@ -47,7 +48,8 @@
       :value="repositoryCommitMessage()" :disabled="repositoryCommitBusy()" @input="repositoryCommitMessage.set($event.target.value)"></textarea>
     <div data-share-dialog-actions>
       <button type="button" @click="closeRepositoryCommit" :disabled="repositoryCommitBusy()">Cancel</button>
-      <button type="button" @click="loadRepositoryCommit" :hidden="!repositoryCommitError()" :disabled="repositoryCommitBusy() || repositoryCommitLoading()">Refresh staged files</button>
+      <button type="button" @click="loadRepositoryCommit" :hidden="!repositoryCommitError()" :disabled="repositoryCommitBusy() || repositoryCommitLoading()"
+        :text="repositoryCommitStaged() ? 'Refresh staged files' : 'Refresh changed files'">Refresh staged files</button>
       <button type="submit" data-share-primary :disabled="repositoryCommitBusy() || repositoryCommitLoading() || Boolean(repositoryCommitError()) || !repositoryCommitMessage().trim() || !repositoryCommitIncludedCount()"
         :text="repositoryCommitBusy() ? 'Committing…' : 'Commit'">Commit</button>
     </div>
