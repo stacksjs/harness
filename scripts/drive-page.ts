@@ -5968,11 +5968,13 @@ try {
   const urlBox = cloneDialog.getByRole('textbox', { name: 'Repository URL' })
   const destinationBox = cloneDialog.getByRole('textbox', { name: 'Destination folder' })
   const cloneSubmit = cloneDialog.getByRole('button', { name: 'Clone repository', exact: true })
-  async function submitClone() {
+  async function submitClone(expectedDestination: string) {
     const [response] = await Promise.all([
       clonePage.waitForResponse(result => new URL(result.url()).pathname === '/projects/clone' && result.request().method() === 'POST'),
       cloneSubmit.click(),
     ])
+    if (response.request().postDataJSON().destination !== expectedDestination)
+      throw new Error('Clone setup submitted a directory other than the one entered in the fixture.')
     if (response.status() !== 202) throw new Error('Clone setup failed: ' + await response.text())
   }
   const suggestionRoute = '**/projects/clone?remote=*'
@@ -6006,7 +6008,7 @@ try {
     await capture(`workspace-project-clone-${width}x${height}`, clonePage)
   }
 
-  await submitClone()
+  await submitClone(destination)
   await cloneDialog.getByRole('button', { name: 'Stop clone' }).waitFor()
   await clonePage.reload()
   await cloneDialog.getByRole('button', { name: 'Stop clone' }).click()
@@ -6015,7 +6017,7 @@ try {
 
   delayGit = false
   networkGate.resolve()
-  await submitClone()
+  await submitClone(destination)
   await clonePage.waitForURL(url => Boolean(url.searchParams.get('workspace')) && url.href !== backgroundDraftUrl)
   await clonePage.locator('[data-project-trust]').waitFor()
   const manualId = Number(new URL(clonePage.url()).searchParams.get('workspace'))
@@ -6042,7 +6044,7 @@ try {
   check('an unavailable GitHub repository opens clone settings with its repository and suggested folder',
     await urlBox.inputValue() === 'fixture/notebook')
   await destinationBox.fill(linkDestination)
-  await submitClone()
+  await submitClone(linkDestination)
   await clonePage.waitForURL(url => Boolean(url.searchParams.get('workspace')) && Boolean(url.searchParams.get('draft')))
   await clonePage.locator('[data-project-trust]').click()
   const editor = clonePage.getByRole('textbox', { name: 'Message', exact: true })
@@ -6096,10 +6098,25 @@ try {
 
   process.env[gitConfigValue] = 'https://github.com/fixture/another-notebook.git'
   const newCheckout = join(driveRoot, 'second-pr-project')
+  const prSuggestionStarted = Promise.withResolvers<void>()
+  const suggestPrDestination = Promise.withResolvers<void>()
+  await clonePage.route(suggestionRoute, async (route) => {
+    prSuggestionStarted.resolve()
+    await suggestPrDestination.promise
+    await route.fulfill({ json: { destination: join(driveRoot, 'late-pr-suggestion'), directory: 'another-notebook' } }).catch(() => {})
+  })
   await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/another-notebook/7', prompt: pullRequestPrompt }))
   await promptReview.getByRole('button', { name: 'Clone repository' }).click()
-  await destinationBox.fill(newCheckout)
-  await submitClone()
+  try {
+    const requestStarted = await Promise.race([prSuggestionStarted.promise.then(() => true), Bun.sleep(4000).then(() => false)])
+    if (!requestStarted) throw new Error('The linked PR clone suggestion was not requested.')
+    await destinationBox.fill(newCheckout)
+  }
+  finally { suggestPrDestination.resolve() }
+  await clonePage.waitForLoadState('networkidle')
+  await clonePage.unroute(suggestionRoute)
+  check('a late linked PR clone suggestion preserves the folder the user typed', await destinationBox.inputValue() === newCheckout)
+  await submitClone(newCheckout)
   await clonePage.waitForURL(url => url.searchParams.has('workspace') && url.searchParams.has('pr'))
   const trustControl = clonePage.locator('[data-project-trust]')
   await trustControl.waitFor()
