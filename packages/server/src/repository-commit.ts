@@ -101,7 +101,7 @@ export async function prepareRepositoryCommit(path: string, scope: RepositoryCom
   if (scope === 'working' && !problem) {
     const snapshot = await snapshotTree(path, [], undefined, base)
     if (!snapshot) throw new Error('Git could not read the working tree.')
-    base ??= await emptyTree(path)
+    base = base ?? await emptyTree(path)
     comparison = [base, snapshot]
     staged = await commitDiff(path, ['--cached', base], raw)
   }

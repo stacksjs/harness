@@ -160,7 +160,7 @@ export async function readPullRequestFilterChoices(repositories: LookupRepositor
         failed++
         continue
       }
-      more ||= page.value.more
+      more = more || page.value.more
       for (const option of page.value.options) {
         const key = option.value.toLowerCase()
         if (!options.has(key)) options.set(key, option)

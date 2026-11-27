@@ -172,7 +172,7 @@ async function readPullRequestPages(repository: Repository, scope: {
       return pull ? [{ ...pull, listPage: Math.floor((offset + sliceStart + index) / LIST_PAGE_SIZE) + 1 }] : []
     }))
     more = offset + batch.items.length > end || batch.more
-    incomplete ||= batch.incomplete
+    incomplete = incomplete || batch.incomplete
     capped ||= batch.capped
     if (!batch.more) break
   }
@@ -212,8 +212,8 @@ async function listRepository(repository: Repository, scope: {
         let capped = false
         for (const { key, section } of sections) {
           if (!section) continue
-          more ||= section.more
-          capped ||= section.capped
+          more = more || section.more
+          capped = capped || section.capped
           for (const pull of section.pulls) {
             if (assignedGroups.has(pull.number)) continue
             assignedGroups.set(pull.number, key)
@@ -530,8 +530,8 @@ async function readPullRequestWorkspace(state: HarnessState, query: URLSearchPar
       if (result.status === 'fulfilled') {
         if (!continuing || (!result.value.incomplete && !result.value.partitionsUnavailable)) rows.push(...result.value.rows)
         nextPage ||= result.value.more
-        incompleteSearch ||= result.value.incomplete
-        cappedSearch ||= result.value.capped
+        incompleteSearch = incompleteSearch || result.value.incomplete
+        cappedSearch = cappedSearch || result.value.capped
         detailsUnavailable ||= result.value.detailsUnavailable
         partitionsUnavailable ||= result.value.partitionsUnavailable
       }
