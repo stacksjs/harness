@@ -60,7 +60,7 @@ export class WorkspaceTerminals<Peer> {
     if (saved) return this.history.read(saved)
   }
 
-  projectJobTail(scope: SavedTerminalScope): string {
+  projectJobTail(scope: SavedTerminalScope): string | undefined {
     for (const terminal of this.terminals.values()) {
       if (terminal.scope.workspaceId !== scope.workspaceId || terminal.scope.sessionId !== scope.sessionId
         || terminal.scope.resumeKey !== scope.resumeKey || !terminal.model) continue
@@ -69,7 +69,6 @@ export class WorkspaceTerminals<Peer> {
       while (end > 0 && viewport[end - 1]!.every(cell => cell.ch === ' ')) end--
       return viewport.slice(Math.max(0, end - 4), end).map(row => row.map(cell => cell.ch).join('').trimEnd()).join('\n')
     }
-    return ''
   }
 
   processIds(scope: { workspaceId: number, sessionId: number }): number[] {

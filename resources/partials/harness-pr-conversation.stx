@@ -1,0 +1,84 @@
+<details data-pr-conversation id="{{ thread.anchor }}" @if(!thread.isResolved || thread.anchor === conversationAnchor) open@endif>
+  <summary>
+    <span :text="threadResolved('{{ thread.anchor }}') ? 'Resolved conversation' : 'Review conversation'">@if(thread.isResolved)Resolved conversation@else Review conversation@endif</span>
+    @if(showPath)<code>{{ thread.path }}</code>@endif
+    @if(thread.location)<span>{{ thread.location }}</span>@endif
+    @if(thread.outdated)<span>Outdated</span>@elseif(detached && !showPath)<span>Outside displayed patch</span>@endif
+  </summary>
+  <div data-pr-conversation-body>
+    <form method="post" action="{{ conversationAction }}" data-pr-conversation-form data-conversation-anchor="{{ thread.anchor }}"
+      @if(!(thread.isResolved ? thread.viewerCanUnresolve : thread.viewerCanResolve)) hidden@endif
+      :hidden="!canChangeThread('{{ thread.anchor }}')" @submit.prevent="changeConversation">
+      <input type="hidden" name="thread" value="{{ thread.id }}">
+      <input type="hidden" name="head" value="{{ selected.head }}">
+      <input type="hidden" name="viewer" value="{{ selected.conversationViewer }}">
+      <input type="hidden" name="resolved" value="{{ String(!thread.isResolved) }}">
+      <button type="submit" data-pr-button :aria-disabled="reviewPending()['{{ thread.anchor }}'] ? 'true' : 'false'"
+        :text="threadResolved('{{ thread.anchor }}') ? 'Unresolve' : 'Resolve'">@if(thread.isResolved)Unresolve@else Resolve@endif</button>
+    </form>
+    <p data-pr-conversation-message role="status" :text="reviewMessages()['{{ thread.anchor }}'] || ''">@if(thread.anchor === conversationAnchor){{ conversationNotice }}@endif</p>
+    @foreach(thread.comments as comment)
+      <article id="{{ comment.anchor }}" data-pr-conversation-comment>
+        <header>
+          <strong>{{ comment.author }}</strong>
+          @if(comment.time)<time datetime="{{ comment.time }}">{{ dateLabel(comment.time) }}</time>@endif
+          @if(comment.href)<a href="{{ comment.href }}" target="_blank" rel="noopener noreferrer" aria-label="Open comment on GitHub">On GitHub</a>@endif
+        </header>
+        @if(comment.minimized)
+          <p>Comment minimized on GitHub.</p>
+        @elseif(comment.text)
+          <div data-pr-markdown="{{ comment.anchor }}" data-transcript-markdown></div>
+        @endif
+      </article>
+    @endforeach
+    <template :for="reply in visibleReviewComments('{{ thread.anchor }}')" :key="reply.anchor">
+      <article :id="reply.anchor" data-pr-conversation-comment tabindex="-1">
+        <header>
+          <strong :text="reply.author"></strong>
+          <time :datetime="reply.time" :text="reviewReplyDate(reply.time)"></time>
+          <a :href="reply.href" :hidden="!reply.href" target="_blank" rel="noopener noreferrer" aria-label="Open comment on GitHub">On GitHub</a>
+        </header>
+        <p :hidden="!reply.minimized">Comment minimized on GitHub.</p>
+        <div data-transcript-markdown :hidden="reply.minimized" :html="reply.html"></div>
+      </article>
+    </template>
+    @if(thread.previousComments || thread.nextComments)
+      <nav data-pr-comment-pages aria-label="Conversation comments">
+        @if(thread.previousComments)
+          <a href="{{ commentsHref(thread, 'before') }}" data-pr-button>Previous comments</a>
+        @endif
+        @if(thread.nextComments)
+          <a href="{{ commentsHref(thread, 'after') }}" :href="nextReviewCommentsHref('{{ thread.anchor }}')" data-pr-button
+            data-pr-load-comments data-comment-anchor="{{ thread.anchor }}"
+            :hidden="!latestCommentCursor('{{ thread.anchor }}')"
+            :aria-disabled="reviewCommentPages()['{{ thread.anchor }}']?.pending ? 'true' : 'false'"
+            :text="reviewCommentPages()['{{ thread.anchor }}']?.pending ? 'Loading…' : 'Load more comments'"
+            @click="loadReviewComments">Load more comments</a>
+        @endif
+        <p data-pr-comments-status role="status" :text="reviewCommentPages()['{{ thread.anchor }}']?.message || ''"></p>
+      </nav>
+    @endif
+    <p data-pr-reply-message role="status" :text="replyMessages()['{{ thread.anchor }}'] || ''">@if(replyDraft?.anchor === thread.anchor){{ replyDraft.message }}@elseif(conversationAnchor === thread.anchor){{ replyNotice }}@endif</p>
+    <details data-pr-reply @if(replyDraft?.anchor === thread.anchor) open@endif
+      @if(!thread.viewerCanReply && replyDraft?.anchor !== thread.anchor) hidden@endif
+      :hidden="{{ thread.viewerCanReply ? 'false' : 'true' }} && !replyDrafts()['{{ thread.anchor }}']?.pending" @toggle="showReviewReply">
+      <summary>Reply</summary>
+      <form method="post" action="{{ replyAction }}" data-pr-reply-form data-reply-anchor="{{ thread.anchor }}" @submit.prevent="sendReviewReply">
+        <input type="hidden" name="thread" value="{{ thread.id }}">
+        <input type="hidden" name="head" value="{{ selected.head }}">
+        <input type="hidden" name="viewer" value="{{ selected.conversationViewer }}">
+        <input type="hidden" name="intent" value="{{ replyDraft?.anchor === thread.anchor ? replyDraft.token : thread.replyIntent }}">
+        <label for="{{ thread.anchor }}-reply">Reply to this conversation</label>
+        <textarea id="{{ thread.anchor }}-reply" name="body" rows="3" required maxlength="16384"
+          @if(replyDraft?.anchor === thread.anchor && replyDraft.pending) readonly@endif
+          :readonly="Boolean(replyDrafts()['{{ thread.anchor }}']?.pending)" @input="editReviewReply" @keydown="reviewReplyKeys">@if(replyDraft?.anchor === thread.anchor){{ replyDraft.text }}@endif</textarea>
+        <div data-pr-reply-actions>
+          <button type="button" data-pr-button hidden
+            :hidden="Boolean(replySending()['{{ thread.anchor }}'])" @click="cancelReviewReply">Cancel</button>
+          <button type="submit" data-pr-button :aria-disabled="replySending()['{{ thread.anchor }}'] ? 'true' : 'false'"
+            :text="replyDrafts()['{{ thread.anchor }}']?.pending ? 'Check reply' : 'Reply'">@if(replyDraft?.anchor === thread.anchor && replyDraft.pending)Check reply@else Reply@endif</button>
+        </div>
+      </form>
+    </details>
+  </div>
+</details>

@@ -1,0 +1,22 @@
+<span data-pr-branch-behind>{{ selected.lifecycle.branchUpdate.behind }} {{ selected.lifecycle.branchUpdate.behind === 1 ? 'commit' : 'commits' }} behind</span>
+@if(!lifecyclePending && selected.lifecycle.branchUpdate.canUpdate)
+  <button type="button" popovertarget="pr-branch-update" data-pr-button data-pr-branch-update-trigger>Update branch</button>
+  <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-branch-update-title" id="pr-branch-update" data-pr-branch-update-panel data-pr-lifecycle-panel popover>
+    @include('./harness-pr-lifecycle-fields')
+    <p id="pr-branch-update-title"><strong>Update pull request branch</strong></p>
+    <dl data-pr-branch-update-target>
+      <div><dt>Base</dt><dd><code>{{ selected.baseRef }}</code></dd></div>
+      <div><dt>Branch</dt><dd><code>{{ selected.headRef }}</code></dd></div>
+    </dl>
+    <fieldset>
+      <legend>Update method</legend>
+      @foreach(selected.lifecycle.branchUpdate.methods as option)
+        <label><input type="radio" name="method" value="{{ option.value }}" @if(option.value === 'MERGE') checked @endif required> {{ option.label }}</label>
+      @endforeach
+    </fieldset>
+    <div data-pr-review-actions>
+      <button type="button" popovertarget="pr-branch-update" popovertargetaction="hide" data-pr-button>Cancel</button>
+      <button type="submit" name="action" value="update-branch" data-pr-button data-pr-merge-confirm>Confirm update</button>
+    </div>
+  </form>
+@endif

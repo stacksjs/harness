@@ -47,19 +47,19 @@ export function createWorkspaceFiles(scope: Scope, changed: (state: WorkspaceFil
 
   function showTree(): void {
     const rows: Row[] = []
-    let truncated = false
-    function add(path: string, depth: number): void {
+    function add(path: string, depth: number): boolean {
       const folder = folders.get(path)
-      if (!folder) return
-      truncated ||= folder.truncated
+      if (!folder) return false
+      let truncated = folder.truncated
       for (const entry of folder.entries) {
         const open = expanded.has(entry.path)
         rows.push({ ...entry, depth, open })
-        if (open) add(entry.path, depth + 1)
+        if (open) truncated = add(entry.path, depth + 1) || truncated
       }
       if (folder.next !== null) rows.push({ kind: 'more', path, depth })
+      return truncated
     }
-    add('', 0)
+    const truncated = add('', 0)
     set({ rows, treeBusy: loading.size > 0, treeError: truncated ? 'This folder has more entries than the browser can list.' : '' })
   }
 

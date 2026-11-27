@@ -1,5 +1,6 @@
 import type { TurnFileSummary, WorkspaceDiff, WorkspaceReviewMode, WorkspaceReviewOptions } from './diff'
 import type { ProjectRepository } from './project-repositories'
+import type { RepositoryStatus } from './repository-status'
 
 interface ProjectReviewOptions extends WorkspaceReviewOptions {
   repositories: ProjectRepository[]
@@ -103,6 +104,12 @@ export async function loadWorkspaceReviewOptions(sessionId: number, base: string
   const options = await response.json()
   if (!response.ok) throw new Error(options.error || 'Could not load Git review options.')
   return options
+}
+
+export async function loadRepositoryStatus(sessionId: number, repository: string, signal: AbortSignal): Promise<RepositoryStatus | null> {
+  const query = repository ? '?' + new URLSearchParams({ repository }) : ''
+  const response = await fetch(`/s/${sessionId}/diff/status${query}`, { cache: 'no-store', signal })
+  return response.ok ? (await response.json()).status ?? null : null
 }
 
 /** Refresh a visible Changes pane without asking Git to rebuild an unchanged patch. */

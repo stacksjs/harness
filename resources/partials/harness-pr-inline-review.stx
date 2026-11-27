@@ -1,0 +1,70 @@
+<aside ref="reviewPreviewBox" data-pr-review-preview aria-label="Pending inline comment" hidden>
+  <strong>Pending inline comment</strong>
+  <p :text="selectedReviewDraft()?.body || ''"></p>
+</aside>
+
+<form ref="reviewComposerBox" data-pr-review-composer hidden @submit.prevent="saveReviewComment">
+  <label for="pr-inline-comment">
+    Inline comment <span :text="reviewEditor() ? reviewLocation(reviewEditor()) : ''"></span>
+  </label>
+  <textarea id="pr-inline-comment" name="body" rows="3" maxlength="8192" required
+    :readonly="reviewIsLocked() || reviewIsStale()" @keydown="reviewEditorKeys"></textarea>
+  <p role="status" :hidden="!reviewEditorError()" :text="reviewEditorError()"></p>
+  <div data-pr-review-actions>
+    <button type="button" data-pr-button @click="closeReviewEditor">Cancel</button>
+    <button type="submit" data-pr-button data-pr-review-primary :disabled="reviewIsLocked() || reviewIsStale()"
+      :text="reviewEditor() && inlineReview().comments.some(comment => comment.id === reviewEditor().id) ? 'Save comment' : 'Add to review'">Add to review</button>
+  </div>
+</form>
+
+<dialog ref="reviewDialogBox" data-pr-review-dialog aria-labelledby="pr-review-title"
+  @close="finishInlineReviewClose" @click.self="closeInlineReview">
+  <form @submit.prevent="submitInlineReview" :aria-busy="String(submittingInlineReview())">
+    <header data-pr-review-dialog-heading>
+      <h3 id="pr-review-title">Review pull request</h3>
+      <button type="button" data-pr-review-close class="harness-icon-button" aria-label="Close review" @click="closeInlineReview">
+        <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </header>
+    <div data-pr-review-scroll>
+      <p role="status" :hidden="!reviewIsStale()">The comparison changed. The draft below is from the previous diff.</p>
+      @if(inlineReviewAuthor)
+        <p data-pr-review-author>Comment as <strong>{{ selected.reviewViewer.login }}</strong></p>
+      @else
+        <fieldset data-pr-review-verdicts :disabled="reviewIsLocked() || reviewIsStale()">
+          <legend>Verdict</legend>
+          <label><input type="radio" name="verdict" value="COMMENT" checked @change="chooseReviewVerdict"> Comment</label>
+          <label><input type="radio" name="verdict" value="APPROVE" @change="chooseReviewVerdict"> Approve</label>
+          <label><input type="radio" name="verdict" value="REQUEST_CHANGES" @change="chooseReviewVerdict"> Request changes</label>
+        </fieldset>
+      @endif
+      <div class="grid gap-1.5">
+        <label for="pr-review-summary">Summary <span>(optional)</span></label>
+        <textarea id="pr-review-summary" name="summary" rows="4" maxlength="16384"
+          :readonly="reviewIsLocked() || reviewIsStale()" @input="updateReviewSummary" @keydown="reviewSummaryKeys"></textarea>
+      </div>
+      <section :hidden="!inlineReview().comments.length" aria-labelledby="pr-review-draft-heading">
+        <h4 id="pr-review-draft-heading" :text="inlineReview().comments.length + (inlineReview().comments.length === 1 ? ' inline comment' : ' inline comments')">Inline comments</h4>
+        <ol data-pr-review-drafts>
+          <template :for="comment in inlineReview().comments" :key="comment.id">
+            <li>
+              <p><code :text="comment.path"></code> <span :text="reviewLocation(comment)"></span></p>
+              <p data-pr-review-comment-copy :text="comment.body"></p>
+              <div data-pr-review-actions>
+                <button type="button" data-pr-button :hidden="reviewIsLocked() || reviewIsStale()" @click="editStagedComment(comment.id)">Edit</button>
+                <button type="button" data-pr-button :hidden="reviewIsLocked()" @click="removeStagedComment(comment.id)">Remove</button>
+              </div>
+            </li>
+          </template>
+        </ol>
+      </section>
+      <p role="status" :hidden="!inlineReviewMessage()" :text="inlineReviewMessage()"></p>
+    </div>
+    <footer data-pr-review-actions>
+      <button type="button" data-pr-button :hidden="!reviewIsStale() || reviewIsLocked()" @click="resetInlineReview">Discard outdated draft</button>
+      <button type="button" data-pr-button @click="closeInlineReview">Close</button>
+      <button type="submit" data-pr-button data-pr-review-primary :disabled="!inlineReviewCanSubmit()"
+        :text="submittingInlineReview() ? 'Working…' : inlineReview().intent ? 'Check GitHub' : 'Submit review'">Submit review</button>
+    </footer>
+  </form>
+</dialog>

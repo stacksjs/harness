@@ -1,0 +1,27 @@
+<dialog data-repository-sync-dialog ref="repositorySyncDialogBox" aria-labelledby="harness-repository-sync-title"
+  @cancel.prevent="closeRepositorySync" @click.self="closeRepositorySync">
+  <form data-share-dialog-body @submit.prevent="submitRepositorySync">
+    <h2 id="harness-repository-sync-title" :text="repositorySyncAction() === 'pull' ? 'Pull changes' : (repositorySyncPreview()?.defaultTarget ? 'Push to default branch?' : 'Push commits')"></h2>
+    <p role="status" :hidden="!repositorySyncLoading()">Reading branch and remote…</p>
+    <dl :hidden="!repositorySyncPreview()?.remote" class="grid gap-1">
+      <div class="flex flex-wrap gap-x-2">
+        <dt>Branch</dt>
+        <dd class="break-all font-mono" :text="repositorySyncPreview()?.branch"></dd>
+      </div>
+      <div class="flex flex-wrap gap-x-2">
+        <dt>Remote branch</dt>
+        <dd class="break-all font-mono" :text="repositorySyncTarget()"></dd>
+      </div>
+    </dl>
+    <p :hidden="!repositorySyncPreview()?.revision || !!repositorySyncError()" :text="repositorySyncDescription()"></p>
+    <p role="alert" :hidden="!repositorySyncError()" :text="repositorySyncError()"></p>
+    <div data-share-dialog-actions>
+      <button type="button" autofocus :disabled="repositorySyncBusy()" @click="closeRepositorySync">Cancel</button>
+      <button type="button" :hidden="!repositorySyncError()" :disabled="repositorySyncBusy() || repositorySyncLoading()"
+        @click="loadRepositorySync">Refresh</button>
+      <button type="submit" data-share-primary data-repository-sync-confirm
+        :disabled="repositorySyncBusy() || repositorySyncLoading() || !!repositorySyncError() || !repositorySyncPreview()?.revision"
+        :text="repositorySyncBusy() ? (repositorySyncAction() === 'pull' ? 'Pulling…' : 'Pushing…') : (repositorySyncAction() === 'pull' ? 'Pull' : 'Push')"></button>
+    </div>
+  </form>
+</dialog>

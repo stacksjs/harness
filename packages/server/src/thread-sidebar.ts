@@ -20,8 +20,11 @@ export function threadSidebarLayout(profileId: number, workspaces: WorkspaceStat
   for (const session of shelves.active) active.get(activeSections.get(session.workspaceId) ?? projectless)?.push(session)
   const items = (rows: SessionState[]) => rows.map(session => ({
     id: session.id,
+    seq: session.lastSeq,
     activeSection: activeSections.get(session.workspaceId) ?? projectless,
     title: threadTitle(session),
+    icon: session.state === 'awaiting-approval' || session.state === 'awaiting-input' ? 'i-hugeicons-help-circle'
+      : session.state === 'running' ? 'i-hugeicons-loading-03' : 'i-hugeicons-message-01',
     canSettle: !isTurnActive(session.state),
     canActivate: session.state !== 'stopped' && session.state !== 'running',
     canPin: session.state !== 'stopped',

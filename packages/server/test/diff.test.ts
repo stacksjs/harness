@@ -6,6 +6,43 @@ import { spawnSync } from 'node:child_process'
 import { expandWorkspaceDiffGap, parseWorkspacePatch, revealWorkspaceDiffContext, workspaceDiffContextKey, workspaceDiffLink, workspaceDiffLinkedRows, workspaceDiffLocation, workspaceDiffRows } from '../src/browser-diff'
 import { capture } from '../src/checkpoint'
 import { MAX_PATCH_BYTES, parseNumstat, parseStatus, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff } from '../src/diff'
+import type { ReviewConversation } from '../src/pull-request-conversations'
+import { placeReviewConversations, reviewLineAnchor, reviewLineSelection } from '../src/pull-request-conversations'
+
+it('attaches review conversations to the matching side and preserves unanchored history', () => {
+  const patch = [
+    '@@ -1,2 +1,3 @@', '-Original', '+Replacement', '+Inserted', ' Common',
+    '@@ -62 +63 @@', '-Previous ending', '+New ending', '\\ No newline at end of file',
+  ].join('\n')
+  const conversation = (id: string, side: 'before' | 'after', line: number, outdated = false): ReviewConversation => ({
+    id, anchor: id, path: 'report.txt', side, line, outdated, location: '', isResolved: false,
+    viewerCanResolve: true, viewerCanUnresolve: false, viewerCanReply: true, replyIntent: id, comments: [], nextComments: null, previousComments: null,
+  })
+  const sections = placeReviewConversations(patch, [
+    conversation('added', 'after', 1),
+    conversation('old', 'before', 1, true),
+    conversation('removed', 'before', 1),
+    conversation('context-before', 'before', 2),
+    conversation('context-after', 'after', 3),
+    conversation('ending', 'after', 63),
+    conversation('outside', 'after', 99),
+  ])
+  expect(sections.map(section => section.conversations.map(thread => thread.id))).toEqual([
+    ['removed'], ['added'], ['context-before', 'context-after'], ['ending'], ['old', 'outside'],
+  ])
+  expect(sections.filter(section => section.patch).map(section => section.patch).join('\n')).toBe(patch)
+  expect(placeReviewConversations(patch, [conversation('outside', 'after', 99)]).map(section => section.patch)).toEqual([patch, ''])
+  const file = 'file-fixture'
+  const before = reviewLineAnchor(file, 'before', 1)
+  const after = reviewLineAnchor(file, 'after', 3)
+  expect(reviewLineSelection(sections, file, after, before)).toEqual({ first: 1, last: 4, line: after, start: before })
+  expect(reviewLineSelection(sections, file, before, after)).toEqual({ first: 1, last: 4, line: before, start: after })
+  expect(reviewLineSelection(sections, file, reviewLineAnchor(file, 'after', 63), before)).toBeNull()
+  expect(reviewLineSelection(sections, 'other-file', after, before)).toBeNull()
+  expect(reviewLineSelection(sections, file, reviewLineAnchor(file, 'after', 99), null)).toBeNull()
+  const unknown = 'Unparsed patch fixture'
+  expect(placeReviewConversations(unknown, [])).toEqual([{ patch: unknown, rows: [], conversations: [] }])
+})
 
 it('expands unchanged lines with distinct before and after numbers across an insertion', () => {
   const path = 'sample.txt'

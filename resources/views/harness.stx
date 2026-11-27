@@ -21,8 +21,15 @@ export const settingsSections = $props.settingsSections || []
 export const keybindings = $props.keybindings || []
 // Settings this host owns, shared by every client connected to it.
 export const hostSettings = $props.hostSettings || { defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 }
+// What the project in view answers for itself, kept apart from the host's own
+// answers above: a row has to show which of the two it is following before it
+// can offer to stop following it.
+export const projectSettings = $props.projectSettings || {}
+export const projectSettingsId = $props.projectSettingsId || 0
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
+export const missingThread = $props.missingThread === true
+export const freshDraftId = $props.freshDraftId || ''
 export const serverUrl = $props.serverUrl || ''
 // The browser CBOR bundle. Empty when the server could not build one, which
 // costs the page its live updates but not its rendered transcript.
@@ -49,6 +56,7 @@ const pendingApproval = initialApprovals[0]
 // they are what a single swipe can reveal, so the common gesture never lands
 // on an empty panel; anything further away fills in on arrival.
 const activeSpaceIndex = Math.max(0, profiles.findIndex(profile => String(profile.id) === String(activeProfile)))
+export const sidebarProjectTemplateItems = [{ id: 'compose', label: 'New thread', icon: 'i-hugeicons-pencil-edit-02', href: '/?workspace=0' }]
 
 // id -> tint, for the native titlebar. The web sidebar gets the tint through
 // `<Sidebar :spaces>`; the window chrome around it is ours to paint. Reaches
@@ -69,29 +77,16 @@ export const spaces = profiles.map((profile, index) => ({
 }))
 
 function threadSections(profile) {
-  const sessionsById = new Map((profile.sessions || []).map(session => [session.id, session]))
-  const projectsById = new Map((profile.workspaces || []).map(workspace => [workspace.id, workspace]))
   return (profile.sidebar || []).map(section => {
-    const rows = section.rows.map(row => toItem(sessionsById.get(row.id)))
-    const project = projectsById.get(section.workspaceId)
+    const rows = section.rows.map(row => ({ id: String(row.id), label: row.title, icon: row.icon, href: `/s/${row.id}` }))
     return {
       id: section.id,
-      label: project?.name || section.label,
-      items: project
-        ? [{ id: 'compose-' + project.id, label: 'New thread', icon: 'i-hugeicons-pencil-edit-02', href: `/?workspace=${project.id}` }, ...rows]
+      label: section.label,
+      items: section.workspaceId
+        ? [{ ...sidebarProjectTemplateItems[0], id: 'compose-' + section.workspaceId, href: `/?workspace=${section.workspaceId}` }, ...rows]
         : rows,
     }
   })
-}
-
-function toItem(session) {
-  const waiting = session.state === 'awaiting-approval' || session.state === 'awaiting-input'
-  return {
-    id: String(session.id),
-    label: session.title,
-    icon: waiting ? 'i-hugeicons-help-circle' : session.state === 'running' ? 'i-hugeicons-loading-03' : 'i-hugeicons-message-01',
-    href: `/s/${session.id}`,
-  }
 }
 
 export const initialNavigation = activeSession?.navigation || {}
@@ -116,6 +111,8 @@ export const providerDisplayName = kind => providerNames[kind] || kind
 export const initialSessionModel = activeSession?.model || ''
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialFork = activeSession?.fork || null
+export const sessionPullRequest = activeSession?.pullRequest || null
+export const pullRequestProfile = $props.pullRequestProfile || 0
 export const initialCodexSelection = activeCodex && activeSession.model
   ? { model: activeSession.model, ...activeSession.codexTurnOptions } : null
 export const activeWorkspaceId = activeSession ? (activeSession.workspaceId || 0) : 0
@@ -125,17 +122,19 @@ const activeWorkspace = activeSession && !activeScratchSession
   ? profiles.flatMap(profile => profile.workspaces || []).find(workspace => workspace.id === activeWorkspaceId)
   : draftProject
 export const workspaceName = activeWorkspace?.name
-// The same name, as `null` rather than `undefined`, for the island's own top
-// level. The server to client bridge seeds a null and drops an undefined, and
-// a name read while the island is setting up is a ReferenceError that stops
-// the whole root from hydrating — silently, since what you see is a page
-// whose buttons never respond.
-export const projectName = activeWorkspace?.name || null
+// Always a string, never undefined. The server to client bridge seeds a null
+// and drops an undefined, and a name read while the island is setting up is a
+// ReferenceError that stops the whole root from hydrating, silently: what you
+// see is a page whose buttons never respond.
+export const projectSettingsName = activeWorkspace?.name || ''
+// The project this page is looking at. Not the same as `projectSettingsId`,
+// which the host computes for a thread even when that thread is scratch.
 export const projectWorkspaceId = activeWorkspace?.id || 0
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
+export const projectCloneAllowed = Boolean($props.canLaunchWorkspaceEditor)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
 export const previewDiscoveryAllowed = Boolean(activeSession && $props.canLaunchWorkspaceEditor)
-export const canCompose = Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
+export const canCompose = !missingThread && Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
 export const profileProjects = Object.fromEntries(profiles.map(profile => {
   const projects = profile.workspaces || []
   return [String(profile.id), projects.find(workspace => workspace.trusted) || projects[0] || null]
@@ -204,19 +203,36 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <button type="button" @click="openProjectPicker" aria-label="Add project" title="Add project" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-folder-add" aria-hidden="true"></span>
           </button>
-          <button type="button" @click="openDraft(visibleProfile())" aria-label="New thread" title="New thread" class="harness-icon-button">
+          <button type="button" data-nav-new-thread @click="openDraft(visibleProfile())" aria-label="New thread" title="New thread" class="harness-icon-button">
             <span class="inline-block size-4 i-hugeicons-pencil-edit-02" aria-hidden="true"></span>
           </button>
         </div>
+        @if(projectCloneAllowed)
+          <a data-navigation-pr href="/pull-requests?profile={{ activeProfile }}" :href="'/pull-requests?profile=' + visibleProfile()" class="harness-nav-search">
+            <span class="inline-block size-4 i-hugeicons-git-pull-request" aria-hidden="true"></span>Pull requests
+          </a>
+        @endif
       @endif
     </div>
     <div data-navigation-content>
+    <template ref="sidebarDraftTemplate">
+      @include('../partials/harness-sidebar-drafts')
+    </template>
     <template ref="draftDiscardTemplate">
       <button type="button" data-draft-discard-row aria-label="Discard draft" title="Discard draft" class="harness-icon-button">
         <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
       </button>
     </template>
     @if(hasProfiles)
+      <template data-live-sidebar-row>
+        <SidebarItem theme="arc" id="0" href="/s/0" icon="i-hugeicons-message-01" />
+      </template>
+      <template data-live-sidebar-project>
+        <SidebarSection theme="arc" id="project" label="Project" :items="sidebarProjectTemplateItems" />
+      </template>
+      <template data-live-sidebar-rename>
+        <input data-sidebar-rename type="text" aria-label="Thread title" maxlength="120" autocomplete="off" class="px-2 h-full min-w-0 w-full text-[13px] bg-white dark:bg-neutral-900 rounded-md" />
+      </template>
       <Sidebar
         :spaces="spaces"
         :space="activeProfile"
@@ -376,14 +392,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       --}}
       @if(turns.length === 0)
         <div data-empty-state :hidden="liveTurns().length > 0" class="flex flex-col gap-2 items-center justify-center text-center @if(activeSession)h-full@endif">
-          @if(activeSession)
+          @if(missingThread)
+            <h1 class="font-semibold text-lg">Thread unavailable</h1>
+            <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">This thread could not be found on the connected host.</p>
+            <a href="/" class="px-3 py-2 text-[13px] underline underline-offset-4">Back to workspace</a>
+          @elseif(activeSession)
             <p class="text-[15px] font-medium">Start the conversation</p>
           @elseif(draftWithoutProject)
             <h1 data-draft-title>What would you like to work on?</h1>
             <p class="max-w-[40ch] text-[13px] text-neutral-600 dark:text-neutral-300">Files stay in a scratch folder on this host.</p>
           @elseif(draftProject && draftProject.trusted)
             <h1 data-draft-title>What would you like to work on in {{ draftProject.name }}?</h1>
-            <button type="button" @click="startWithoutProject" class="px-2 h-8 text-[13px] text-neutral-600 underline underline-offset-4 dark:text-neutral-300">Start without a project</button>
+            <button type="button" @click="startScratchDraft" class="px-2 h-8 text-[13px] text-neutral-600 underline underline-offset-4 dark:text-neutral-300">Start without a project</button>
           @elseif(draftProject)
             <p class="text-[16px] font-semibold">Trust {{ draftProject.name }} to start</p>
             <p class="max-w-[34ch] text-[13px] text-neutral-600 dark:text-neutral-300">Trust lets agents access this folder when you start a session.</p>
@@ -404,6 +424,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @if(!turn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(turn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ turn.prompt }}</div>
+          @if(turn.prompt && !turn.automaticCompaction)
+            @include('../partials/harness-prompt-link-buttons')
+          @endif
           @if(turn.attachments.length)
             <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
               @foreach(turn.attachments as file)
@@ -506,6 +529,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @if(!liveTurn.automaticCompaction)<div class="sr-only">You</div>@endif
           @if(liveTurn.automaticCompaction)<p data-automatic-compaction class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>@endif
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5">{{ liveTurn.prompt }}</div>
+          @if(liveTurn.prompt && !liveTurn.automaticCompaction)
+            @include('../partials/harness-prompt-link-buttons')
+          @endif
           @if(liveTurn.attachments.length)
             <ul aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
               @foreach(liveTurn.attachments as file)
@@ -625,6 +651,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <div class="sr-only" :hidden="turn.automaticCompaction">You</div>
           <p data-automatic-compaction hidden :hidden="!turn.automaticCompaction" class="mb-1 text-end text-neutral-600 text-xs dark:text-neutral-300">Harness</p>
           <div data-user-prompt class="mb-4 ms-auto px-3 py-2 max-w-[90%] w-fit rounded-xl whitespace-pre-wrap break-words text-sm leading-5" :text="turn.prompt"></div>
+          <div :hidden="!turn.prompt || turn.automaticCompaction">
+            @include('../partials/harness-prompt-link-buttons')
+          </div>
           <ul :hidden="!turn.attachments?.length" aria-label="Message attachments" class="flex flex-wrap gap-2 justify-end mb-4">
             <template :for="file in turn.attachments ?? []" :key="file.id">
               <li class="max-w-full min-w-0">
@@ -692,6 +721,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           </div>
         </template>
       @endif
+      @if(sessionPullRequest)
+        <div data-thread-pull-request class="flex flex-wrap gap-x-3 gap-y-1 items-baseline mb-4 break-words text-neutral-600 text-sm dark:text-neutral-300">
+          <a href="{{ sessionPullRequest.url }}" target="_blank" rel="noopener noreferrer" class="underline underline-offset-2">Pull request {{ sessionPullRequest.label }}</a>
+          <span role="status" :hidden="Boolean(workspaceBranch() || sessionError())">Isolated checkout pending.</span>
+          @if(workspaceEditorAllowed)
+            <button type="button" hidden :hidden="Boolean(workspaceBranch() || threadNavigation().archivedAt)" :disabled="pullRequestRetrying()" @click="retryPullRequestCheckout" class="min-h-8 font-medium underline underline-offset-2">Retry checkout</button>
+            <span role="alert" :hidden="!pullRequestRetryError()" :text="pullRequestRetryError()"></span>
+          @endif
+        </div>
+      @endif
       @if(activeSession && workspaceEditorAllowed)
         <section data-project-setup-status hidden :hidden="!projectSetupStatus()" aria-label="Worktree setup" class="grid mb-4 p-3 text-neutral-700 text-sm dark:text-neutral-200 border border-black/10 rounded-md dark:border-white/15">
           <div class="flex flex-wrap gap-x-3 items-baseline justify-between min-w-0">
@@ -725,12 +764,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     </div>
     @if(activeSession)
       @include('../partials/harness-transcript-find')
-      <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
     @endif
+    <p class="sr-only" role="status" :text="transcriptAnnouncement()"></p>
     </div>
 
     @if(activeSession)
       <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="px-3 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full dark:border-white/20">Jump to latest</button>
+      <p role="status" data-unavailable-message hidden :hidden="!missingTurnLink()">This message is unavailable in the current thread.</p>
       <div data-thread-archived @if(!initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().archivedAt" class="mx-auto mb-3 px-3 py-2 flex gap-2 items-center text-sm border border-black/10 rounded-md dark:border-white/15">
         <span>Archived thread</span>
         <button type="button" @click="organizeThread('restore')" :disabled="threadActionBusy()" class="font-medium underline">Restore thread</button>
@@ -754,6 +794,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
     @if(canCompose)
     <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerFileActions()?.drop($event)" class="grid gap-2 items-end shrink-0">
+      <div data-linked-prompt-notice hidden :hidden="!sharedPromptNotice()">
+        <span role="status" :text="sharedPromptNotice()"></span>
+        <button type="button" @click="dismissLinkedPromptNotice" aria-label="Dismiss linked prompt notice" class="harness-icon-button">
+          <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </div>
       {{--
         Enter sends, Shift+Enter makes a newline — the convention every chat
         surface uses; the textarea would otherwise only ever insert newlines.
@@ -789,6 +835,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         rows="2"
         :rows="Math.min(7, Math.max(2, composerText().split('\n').length + 1))"
         aria-label="Message"
+        @if(freshDraftId && !initialSettingsSection)autofocus@endif
+        :aria-keyshortcuts="composerShortcuts()"
         placeholder="{{ promptPlaceholder }}"
         :placeholder="composerPlaceholder()"
         class="px-1 py-1 min-h-[46px] max-h-[30dvh] min-w-0 text-sm bg-transparent outline-none resize-none"
@@ -811,7 +859,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
           </button>
           <button type="button" data-idle-compaction hidden :hidden="!idleCompactionOffer()" @click="toggleIdleCompaction" :aria-pressed="compactNextPrompt()" :aria-label="idleCompactionLabel()" :title="idleCompactionLabel()" class="px-2 min-h-8 text-[12px] border border-black/10 rounded-full dark:border-white/20" :text="idleCompactionChip()"></button>
-          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || conversationRewind() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
+          <button type="submit" data-send data-primary-send="true" :data-primary-send="sendLabel() === 'Send'" :aria-label="compactNextPrompt() ? 'Compact and send' : sendLabel()" :title="composerShortcutTitle()" :hidden="!showSend()" :disabled="!hasComposerMessage() || composerFilesPending() || startPending() || conversationRewind() || sessionConnecting() || handoffBlocked() || (sendLabel() === 'Steer' && steeringPending())" class="h-8 text-[13px] rounded-full">
             <span class="size-4 i-hugeicons-arrow-up-02" data-send-icon aria-hidden="true"></span>
             <span data-send-text :text="sendLabel()">Send</span>
           </button>
@@ -825,6 +873,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
       <p data-prompt-stash-error role="alert" :hidden="stashOpen() || !stashError()" :text="stashError()" class="text-red-700 text-sm dark:text-red-300"></p>
     </form>
+    <div data-background-thread hidden :hidden="!startedBackgroundThread() || Boolean(modelBatchNotice()?.length || pendingModelBatches()?.length)">
+      <span role="status">Started in background.</span>
+      <a :href="startedBackgroundThread() ? '/s/' + startedBackgroundThread() : null">Open thread</a>
+      <button type="button" @click="dismissBackgroundNotice" aria-label="Dismiss background notification" class="harness-icon-button">
+        <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </div>
+    @include('../partials/harness-model-batch')
     @include('../partials/harness-prompt-stash')
     @endif
     @if(!activeSession && draftProjectChoices.length)
@@ -999,6 +1055,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
       <input data-thread-search-input ref="threadSearchInputBox" type="search" maxlength="120" role="combobox" aria-label="Search thread titles and messages" aria-controls="thread-search-list" aria-autocomplete="list" aria-expanded="false" :aria-expanded="threadSearchResults().length ? 'true' : 'false'" :aria-activedescendant="selectedThreadSearchId()" @input="queueThreadSearch" @compositionend="queueThreadSearch" @keydown="threadSearchKeydown" autocomplete="off" placeholder="Search titles, projects, and messages" class="px-3 py-2 w-full text-[14px] bg-neutral-50 dark:bg-neutral-950 border border-black/15 rounded-[8px] dark:border-white/20" />
       <p role="status" :hidden="!threadSearchStatus()" :text="threadSearchStatus()" class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300"></p>
+      <div data-share-commands :hidden="!showShareCommand('copy prompt link') && !showShareCommand('copy prompt link with repo and model', true) && !showShareCommand('copy thread link', false, true)">
+        <button type="button" @click="copyDraftPromptLink($event)" :hidden="!showShareCommand('copy prompt link')">Copy prompt link</button>
+        <button type="button" @click="copyDraftPromptLink($event, true)" :hidden="!showShareCommand('copy prompt link with repo and model', true)">Copy prompt link with repo and model</button>
+        <button type="button" @click="copyThreadLink($event)" :hidden="!showShareCommand('copy thread link', false, true)">Copy thread link</button>
+      </div>
       <ul id="thread-search-list" data-thread-search-list ref="threadSearchListBox" role="listbox" aria-label="Matching threads" :hidden="!threadSearchResults().length" class="overflow-y-auto mt-2">
         <li :for="(result, index) in threadSearchResults()" :key="result.id" :id="'thread-search-result-' + result.id" data-thread-search-option role="option" :aria-selected="threadSearchIndex() === index ? 'true' : 'false'" @click="chooseThreadSearchResult(result)" class="px-3 py-2 rounded-[6px] cursor-pointer">
           <div class="flex gap-2 items-center justify-between">
@@ -1010,6 +1071,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </ul>
     </div>
   </dialog>
+
+  @include('../partials/harness-prompt-link-dialogs')
+  @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-commit')
+  @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-sync')
+  @includeWhen(activeSession && workspaceEditorAllowed, '../partials/harness-repository-pull-request')
+  @include('../partials/harness-project-clone')
 
   <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
     <form class="flex flex-col gap-4 p-5" @submit.prevent="registerProject">
@@ -1029,7 +1096,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         <span>Trust this folder for agent sessions</span>
       </label>
       <p data-project-error role="alert" :text="projectError()" :hidden="!projectError()" hidden class="text-[13px] text-red-700 dark:text-red-300"></p>
-      <div class="flex gap-2 justify-end">
+      <div class="flex flex-wrap gap-2 justify-end">
+        @if(projectCloneAllowed)
+          <button type="button" :disabled="projectBusy()" @click="openProjectClone(null)" class="me-auto px-2 h-9 text-[13px] underline underline-offset-4">Clone a repository</button>
+        @endif
         <button type="button" :disabled="projectBusy()" @click="closeProjectPicker" class="px-3 h-9 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
         <button type="submit" data-project-submit :disabled="projectBusy()" :text="projectBusy() ? 'Adding…' : 'Add project'" class="px-3 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
       </div>
@@ -1146,6 +1216,23 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <option value="grok">Grok</option>
           </select>
         </div>
+        <div data-settings-field data-project-driver-field :hidden="!projectSettingsId">
+          <label for="settings-project-driver" :text="projectDriverLabel()"></label>
+          <select
+            id="settings-project-driver"
+            data-project-driver
+            :value="projectDriverValue()"
+            @change="saveProjectDriverChoice"
+            class="px-2 text-[13px] bg-transparent border border-black/10 rounded-md dark:border-white/15"
+          >
+            <option value="">Follow the host default</option>
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="opencode">OpenCode</option>
+            <option value="cursor">Cursor</option>
+            <option value="grok">Grok</option>
+          </select>
+        </div>
         <div data-settings-field>
           <label for="settings-follow-up">Follow-up behavior</label>
           <select id="settings-follow-up" :value="followUpPreference()" @change="setFollowUpPreference" class="px-2 text-[13px] bg-transparent border border-black/10 rounded-md dark:border-white/15">
@@ -1163,6 +1250,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
       <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">New terminals use the selected shell. Den must be installed on this host.</p>
       <p data-host-settings-note class="mt-3 mb-2 text-[12px] text-neutral-600 dark:text-neutral-300">These apply to every client of this host. Appearance and keyboard shortcuts stay with this browser.</p>
+      <p data-project-settings-note :hidden="!projectSettingsId" :text="projectSettingsNote()" class="mb-2 text-[12px] text-neutral-600 dark:text-neutral-300"></p>
       <p data-settings-error role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
       </section>
       <section :hidden="settingsSelection() !== 'projects'" data-settings-pane>
@@ -1198,6 +1286,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         </div>
         <p class="mt-2 text-[12px] text-neutral-600 dark:text-neutral-300">The host settles idle threads even when the app is closed. Pinned and snoozed threads stay put. Choose Never in a thread’s actions to opt out.</p>
         <p role="alert" :hidden="!settingsSaveError()" :text="settingsSaveError()" class="mb-2 text-[12px] text-red-700 dark:text-red-300"></p>
+        @include('../partials/harness-snooze-settings')
       </section>
       <section :hidden="settingsSelection() !== 'providers'" data-settings-pane>
       <h3 data-settings-section="providers" tabindex="-1">Providers</h3>
@@ -1433,6 +1522,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // theirs — because tools finish out of order and a row is found by id.
   const toolResults = state({})
   const draftWorktreeOptions = state(null)
+  let draftWorktreeRequest
   const draftWorktreeLoad = state('')
   const draftIsolated = state(false)
   const draftRepositoryKeys = state([])
@@ -1455,6 +1545,28 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const diffCommit = state('')
   const diffTurn = state('')
   const diffReviewOptions = state(null)
+  const diffGitStatus = state(null)
+  const diffGitStatusLoader = state(null)
+  let diffGitStatusStop
+  const diffStatusBranch = derived(() => {
+    const status = diffGitStatus()
+    if (!status) return ''
+    return status.branch ?? (status.head ? 'Detached at ' + status.head.slice(0, 7) : 'No commits')
+  })
+  const diffStatusTracking = derived(() => {
+    const status = diffGitStatus()
+    if (!status) return ''
+    if (!status.upstream) return status.branch ? 'No upstream' : ''
+    if (status.ahead === null || status.behind === null) return 'Upstream unavailable'
+    return [status.ahead && status.ahead + ' ahead', status.behind && status.behind + ' behind'].filter(Boolean).join(' · ') || 'Up to date'
+  })
+  const diffStatusChanges = derived(() => {
+    const status = diffGitStatus()
+    if (!status) return ''
+    return [status.staged && status.staged + ' staged', status.unstaged && status.unstaged + ' unstaged',
+      status.untracked && status.untracked + ' untracked', status.conflicted && status.conflicted + ' conflicted']
+      .filter(Boolean).join(' · ') || 'Clean working tree'
+  })
   const diffReviewError = state('')
   const diffLineSelection = state(null)
   const diffLineNotice = state('')
@@ -1526,7 +1638,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return Boolean(sessionId && runningTurnId() > 0 && !editingFollowUp()
       && text.startsWith('/') && '/clear'.startsWith(text))
   })
-  const promptDraftKey = `harness.composer.v1:${activeProfile || 0}:${promptScope}`
+  const draftStorageScope = freshDraftId ? [promptScope, 'draft', freshDraftId].join(':') : promptScope
+  const promptDraftKey = `harness.composer.v1:${activeProfile || 0}:${draftStorageScope}`
   const composerDraft = useLocalStorage(promptDraftKey, null, {
     listenToStorageChanges: false,
   })
@@ -1560,6 +1673,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const hasComposerMessage = derived(() => Boolean(composerText().trim() || (editingFollowUp() ? editingFollowUp()?.attachments?.length : composerFiles().length)))
   const uploadScope = promptScope === 'projectless' ? `scratch:${Number(activeProfile) || 0}` : promptScope
   const pendingFirstPrompt = useSessionStorage('harness.pendingPrompt.v2', null)
+  const startedBackgroundThread = state(null)
+  const draftModelChoices = useLocalStorage(promptDraftKey + ':models', [], { listenToStorageChanges: false })
+  const pendingModelBatches = useLocalStorage(promptDraftKey + ':model-batches', [], { listenToStorageChanges: false })
+  const activeModelBatches = state([])
+  const modelBatchNotice = state([])
+  const modelBatchBusy = derived(() => activeModelBatches().length > 0)
+  const comparingModels = derived(() => !sessionId && draftModelChoices()?.length > 1)
+  const draftUsesWorktree = derived(() => draftIsolated() || comparingModels())
   const followUps = state(initialFollowUps)
   const steeringMessage = useRef('steeringMessageBox')
   // Host settings, seeded from the render and kept here so a change shows at
@@ -1567,7 +1688,24 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // the phone and the laptop pointed at one host must agree about which agent
   // a new thread starts with, and the browser store cannot give them that.
   const settings = state({ ...hostSettings })
+  // Only what this project pins. An absent key is not a default, it is "ask
+  // the host", so the row shows "Follow the host default" rather than a value.
+  const projectPins = state({ ...projectSettings })
+  const projectDriverValue = derived(() => projectPins().defaultDriver || '')
+  const projectDriverLabel = derived(() => projectSettingsName
+    ? `Agent for new sessions in ${projectSettingsName}`
+    : 'Agent for new sessions in this project')
+  const projectSettingsNote = derived(() => projectDriverValue()
+    ? `Only sessions in ${projectSettingsName || 'this project'} start with that agent. Every other project follows the host default above.`
+    : `${projectSettingsName || 'This project'} follows the host default. Choose an agent to pin it here instead.`)
   const settingsSaveError = state('')
+  const snoozeEditor = state(null)
+  const snoozeRows = state([])
+  const snoozeSaveError = state('')
+  const snoozePreviewTime = state(new Date())
+  const snoozePreviewTimer = useInterval(() => snoozePreviewTime.set(new Date()), 30_000)
+  snoozePreviewTimer.pause()
+  const snoozeRowPreviews = derived(() => snoozeEditor()?.previews(snoozeRows(), snoozePreviewTime()) ?? {})
   const accountCompaction = state(initialAccountCompaction)
   const accountCompactionError = state(null)
   const canEditProviderAccounts = state(false)
@@ -1612,6 +1750,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const draftUndo = useSessionStorage(draftUndoKey, [], { listenToStorageChanges: false })
   const threadUndoBatch = useSessionStorage('harness.thread-undo-batch.v1', '', { listenToStorageChanges: false })
   const draftDiscardTemplate = useRef('draftDiscardTemplate')
+  const sidebarDraftTemplate = useRef('sidebarDraftTemplate')
   const draftDiscardReady = state(false)
   let composerDraftTools
   let composerRecall
@@ -1671,6 +1810,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const arrangementStatus = state('')
   const arrangementError = state('')
   let cancelArrangementDrag = () => {}
+  let arrangementFocus = null
 
   function arrangementReady() {
     return Boolean(sessionOnline() && arrangementLayout() && !arrangementBusy())
@@ -1711,6 +1851,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function finishThreadArrangement() {
     cancelArrangementDrag()
+    arrangementFocus = null
     arrangementOpen.set(false)
     arrangementLayout.set(null)
     watchSidebarOrder()
@@ -1745,26 +1886,39 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return options
   }
 
+  function restoreArrangementFocus() {
+    const pending = arrangementFocus
+    if (!pending || arrangementBusy()) return
+    const seen = arrangementLayout()?.some(section => section.rows.some(row => row.id === pending.id && row.seq >= pending.seq))
+    if (pending.seq && !seen) return
+    arrangementFocus = null
+    void nextTick(() => requestAnimationFrame(() => {
+      const dialog = threadArrangement.current
+      if (!dialog?.open) return
+      const grip = dialog.querySelector(`[data-arrangement-row][data-item-id="${pending.id}"] [data-arrangement-grip]`)
+      if (grip && !grip.closest('[hidden]')) grip.focus({ preventScroll: true })
+      else grip?.closest('[data-arrangement-section]')?.querySelector('button[data-arrangement-header]')?.focus({ preventScroll: true })
+    }))
+  }
+
   async function saveArrangement(id, intent, restoreFocus = false) {
     if (!arrangementReady()) return
     arrangementBusy.set(true)
     arrangementError.set('')
     arrangementStatus.set('')
     try {
-      await sendThreadOrganization({ sessionId: id, action: 'drop', ...intent })
+      const receipt = await sendThreadOrganization({ sessionId: id, action: 'drop', ...intent })
+      if (restoreFocus && arrangementOpen()) arrangementFocus = { id, seq: receipt.seqs.at(-1) ?? 0 }
       arrangementChoice.set(null)
       arrangementStatus.set('Thread position saved.')
     }
-    catch (error) { arrangementError.set(error.message) }
+    catch (error) {
+      if (restoreFocus && arrangementOpen()) arrangementFocus = { id, seq: 0 }
+      arrangementError.set(error.message)
+    }
     finally {
       arrangementBusy.set(false)
-      if (restoreFocus) void nextTick(() => requestAnimationFrame(() => {
-        const dialog = threadArrangement.current
-        if (!dialog?.open) return
-        const grip = dialog.querySelector(`[data-arrangement-row][data-item-id="${id}"] [data-arrangement-grip]`)
-        if (grip && !grip.closest('[hidden]')) grip.focus({ preventScroll: true })
-        else dialog.querySelector('[data-arrangement-section][data-section-id^="settled-"] button[data-arrangement-header]')?.focus({ preventScroll: true })
-      }))
+      restoreArrangementFocus()
     }
   }
 
@@ -1826,7 +1980,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (form === 'snooze' && codecUrl) {
       void import(codecUrl).then(({ threadSnoozeChoices }) => {
         if (threadActionForm() !== 'snooze') return
-        threadSnoozePresets.set(threadSnoozeChoices(new Date()))
+        threadSnoozePresets.set(threadSnoozeChoices(new Date(), settings().snoozePresets))
         void nextTick(positionThreadSnooze)
       }).catch(() => {})
     }
@@ -1851,9 +2005,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   async function sendThreadOrganization(command) {
     const commandId = newCommandId()
     const undoBatch = threadUndoBatch()
-    const { threadUndo: offer } = await sendCommand({
+    const receipt = await sendCommand({
       ...command, type: 'session.organize', undoScope: threadUndoScope(), ...(undoBatch && { undoBatch }),
     }, commandId)
+    const { threadUndo: offer } = receipt
     if (offer && offer.sourceCommandId !== threadUndo()?.sourceCommandId) threadUndoShortcutClaimed.set(true)
     storeThreadUndo(offer)
     if (offer?.sourceCommandId === commandId && draftUndo().length) {
@@ -1861,6 +2016,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const expiresAt = Date.now() + offer.remainingMs
       draftUndo.update(groups => groups.map(group => ({ ...group, expiresAt })))
     }
+    return receipt
   }
 
   async function undoThreadAction() {
@@ -1911,7 +2067,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     try {
       await sendThreadOrganization({ sessionId: target, action, ...fields })
       if (threadActionsDialog.current?.open) closeThreadActions()
-      if (action === 'auto-settle') {
+      if (action === 'auto-settle' || (target === sessionId && (action === 'settle' || action === 'unsettle'))) {
         threadActionBusy.set(false)
         return
       }
@@ -2046,6 +2202,35 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     void updateSettings({ autoSettleAfterDays: Number(input.value) })
   }
 
+  function addSnoozeOption() {
+    snoozeEditor()?.add()
+    void nextTick(() => settingsPanel.current?.querySelector('[data-snooze-row]:last-of-type select')?.focus())
+  }
+
+  function removeSnoozeOption(id, event) {
+    const row = event.currentTarget.closest('[data-snooze-row]')
+    const adjacent = row?.nextElementSibling?.matches('[data-snooze-row]') ? row.nextElementSibling : row?.previousElementSibling
+    const target = adjacent?.querySelector('[data-snooze-remove]') ?? settingsPanel.current?.querySelector('[data-snooze-add]')
+    snoozeEditor()?.remove(id)
+    void nextTick(() => target?.focus())
+  }
+
+  function arrangeSnoozeOptions(event) {
+    const list = event.currentTarget
+    if (list.contains(event.relatedTarget)) return
+    void nextTick(() => {
+      if (!list.matches(':focus-within')) snoozeEditor()?.arrange()
+    })
+  }
+
+  function commitSnoozeAmount(event) {
+    if (event.key !== 'Enter' || event.isComposing) return
+    event.preventDefault()
+    const input = event.currentTarget
+    input.blur()
+    input.focus()
+  }
+
   async function updateSettings(changes) {
     const previous = settings()
     if (Object.entries(changes).every(([key, value]) => previous[key] === value)) return
@@ -2055,10 +2240,41 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       await sendCommand({ type: 'settings.update', changes })
     }
     catch (error) {
-      settings.set(previous)
+      settings.update(current => ({
+        ...current,
+        ...Object.fromEntries(Object.entries(changes).filter(([key, value]) => current[key] === value).map(([key]) => [key, previous[key]])),
+      }))
       settingsSaveError.set(error.message || 'Could not save that setting.')
     }
   }
+  async function updateProjectSettings(changes, inherit = []) {
+    if (!projectSettingsId) return
+    const previous = projectPins()
+    const next = { ...previous, ...changes }
+    for (const key of inherit) delete next[key]
+    if (Object.keys(next).length === Object.keys(previous).length
+      && Object.entries(next).every(([key, value]) => previous[key] === value)) return
+    projectPins.set(next)
+    settingsSaveError.set('')
+    try {
+      await sendCommand({
+        type: 'settings.update',
+        workspaceId: projectSettingsId,
+        changes,
+        ...(inherit.length ? { inherit } : {}),
+      })
+    }
+    catch (error) {
+      projectPins.set(previous)
+      settingsSaveError.set(error.message || 'Could not save that setting for this project.')
+    }
+  }
+
+  function saveProjectDriverChoice(event) {
+    const chosen = event.currentTarget.value
+    void updateProjectSettings(chosen ? { defaultDriver: chosen } : {}, chosen ? [] : ['defaultDriver'])
+  }
+
   // Stop hides the moment it is clicked, before the log settles the turn.
   const stopPressed = state(false)
   function setSessionState(next) {
@@ -2094,10 +2310,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectScriptsBusy = state(false)
   const projectScriptDraft = state(null)
   const projectSetup = state(null)
+  const pullRequestRetrying = state(false)
+  const pullRequestRetryError = state('')
   const projectSetupStatus = derived(() => {
     const setup = projectSetup()
     if (!setup) return ''
-    if (setup.status === 'pending') return 'Worktree setup will run with the next message.'
+    if (setup.status === 'pending') return sessionPullRequest ? 'Preparing worktree setup…' : 'Worktree setup will run with the next message.'
     if (setup.status === 'running') return 'Running worktree setup…'
     if (setup.status === 'failed') return `Worktree setup exited with code ${setup.exitCode}.`
     if (setup.status === 'interrupted') return 'Worktree setup was interrupted.'
@@ -2107,6 +2325,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const waitingForProjectSetup = derived(() => projectSetup()?.blocking && ['pending', 'running'].includes(projectSetup()?.status))
   const projectSetupOwnsError = derived(() => projectSetupNeedsAttention() && sessionError().startsWith(projectSetupStatus()))
   let projectSetupPoll
+  let workspaceStatusPaused = false
   let projectSetupRequest
   let projectSetupPreview = false
   const projectSettlement = state(null)
@@ -2123,6 +2342,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectSettlementTerminalAvailable = derived(() => ['running', 'failed', 'interrupted'].includes(projectSettlement()?.status))
   let projectSettlementPoll
   let projectSettlementRequest
+  let projectSettlementPending = false
   let projectScriptsTrigger = null
   let projectScriptsRead = 0
   const terminalTabs = derived(() => {
@@ -2160,6 +2380,32 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectDialog = useRef('projectDialogBox')
   const projectPath = useRef('projectPathBox')
   const projectTrust = useRef('projectTrustBox')
+  const cloneDialog = useRef('projectCloneDialogBox')
+  const cloneRemoteInput = useRef('projectCloneRemoteBox')
+  const cloneDestinationInput = useRef('projectCloneDestinationBox')
+  const cloneRemoteText = state('')
+  const cloneError = state('')
+  const cloneReceipt = state(null)
+  const cloneSubmitting = state(false)
+  const cloneCancelling = state(false)
+  const pendingProjectClone = useLocalStorage('harness.projectClone.v1', null)
+  const cloneBusy = derived(() => Boolean(pendingProjectClone()?.input?.id) || cloneSubmitting() || ['cloning', 'publishing'].includes(cloneReceipt()?.phase))
+  const cloneStatusText = derived(() => {
+    if (cloneCancelling()) return 'Stopping clone…'
+    if (cloneReceipt()?.phase === 'cloning') return cloneReceipt().progress || 'Connecting to the repository…'
+    if (cloneReceipt()?.phase === 'publishing') return 'Adding the cloned project…'
+    if (cloneReceipt()?.phase === 'cancelled') return 'Clone stopped.'
+    if (cloneReceipt()?.phase === 'done') return 'Repository cloned.'
+    return cloneSubmitting() ? 'Starting clone…' : ''
+  })
+  let clonePoll
+  let cloneRequest
+  let cloneSuggestionRequest
+  let cloneDestinationEdited = false
+  let cloneSuggestion = ''
+  let cloneLinkedPrompt = null
+  let cloneReturnToPicker = false
+
   const sidebarOpen = state(false)
   const sidebarCollapsed = useLocalStorage('harness.sidebarCollapsed', false)
   const desktopSidebar = useMediaQuery('(min-width: 48rem)')
@@ -2243,6 +2489,119 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const browserPreviewToggle = useRef('browserPreviewToggleBox')
   let browserPreviewTrigger = null
   const diffClose = useRef('diffCloseBox')
+  const repositoryCommitDialog = useRef('repositoryCommitDialogBox')
+  const repositoryCommitPreview = state(null)
+  const repositoryCommitMessage = state('')
+  const repositoryCommitLimit = state(40)
+  const repositoryCommitError = state('')
+  const repositoryCommitResult = state('')
+  const repositoryCommitLoading = state(false)
+  const repositoryCommitBusy = state(false)
+  let repositoryCommitTrigger
+  let repositoryCommitKey
+  const repositorySyncDialog = useRef('repositorySyncDialogBox')
+  const repositorySyncAction = state('push')
+  const repositorySyncPreview = state(null)
+  const repositorySyncError = state('')
+  const repositorySyncResult = state(null)
+  const repositorySyncLoading = state(false)
+  const repositorySyncBusy = state(false)
+  const repositorySyncTarget = derived(() => {
+    const preview = repositorySyncPreview()
+    return preview?.remote ? preview.remote + '/' + preview.ref.replace(/^refs\/heads\//u, '') : ''
+  })
+  const repositorySyncDescription = derived(() => repositorySyncAction() === 'pull'
+    ? 'Fast-forward the checked-out branch from its remote.'
+    : repositorySyncPreview()?.firstPush
+      ? 'Publish this branch and set its upstream.'
+      : repositorySyncPreview()?.defaultTarget ? 'Send local commits directly to the remote’s default branch.'
+        : 'Send local commits to the named remote branch.')
+  let repositorySyncTrigger
+  let repositorySyncKey
+  let repositorySyncRequest
+  let repositoryCommitRequest
+  const repositoryPullRequestDialog = useRef('repositoryPullRequestDialogBox')
+  const repositoryPullRequestBase = useRef('repositoryPullRequestBaseBox')
+  const repositoryPullRequestTitle = useRef('repositoryPullRequestTitleBox')
+  const repositoryPullRequestBody = useRef('repositoryPullRequestBodyBox')
+  const repositoryPullRequestDraft = useRef('repositoryPullRequestDraftBox')
+  const repositoryPullRequestPreview = state(null)
+  const repositoryPullRequestBaseText = state('')
+  const repositoryPullRequestTitleText = state('')
+  const repositoryPullRequestError = state('')
+  const repositoryPullRequestLoading = state(false)
+  const repositoryPullRequestBusy = state(false)
+  const repositoryPullRequestResult = state(null)
+  const linkedRepositoryPullRequests = state(@json(activeSession?.linkedPullRequests || []))
+  const pullRequestCheckout = @json(activeSession?.pullRequest?.reference || null)
+  const selectedRepositoryPullRequest = derived(() => linkedRepositoryPullRequests().findLast(link => link.repositoryKey === diffRepository())
+    || (pullRequestCheckout?.repositoryKey === diffRepository() ? pullRequestCheckout : null))
+  const repositoryChecksOpen = state(false)
+  const repositoryChecksData = state(null)
+  const repositoryChecksError = state('')
+  const repositoryChecksLoading = state(false)
+  const repositoryChecksShowAll = state(false)
+  const checkLabels = { failed: 'Failed', cancelled: 'Cancelled', 'action-required': 'Action required',
+    pending: 'Pending', passed: 'Passed', skipped: 'Skipped', neutral: 'Neutral', unknown: 'Unknown' }
+  const completedCheckStates = ['passed', 'skipped', 'neutral']
+  const repositoryChecksGroups = derived(() => {
+    const attention = []
+    const pending = []
+    const completed = []
+    for (const check of repositoryChecksData()?.checks || []) {
+      (completedCheckStates.includes(check.status) ? completed : check.status === 'pending' ? pending : attention).push(check)
+    }
+    return { attention, pending, completed, canCollapse: completed.length > 0 && attention.length + pending.length > 0 }
+  })
+  const repositoryChecksVisible = derived(() => {
+    const { attention, pending, completed, canCollapse } = repositoryChecksGroups()
+    return [...attention, ...pending, ...(!canCollapse || repositoryChecksShowAll() ? completed : [])]
+  })
+  const repositoryChecksSummary = derived(() => {
+    const data = repositoryChecksData()
+    if (!data || repositoryChecksError()) return ''
+    const { attention, pending } = repositoryChecksGroups()
+    const count = data.checks.length
+    if (!count) return 'No checks reported'
+    const countLabel = String(count) + (data.truncated ? '+' : '') + (count === 1 ? ' check' : ' checks')
+    const parts = [countLabel]
+    if (attention.length) parts.push(attention.length + ' need attention')
+    if (pending.length) parts.push(pending.length + ' pending')
+    if (!data.truncated && data.checks.every(check => check.status === 'passed')) parts.push('all passed')
+    return parts.join(' · ')
+  })
+  const repositoryChecksStateLabel = derived(() => {
+    const data = repositoryChecksData()
+    if (!data) return ''
+    if (data.state === 'MERGED') return 'Merged'
+    if (data.state === 'CLOSED') return 'Closed'
+    return data.draft ? 'Draft' : 'Open'
+  })
+  let repositoryChecksRequest
+  effect(() => {
+    diffOpen()
+    diffRepository()
+    selectedRepositoryPullRequest()
+    repositoryChecksRequest?.abort()
+    batch(() => {
+      repositoryChecksOpen.set(false)
+      repositoryChecksData.set(null)
+      repositoryChecksError.set('')
+      repositoryChecksShowAll.set(false)
+      repositoryChecksLoading.set(false)
+    })
+  })
+  const repositoryPullRequestBaseChanged = derived(() => Boolean(repositoryPullRequestPreview()
+    && repositoryPullRequestBaseText().trim() !== repositoryPullRequestPreview().baseRef))
+  const repositoryPullRequestCanSubmit = derived(() => Boolean(repositoryPullRequestPreview()?.revision
+    && !repositoryPullRequestBaseChanged() && !repositoryPullRequestLoading() && !repositoryPullRequestBusy() && !repositoryPullRequestError()
+    && (repositoryPullRequestPreview().existing || repositoryPullRequestTitleText().trim())))
+  const repositoryPullRequestSubmitLabel = derived(() => repositoryPullRequestBusy() ? 'Working…'
+    : repositoryPullRequestPreview()?.existing ? 'Link pull request'
+      : repositoryPullRequestPreview()?.publish ? 'Push and create' : 'Create pull request')
+  let repositoryPullRequestTrigger
+  let repositoryPullRequestKey
+  let repositoryPullRequestRequest
   const changesPane = useRef('changesPane')
   const workspaceFilesOpen = state(false)
   const workspaceFileState = state(null)
@@ -2278,7 +2637,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const settingsQuery = state('')
   const settingsResults = derived(() => {
     const query = settingsQuery().trim().toLowerCase()
-    return settingsSections.filter(section => section.label.toLowerCase().includes(query) || section.id.includes(query))
+    return settingsSections.filter(section => section.label.toLowerCase().includes(query) || section.id.includes(query)
+      || (section.id === 'threads' && ['snooze options', 'auto-settle inactive threads'].some(label => label.includes(query))))
   })
   const settingsSelectionLabel = derived(() => settingsSections.find(section => section.id === settingsSelection())?.label || 'General')
 
@@ -2290,7 +2650,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectRepositories = state([])
   const projectRepositoryStatus = state('')
   const projectRepositoryLayout = state(false)
-  const projectRepositoryTitle = derived(() => projectName ? `Repositories in ${projectName}` : 'No project open')
+  const projectRepositoryTitle = derived(() => projectSettingsName ? `Repositories in ${projectSettingsName}` : 'No project open')
 
   async function loadProjectRepositories() {
     if (!projectWorkspaceId) {
@@ -2323,7 +2683,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     // The project folder is a repository of the project where it is one, and
     // it has no name of its own, so it is shown by the project's name.
     const rows = covered.hasProjectRepository
-      ? [{ key: '', label: projectName || 'This project', note: 'project folder' }]
+      ? [{ key: '', label: projectSettingsName || 'This project', note: 'project folder' }]
       : []
     for (const repository of covered.repositories ?? [])
       rows.push({ key: repository.key, label: repository.label, note: repository.key === repository.label ? '' : repository.key })
@@ -2356,6 +2716,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const appleKeyboard = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent)
   let keyboard = null
   let keybindingStore = null
+  let sidebarJumpHints
 
   function keybindingRow(id) {
     return keybindings.find(binding => binding.id === id) || null
@@ -2364,7 +2725,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function chordLabel(id) {
     const row = keybindingRow(id)
     const bound = keybindingTable()?.bindings?.[id]
-    if (keyboard && bound) return keyboard.formatChordText(bound, appleKeyboard)
+    if (keyboard && bound !== undefined) return bound ? keyboard.formatChordText(bound, appleKeyboard) : 'Unassigned'
     return (appleKeyboard ? row?.apple : row?.other) || ''
   }
 
@@ -2382,17 +2743,50 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function shortcutKeys(id) {
     const row = keybindingRow(id)
     const bound = keybindingTable()?.bindings?.[id]
-    if (keyboard && bound) {
+    if (keyboard && bound !== undefined) {
       const chord = keyboard.parseChord(bound)
-      if (chord) return keyboard.ariaKeyshortcuts(chord, appleKeyboard && row?.scope === 'terminal')
+      return chord ? keyboard.ariaKeyshortcuts(chord, appleKeyboard && row?.scope === 'terminal') : ''
     }
     return row?.aria || ''
   }
 
-  function matchedCommand(event, terminalFocus = false) {
-    const table = keybindingTable()
-    return keyboard && table ? keyboard.matchCommand(table.bindings, event, { terminalFocus, apple: appleKeyboard }) : null
+  function composerShortcuts() {
+    const sendAndNew = shortcutKeys('composer.sendAndNewThread')
+    return sessionId ? sendAndNew : [shortcutKeys('composer.startBackground'), sendAndNew].filter(Boolean).join(' ')
   }
+
+  function composerShortcutTitle() {
+    const chord = chordLabel(sessionId ? 'composer.sendAndNewThread' : 'composer.startBackground')
+    if (!chord) return null
+    return sessionId ? `Send and open a new draft with ${chord}` : `Start in background with ${chord}`
+  }
+
+  function matchedCommand(event, terminalFocus = false, composerFocus = false) {
+    const table = keybindingTable()
+    return keyboard && table ? keyboard.matchCommand(table.bindings, event, {
+      terminalFocus, composerFocus, apple: appleKeyboard, craft: craftMenuReady(), modelPickerOpen: draftPickerOpen(),
+    }) : null
+  }
+
+  function sidebarShortcutBlocked() {
+    return draftPickerOpen() || threadUndoBlocked() || arrangementOpen() || stashOpen() || profileModalOpen()
+  }
+
+  function updateSidebarJumpHints(event) {
+    if (event.repeat || !['Alt', 'Control', 'Meta', 'Shift'].includes(event.key)) return
+    const sidebar = sidebarRef.current
+    if (sidebar && keyboard && !sidebarJumpHints) {
+      sidebarJumpHints = keyboard.createSidebarJumpHints(sidebar, () => ({
+        profile: String(visibleProfile()), bindings: keybindingTable()?.bindings, apple: appleKeyboard,
+        blocked: sidebarShortcutBlocked() || terminalInputFocused() || Boolean(recordingKeybinding()),
+      }))
+    }
+    sidebarJumpHints?.update(event)
+  }
+
+  useEventListener('keyup', updateSidebarJumpHints, { target: window })
+  useEventListener('blur', () => sidebarJumpHints?.clear(), { target: window })
+  onUnmounted(() => sidebarJumpHints?.clear())
 
   function readKeyboardStore(craft) {
     keybindingStore = keyboard.createKeybindingStore(localStorage, keyboard.KEYBINDINGS_KEY, { apple: appleKeyboard, craft })
@@ -2509,6 +2903,20 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const threadSearchResults = state([])
   const threadSearchStatus = state('')
   const threadSearchIndex = state(0)
+  const shareSearch = state('')
+  const shareRepository = state('')
+  const shareClipboardDialog = useRef('shareClipboardDialogBox')
+  const shareClipboardBox = useRef('shareClipboardTextBox')
+  const shareClipboardText = state('')
+  let shareClipboardTrigger = null
+  let shareRepositoryRequest
+  let linkedPromptRequest
+  const promptLinkDialog = useRef('promptLinkDialogBox')
+  const linkReview = state(null)
+  const linkReviewError = state('')
+  const linkOpening = state(false)
+  const sharedPromptNotice = state('')
+  const missingTurnLink = state(false)
   const selectedThreadSearchId = derived(() => {
     const id = threadSearchResults()[threadSearchIndex()]?.id
     return id === undefined ? undefined : `thread-search-result-${id}`
@@ -2734,8 +3142,28 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     finally { if (read === projectScriptsRead) projectScriptsLoading.set(false) }
   }
 
+  function stopWorkspaceStatusRequests() {
+    workspaceStatusPaused = true
+    diffGitStatusStop?.()
+    repositoryCommitRequest?.abort()
+    repositorySyncRequest?.abort()
+    repositoryPullRequestRequest?.abort()
+    providerCatalogRequest?.abort()
+    draftWorktreeRequest?.abort()
+    shareRepositoryRequest?.abort()
+    linkedPromptRequest?.abort()
+    clonePoll?.stop()
+    cloneRequest?.abort()
+    cloneSuggestionRequest?.abort()
+    projectSetupRequest?.abort()
+    projectSetupPoll?.stop()
+    projectSettlementPending = false
+    projectSettlementRequest?.abort()
+    projectSettlementPoll?.stop()
+  }
+
   async function refreshProjectSetup() {
-    if (!sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
+    if (workspaceStatusPaused || !sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
     projectSetupPoll?.stop()
     projectSetupRequest?.abort()
     const request = new AbortController()
@@ -2750,7 +3178,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         projectSetupPreview = false
         void previewProjectScript(setup.previewUrl, true)
       }
-      if (setup?.status === 'pending' ? uiBusy() : setup?.status === 'running')
+      if (setup?.status === 'pending' ? (uiBusy() || sessionPullRequest) : setup?.status === 'running')
         projectSetupPoll = useTimeout(refreshProjectSetup, 750)
       else projectSetupPreview = false
     }
@@ -2761,9 +3189,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   async function refreshProjectSettlement() {
-    if (!sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
+    if (workspaceStatusPaused || !sessionId || !workspaceEditorAllowed || !workspaceBranch()) return
     projectSettlementPoll?.stop()
-    projectSettlementRequest?.abort()
+    if (projectSettlementRequest) {
+      projectSettlementPending = true
+      return
+    }
     const request = new AbortController()
     projectSettlementRequest = request
     try {
@@ -2786,6 +3217,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     catch {
       if (!request.signal.aborted && sessionOnline() && projectSettlement()?.status === 'running')
         projectSettlementPoll = useTimeout(refreshProjectSettlement, 1500)
+    }
+    finally {
+      projectSettlementRequest = undefined
+      if (projectSettlementPending) {
+        projectSettlementPending = false
+        void refreshProjectSettlement()
+      }
     }
   }
 
@@ -2816,7 +3254,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function editProjectScript(script) {
     projectScriptsError.set('')
     projectScriptDraft.set(script || { name: '', command: '', previewUrl: '', autoOpenPreview: false, stopOnSettle: false })
-    void nextTick(() => projectScriptName.current?.focus())
+    void nextTick(() => {
+      const name = projectScriptName.current
+      if (projectScriptsDialog.current?.open && name?.form && !name.form.contains(name.ownerDocument.activeElement)) name.focus()
+    })
   }
 
   function cancelProjectScriptEdit() {
@@ -3189,6 +3630,183 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
   }
 
+
+  function openProjectClone(prompt) {
+    if (!projectCloneAllowed || cloneDialog.current?.open) return
+    cloneReturnToPicker = Boolean(projectDialog.current?.open)
+    projectDialog.current?.close()
+    promptLinkDialog.current?.close()
+    const operation = pendingProjectClone()
+    cloneLinkedPrompt = operation?.prompt ?? prompt
+    cloneRemoteText.set(operation?.input?.remote || prompt?.repository || '')
+    cloneDestinationEdited = false
+    if (cloneDestinationInput.current) cloneDestinationInput.current.value = operation?.input?.destination || ''
+    cloneSuggestion = ''
+    cloneError.set('')
+    cloneReceipt.set(null)
+    cloneDialog.current?.showModal()
+    if (operation?.input?.id) {
+      cloneSubmitting.set(true)
+      void showCloneProgress(operation)
+    }
+    else if (prompt) void suggestCloneDestination()
+    else cloneRemoteInput.current?.focus()
+  }
+
+  function closeProjectClone() {
+    if (cloneBusy()) return
+    cloneSuggestionRequest?.abort()
+    cloneDialog.current?.close()
+    if (cloneReturnToPicker) {
+      projectDialog.current?.showModal()
+      projectPath.current?.focus()
+    }
+    else if (cloneLinkedPrompt && linkReview()) showLinkedPrompt(linkReview())
+    else (projectPickerTrigger || sidebarRef.current)?.focus()
+    cloneLinkedPrompt = null
+    cloneReturnToPicker = false
+  }
+
+  function changeCloneRemote(value) {
+    cloneRemoteText.set(value)
+    cloneError.set('')
+  }
+
+  function changeCloneDestination() {
+    cloneDestinationEdited = true
+    cloneSuggestionRequest?.abort()
+    cloneError.set('')
+  }
+
+  function canSuggestCloneDestination(input) {
+    return input && !cloneBusy() && !cloneDestinationEdited && (!input.value || input.value === cloneSuggestion)
+  }
+
+  async function suggestCloneDestination() {
+    const remote = cloneRemoteText().trim()
+    const input = cloneDestinationInput.current
+    if (!remote || !canSuggestCloneDestination(input)) return
+    cloneSuggestionRequest?.abort()
+    const request = new AbortController()
+    cloneSuggestionRequest = request
+    const response = await fetch('/projects/clone?' + new URLSearchParams({ remote }), { signal: request.signal })
+      .then(result => result.ok ? result.json() : null).catch(() => null)
+    if (request.signal.aborted) return
+    cloneSuggestionRequest = undefined
+    if (response?.destination && cloneDialog.current?.open && cloneRemoteText().trim() === remote && canSuggestCloneDestination(input)) {
+      cloneSuggestion = response.destination
+      input.value = cloneSuggestion
+      if (cloneLinkedPrompt) input.focus()
+    }
+  }
+
+  async function browseCloneFolder() {
+    const craft = desktop()
+    if (typeof craft?.dialog?.showOpenDialog !== 'function') return
+    try {
+      const { directory } = composerDraftTools.cloneRemote(cloneRemoteText())
+      const selection = await craft.dialog.showOpenDialog({ title: 'Choose where to clone', properties: ['openDirectory'] })
+      const parent = selection?.filePaths?.[0]
+      const input = cloneDestinationInput.current
+      if (!selection?.canceled && typeof parent === 'string' && input) {
+        const separator = parent.includes('\\') ? '\\' : '/'
+        changeCloneDestination()
+        input.value = parent.replace(/[\\/]+$/, '') + separator + directory
+      }
+    }
+    catch (error) { cloneError.set(error.message || 'Could not open the folder picker.') }
+  }
+
+  async function showCloneProgress(operation, start = false) {
+    const request = new AbortController()
+    cloneRequest = request
+    try {
+      const endpoint = '/projects/clone'
+      const response = start
+        ? await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation.input), signal: request.signal })
+        : await fetch(endpoint + '?' + new URLSearchParams({ id: operation.input.id }), { signal: request.signal })
+      if (!start && response.status === 404 && !request.signal.aborted) return showCloneProgress(operation, true)
+      const result = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) {
+        pendingProjectClone.set(null)
+        throw new Error(result.error || 'Could not start the clone.')
+      }
+      cloneReceipt.set(result)
+      cloneError.set('')
+      cloneSubmitting.set(false)
+      if (['cloning', 'publishing'].includes(result.phase)) {
+        clonePoll = useTimeout(() => void showCloneProgress(operation), 500)
+        return
+      }
+      cloneCancelling.set(false)
+      pendingProjectClone.set(null)
+      if (result.phase === 'done') {
+        const target = cloneDialog.current
+        target?.close()
+        if (operation.prompt?.pullRequest) {
+          const params = new URLSearchParams({ workspace: String(result.workspace), pr: operation.prompt.pullRequest })
+          if (operation.prompt.text) params.set('prompt', operation.prompt.text)
+          openDraftAddress('/?' + params)
+          return
+        }
+        if (operation.prompt && target) {
+          try {
+            await openLinkedDraft(operation.prompt, { id: result.workspace, profile: result.profile }, target)
+            return
+          }
+          catch { /* Keep access to the registered checkout if browser storage is unavailable. */ }
+        }
+        openDraftAddress('/?workspace=' + result.workspace)
+      }
+      else cloneError.set(result.error || '')
+    }
+    catch (error) {
+      if (request.signal.aborted) return
+      cloneSubmitting.set(false)
+      cloneCancelling.set(false)
+      cloneError.set(error.message || 'Could not read clone progress.')
+      if (pendingProjectClone()?.input?.id === operation.input.id)
+        clonePoll = useTimeout(() => void showCloneProgress(operation), 1000)
+    }
+    finally { if (cloneRequest === request) cloneRequest = null }
+  }
+
+  function startProjectClone() {
+    if (cloneBusy() || !composerDraftTools || !projectCloneAllowed) return
+    try {
+      const { remote } = composerDraftTools.cloneRemote(cloneRemoteInput.current?.value ?? cloneRemoteText())
+      const destination = cloneDestinationInput.current?.value.trim() || ''
+      const operation = { input: { id: newCommandId(), remote, destination, profile: Number(visibleProfile()) || null }, prompt: cloneLinkedPrompt }
+      cloneSubmitting.set(true)
+      cloneError.set('')
+      pendingProjectClone.set(operation)
+      void showCloneProgress(operation, true)
+    }
+    catch (error) { cloneError.set(error.message || 'Could not start the clone.') }
+  }
+
+  async function cancelProjectClone() {
+    const receipt = cloneReceipt()
+    if (receipt?.phase !== 'cloning' || cloneCancelling()) return
+    cloneCancelling.set(true)
+    try {
+      const response = await fetch('/projects/clone?' + new URLSearchParams({ id: receipt.id }), { method: 'DELETE' })
+      if (!response.ok) throw new Error('The host could not stop the clone.')
+    }
+    catch (error) {
+      cloneCancelling.set(false)
+      cloneError.set(error.message)
+    }
+  }
+
+  function resumeProjectClone() {
+    const current = pendingProjectClone()
+    if (!projectCloneAllowed || !current?.input?.id || !cloneDialog.current) return false
+    openProjectClone(current.prompt)
+    return true
+  }
+
   async function registerProject() {
     const path = projectPath.current?.value
     if (!path?.trim() || projectBusy()) return
@@ -3253,14 +3871,34 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (id) navigate(`/?workspace=${id}`)
   }
 
+  function openDraftAddress(href) {
+    stopWorkspaceStatusRequests()
+    navigate(href)
+  }
+
+  function openNewDraft(query) {
+    openDraftAddress(`/?${query}&draft=${newCommandId()}`)
+  }
+
+  function startProjectDraft(id) {
+    openNewDraft(`workspace=${id}`)
+  }
+
   function startWithoutProject() {
     const profile = Number(activeProfile)
-    navigate(profile ? `/?profile=${profile}&project=none` : '/?project=none')
+    openDraftAddress(profile ? `/?profile=${profile}&project=none` : '/?project=none')
+  }
+
+  function startScratchDraft() {
+    const profile = Number(activeProfile)
+    if (profile) openNewDraft(`profile=${profile}&project=none`)
+    else startWithoutProject()
   }
 
   function openDraft(profileId) {
     const project = String(profileId) === String(activeProfile) ? draftProject : profileProjects[String(profileId)]
-    if (project) navigate(`/?workspace=${project.id}`)
+    if (project) startProjectDraft(project.id)
+    else if (draftWithoutProject) openNewDraft(`profile=${Number(profileId) || 0}&project=none`)
     else openProjectPicker()
   }
 
@@ -3293,7 +3931,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const providerCatalog = state('loading')
   const modelFavorites = state([])
   let modelFavoritesRevision = 0
-  let providerCatalogRequest = 0
+  let providerCatalogRequest
   const activeDriverValue = state(sessionProviderInstanceId === null ? sessionDriver : `${sessionDriver}:${sessionProviderInstanceId}`)
   const currentDriver = derived(() => activeDriverValue().split(':')[0])
   const appliedCodexSelection = state(initialCodexSelection)
@@ -3338,6 +3976,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const selectedDraftAccount = derived(() => composerProviders().find(account => account.value === draftProvider()))
   const selectedDraftModel = derived(() => selectedDraftAccount()?.models?.find(model => model.id === draftModel()))
   const draftPickerLabel = derived(() => {
+    if (comparingModels()) return draftModelChoices().map(modelBatchTargetName).join(', ')
     const model = selectedDraftModel()
     const effort = draftEffort()
     const speed = model?.speedTiers.find(tier => tier.id === draftSpeed())?.name
@@ -3380,6 +4019,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       }).map(model => ({ id: model.id, name: model.name, account: account.value, accountName: account.name, key: `${account.value}/${model.id}` }))
     })
   })
+  const numberedPickerResults = derived(() => pickerResults().filter(result => result.id).slice(0, 9))
   const pickerStatus = derived(() => {
     if (providerCatalog() === 'failed') return 'Could not load provider accounts.'
     if (providerCatalog() === 'loading') return 'Checking provider accounts…'
@@ -3430,6 +4070,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function openDraftPicker(event) {
     const dialog = draftPickerDialog.current
     if (!dialog || dialog.open) return
+    if (!sessionId && draftProject?.trusted) void loadDraftWorktreeOptions()
     pickerQuery.set('')
     favoriteError.set('')
     pickerAccount.set(draftProvider())
@@ -3444,6 +4085,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function closeDraftPicker() {
+    if (comparingModels()) draftModelChoices.set(modelChoicesWithOptions())
     draftPickerDialog.current?.close()
     draftPickerOpen.set(false)
     rememberPrompt()
@@ -3504,6 +4146,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     pickerIndex.set(0)
   }
 
+  function modelPickerShortcut(result, accessible = false) {
+    const index = numberedPickerResults().findIndex(row => row.key === result.key)
+    if (index === -1) return ''
+    const command = 'modelPicker.jump.' + (index + 1)
+    if (!keybindingTable()?.bindings?.[command]) return ''
+    return accessible ? shortcutKeys(command) : chordLabel(command)
+  }
+
   function pickerSearchKeydown(event) {
     if (event.isComposing || event.keyCode === 229) return
     if (event.key === 'Escape') {
@@ -3515,7 +4165,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const rows = pickerResults()
     if (event.key === 'Enter') {
       event.preventDefault()
-      if (rows[pickerIndex()]) pickDraftModel(rows[pickerIndex()])
+      if (rows[pickerIndex()]) pickDraftModel(rows[pickerIndex()], event)
     }
     if (rows.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
       event.preventDefault()
@@ -3525,7 +4175,69 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
   }
 
-  function pickDraftModel(result) {
+  function matchesDraftModel(selection, result) {
+    return selection.account === result.account && selection.id === result.id
+  }
+
+  function modelBatchTargetName(selection) {
+    if (draftModelChoices().filter(choice => choice.name === selection.name).length < 2) return selection.name
+    const account = composerProviders().find(account => account.value === selection.account)
+    return selection.name + ' · ' + (account?.name || selection.account)
+  }
+
+  function draftModelSelected(result) {
+    return comparingModels()
+      ? draftModelChoices().some(selection => matchesDraftModel(selection, result))
+      : draftProvider() === result.account && draftModel() === result.id
+  }
+
+  function currentDraftChoice() {
+    const account = selectedDraftAccount()
+    const model = selectedDraftModel() || account?.models?.find(model => model.isDefault)
+    if (!model) return null
+    return { account: account.value, id: model.id, name: model.name, effort: draftEffort(), speed: draftSpeed() }
+  }
+
+  function modelChoicesWithOptions() {
+    const current = currentDraftChoice()
+    return draftModelChoices().map(choice => current && matchesDraftModel(choice, current) ? current : choice)
+  }
+
+  function toggleDraftModel(result) {
+    if (sessionId || !draftWorktreeOptions()?.canStartWorktree || !result.id) return
+    const current = currentDraftChoice()
+    const choices = comparingModels() ? modelChoicesWithOptions() : current ? [current] : []
+    const selected = choices.find(choice => matchesDraftModel(choice, result))
+    if (selected && choices.length === 1) return
+    const next = selected
+      ? choices.filter(choice => !matchesDraftModel(choice, result))
+      : [...choices, { account: result.account, id: result.id, name: result.name, effort: '', speed: '' }]
+    draftModelChoices.set(next.length > 1 ? next : [])
+    if (next.length === 1 || !current || !next.some(choice => matchesDraftModel(choice, current))) {
+      const choice = next[0]
+      draftProvider.set(choice.account)
+      draftModel.set(choice.id)
+      draftEffort.set(choice.effort)
+      draftSpeed.set(choice.speed)
+    }
+    void nextTick(positionDraftPicker)
+  }
+
+  function pickDraftModel(result, event) {
+    if (event?.shiftKey && !sessionId && draftWorktreeOptions()?.canStartWorktree) {
+      toggleDraftModel(result)
+      return
+    }
+    if (!sessionId) {
+      const choice = draftModelChoices()?.find(choice => matchesDraftModel(choice, result))
+      draftModelChoices.set([])
+      if (choice && (draftProvider() !== choice.account || draftModel() !== choice.id)) {
+        draftProvider.set(choice.account)
+        draftModel.set(choice.id)
+        draftEffort.set(choice.effort)
+        draftSpeed.set(choice.speed)
+      }
+    }
     if (draftProvider() !== result.account || draftModel() !== result.id) {
       draftProvider.set(result.account)
       draftModel.set(result.id)
@@ -3579,14 +4291,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // the answer in their option labels, with unusable agents disabled — a
   // driver you cannot run should not be one click from a dead session.
   async function annotateDriverPickers() {
-    const request = ++providerCatalogRequest
+    if (workspaceStatusPaused) return
+    providerCatalogRequest?.abort()
+    const request = new AbortController()
+    providerCatalogRequest = request
     if (!defaultProviders().length) providerCatalog.set('loading')
     const workspace = Number(activeWorkspaceId) || draftProject?.id || 0
     const modelsQuery = canCompose && (!activeSessionId || draftPickerOpen()) ? '&models=1' : ''
     const favoritesRevision = modelFavoritesRevision
-    const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`)
+    const catalog = await fetch(`/drivers?workspace=${workspace}&profile=${Number(activeProfile) || 0}${modelsQuery}`, { signal: request.signal })
       .then(response => response.ok ? response.json() : null).catch(() => null)
-    if (request !== providerCatalogRequest) return
+    if (request.signal.aborted) return
     if (!catalog) {
       if (modelsQuery || !defaultProviders().length) providerCatalog.set('failed')
       return
@@ -3659,10 +4374,23 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   requestAnimationFrame(() => {
     annotateDriverPickers()
     restorePrompt()
+    modelBatchNotice.set(pendingModelBatches().flatMap(batch => batch.started || []))
+    const choices = draftModelChoices()
+    if (!sessionId && Array.isArray(choices) && choices.length > 1) {
+      void loadDraftWorktreeOptions()
+      const choice = choices[0]
+      draftProvider.set(choice.account)
+      draftModel.set(choice.id)
+      draftEffort.set(choice.effort)
+      draftSpeed.set(choice.speed)
+    }
   })
 
   function defaultDriver() {
-    const stored = settings().defaultDriver
+    // The project's answer where it has one, the host's otherwise. This is
+    // where the setting actually bites: it is the agent the composer starts a
+    // new thread in this project with.
+    const stored = projectPins().defaultDriver || settings().defaultDriver
     return KNOWN_DRIVERS.includes(stored) ? stored : 'claude'
   }
 
@@ -3673,6 +4401,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function focusSettingsHeading() {
+    if (settingsSelection() === 'threads') {
+      snoozePreviewTime.set(new Date())
+      snoozePreviewTimer.resume()
+    }
+    else snoozePreviewTimer.pause()
     void nextTick(() => {
       if (settingsPanel.current) settingsPanel.current.scrollTop = 0
       const heading = settingsDialogRef.current?.querySelector(`[data-settings-section="${settingsSelection()}"]`)
@@ -3693,6 +4426,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const box = settingsDriverRef.current
     if (box) box.value = defaultDriver()
     focusSettingsHeading()
+  }
+
+  function editSnoozeSettings() {
+    closeThreadActions()
+    openSettings(null, 'threads')
+    settingsTrigger = threadActionsTrigger.current
+    void nextTick(() => {
+      const panel = settingsPanel.current
+      const heading = panel?.querySelector('#settings-snooze-heading')
+      if (!panel || !heading) return
+      panel.scrollTop += heading.getBoundingClientRect().top - panel.getBoundingClientRect().top - 12
+      heading.focus({ preventScroll: true })
+    })
   }
 
   function settingsMatches(section) {
@@ -3724,6 +4470,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     // into a rebind nobody asked for.
     recordingKeybinding.set('')
     keybindingStatus.set('')
+    snoozePreviewTimer.pause()
     settingsQuery.set('')
     settingsDialogRef.current?.close()
     settingsTrigger?.focus()
@@ -3763,11 +4510,75 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let threadSearchRequest = null
   let threadSearchTrigger = null
 
+  function showShareCommand(label, withRepository = false, thread = false) {
+    if (thread ? !sessionId : !composerText().trim()) return false
+    if (withRepository && !shareRepository()) return false
+    return shareSearch().toLowerCase().split(/\s+/).every(word => label.includes(word))
+  }
+
+  function loadShareRepository() {
+    const workspace = Number(activeScratchSession ? 0 : activeWorkspaceId || draftProject?.id)
+    if (!workspace || shareRepositoryRequest) return
+    const request = new AbortController()
+    shareRepositoryRequest = request
+    void fetch('/prompt-link/project?workspace=' + workspace, { signal: request.signal }).then(async (response) => {
+      if (!response.ok) return
+      const result = await response.json()
+      if (!request.signal.aborted) shareRepository.set(result.repository || '')
+    }).catch(() => {}).finally(() => { shareRepositoryRequest = undefined })
+  }
+
+  async function shareLink(target, address, notice) {
+    try {
+      await composerDraftTools.writeClipboardText(target, address, desktop()?.clipboard)
+      transcriptAnnouncement.set(notice)
+    }
+    catch {
+      shareClipboardTrigger = target
+      shareClipboardText.set(address)
+      shareClipboardDialog.current?.showModal()
+      void nextTick(() => shareClipboardBox.current?.select())
+    }
+  }
+
+  function closeShareClipboard() {
+    shareClipboardDialog.current?.close()
+    const trigger = shareClipboardTrigger
+    shareClipboardTrigger = null
+    shareClipboardText.set('')
+    const fallback = sessionId ? threadActionsTrigger.current : promptRef.current
+    const focus = trigger?.getClientRects().length ? trigger : fallback
+    focus?.focus()
+  }
+
+  function copyThreadLink(event) {
+    const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : threadActionsTrigger.current
+    if (!sessionId || !target || !composerDraftTools) return
+    if (threadActionsDialog.current?.open) closeThreadActions()
+    if (threadSearchDialog.current?.open) closeThreadSearch()
+    void shareLink(target, composerDraftTools.threadLink(target.ownerDocument.location.origin, sessionId), 'Thread link copied.')
+  }
+
+  function copyDraftPromptLink(event, withRepository = false) {
+    const target = event.currentTarget
+    if (!target || !composerDraftTools) return
+    try {
+      const context = withRepository && shareRepository() ? {
+        repository: shareRepository(), provider: agentChoice(draftProvider()).driverKind, model: draftModel(),
+      } : undefined
+      const address = composerDraftTools.newThreadLink(target.ownerDocument.location.origin, composerText(), context)
+      closeThreadSearch()
+      void shareLink(target, address, 'Prompt link copied.')
+    }
+    catch (error) { stxAlert(error.message) }
+  }
+
   function openThreadSearch(event) {
     const dialog = threadSearchDialog.current
-    if (!dialog || dialog.open || !Number(activeProfile)) return
+    if (!dialog || dialog.open || (!Number(activeProfile) && !composerText().trim())) return
     threadSearchTrigger = event?.currentTarget?.matches?.('[data-thread-search-toggle], [data-nav-search]') ? event.currentTarget : null
     workspaceActionsOpen.set(false)
+    if (composerText().trim()) loadShareRepository()
     dialog.showModal()
     threadSearchInput.current?.focus()
   }
@@ -3777,6 +4588,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     threadSearchRequest?.abort()
     threadSearchResults.set([])
     threadSearchStatus.set('')
+    shareSearch.set('')
     if (threadSearchInput.current) threadSearchInput.current.value = ''
     threadSearchDialog.current?.close()
     threadSearchTrigger?.focus()
@@ -3791,12 +4603,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function queueThreadSearch(event) {
     if (event.isComposing) return
     const query = event.currentTarget.value.trim()
+    shareSearch.set(query)
     threadSearchTimer?.stop()
     threadSearchRequest?.abort()
     threadSearchResults.set([])
     threadSearchIndex.set(0)
     threadSearchStatus.set('')
-    if (!query) return
+    if (!query || !Number(activeProfile)) return
     threadSearchTimer = useTimeout(() => searchThreadResults(query), 160)
   }
 
@@ -3833,7 +4646,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     const results = threadSearchResults()
-    if (results.length === 0) return
+    if (results.length === 0) {
+      const command = threadSearchDialog.current?.querySelector('[data-share-commands]:not([hidden]) button:not([hidden])')
+      if (event.key === 'Enter' && command) {
+        event.preventDefault()
+        command.click()
+      }
+      return
+    }
     if (event.key === 'Enter') {
       event.preventDefault()
       chooseThreadSearchResult(results[threadSearchIndex()])
@@ -4037,6 +4857,310 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function showMoreDiffRows(path) {
     setDiffFileLimit(path, (diffFileLimits().get(path) || 0) + diffPageSize)
+  }
+
+  function rememberRepositoryPullRequest(link) {
+    linkedRepositoryPullRequests.update(current => current.some(item => item.repositoryKey === link.repositoryKey
+      && item.repository === link.repository && item.number === link.number) ? current : current.concat(link))
+  }
+
+  function pullRequestLink(link) {
+    return link ? 'https://github.com/' + link.repository + '/pull/' + link.number : undefined
+  }
+
+  function reviewPullRequestHref(link) {
+    const selectedUrl = pullRequestLink(link)
+    if (!selectedUrl) return undefined
+    return '/pull-requests?' + new URLSearchParams({ profile: String(activeProfile), selectedUrl })
+  }
+
+  function toggleRepositoryChecks() {
+    if (repositoryChecksOpen()) {
+      repositoryChecksRequest?.abort()
+      repositoryChecksLoading.set(false)
+      repositoryChecksOpen.set(false)
+      return
+    }
+    repositoryChecksShowAll.set(false)
+    repositoryChecksOpen.set(true)
+    void refreshRepositoryChecks()
+  }
+
+  async function refreshRepositoryChecks() {
+    if (repositoryChecksLoading() || !selectedRepositoryPullRequest()) return
+    const request = new AbortController()
+    repositoryChecksRequest = request
+    repositoryChecksLoading.set(true)
+    repositoryChecksError.set('')
+    const params = new URLSearchParams({ repository: diffRepository() })
+    try {
+      const response = await fetch('/s/' + sessionId + '/git/pull-request-checks?' + params, { signal: request.signal, cache: 'no-store' })
+      const data = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(data.error || 'Could not read checks from GitHub. Try again.')
+      repositoryChecksData.set(data)
+    }
+    catch (error) {
+      if (!request.signal.aborted) {
+        repositoryChecksData.set(null)
+        repositoryChecksError.set(error.message || 'Could not read checks from GitHub. Try again.')
+      }
+    }
+    finally {
+      if (repositoryChecksRequest === request) {
+        repositoryChecksLoading.set(false)
+        repositoryChecksRequest = undefined
+      }
+    }
+  }
+
+  function toggleAllRepositoryChecks() {
+    repositoryChecksShowAll.update(value => !value)
+  }
+
+  function openRepositoryPullRequest(event) {
+    repositoryPullRequestTrigger = event.currentTarget
+    repositoryPullRequestKey = diffRepository()
+    repositoryPullRequestPreview.set(null)
+    repositoryPullRequestResult.set(null)
+    repositoryPullRequestBaseText.set('')
+    repositoryPullRequestTitleText.set('')
+    if (repositoryPullRequestBase.current) repositoryPullRequestBase.current.value = ''
+    if (repositoryPullRequestTitle.current) repositoryPullRequestTitle.current.value = ''
+    if (repositoryPullRequestBody.current) repositoryPullRequestBody.current.value = ''
+    if (repositoryPullRequestDraft.current) repositoryPullRequestDraft.current.checked = false
+    repositoryPullRequestDialog.current?.showModal()
+    void runRepositoryPullRequest()
+  }
+
+  function closeRepositoryPullRequest() {
+    if (repositoryPullRequestBusy()) return
+    repositoryPullRequestRequest?.abort()
+    repositoryPullRequestDialog.current?.close()
+    if (repositoryPullRequestTrigger?.offsetWidth) repositoryPullRequestTrigger.focus()
+    else diffClose.current?.focus()
+  }
+
+  function setRepositoryPullRequestBase(value) {
+    repositoryPullRequestBaseText.set(value)
+  }
+
+  function setRepositoryPullRequestTitle(value) {
+    repositoryPullRequestTitleText.set(value)
+  }
+
+  async function runRepositoryPullRequest(input) {
+    repositoryPullRequestRequest?.abort()
+    const request = new AbortController()
+    repositoryPullRequestRequest = request
+    repositoryPullRequestError.set('')
+    repositoryPullRequestLoading.set(!input)
+    repositoryPullRequestBusy.set(Boolean(input))
+    const params = new URLSearchParams()
+    if (repositoryPullRequestKey) params.set('repository', repositoryPullRequestKey)
+    const base = repositoryPullRequestBaseText().trim()
+    if (base && !input) params.set('base', base)
+    try {
+      const response = await fetch('/s/' + sessionId + '/git/pull-request?' + params, {
+        signal: request.signal,
+        ...(input ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) } : {}),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(data.error || 'Could not prepare the pull request.')
+      if (input) {
+        const link = data.pullRequest
+        if (data.linked) rememberRepositoryPullRequest({ repository: link.repository, number: link.number, repositoryKey: repositoryPullRequestKey })
+        repositoryPullRequestResult.set({ repository: repositoryPullRequestKey, url: link.url, number: link.number,
+          message: data.headChanged ? 'The pull request is open. GitHub reports a different head commit.'
+            : data.linked ? (data.existing ? 'Linked pull request' : 'Opened pull request')
+              : 'Pull request open on GitHub. Refresh the review to link it to this thread.' })
+        repositoryPullRequestBusy.set(false)
+        closeRepositoryPullRequest()
+        diffClose.current?.focus()
+        refreshWorkspaceDiff()
+      }
+      else {
+        repositoryPullRequestPreview.set(data)
+        repositoryPullRequestBaseText.set(data.baseRef)
+        if (repositoryPullRequestBase.current) repositoryPullRequestBase.current.value = data.baseRef
+        if (!repositoryPullRequestTitleText().trim() && repositoryPullRequestTitle.current) {
+          repositoryPullRequestTitleText.set(data.title)
+          repositoryPullRequestTitle.current.value = data.title
+        }
+        repositoryPullRequestError.set(data.problem || '')
+      }
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositoryPullRequestError.set(error.message || 'Could not complete the pull request.')
+    }
+    finally {
+      if (repositoryPullRequestRequest === request) {
+        repositoryPullRequestLoading.set(false)
+        repositoryPullRequestBusy.set(false)
+        repositoryPullRequestRequest = undefined
+      }
+    }
+  }
+
+  function refreshRepositoryPullRequest() {
+    if (!repositoryPullRequestLoading() && !repositoryPullRequestBusy()) void runRepositoryPullRequest()
+  }
+
+  function submitRepositoryPullRequest() {
+    if (!repositoryPullRequestCanSubmit()) return
+    const { revision, baseRef } = repositoryPullRequestPreview()
+    void runRepositoryPullRequest({ revision, baseRef, title: repositoryPullRequestTitle.current?.value || '',
+      body: repositoryPullRequestBody.current?.value || '', draft: repositoryPullRequestDraft.current?.checked === true })
+  }
+
+  function openRepositorySync(action, event) {
+    repositorySyncTrigger = event.currentTarget
+    repositorySyncKey = diffRepository()
+    repositorySyncAction.set(action)
+    repositorySyncResult.set(null)
+    repositorySyncDialog.current?.showModal()
+    void loadRepositorySync()
+  }
+
+  function closeRepositorySync() {
+    if (repositorySyncBusy()) return
+    repositorySyncRequest?.abort()
+    repositorySyncDialog.current?.close()
+    if (repositorySyncTrigger?.offsetWidth) repositorySyncTrigger.focus()
+    else diffClose.current?.focus()
+  }
+
+  async function runRepositorySync(revision) {
+    repositorySyncRequest?.abort()
+    const request = new AbortController()
+    repositorySyncRequest = request
+    repositorySyncError.set('')
+    repositorySyncBusy.set(Boolean(revision))
+    repositorySyncLoading.set(!revision)
+    if (!revision) repositorySyncPreview.set(null)
+    const query = repositorySyncKey ? '?' + new URLSearchParams({ repository: repositorySyncKey }) : ''
+    try {
+      const response = await fetch('/s/' + sessionId + '/git/' + repositorySyncAction() + query, {
+        signal: request.signal,
+        ...(revision ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ revision }) } : {}),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(body.error || 'Could not complete the Git action.')
+      if (revision) {
+        repositorySyncResult.set({ repository: repositorySyncKey, message: body.message })
+        repositorySyncBusy.set(false)
+        closeRepositorySync()
+        diffClose.current?.focus()
+        refreshWorkspaceDiff()
+      }
+      else {
+        repositorySyncPreview.set(body)
+        repositorySyncError.set(body.problem || '')
+      }
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositorySyncError.set(error.message || 'Could not complete the Git action.')
+    }
+    finally {
+      if (repositorySyncRequest === request) {
+        repositorySyncBusy.set(false)
+        repositorySyncLoading.set(false)
+        repositorySyncRequest = undefined
+      }
+    }
+  }
+
+  function loadRepositorySync() {
+    if (!repositorySyncBusy()) void runRepositorySync()
+  }
+
+  function submitRepositorySync() {
+    const revision = repositorySyncPreview()?.revision
+    if (revision && !repositorySyncBusy() && !repositorySyncError()) void runRepositorySync(revision)
+  }
+
+  function repositoryCommitAddress() {
+    const query = repositoryCommitKey ? '?' + new URLSearchParams({ repository: repositoryCommitKey }) : ''
+    return '/s/' + sessionId + '/git/commit' + query
+  }
+
+  function openRepositoryCommit(event) {
+    repositoryCommitTrigger = event.currentTarget
+    repositoryCommitKey = diffRepository()
+    repositoryCommitMessage.set('')
+    repositoryCommitResult.set('')
+    repositoryCommitDialog.current?.showModal()
+    void loadRepositoryCommit()
+  }
+
+  function closeRepositoryCommit() {
+    if (repositoryCommitBusy()) return
+    repositoryCommitRequest?.abort()
+    repositoryCommitDialog.current?.close()
+    if (repositoryCommitTrigger?.offsetWidth) repositoryCommitTrigger.focus()
+    else diffClose.current?.focus()
+  }
+
+  async function loadRepositoryCommit() {
+    if (repositoryCommitBusy()) return
+    repositoryCommitRequest?.abort()
+    const request = new AbortController()
+    repositoryCommitRequest = request
+    repositoryCommitLoading.set(true)
+    repositoryCommitPreview.set(null)
+    repositoryCommitLimit.set(40)
+    repositoryCommitError.set('')
+    try {
+      const response = await fetch(repositoryCommitAddress(), { signal: request.signal })
+      const value = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) throw new Error(value.error || 'Could not read the staged changes.')
+      repositoryCommitPreview.set(value)
+      if (value.problem) repositoryCommitError.set(value.problem)
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositoryCommitError.set(error.message || 'Could not read the staged changes.')
+    }
+    finally {
+      if (repositoryCommitRequest === request) {
+        repositoryCommitLoading.set(false)
+        repositoryCommitRequest = undefined
+      }
+    }
+  }
+
+  async function submitRepositoryCommit() {
+    const preview = repositoryCommitPreview()
+    const message = repositoryCommitMessage().trim()
+    if (!preview?.files.length || !message || repositoryCommitBusy() || repositoryCommitError()) return
+    const request = new AbortController()
+    repositoryCommitRequest = request
+    repositoryCommitBusy.set(true)
+    try {
+      const response = await fetch(repositoryCommitAddress(), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message, revision: preview.revision }), signal: request.signal,
+      })
+      const value = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok || !value.commit) throw new Error(value.error || 'Could not confirm the commit.')
+      repositoryCommitResult.set('Committed ' + value.commit.slice(0, 7) + '.')
+      repositoryCommitBusy.set(false)
+      repositoryCommitDialog.current?.close()
+      diffClose.current?.focus()
+      refreshWorkspaceDiff()
+    }
+    catch (error) {
+      if (!request.signal.aborted) repositoryCommitError.set(error.message || 'Could not confirm the commit.')
+    }
+    finally {
+      if (repositoryCommitRequest === request) {
+        repositoryCommitBusy.set(false)
+        repositoryCommitRequest = undefined
+      }
+    }
   }
 
   function refreshWorkspaceDiff() {
@@ -4303,6 +5427,30 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (linked) void selectLinkedDiffLine(linked)
     if (selectedFile && diffOpen()) void nextTick(() => diffTools.focusWorkspaceDiffFile(changesPane.current, selectedFile))
   }
+
+  effect(() => {
+    const load = diffGitStatusLoader()
+    const repository = diffRepository()
+    const mode = diffReviewMode()
+    diffRefresh()
+    diffGitStatus.set(null)
+    if (!sessionId || !load || !diffOpen() || workspaceStatusPaused || changesVisibility() !== 'visible'
+      || mode === 'commit' || mode === 'turn') return
+    const request = new AbortController()
+    let timer
+    async function update() {
+      const status = await load(sessionId, repository, request.signal).catch(() => null)
+      if (request.signal.aborted) return
+      diffGitStatus.set(status)
+      timer = useTimeout(update, 3500)
+    }
+    diffGitStatusStop = () => {
+      request.abort()
+      timer?.stop()
+    }
+    void update()
+    return diffGitStatusStop
+  })
 
   effect(() => {
     const load = reviewOptionsLoader()
@@ -4691,12 +5839,30 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const transcript = transcriptRef.current
     if (!transcript) return
     followingTranscript.set(true)
+    missingTurnLink.set(false)
+    transcript.querySelector('[data-linked-turn]')?.removeAttribute('data-linked-turn')
     transcript.scrollTop = transcript.scrollHeight
     transcript.focus({ preventScroll: true })
     void nextTick(() => { transcript.scrollTop = transcript.scrollHeight })
   }
 
   async function handleTranscriptControl(event) {
+    const copy = event.target?.closest?.('[data-copy-prompt-link], [data-copy-message-link]')
+    if (copy && sessionId && composerDraftTools) {
+      const turn = copy.closest('[data-turn]')
+      const origin = copy.ownerDocument.location.origin
+      try {
+        if (copy.hasAttribute('data-copy-message-link')) {
+          void shareLink(copy, composerDraftTools.threadLink(origin, sessionId, Number(turn?.dataset.turn)), 'Message link copied.')
+        }
+        else {
+          const text = turn?.querySelector('[data-user-prompt]')?.textContent || ''
+          void shareLink(copy, composerDraftTools.newThreadLink(origin, text), 'Prompt link copied.')
+        }
+      }
+      catch (error) { stxAlert(error.message) }
+      return
+    }
     try {
       const message = await transcriptControl?.(event.target, desktop()?.clipboard)
       if (message) transcriptAnnouncement.set(message)
@@ -4707,6 +5873,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   function handleTranscriptKeyboard(event) { transcriptMenuKeyboard?.(event) }
+
+  function revealLinkedTurn() {
+    const transcript = transcriptRef.current
+    const outcome = transcript && composerDraftTools?.linkedTurn(transcript)
+    missingTurnLink.set(outcome === 'missing')
+    if (outcome) followingTranscript.set(false)
+  }
+
+  useEventListener('hashchange', revealLinkedTurn, { target: window })
 
   function paintTranscript(updateMarkdown) {
     if (transcriptFrame) return
@@ -4973,13 +6148,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function setComposerFiles(files, upload) {
     const previous = composerDraft()
-    const remainder = { ...previous }
+    const remainder = { createdAt: Date.now(), ...previous }
     delete remainder.commandId
     delete remainder.files
     delete remainder.upload
     delete remainder.discardedDraft
     const text = promptRef.current?.value ?? remainder.text ?? ''
     composerDraft.set(files.length ? { ...remainder, text, files, upload } : text ? { ...remainder, text } : null)
+    rememberPrompt()
     sidebarDrafts?.update()
   }
 
@@ -4999,16 +6175,20 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function promptEdited(event) {
     composerRecall?.reset()
-    rememberPrompt()
+    rememberPrompt(true)
     if (!event?.isComposing) updateComposerFiles()
   }
 
-  function rememberPrompt() {
+  function rememberPrompt(edited = false) {
     const box = promptRef.current
     if (!box) return
     composerText.set(box.value)
     if (editingFollowUp()) return
+    if (!box.value) sharedPromptNotice.set('')
     const previous = composerDraft()
+    // Autofocus can report a caret or selection before the saved text is restored.
+    // Only a deliberate editor change can clear the saved value through this path.
+    if (!box.value && previous?.text && edited !== true) return
     if (!box.value && !previous?.files?.length) {
       if (previous?.text) composerDraft.set(null)
       return
@@ -5016,16 +6196,23 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const { value: text, selectionStart: start, selectionEnd: end, selectionDirection: direction } = box
     if (previous?.text === text && composerDraftTools?.wasComposerDraftDiscarded(localStorage, promptDraftKey)) return
     const codexSelection = draftCodexSelection()
-    const provider = pendingProviderSwitch() ? draftProvider() : undefined
+    const provider = !sessionId || pendingProviderSwitch() ? draftProvider() : undefined
     const model = provider ? draftModel() : undefined
+    const worktree = !sessionId && draftWorktreeOptions()
+      ? { isolated: draftIsolated(), selection: draftWorktreeSelection() }
+      : previous?.worktree
     const sameSelection = previous?.provider === provider && previous?.model === model && sameCodexSelection(previous?.codexSelection, codexSelection)
+      && JSON.stringify(previous?.worktree) === JSON.stringify(worktree)
+    const linkNotice = sharedPromptNotice() || undefined
     if (previous?.text === text && previous.start === start && previous.end === end && previous.direction === direction
-      && sameSelection) return
+      && sameSelection && previous.linkNotice === linkNotice) return
     composerDraft.set({
-      text, start, end, direction,
+      text, start, end, direction, createdAt: previous?.createdAt ?? Date.now(),
       ...(previous?.files?.length ? { files: previous.files, upload: previous.upload } : {}),
       ...(codexSelection ? { codexSelection } : {}),
       ...(provider ? { provider, model } : {}),
+      ...(worktree ? { worktree } : {}),
+      ...(linkNotice ? { linkNotice } : {}),
       ...(sameSelection && previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
     })
   }
@@ -5037,6 +6224,179 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function discardCurrentDraft() {
     discardDraft(promptDraftKey)
+  }
+
+  function linkedPromptWarning(prompt) {
+    return prompt.hiddenCharacters ? 'Hidden characters were removed from this prompt. Read it carefully before sending.' : ''
+  }
+
+  function showLinkedPrompt(review) {
+    linkReview.set(review)
+    linkReviewError.set('')
+    if (!promptLinkDialog.current?.open) promptLinkDialog.current?.showModal()
+  }
+
+  function cancelPromptLink() {
+    if (linkOpening()) return
+    const review = linkReview()
+    promptLinkDialog.current?.close()
+    linkReview.set(null)
+    if (review?.newThread) openDraftAddress('/')
+    else promptRef.current?.focus()
+  }
+
+  function dismissLinkedPromptNotice() {
+    sharedPromptNotice.set('')
+    if (composerDraft()?.linkNotice) {
+      const draft = { ...composerDraft() }
+      delete draft.linkNotice
+      composerDraft.set(draft)
+    }
+  }
+
+  function replaceFromPromptLink(prompt) {
+    const box = promptRef.current
+    if (!box?.form || box.form.hidden || startPending() || editingFollowUp())
+      throw new Error('This composer is unavailable. Open the prompt as a new draft.')
+    box.value = prompt.text
+    box.setSelectionRange(prompt.text.length, prompt.text.length)
+    sharedPromptNotice.set(linkedPromptWarning(prompt))
+    rememberPrompt()
+    promptLinkDialog.current?.close()
+    linkReview.set(null)
+    box.focus({ preventScroll: true })
+  }
+
+  async function openLinkedDraft(prompt, project, target) {
+    const profile = String(project?.profile || activeProfile || '0')
+    let notice = linkedPromptWarning(prompt)
+    let choice
+    if (prompt.provider || prompt.model) {
+      const params = new URLSearchParams({ profile, workspace: String(project?.id || 0), models: '1' })
+      const request = new AbortController()
+      linkedPromptRequest = request
+      const catalog = await fetch('/drivers?' + params, { signal: request.signal }).then(response => response.ok ? response.json() : null).catch(() => null)
+      if (request.signal.aborted) return
+      linkedPromptRequest = undefined
+      const accounts = [...(catalog?.drivers || []), ...(catalog?.accounts || [])]
+      choice = composerDraftTools.matchingLinkedModel(prompt.provider, prompt.model, accounts)
+      if (!choice) notice = [notice, 'The linked model is unavailable. Your default model was selected.'].filter(Boolean).join(' ')
+    }
+    const address = composerDraftTools.storeLinkedDraft(target, { profile, workspace: project?.id, id: newCommandId() }, {
+      text: prompt.text, notice, ...choice,
+    })
+    openDraftAddress(address)
+  }
+
+  async function acceptLinkedPrompt(destination) {
+    const review = linkReview()
+    const target = promptRef.current ?? transcriptRef.current
+    if (!review?.prompt?.text || !target || linkOpening()) return
+    linkOpening.set(true)
+    try {
+      if (destination === 'selected' && review.replace) replaceFromPromptLink(review.prompt)
+      else await openLinkedDraft(review.prompt, destination === 'selected' ? review.project : null, target)
+    }
+    catch (error) { linkReviewError.set(error.message || 'Could not open this prompt.') }
+    finally { linkOpening.set(false) }
+  }
+
+  async function openIncomingPromptLink() {
+    const target = promptRef.current ?? transcriptRef.current
+    const link = target && composerDraftTools.readPromptLink(target, Boolean(sessionId))
+    if (!link || (link.prompt?.pullRequest && draftProject && !draftProject.trusted)) return
+    composerDraftTools.clearPromptLink(target)
+    const { newThread, prompt, error, rawText } = link
+    if (error) {
+      showLinkedPrompt({ title: 'Could not open prompt link', detail: error, newThread })
+      return
+    }
+    if (!newThread) {
+      restorePrompt()
+      const editable = promptRef.current?.form && !promptRef.current.form.hidden && !inputRequest() && !initialNavigation.archivedAt
+      if (editable && !promptRef.current.value && !composerFiles().length) {
+        replaceFromPromptLink(prompt)
+        return
+      }
+      showLinkedPrompt({
+        title: editable ? 'Replace draft text?' : 'Open linked prompt',
+        detail: editable ? 'This thread already has a draft. Its attachments will stay with it.' : 'This thread cannot receive a draft right now.',
+        prompt, replace: Boolean(editable),
+      })
+      return
+    }
+    if (!prompt.repository) {
+      showLinkedPrompt({ title: 'Opening linked prompt', prompt, newThread })
+      await acceptLinkedPrompt('scratch')
+      return
+    }
+    showLinkedPrompt({ title: 'Open linked prompt', detail: 'Looking for ' + prompt.repository + ' on this host.', prompt, newThread })
+    const request = new AbortController()
+    linkedPromptRequest = request
+    const endpoint = prompt.pullRequest ? pullRequestAddress(prompt.pullRequest) : '/prompt-link/project?repo=' + encodeURIComponent(prompt.repository)
+    const result = await fetch(endpoint, { signal: request.signal })
+      .then(response => response.ok ? response.json() : null).catch(() => null)
+    if (request.signal.aborted || !linkReview()) return
+    linkedPromptRequest = undefined
+    if (result?.sessionId) {
+      openPullRequestThread(result.sessionId, rawText)
+      return
+    }
+    const project = result?.project
+    const canCheckOut = Boolean(prompt.pullRequest && project && result?.canCheckOut)
+    const label = prompt.pullRequest ? prompt.repository + '#' + prompt.pullRequest.split('/').at(-1) : ''
+    const title = canCheckOut ? 'Check out ' + label + '?' : prompt.pullRequest ? 'Open pull request' : 'Open linked prompt'
+    const detail = canCheckOut ? 'This creates an isolated worktree in ' + project.name + ' and runs any configured setup.'
+      : prompt.pullRequest && project ? 'Check out this pull request from the Harness host.'
+        : project ? 'Open a draft in ' + project.name + '.' : prompt.repository + ' is unavailable on this host.'
+    showLinkedPrompt({ title, detail, prompt, newThread, project, canCheckOut, rawText, canClone: projectCloneAllowed && !project })
+  }
+
+  function pullRequestAddress(pullRequest, project, thread) {
+    const params = new URLSearchParams({ pr: pullRequest })
+    if (pullRequestProfile) params.set('profile', String(pullRequestProfile))
+    if (project) params.set('workspace', String(project))
+    if (thread) params.set('session', String(thread))
+    return '/prompt-link/pull-request?' + params
+  }
+
+  function openPullRequestThread(id, rawText) {
+    const params = rawText?.trim() ? '?' + new URLSearchParams({ prompt: rawText }) : ''
+    openDraftAddress('/s/' + id + params)
+  }
+
+  async function requestPullRequestCheckout(pullRequest, project, thread) {
+    const response = await fetch(pullRequestAddress(pullRequest, project, thread), { method: 'POST', headers: { 'content-type': 'application/json' } })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok || !result.sessionId) throw new Error(result.error || 'Could not start the pull request checkout.')
+    return result.sessionId
+  }
+
+  async function confirmPullRequestCheckout() {
+    const review = linkReview()
+    if (!review?.canCheckOut || linkOpening()) return
+    linkOpening.set(true)
+    linkReviewError.set('')
+    try {
+      const id = await requestPullRequestCheckout(review.prompt.pullRequest, review.project.id)
+      openPullRequestThread(id, review.rawText)
+    }
+    catch (error) { linkReviewError.set(error.message || 'Could not start the pull request checkout.') }
+    finally { linkOpening.set(false) }
+  }
+
+  async function retryPullRequestCheckout() {
+    if (pullRequestRetrying() || !sessionPullRequest || workspaceBranch()) return
+    pullRequestRetrying.set(true)
+    pullRequestRetryError.set('')
+    const previousError = sessionError()
+    sessionError.set('')
+    try { await requestPullRequestCheckout(sessionPullRequest.url, activeWorkspaceId, sessionId) }
+    catch (error) {
+      sessionError.set(previousError)
+      pullRequestRetryError.set(error.message || 'Could not retry the checkout.')
+    }
+    finally { pullRequestRetrying.set(false) }
   }
 
   async function connectComposerDrafts() {
@@ -5067,10 +6427,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }))
     const sidebar = sidebarRef.current
     const discardTemplate = draftDiscardTemplate.current
-    if (sidebar && discardTemplate) sidebarDrafts = composerDraftTools.watchSidebarDrafts(sidebar, discardTemplate, discardDraft)
+    const sectionTemplate = sidebarDraftTemplate.current
+    if (sidebar && discardTemplate && sectionTemplate) {
+      sidebarDrafts = composerDraftTools.watchSidebarDrafts({
+        root: sidebar, discardTemplate, sectionTemplate, currentKey: promptDraftKey,
+        discard: discardDraft, startProject: startProjectDraft, open: openDraftAddress,
+      })
+    }
     draftDiscardReady.set(true)
     expireUndoNotices()
     if (initialRewoundPrompt && requestedRewind() === initialRewoundPrompt.operation) await restoreEarlierPrompt()
+    if (!resumeProjectClone()) await openIncomingPromptLink()
   }
 
   function discardDraft(key) {
@@ -5101,6 +6468,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (box) {
         box.value = ''
         composerText.set('')
+        sharedPromptNotice.set('')
         composerDraft.set({ discardedDraft: claim })
         if (!sidebarOpen()) box.focus()
       }
@@ -5131,6 +6499,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         }
         if (editor) {
           composerDraft.set(entry.draft)
+          sidebarDrafts?.restoreCurrent(entry)
           restorePrompt()
           if (!sidebarOpen()) editor.focus()
         }
@@ -5138,7 +6507,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       catch { skipped++ }
     }
     sidebarDrafts?.update()
-    if (sidebarOpen()) sidebarRef.current?.querySelector('a[data-sidebar-item][data-active="true"]')?.focus()
+    if (sidebarOpen()) sidebarRef.current?.querySelector('[data-saved-draft-link][aria-current="page"], a[data-sidebar-item][data-active="true"]')?.focus()
     if (skipped) stxAlert(skipped === 1 ? 'A draft changed and could not be restored.' : `${skipped} drafts changed and could not be restored.`)
   }
 
@@ -5151,17 +6520,25 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (first) pendingFirstPrompt.set(null)
     const current = typeof saved?.text === 'string' ? saved : first
     if (!current?.text && !current?.files?.length) return
+    sharedPromptNotice.set(current.linkNotice || '')
     if (current === first && first.files?.length) composerDraft.set(first)
     if (current.files?.some(file => file.status === 'uploading' && !composerUploadSources.has(file.key))) {
       const files = current.files.map(file => file.status === 'uploading' && !composerUploadSources.has(file.key)
         ? { ...file, status: 'failed', error: 'Upload interrupted. Attach this file again.' } : file)
       composerDraft.set({ ...current, files })
     }
-    if (sessionId && typeof current.provider === 'string' && KNOWN_DRIVERS.includes(agentChoice(current.provider).driverKind)) {
+    if (typeof current.provider === 'string' && KNOWN_DRIVERS.includes(agentChoice(current.provider).driverKind)) {
       draftProvider.set(current.provider)
       draftModel.set(typeof current.model === 'string' ? current.model : '')
     }
     if (draftIsCodex() && typeof current.codexSelection?.model === 'string') showDraftCodexSelection(current.codexSelection)
+    if (!sessionId && current.worktree && draftProject?.trusted) {
+      const selection = current.worktree.selection
+      draftIsolated.set(current.worktree.isolated === true)
+      if (typeof selection?.baseBranch === 'string') draftBaseBranch.set(selection.baseBranch)
+      if (Array.isArray(selection?.repositories)) draftRepositoryKeys.set(selection.repositories.filter(key => typeof key === 'string'))
+      void loadDraftWorktreeOptions()
+    }
     box.value = current.text
     const start = Number.isInteger(current.start) ? current.start : box.value.length
     const end = Number.isInteger(current.end) ? current.end : start
@@ -5195,14 +6572,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   async function loadDraftWorktreeOptions(event) {
-    if (!event.currentTarget.open || !draftProject?.trusted || draftWorktreeOptions() || draftWorktreeLoad() === 'Loading repositories…') return
+    if (workspaceStatusPaused || (event && !event.currentTarget.open) || !draftProject?.trusted || draftWorktreeOptions() || draftWorktreeRequest) return
+    const request = new AbortController()
+    draftWorktreeRequest = request
     draftWorktreeLoad.set('Loading repositories…')
     try {
-      const response = await fetch('/workspace-repositories?' + new URLSearchParams({ workspace: String(draftProject.id) }))
+      const query = new URLSearchParams({ workspace: String(draftProject.id) })
+      const response = await fetch('/workspace-repositories?' + query, { signal: request.signal })
       if (!response.ok) throw new Error('Could not load project repositories. Close and reopen this panel to retry.')
       const options = await response.json()
+      if (request.signal.aborted) return
       const keys = options.repositories.map(repository => repository.key)
-      const saved = worktreePreferences()?.[draftProject.id]
+      const saved = composerDraft()?.worktree?.selection ?? worktreePreferences()?.[draftProject.id]
       batch(() => {
         draftWorktreeOptions.set(options)
         draftRepositoryKeys.set(Array.isArray(saved?.repositories) ? keys.filter(key => saved.repositories.includes(key)) : keys.length <= 8 ? keys : [])
@@ -5212,23 +6593,97 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           : 'No Git repositories were found in this project.')
       })
     }
-    catch (error) { draftWorktreeLoad.set(error.message) }
+    catch (error) { draftWorktreeLoad.set(request.signal.aborted ? '' : error.message) }
+    finally { draftWorktreeRequest = undefined }
   }
 
   function changeDraftWorktreeMode(event) {
     draftIsolated.set(event.currentTarget.value === 'worktree')
+    rememberPrompt()
   }
 
   function selectDraftRepository(key, event) {
     const selected = event.currentTarget.checked
     draftRepositoryKeys.update(keys => selected ? [...keys, key] : keys.filter(value => value !== key))
+    rememberPrompt()
   }
 
   function editDraftBaseBranch(event) {
     draftBaseBranch.set(event.currentTarget.value)
+    rememberPrompt()
   }
 
-  async function sendPrompt(mode = followUpPreference()) {
+  function modelLaunchOptions(selection, model) {
+    const choice = agentChoice(selection.account)
+    const effort = model?.reasoningEfforts.includes(selection.effort) ? selection.effort : ''
+    const serviceTier = model?.speedTiers.some(tier => tier.id === selection.speed) ? selection.speed : ''
+    return {
+      ...choice,
+      ...(model ? { model: model.id } : {}),
+      ...(choice.driverKind === 'codex' && (effort || serviceTier)
+        ? { codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } }
+        : {}),
+    }
+  }
+
+  function prepareModelBatch(text, uploads) {
+    if (!draftWorktreeOptions()?.canStartWorktree) throw new Error('Choose a Git project to send to multiple models.')
+    const worktree = draftWorktreeSelection()
+    const selections = modelChoicesWithOptions()
+    const targets = selections.map(selection => {
+      const account = composerProviders().find(account => account.value === selection.account && account.status === 'ready')
+      const model = account?.models?.find(model => model.id === selection.id)
+      if (!model) throw new Error('The selected model ' + selection.name + ' is unavailable.')
+      const id = newCommandId()
+      return {
+        id, sessionId: derivedSessionId(id), name: modelBatchTargetName(selection),
+        create: { type: 'session.create', workspaceId: draftProject.id, ...modelLaunchOptions(selection, model), isolate: true, worktree },
+      }
+    })
+    draftModelChoices.set(selections)
+    worktreePreferences.update(preferences => ({ ...preferences, [draftProject.id]: worktree }))
+    return { id: targets[0].id, text, uploads, targets }
+  }
+
+  async function submitModelBatch(batch) {
+    if (!batch?.targets?.length || activeModelBatches().includes(batch.id)) return
+    activeModelBatches.update(ids => [...ids, batch.id])
+    startedBackgroundThread.set(null)
+    try {
+      const { sendModelBatch } = await import(codecUrl)
+      await sendModelBatch(batch, sendCommand, (target, error) => {
+        pendingModelBatches.update(batches => batches.flatMap(current => {
+          if (current.id !== batch.id) return [current]
+          const targets = error
+            ? current.targets.map(item => item.id === target.id ? { ...item, error } : item)
+            : current.targets.filter(item => item.id !== target.id)
+          const started = error ? current.started : [...(current.started || []), { id: target.sessionId, name: target.name }]
+          return targets.length ? [{ ...current, targets, started }] : []
+        }))
+        if (!error) modelBatchNotice.update(threads => [...threads, { id: target.sessionId, name: target.name }])
+      })
+    }
+    catch (error) { stxAlert(error.message || 'Could not send to the selected models.') }
+    finally { activeModelBatches.update(ids => ids.filter(id => id !== batch.id)) }
+  }
+
+  function dismissModelBatch() {
+    if (modelBatchBusy()) return
+    modelBatchNotice.set([])
+    promptRef.current?.focus()
+  }
+
+  function discardModelBatch(batch) {
+    if (activeModelBatches().includes(batch.id)) return
+    pendingModelBatches.update(batches => batches.filter(item => item.id !== batch.id))
+    promptRef.current?.focus()
+  }
+
+  function draftWorktreeSelection() {
+    return { repositories: draftRepositoryKeys(), baseBranch: draftBaseBranch().trim() }
+  }
+
+  async function sendPrompt(mode = followUpPreference(), background = false) {
     const box = promptRef.current
     const raw = box?.value ?? ''
     const text = raw.trim()
@@ -5245,6 +6700,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     if (handoffBlocked()) return
+    if (sessionId && background && !editing && !sessionOnline()) {
+      stxAlert('Reconnect to send and open a new draft.')
+      return
+    }
     if (editing) {
       startPending.set(true)
       try {
@@ -5268,6 +6727,24 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const attachmentInput = uploads ? { uploads } : {}
     if (draft) composerDraft.set({ ...draft, commandId })
 
+    function openFreshDraft() {
+      if (!box.isConnected || promptRef.current !== box || box.value || composerFiles().length) return
+      const target = activeScratchSession ? `profile=${providerProfileId || 0}&project=none` : `workspace=${activeWorkspaceId}`
+      openNewDraft(target)
+    }
+
+    function finishSend() {
+      if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
+      if (box.value === raw) {
+        box.value = ''
+        composerText.set('')
+        sharedPromptNotice.set('')
+        composerDraft.set(null)
+        if (background && sessionId) openFreshDraft()
+      }
+      else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+    }
+
     const codexSelection = draftCodexSelection()
     if (pendingProviderSwitch()) {
       startPending.set(true)
@@ -5277,13 +6754,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         const { model: _model, ...options } = codexSelection ?? {}
         await sendCommand({ type: 'session.handoff', sessionId, afterTurnId: runningTurnId(), text, ...attachmentInput, ...choice, ...model,
           ...(codexSelection ? { codexTurnOptions: options } : {}), ...freshContext }, commandId)
-        if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
-        if (box.value === raw) {
-          box.value = ''
-          composerText.set('')
-          composerDraft.set(null)
-        }
-        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+        finishSend()
       }
       catch (error) {
         stxAlert(error.message || 'Could not switch providers. Your draft is still here.')
@@ -5299,12 +6770,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       startPending.set(true)
       try {
         await sendCommand({ type: 'session.turn.steer', sessionId, turnId: runningTurnId(), text }, commandId)
-        if (box.value === raw) {
-          box.value = ''
-          composerText.set('')
-          composerDraft.set(null)
-        }
-        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+        finishSend()
       }
       catch (error) {
         stxAlert(error.message || 'Could not steer the turn. Your draft is still here.')
@@ -5319,54 +6785,72 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       || (freshContext.freshContext && followUps().entries.length))) {
       const actions = followUpActions()
       if (!actions) return
-      actions.stage({ id: commandId, text, ...attachmentInput, ...(uploads ? { fileNames: files.map(file => file.name) } : {}), ...(codexSelection ? { codexSelection } : {}), ...freshContext })
+      const accepted = actions.stage({ id: commandId, text, ...attachmentInput, ...(uploads ? { fileNames: files.map(file => file.name) } : {}), ...(codexSelection ? { codexSelection } : {}), ...freshContext })
       if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
       box.value = ''
       composerText.set('')
+      sharedPromptNotice.set('')
       composerDraft.set(null)
       followingTranscript.set(true)
       void nextTick(() => {
         const transcript = transcriptRef.current
         if (transcript) transcript.scrollTop = transcript.scrollHeight
       })
+      if (background) {
+        startPending.set(true)
+        try {
+          if (await accepted) openFreshDraft()
+        }
+        finally { startPending.set(false) }
+      }
       return
     }
 
     if (!sessionId) {
       if (!draftProject?.trusted && !draftWithoutProject) return
+      if (comparingModels()) {
+        try {
+          const batch = prepareModelBatch(text, uploads)
+          if (!pendingModelBatches().length) modelBatchNotice.set([])
+          pendingModelBatches.update(batches => [...batches, batch])
+          finishSend()
+          void submitModelBatch(batch)
+          box.focus()
+        }
+        catch (error) { stxAlert(error.message) }
+        return
+      }
       startPending.set(true)
       try {
         const account = selectedDraftAccount()
         if (providerCatalog() === 'ready' && account?.status !== 'ready') throw new Error('Choose an available agent to start this session.')
-        const choice = agentChoice(draftProvider())
-        const selected = selectedDraftModel()
-        const effort = selected?.reasoningEfforts.includes(draftEffort()) ? draftEffort() : ''
-        const serviceTier = selected?.speedTiers.some(tier => tier.id === draftSpeed()) ? draftSpeed() : ''
-        const model = selected ? { model: selected.id } : {}
-        const options = choice.driverKind === 'codex' && (effort || serviceTier)
-          ? { codexTurnOptions: { ...(effort ? { effort } : {}), ...(serviceTier ? { serviceTier } : {}) } }
-          : {}
+        const { providerInstanceId, ...options } = modelLaunchOptions({
+          account: draftProvider(), effort: draftEffort(), speed: draftSpeed(),
+        }, selectedDraftModel())
         if (draftWithoutProject) {
           const profileId = Number(activeProfile) || undefined
-          await sendCommand({ type: 'session.scratch.create', profileId, driverKind: choice.driverKind, label: text || files[0]?.name, ...model, ...options }, commandId)
+          await sendCommand({ type: 'session.scratch.create', profileId, label: text || files[0]?.name, ...options }, commandId)
         }
         else {
-          const worktree = draftIsolated() ? { repositories: draftRepositoryKeys(), baseBranch: draftBaseBranch().trim() } : undefined
+          const worktree = draftUsesWorktree() ? draftWorktreeSelection() : undefined
           await sendCommand({
-            type: 'session.create', workspaceId: draftProject.id, ...choice, ...model, ...options,
+            type: 'session.create', workspaceId: draftProject.id, ...options, ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
             ...(worktree && { isolate: true, worktree }),
           }, commandId)
           if (worktree) worktreePreferences.update(preferences => ({ ...preferences, [draftProject.id]: worktree }))
         }
         const nextSession = derivedSessionId(commandId)
-        pendingFirstPrompt.set({ sessionId: nextSession, text: raw, ...(uploads ? { upload: draft.upload, files } : {}) })
-        if (box.value === raw) {
-          box.value = ''
-          composerText.set('')
-          composerDraft.set(null)
+        // Keep the first turn's receipt stable across retries, including
+        // switching between opening the thread and staying in this composer.
+        await sendCommand({ type: 'session.turn.start', sessionId: nextSession, text, ...attachmentInput }, commandId + '_first')
+        finishSend()
+        if (background) {
+          modelBatchNotice.set([])
+          startedBackgroundThread.set(nextSession)
+          startPending.set(false)
+          box.focus()
         }
-        else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
-        navigate(`/s/${nextSession}`)
+        else navigate(`/s/${nextSession}`)
       }
       catch (error) {
         startPending.set(false)
@@ -5380,13 +6864,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const compactAfterTurnId = compactNextPrompt() ? idleCompactionOffer()?.afterTurnId : undefined
       await sendCommand({ type: 'session.turn.start', sessionId, text, ...attachmentInput, ...(codexSelection ? { codexSelection } : {}),
         ...(compactAfterTurnId === undefined ? {} : { compactAfterTurnId }), ...freshContext }, commandId)
-      if (freshArm && storedFreshSession() === freshArm) storedFreshSession.set('')
-      if (box.value === raw) {
-        box.value = ''
-        composerText.set('')
-        composerDraft.set(null)
-      }
-      else if (uploads && composerDraft()?.upload?.draft === uploads.draft) setComposerFiles([], draft.upload)
+      finishSend()
     }
     catch (error) {
       stxAlert(error.message || 'Could not send the prompt. Your draft is still here.')
@@ -5399,12 +6877,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function promptKeydown(event) {
     if (event.isComposing || event.keyCode === 229) return
     if (fileMentionPicker?.keydown(event)) return
+    const command = matchedCommand(event, false, true)
+    if (command === 'composer.sendAndNewThread' || (!sessionId && command === 'composer.startBackground')) {
+      event.preventDefault()
+      if (!event.repeat) void sendPrompt(followUpPreference(), true)
+      return
+    }
     if (event.key === 'ArrowDown' && offerClearCommand()) {
       event.preventDefault()
       clearCommandBox.current?.focus()
       return
     }
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && (event.shiftKey ? canSteer() : canSteerDraft()) && !editingFollowUp()) {
+    if (event.key === 'Enter' && !event.altKey && (event.metaKey || event.ctrlKey) && (event.shiftKey ? canSteer() : canSteerDraft()) && !editingFollowUp()) {
       event.preventDefault()
       if (event.shiftKey) {
         const entry = followUps().entries[0]
@@ -5426,7 +6910,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
     if (sessionId && !startPending() && !editingFollowUp() && !composerFiles().length
       && promptRef.current && transcriptRef.current && composerRecall?.step(event, promptRef.current, transcriptRef.current)) {
-      rememberPrompt()
+      rememberPrompt(true)
       return
     }
     if (event.key === 'Escape' && editingFollowUp()) {
@@ -5434,10 +6918,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       followUpActions()?.endEdit()
       return
     }
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+    if (event.key === 'Enter' && !event.altKey && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault()
       event.target.form?.requestSubmit()
     }
+  }
+
+  function dismissBackgroundNotice() {
+    startedBackgroundThread.set(null)
+    promptRef.current?.focus()
   }
 
   // Optimistic: Stop hides immediately through `stopPressed`, but the turn is
@@ -5772,6 +7261,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // decides — the defaults are still Ctrl+` for the terminal, the editor
   // convention, and Cmd+, for settings, where in the desktop window the menu
   // item usually claims the chord first and arrives as `craft:settings`.
+  effect(() => {
+    if (sidebarShortcutBlocked() || terminalInputFocused() || recordingKeybinding()) sidebarJumpHints?.clear()
+  })
   useEventListener('keydown', (event) => {
     // Recording comes before the dialog guard: the pane records from inside
     // the open settings sheet, and the chord being bound must not also run
@@ -5782,7 +7274,38 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       return
     }
     if (event.defaultPrevented) return
+    if (repositoryPullRequestDialog.current?.open) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeRepositoryPullRequest()
+      }
+      return
+    }
+    if (repositorySyncDialog.current?.open) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeRepositorySync()
+      }
+      return
+    }
+    if (repositoryCommitDialog.current?.open) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeRepositoryCommit()
+      }
+      return
+    }
+    updateSidebarJumpHints(event)
     const command = matchedCommand(event, Boolean(event.target?.closest?.('[data-terminal-host]')))
+    if (draftPickerOpen()) {
+      const number = /^modelPicker\.jump\.([1-9])$/.exec(command || '')
+      if (number && !event.repeat) {
+        event.preventDefault()
+        const result = numberedPickerResults()[Number(number[1]) - 1]
+        if (result) pickDraftModel(result)
+      }
+      return
+    }
     const editable = event.target?.closest?.('textarea, input, [contenteditable="true"]')
     if (command === 'composer.stash' && stashReady() && promptRef.current?.form && !promptRef.current.form.hidden
       && !threadUndoBlocked() && !editingFollowUp() && (!editable || editable === promptRef.current)) {
@@ -5798,6 +7321,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
     if (visibleUndo() && !['Alt', 'Control', 'Meta', 'Shift'].includes(event.key)) threadUndoShortcutClaimed.set(false)
     if (arrangementOpen()) return
+    if (!event.repeat && command && /^thread\.(?:jump\.|next$|previous$)/.test(command) && !sidebarShortcutBlocked()) {
+      const sidebar = sidebarRef.current
+      const target = sidebar && keyboard?.sidebarShortcutTarget(sidebar, String(visibleProfile()), sessionId, command)
+      if (target) {
+        event.preventDefault()
+        if (sidebarOpen()) closeSidebar()
+        const address = new URL(target, location.origin)
+        if (address.pathname !== location.pathname || address.search !== location.search) openDraftAddress(target)
+      }
+      return
+    }
     // Esc closes whichever sheet is open. preventDefault matters beyond the
     // DOM: an unhandled keyDown climbs WKWebView's responder chain and AppKit
     // answers it with the system beep.
@@ -5845,14 +7379,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       openSettings()
       return
     }
-    if (command === 'thread.search' && Number(activeProfile)) {
+    if (command === 'thread.copyReference' && sessionId && !editable && !event.target?.ownerDocument?.getSelection()?.toString()) {
+      event.preventDefault()
+      if (!event.repeat) copyThreadLink(event)
+      return
+    }
+    if (command === 'thread.search' && (Number(activeProfile) || composerText().trim())) {
       event.preventDefault()
       openThreadSearch()
       return
     }
     if (command === 'thread.startWithoutProject') {
       event.preventDefault()
-      startWithoutProject()
+      startScratchDraft()
       return
     }
     if (command === 'editor.open' && workspaceEditorAllowed && !event.repeat) {
@@ -5874,8 +7413,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }, { target: window })
 
   function threadUndoBlocked() {
-    return projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open
+    return projectDialog.current?.open || cloneDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open
       || threadActionsDialog.current?.open || workspaceEditorDialog.current?.open
+      || promptLinkDialog.current?.open || shareClipboardDialog.current?.open
   }
 
   function termKeydown(tab, event) {
@@ -5906,13 +7446,58 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
     const codec = await import(codecUrl)
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions } = codec
+    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions, loadRepositoryStatus } = codec
+    snoozeEditor.set({
+      ...codec.createSnoozeEditor({
+        initial: settings().snoozePresets ?? [],
+        render(rows) {
+          snoozePreviewTime.set(new Date())
+          snoozeRows.set(rows)
+        },
+        error: message => snoozeSaveError.set(message),
+        async save(presets) {
+          await sendCommand({ type: 'settings.update', changes: { snoozePresets: presets } })
+        },
+      }),
+      maxRows: codec.maxSnoozePresets,
+    })
+    function receiveHostSettings(frame) {
+      if (frame?.t === 'host-settings') {
+        settings.update(previous => ({ ...previous, ...frame.settings }))
+        if (frame.settings?.snoozePresets) snoozeEditor()?.receive(frame.settings.snoozePresets)
+        // The reply carries a project's answers only when this client asked
+        // about one, and the whole set rather than a delta.
+        if (frame.workspaceId === projectSettingsId && frame.projectSettings) projectPins.set({ ...frame.projectSettings })
+        return true
+      }
+      const event = frame?.t === 'event' && frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated'
+        ? frame.event.payload
+        : null
+      if (!event) return false
+      // A change to some other project is still a settings event and not the
+      // sidebar's to read, so it is consumed here and dropped.
+      if (event.workspaceId !== undefined) {
+        if (event.workspaceId === projectSettingsId) {
+          projectPins.update((previous) => {
+            const next = { ...previous, ...event.changes }
+            for (const key of event.inherit || []) delete next[key]
+            return next
+          })
+        }
+        return true
+      }
+      settings.update(previous => ({ ...previous, ...event.changes }))
+      if (event.changes.snoozePresets) snoozeEditor()?.receive(event.changes.snoozePresets)
+      return true
+    }
     const sidebar = sidebarRef.current
     const threadSidebar = sidebar && createThreadSidebar({
       root: sidebar,
       arrangement: threadArrangement.current,
       onLayout(profileId, layout) {
-        if (arrangementOpen() && profileId === Number(providerProfileId)) arrangementLayout.set(layout)
+        if (!arrangementOpen() || profileId !== Number(providerProfileId)) return
+        arrangementLayout.set(layout)
+        restoreArrangementFocus()
       },
       async save(sessionId, intent, fromArrangement) {
         if (fromArrangement) {
@@ -5924,6 +7509,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           await sendThreadOrganization({ sessionId, action: 'drop', ...intent })
           threadOrderStatus.set('Thread position saved.')
         }
+        catch (error) { stxAlert(error.message) }
+      },
+      async rename(sessionId, title) {
+        try { await sendThreadOrganization({ sessionId, action: 'rename', title }) }
         catch (error) { stxAlert(error.message) }
       },
     })
@@ -5938,8 +7527,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const connection = createSessionSocket({
         url: serverUrl, sessionId: null, cursor: () => 0,
         onSocket: socket => { liveSocket = socket },
-        onFrame: frame => threadSidebar?.receive(frame),
-        onOnline: online => { if (online) watchSidebarOrder() },
+        onFrame: frame => receiveHostSettings(frame) || threadSidebar?.receive(frame),
+        onOnline: (online) => {
+          if (!online) return
+          watchSidebarOrder()
+          connection.send({ t: 'read-settings', ...(projectSettingsId ? { workspaceId: projectSettingsId } : {}) })
+        },
       })
       watchOrder(connection)
       reconnectLiveSession = connection.open
@@ -5953,6 +7546,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     diffTools = codec
     changesWatcher.set(watchWorkspaceChanges)
     reviewOptionsLoader.set(loadWorkspaceReviewOptions)
+    diffGitStatusLoader.set(loadRepositoryStatus)
     openLinkedDiffLine()
     transcriptControl = useTranscriptControl
     transcriptMenuKeyboard = closeTranscriptMenu
@@ -5991,8 +7585,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       liveResponse.removeAttribute('data-response-source')
     }
     const hash = transcript?.ownerDocument.location?.hash
-    if (hash?.startsWith('#turn-')) followingTranscript.set(false)
-    else paintTranscript(updateTranscriptMarkdown)
+    if (hash?.startsWith('#turn-')) {
+      followingTranscript.set(false)
+      void nextTick(revealLinkedTurn)
+    }
+    paintTranscript(updateTranscriptMarkdown)
 
     let cursor = Number(sinceSeq) || 0
     followUpActions.set(createFollowUpActions({
@@ -6026,16 +7623,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     terminalController.set(terminal)
 
     function onMessage(frame) {
+      if (receiveHostSettings(frame)) return
       if (threadSidebar?.receive(frame)) return
       if (frame && terminal.receive(frame)) return
       if (frame?.t !== 'event') return
       if (frame.event.sessionId === 0 && frame.event.payload.type === 'profile.claude-compaction.updated') {
         const { profileId, providerInstanceId, changes } = frame.event.payload
         if (profileId === providerProfileId) applyAccountCompaction(providerInstanceId, changes)
-        return
-      }
-      if (frame.event.sessionId === 0 && frame.event.payload.type === 'settings.updated') {
-        settings.update(previous => ({ ...previous, ...frame.event.payload.changes }))
         return
       }
       if (frame.event.sessionId !== sessionId || frame.event.seq <= cursor) return
@@ -6056,8 +7650,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         if (payload.changes.title) currentThreadTitle.set(payload.changes.title)
         if (typeof payload.changes.settledAt === 'number') void refreshProjectSettlement()
       }
+      if (payload.type === 'session.pull-request-linked') rememberRepositoryPullRequest(payload.pullRequest)
       if (payload.type === 'session.worktree-reserved') worktreeSetup.set(Boolean(payload.intent?.layout))
       if (payload.type === 'session.isolated') {
+        if (sessionPullRequest && !turns.length && !liveTurns().length && uiState() === 'failed') {
+          setSessionState('idle')
+          sessionError.set('')
+        }
         worktreeSetup.set(false)
         workspaceBranch.set(payload.branch)
         isolatedRewind.set(payload.combined && !payload.combined.checkouts.some(checkout => !checkout.key) ? 'repositories' : 'files')
@@ -6303,6 +7902,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         sessionConnecting.set(false)
         if (online) {
           watchSidebarOrder()
+          connection.send({ t: 'read-settings', ...(projectSettingsId ? { workspaceId: projectSettingsId } : {}) })
           void followUpActions()?.flush()
           void refreshProjectSetup()
           void refreshProjectSettlement()
@@ -6328,12 +7928,17 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   onUnmounted(() => sidebarDrafts?.dispose())
-  onUnmounted(() => {
-    projectSetupRequest?.abort()
-    projectSetupPoll?.stop()
-    projectSettlementRequest?.abort()
-    projectSettlementPoll?.stop()
-  })
+  onUnmounted(stopWorkspaceStatusRequests)
+  useEventListener('pagehide', stopWorkspaceStatusRequests, { target: window })
+  useEventListener('pageshow', (event) => {
+    if (!event.persisted || !workspaceStatusPaused) return
+    workspaceStatusPaused = false
+    if (diffOpen()) refreshWorkspaceDiff()
+    void annotateDriverPickers()
+    void refreshProjectSetup()
+    void refreshProjectSettlement()
+  }, { target: window })
   if (codecUrl) void connectComposerDrafts().catch(() => {})
-  if ((sessionId || activeProfile) && serverUrl && codecUrl) void connectLiveSession().catch(() => sessionConnecting.set(false))
+  if ((sessionId || activeProfile || initialSettingsSection) && serverUrl && codecUrl)
+    void connectLiveSession().catch(() => sessionConnecting.set(false))
 </script>

@@ -1,5 +1,5 @@
 import { expect, it } from 'bun:test'
-import { renderTranscriptMarkdown } from '../src/transcript-markdown'
+import { renderPullRequestCommentMarkdown, renderTranscriptMarkdown } from '../src/transcript-markdown'
 
 it('renders prose, tables and open fences using the same renderer for streaming and history', () => {
   const html = renderTranscriptMarkdown('## Result\n\n**Passed**\n\n| Test | Result |\n| --- | --- |\n| Build | OK |\n\n```ts\nconst size = 2 < 3\n')
@@ -26,4 +26,18 @@ it('renders model content without active HTML, external image loading or arbitra
   expect(html).not.toContain('href="/drivers"')
   expect(html).toContain('href="/s/12#turn-2">Thread')
   expect(html).toContain('href="https://example.test/guide" target="_blank" rel="noopener noreferrer"')
+})
+
+it('omits raw GitHub markup and hidden review markers while retaining them literally in code', () => {
+  const html = renderPullRequestCommentMarkdown([
+    'Review **this**. <!-- hidden metadata -->',
+    '<script>alert(1)</script>',
+    '```html',
+    '<!-- example syntax -->',
+    '```',
+  ].join('\n\n'))
+  expect(html).toContain('<strong>this</strong>')
+  expect(html).not.toContain('hidden metadata')
+  expect(html).not.toContain('alert(1)')
+  expect(html).toContain('&lt;!-- example syntax --&gt;')
 })

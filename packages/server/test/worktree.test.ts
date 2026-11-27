@@ -37,6 +37,22 @@ const g = (dir: string, ...args: string[]) => spawnSync('git', args, { cwd: dir,
 const GIT_TIMEOUT = 30_000
 
 describe('reserved worktrees', () => {
+  it('uses the default branch for an empty composer selection and HEAD for a legacy command', async () => {
+    const dir = repo()
+    try {
+      expect(spawnSync('git', ['branch', '-M', 'main'], { cwd: dir }).status).toBe(0)
+      const base = g(dir, 'rev-parse', 'HEAD')
+      expect(spawnSync('git', ['switch', '-qc', 'topic'], { cwd: dir }).status).toBe(0)
+      writeFileSync(join(dir, 'app.txt'), 'topic\n')
+      expect(spawnSync('git', ['commit', '-qam', 'Topic changes'], { cwd: dir }).status).toBe(0)
+      const head = g(dir, 'rev-parse', 'HEAD')
+      expect(head).not.toBe(base)
+      expect(await plan(dir, 42, 'selected', '')).toMatchObject({ base })
+      expect(await plan(dir, 43, 'legacy')).toMatchObject({ base: head })
+    }
+    finally { rmSync(dir, { recursive: true, force: true }) }
+  }, GIT_TIMEOUT)
+
   it('keeps the reserved base when the project moves forward before checkout', async () => {
     const dir = repo()
     try {

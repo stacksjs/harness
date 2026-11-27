@@ -1,0 +1,58 @@
+<section data-snooze-settings aria-labelledby="settings-snooze-heading" class="mt-6">
+  <div class="flex flex-wrap gap-2 items-center justify-between mb-2">
+    <h4 id="settings-snooze-heading" tabindex="-1" class="font-semibold text-sm">Snooze options</h4>
+    <button type="button" :disabled="!snoozeEditor() || snoozeEditor().isDefault(snoozeRows())" @click="snoozeEditor()?.reset()" data-snooze-reset>Reset defaults</button>
+  </div>
+  <p class="mb-3 text-neutral-600 text-xs dark:text-neutral-300">Set the wake choices shown in the thread menu. Times use the device’s local time zone.</p>
+  <div data-settings-fields @focusout="arrangeSnoozeOptions">
+    <fieldset :for="row in snoozeRows()" :key="row.id" data-snooze-row :data-snooze-id="row.id">
+      <legend class="sr-only" :text="'Snooze option ' + (snoozeRows().indexOf(row) + 1)"></legend>
+      <div data-snooze-row-controls>
+        <label data-snooze-select>
+          <span>When</span>
+          <select aria-label="When" :value="row.when" @change="snoozeEditor()?.change(row.id, 'when', $event.currentTarget)">
+            <option value="after">After a duration</option>
+            <option value="today">Today</option>
+            <option value="tomorrow">Tomorrow</option>
+            <option value="sunday">Next Sunday</option>
+            <option value="monday">Next Monday</option>
+            <option value="tuesday">Next Tuesday</option>
+            <option value="wednesday">Next Wednesday</option>
+            <option value="thursday">Next Thursday</option>
+            <option value="friday">Next Friday</option>
+            <option value="saturday">Next Saturday</option>
+          </select>
+        </label>
+        <label :hidden="row.when !== 'after'">
+          <span>Amount</span>
+          <input type="number" inputmode="numeric" aria-label="Amount" required min="1" :max="snoozeEditor()?.maxAmount(row)" :value="row.amount" @change="snoozeEditor()?.change(row.id, 'amount', $event.currentTarget)" @keydown="commitSnoozeAmount">
+        </label>
+        <label :hidden="row.when !== 'after'" data-snooze-select>
+          <span>Unit</span>
+          <select aria-label="Unit" :value="row.unit" @change="snoozeEditor()?.change(row.id, 'unit', $event.currentTarget)">
+            <option value="minutes">Minutes</option>
+            <option value="hours">Hours</option>
+            <option value="days">Days</option>
+          </select>
+        </label>
+        <label :hidden="row.when === 'after'" data-snooze-clock>
+          <span>Time</span>
+          <input type="time" aria-label="Time" required :value="row.time" @change="snoozeEditor()?.change(row.id, 'time', $event.currentTarget)">
+        </label>
+        <p data-snooze-preview class="text-neutral-600 text-xs dark:text-neutral-300" :text="snoozeRowPreviews()[row.id]"></p>
+        <button type="button" aria-label="Remove snooze option" @click="removeSnoozeOption(row.id, $event)" data-snooze-remove>
+          <span aria-hidden="true" class="i-hugeicons-delete-02"></span>
+        </button>
+      </div>
+    </fieldset>
+    <div class="flex flex-wrap gap-2 items-center justify-between p-2">
+      <button type="button" :disabled="!snoozeEditor() || snoozeRows().length >= snoozeEditor().maxRows" @click="addSnoozeOption" data-snooze-add>Add option</button>
+      <span class="text-neutral-600 text-xs dark:text-neutral-300" :text="snoozeEditor() ? snoozeRows().length + ' of ' + snoozeEditor().maxRows + ' options' : ''"></span>
+    </div>
+  </div>
+  <p class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">
+    Menu now
+    <span :text="[snoozeEditor()?.menuPreview(snoozeRows(), snoozePreviewTime()), 'Custom'].filter(Boolean).join(', ')"></span>
+  </p>
+  <p role="alert" :hidden="!snoozeSaveError()" :text="snoozeSaveError()" class="mt-2 text-red-700 text-xs dark:text-red-300"></p>
+</section>

@@ -19,7 +19,7 @@ import type { DoomedWorktree } from './runtime'
 import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState, SessionState } from '@harness/engine'
-import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer } from '@harness/engine'
+import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, SqliteStore, threadUndoOffer, workspaceSettings } from '@harness/engine'
 import { AccessControl, isLoopbackHost, sessionCookie, writeLocalToken } from './access'
 import { ASSET_PREFIX, AssetCache, respondStxAsset } from './assets'
 import type { WorkspaceReviewTurn } from './diff'
@@ -29,12 +29,22 @@ import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
+import { ProjectClones } from './project-clones'
 import type { ProjectScript } from './project-scripts'
 import { ProjectScripts, respondProjectScripts, scriptIdPattern } from './project-scripts'
 import type { ProjectSetupScope, SettlementReceipt } from './project-setup'
 import { ProjectSetup } from './project-setup'
 import { respondTranscriptHighlightWorker, TRANSCRIPT_HIGHLIGHT_WORKER } from './transcript-highlight-asset'
 import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositories } from './project-repositories'
+import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
+import { parsePullRequest, promptLinkKeys } from './prompt-links'
+import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
+import { createStagedCommit, readRepositorySubmission, stagedCommitPreview } from './repository-commit'
+import { readRepositoryStatus } from './repository-status'
+import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
+import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
+import { RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
+import type { RepositorySyncAction } from './repository-sync'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -44,8 +54,12 @@ import { respondWorkspaceEditor } from './workspace-editors'
 import { createWorkspaceFileSearch } from './workspace-file-search'
 import { respondWorkspaceFile } from './workspace-files'
 import { threadSidebarLayout } from './thread-sidebar'
+import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
-import { renderHarnessView, viewProps } from './views'
+import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
+import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
+import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLabels, updateWorkspacePullRequestLifecycle, updateWorkspacePullRequestReviewers, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import type { PullRequestLabelDraft, PullRequestLifecycleDraft, PullRequestReplyDraft, PullRequestReviewerDraft, PullRequestReviewerEditor } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -119,6 +133,7 @@ type ClientFrame =
   | { t: 'unsubscribe', sessionId: number }
   | { t: 'watch-pins', profileId: number }
   | { t: 'watch-sidebar', profileId: number }
+  | { t: 'read-settings', workspaceId?: number }
   | { t: 'ping' }
   | { t: 'term-open', workspaceId: number, sessionId?: number, resumeKey?: string, resumeOnly?: true, cols?: number, rows?: number, projectScriptId?: string }
   | { t: 'term-input', termId: number, data: string }
@@ -190,6 +205,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const deletionWorktrees = new WeakMap<CommandEnvelope, DoomedWorktree[]>()
   const scratchDirectory = resolve(options.scratchDirectory ?? join(homedir(), '.harness', 'scratch'))
   const store = new SqliteStore(databasePath)
+  const reviewReplies = new PullRequestReplyReceipts(databasePath)
   const previewDatabase = await realpath(databasePath).catch(() => resolve(databasePath))
   const previewOwner = (sessionId: number) => createHash('sha256').update(previewDatabase).update('\0').update(String(sessionId)).digest('hex')
   const savedProviders = new SavedProviderInstances(databasePath)
@@ -329,7 +345,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const authorized = () => !signal.aborted && projectWorktreeIsTrusted(scope)
       && (!settlement || Boolean(activeSettlementScript(settlement)))
     const workspace = engine.current.workspaces.get(scope.workspaceId)
-    const shellKind = engine.current.settings.terminalShell
+    const shellKind = workspaceSettings(engine.current, scope.workspaceId).terminalShell
     const shell = shellKind === 'den' ? findDenShell() : undefined
     if (!workspace || shell === null || !authorized()) return Promise.resolve(null)
     const env = { T3CODE_PROJECT_ROOT: workspace.path, T3CODE_WORKTREE_PATH: scope.checkout }
@@ -418,6 +434,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // half-built read model would be served a projection missing everything the
   // log has not replayed yet, and it has no way to tell.
   await engine.hydrate()
+  const projectClones = new ProjectClones(databasePath, async (id, path, profileId) => {
+    const result = await engine.dispatch({
+      id, at: Date.now(),
+      command: { type: 'workspace.register', path, trusted: false, ...(profileId === null ? {} : { profileId }) },
+    })
+    const added = result.events.find(event => event.payload.type === 'workspace.added')?.payload
+    if (added?.type !== 'workspace.added' || added.path !== path || (profileId !== null && added.profileId !== profileId))
+      throw new Error('The cloned folder could not be registered.')
+    if (!result.replayed) broadcast(result.events)
+    return { workspace: added.workspaceId, profile: added.profileId }
+  })
 
   // Close out turns that were in flight when the process last stopped.
   //
@@ -508,6 +535,102 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return checkout ? openCombinedRepository(combined, checkout) : repository ? null : root
   }
 
+  const repositoryActions = new Set<string>()
+  type RepositoryAction = 'commit' | 'pull-request' | 'pull-request-checks' | RepositorySyncAction
+
+  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: RepositoryAction, extendTimeout: () => void): Promise<Response> {
+    const headers = { 'cache-control': 'private, no-store' }
+    const respond = (body: object, status = 200) => Response.json(body, { headers, status })
+    const site = request.headers.get('sec-fetch-site')
+    if (site === 'cross-site' || site === 'same-site' || !canUseHostPrivileges(request, url))
+      return new Response(null, { status: 403, headers })
+    const readingChecks = action === 'pull-request-checks'
+    if (request.method !== 'GET' && (readingChecks || request.method !== 'POST'))
+      return new Response(null, { status: 405, headers })
+    const key = url.searchParams.get('repository') ?? ''
+    const submitted = request.method === 'POST'
+    const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
+    const input = submitted && action !== 'pull-request' ? await readRepositorySubmission(request) : null
+    if (submitted && (!input && !pullInput || action === 'commit' && !input?.message))
+      return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the staged review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
+
+    const session = engine.current.sessions.get(sessionId)
+    const workspace = session && engine.current.workspaces.get(session.workspaceId)
+    if (!session || !workspace?.trusted || workspace.scratch || (!readingChecks && session.navigation?.archivedAt)
+      || (session.isolate && !session.worktreePath))
+      return respond({ error: 'This thread needs an available, trusted checkout.' }, 404)
+    const worktree = session.worktreePath
+    const root = worktree || workspace.path
+    if (worktree && !await runtime.checkProjectWorktree({ workspaceId: workspace.id, sessionId, checkout: root }))
+      return respond({ error: 'The thread’s worktree is unavailable.' }, 404)
+    const repository = await reviewRepositoryPath(root, session, key).then(path => path && realpath(path)).catch(() => null)
+    if (!repository || !await isWorkspaceGitRoot(repository))
+      return respond({ error: 'This repository is unavailable in the thread’s checkout.' }, 404)
+    if (!readingChecks && repositoryActions.has(repository)) return respond({ error: 'A Git action is already running in this repository.' }, 409)
+    if (submitted) repositoryActions.add(repository)
+    if (submitted || action === 'pull-request' || readingChecks) extendTimeout()
+
+    const authorize = () => {
+      const current = engine.current.sessions.get(sessionId)
+      return !closing && current?.worktreePath === worktree && current.workspaceId === workspace.id
+        && !current.navigation?.archivedAt && engine.current.workspaces.get(workspace.id)?.trusted === true
+        && ![...engine.current.sessions.values()].some(thread => isTurnActive(thread.state)
+          && (worktree ? thread.worktreePath === root : thread.workspaceId === workspace.id && !thread.worktreePath))
+    }
+
+    try {
+      if (readingChecks) {
+        const link = (thread: SessionState) => thread.linkedPullRequests?.findLast(pull => pull.repositoryKey === key)
+          ?? (thread.pullRequest?.repositoryKey === key ? thread.pullRequest : undefined)
+        const pull = link(session)
+        if (!pull) return respond({ error: 'There is no pull request linked to this repository.' }, 404)
+        const checks = await readRepositoryPullRequestChecks(repository, pull, request.signal)
+        const current = engine.current.sessions.get(sessionId)
+        if (closing || current?.worktreePath !== worktree || current.workspaceId !== workspace.id || link(current) !== pull
+          || !engine.current.workspaces.get(workspace.id)?.trusted)
+          return respond({ error: 'The linked checkout changed. Open its checks again.' }, 409)
+        return respond(checks)
+      }
+      if (action === 'pull-request') {
+        const base = pullInput?.baseRef ?? url.searchParams.get('base') ?? undefined
+        if (base !== undefined && Buffer.byteLength(base) > 1024) return respond({ error: 'The base branch name is too long.' }, 400)
+        const prepared = await prepareRepositoryPullRequest(repository, base)
+        const { preview } = prepared
+        if (!pullInput) return respond(preview)
+        if (preview.revision !== pullInput.revision)
+          return respond({ error: 'The branch, remote, or pull request changed. Refresh the review before continuing.' }, 409)
+        if (preview.problem) return respond({ error: preview.problem }, 409)
+        if (!preview.existing && !pullInput.title) return respond({ error: 'Enter a pull request title.' }, 400)
+        const result = await openRepositoryPullRequest(repository, prepared, pullInput, authorize)
+        const { repository: name, number } = result.pullRequest
+        const linked = authorize() && await engine.dispatchInternal({
+          id: 'pull_request_link_' + crypto.randomUUID(), at: Date.now(),
+          command: { type: 'thread.pull-request.link', sessionId, pullRequest: { repository: name, number, repositoryKey: key } },
+        }).then(() => true, () => false)
+        return respond({ ...result, linked }, result.existing ? 200 : 201)
+      }
+      const preview = action === 'commit' ? await stagedCommitPreview(repository) : await repositorySyncPreview(repository, action)
+      if (!input) return respond(preview)
+      if (preview.problem) return respond({ error: preview.problem }, 409)
+      if (preview.revision !== input.revision)
+        return respond({ error: action === 'commit' ? 'The branch or staged files changed. Review the updated files before committing.'
+          : 'The branch or remote changed. Review the Git action again.' }, 409)
+      if (!authorize())
+        return respond({ error: 'The checkout changed or a turn is still active. Wait for it to finish and try again.' }, 409)
+      if ('files' in preview) return respond({ commit: await createStagedCommit(repository, input.message) }, 201)
+      return respond(await syncRepository(repository, action as RepositorySyncAction, preview, authorize))
+    }
+    catch (error) {
+      if (error instanceof RepositorySyncError || error instanceof RepositoryPullRequestError) return respond({ error: error.message }, 409)
+      if (readingChecks) return respond({ error: 'Could not read checks from GitHub. Try again.' }, 503)
+      return respond({ error: action === 'commit' ? (input
+        ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'
+        : 'Git could not read the staged changes.')
+        : 'Git could not complete this action. Check the remote, connection, and Git credentials, then review the branch.' }, 503)
+    }
+    finally { if (submitted) repositoryActions.delete(repository) }
+  }
+
   async function renderWorkspaceReview(root: string | null, url: URL, operation: string | undefined,
     session: SessionState | undefined, trusted: boolean): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
@@ -542,6 +665,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const path = await reviewRepositoryPath(root, session, repository || '')
     if (!path) return Response.json({ error: 'This project repository is unavailable.' }, { status: 404, headers })
 
+    if (operation === 'status') {
+      const status = await isWorkspaceGitRoot(path) ? await readRepositoryStatus(path) : null
+      return Response.json({ status }, { headers })
+    }
     const turns = reviewTurns(session, repository || '')
     try {
       if (operation === 'options') {
@@ -628,7 +755,22 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
    * before the client bundle, the asset cache or the projection are reachable,
    * and it is the only surface an unauthenticated caller can reach at all.
    */
-  function pairingPage(error: string | null): string {
+  function pairingReturn(value: unknown): string {
+    if (typeof value !== 'string' || value.length > 96_000 || !value.startsWith('/') || value.startsWith('//')) return '/'
+    const link = new URL(value, 'http://harness.local')
+    if (link.origin !== 'http://harness.local' || (!['/new', '/new/'].includes(link.pathname) && !/^\/s\/[1-9]\d*\/?$/u.test(link.pathname))) return '/'
+    const params = new URLSearchParams()
+    for (const key of promptLinkKeys) {
+      const item = link.searchParams.get(key)
+      if (item !== null) params.set(key, item)
+    }
+    const hash = /^#turn-[1-9]\d*$/u.test(link.hash) ? link.hash : ''
+    return link.pathname + (params.size ? '?' + params : '') + hash
+  }
+
+  const pairingHeaders = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }
+
+  function pairingPage(error: string | null, destination = '/'): string {
     const message = error
       ? `<p class="err">${error.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] ?? c))}</p>`
       : '<p class="hint">Enter the code shown in the terminal running harness.</p>'
@@ -654,6 +796,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   <input name="code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off"
         spellcheck="false" placeholder="XXXX-XXXX" autofocus required>
   <input type="hidden" name="name" value="">
+  <input type="hidden" name="next" value="${escapeTranscriptText(destination)}">
   <button type="submit">Pair this device</button>
 </form>
 <script>
@@ -661,6 +804,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // already knows what it is, and one fewer field is one fewer reason to give up.
   document.querySelector('input[name=name]').value =
     (navigator.userAgentData?.platform || navigator.platform || 'a device') + ' browser'
+  const next = document.querySelector('input[name=next]')
+  if (next.value.startsWith('/s/') && /^#turn-[1-9][0-9]*$/.test(location.hash))
+    next.value = next.value.split('#')[0] + location.hash
 </script>`
   }
 
@@ -668,21 +814,16 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (!access) return new Response('not found', { status: 404 })
 
     if (request.method !== 'POST') {
-      return new Response(pairingPage(null), {
-        status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      })
+      return new Response(pairingPage(null), { headers: pairingHeaders })
     }
 
     const form = await request.formData().catch(() => null)
-    if (!form) return new Response(pairingPage('that form did not arrive intact'), { status: 400, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    if (!form) return new Response(pairingPage('that form did not arrive intact'), { status: 400, headers: pairingHeaders })
 
+    const destination = pairingReturn(form.get('next'))
     const result = await access.redeem(String(form.get('code') ?? ''), String(form.get('name') ?? ''))
     if (!result.ok) {
-      return new Response(pairingPage(result.reason), {
-        status: 401,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      })
+      return new Response(pairingPage(result.reason, destination), { status: 401, headers: pairingHeaders })
     }
 
     console.warn(`[access] paired a new device from ${url.host}`)
@@ -691,7 +832,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return new Response(null, {
       status: 303,
       headers: {
-        'location': '/',
+        'location': destination,
         'set-cookie': sessionCookie(result.token, url.protocol === 'https:'),
       },
     })
@@ -749,6 +890,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (event.payload.type === 'profile.deleted') {
         terminals.prune(terminalScopeExists)
         projectSetup.prune(terminalScopeExists)
+        changedProfiles.add(event.payload.profileId)
+      }
+      if (event.payload.type === 'workspace.added' && !event.payload.scratch) changedProfiles.add(event.payload.profileId)
+      if (event.payload.type === 'workspace.promoted') {
+        const profile = engine.current.workspaces.get(event.payload.workspaceId)?.profileId
+        if (profile !== undefined) changedProfiles.add(profile)
       }
       // A revoke has to reach the connection, not just the next handshake.
       // Closed before the event is delivered, so the socket being cut off does
@@ -796,7 +943,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           reschedule = true
       }
       if (event.payload.type === 'session.navigation-changed' || event.payload.type === 'session.created' || event.payload.type === 'turn.started'
-        || event.payload.type === 'turn.completed' || event.payload.type === 'turn.interrupted' || event.payload.type === 'turn.rewind-settled'
+        || event.payload.type === 'turn.completed' || event.payload.type === 'turn.failed' || event.payload.type === 'turn.interrupted'
+        || event.payload.type === 'turn.rewind-requested' || event.payload.type === 'turn.rewind-settled'
+        || event.payload.type === 'session.fork-finished' || event.payload.type === 'session.fork-portable' || event.payload.type === 'session.fork-failed'
         || event.payload.type === 'session.failed' || event.payload.type === 'session.stopped'
         || event.payload.type === 'approval.requested' || event.payload.type === 'approval.resolved'
         || event.payload.type === 'input.requested' || event.payload.type === 'input.resolved') {
@@ -831,6 +980,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   let closing = false
+  const pullRequestCheckouts = new Set<string>()
   let settlementRetry: ReturnType<typeof setTimeout> | undefined
   let maintenanceTimer: ReturnType<typeof setTimeout> | undefined
   let maintainingThreads = false
@@ -839,13 +989,83 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (maintainingThreads || closing) return
     clearTimeout(maintenanceTimer)
     let earliest = Infinity
-    const { sessions, settings, workspaces } = engine.current
+    const { sessions, workspaces } = engine.current
     for (const session of sessions.values())
       earliest = Math.min(earliest, session.navigation?.snoozedUntil ?? Infinity,
-        workspaces.has(session.workspaceId) ? inactivityDeadline(session, settings) ?? Infinity : Infinity)
+        workspaces.has(session.workspaceId)
+          ? inactivityDeadline(session, workspaceSettings(engine.current, session.workspaceId)) ?? Infinity
+          : Infinity)
     if (!Number.isFinite(earliest)) return
     maintenanceTimer = setTimeout(() => void maintainThreads(), Math.max(minimumDelay, Math.min(2_147_483_647, earliest - Date.now())))
     maintenanceTimer.unref()
+  }
+
+  async function respondPullRequestLink(request: Request, url: URL, isLocalPeer: boolean, extendTimeout: () => void): Promise<Response> {
+    const headers = { 'cache-control': 'no-store' }
+    const respond = (value: object, status = 200) => Response.json(value, { headers, status })
+    const site = request.headers.get('sec-fetch-site')
+    const local = canUseHostPrivileges(request, url) && isLocalPeer
+    if (site === 'cross-site' || site === 'same-site' || (!access && !local))
+      return new Response(null, { status: 403, headers })
+    const pull = parsePullRequest(url.searchParams.get('pr') ?? '')
+    if (!pull) return respond({ error: 'Invalid GitHub pull request.' }, 400)
+    const profileId = url.searchParams.has('profile') ? Number(url.searchParams.get('profile')) : undefined
+    if (profileId !== undefined && !engine.current.profiles.has(profileId)) return respond({ error: 'This profile is unavailable.' }, 404)
+    const existing = findPullRequestThread(engine.current, pull, profileId)
+    if (request.method === 'GET') {
+      if (existing) return respond({ sessionId: existing.id })
+      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true, profileId })
+      return respond({ project: match ? linkedProject(match.workspace) : null, canCheckOut: local })
+    }
+    if (request.method !== 'POST') return new Response(null, { status: 405, headers })
+    if (!local || request.headers.get('content-type') !== 'application/json')
+      return new Response(null, { status: 403, headers })
+    const workspaceId = Number(url.searchParams.get('workspace'))
+    if (!Number.isSafeInteger(workspaceId) || workspaceId <= 0)
+      return respond({ error: 'Select a trusted project for this checkout.' }, 400)
+    const retry = url.searchParams.get('session')
+    if (retry !== null) {
+      if (!existing || String(existing.id) !== retry || existing.workspaceId !== workspaceId)
+        return respond({ error: 'This pull request thread is no longer available for checkout.' }, 409)
+    }
+    if (existing) {
+      if (existing.workspaceId === workspaceId && !existing.worktreePath)
+        void runtime.preparePullRequestWorktree(existing.id).catch(() => {})
+      return respond({ sessionId: existing.id })
+    }
+
+    const key = pull.repository.toLowerCase() + '#' + pull.number
+    if (pullRequestCheckouts.has(key)) return respond({ error: 'This pull request checkout is already starting. Try again shortly.' }, 409)
+    pullRequestCheckouts.add(key)
+    extendTimeout()
+    try {
+      const match = await findPromptLinkProject(engine.current, pull.repository, { pullRequest: true, workspaceId, profileId })
+      if (!match) return respond({ error: 'The matching project is unavailable or needs trust.' }, 409)
+      const commit = await fetchPullRequest(match.path, match.remote, pull)
+      if (!commit) return respond({ error: 'Git could not fetch this pull request. Check the number, network, and Git credentials.' }, 502)
+      const workspace = engine.current.workspaces.get(workspaceId)
+      if (closing || !workspace?.trusted || workspace.path !== match.workspace.path
+        || (profileId !== undefined && workspace.profileId !== profileId))
+        return respond({ error: 'The project changed during checkout. Check its trust settings and try again.' }, 409)
+      const result = await engine.dispatchInternal({
+        id: 'pull-request_' + crypto.randomUUID(),
+        at: Date.now(),
+        command: {
+          type: 'thread.pull-request.create',
+          workspaceId,
+          pullRequest: { repository: pull.repository, number: pull.number, repositoryKey: match.repositoryKey, commit },
+        },
+      })
+      const created = result.events.find(event => event.payload.type === 'session.created')
+      if (!created) return respond({ error: 'Could not record the pull request thread.' }, 503)
+      if (!closing) {
+        broadcast(result.events)
+        void runtime.preparePullRequestWorktree(created.sessionId).catch(() => {})
+      }
+      return respond({ sessionId: created.sessionId }, 201)
+    }
+    catch { return respond({ error: 'Could not start the pull request checkout. Try again.' }, 503) }
+    finally { pullRequestCheckouts.delete(key) }
   }
 
   async function maintainThreads(): Promise<void> {
@@ -864,7 +1084,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           })
           if (!closing) broadcast(result.events)
         }
-        const deadline = inactivityDeadline(session, engine.current.settings)
+        const deadline = inactivityDeadline(session, workspaceSettings(engine.current, session.workspaceId))
         if (deadline === undefined || deadline > at || closing) continue
         const result = await engine.dispatchInternal({
           id: `thread-auto-settle_${crypto.randomUUID()}`, at,
@@ -1103,6 +1323,20 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         send(socket, { t: 'pong' })
         return
 
+      case 'read-settings':
+        // The host's own answers and the project's own answers travel apart,
+        // as they do on first paint: a client that only had the effective
+        // settings could not tell a pinned value from an inherited one.
+        send(socket, {
+          t: 'host-settings',
+          settings: engine.current.settings,
+          ...(frame.workspaceId === undefined ? {} : {
+            workspaceId: frame.workspaceId,
+            projectSettings: { ...engine.current.workspaces.get(frame.workspaceId)?.settings },
+          }),
+        })
+        return
+
       case 'watch-pins':
       case 'watch-sidebar': {
         const pinsOnly = frame.t === 'watch-pins'
@@ -1147,7 +1381,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           if (!terminals.resume(socket, scope)) {
             try {
               const history = terminals.savedHistory(scope)
-              if (history !== undefined) terminals.openProjectHistory(socket, scope, engine.current.settings.terminalShell, history, jobHistory.exitCode)
+              if (history !== undefined) terminals.openProjectHistory(socket, scope, workspaceSettings(engine.current, scope.workspaceId).terminalShell, history, jobHistory.exitCode)
               else send(socket, { t: 'term-error', message: 'The worktree script has no saved terminal output.' })
             }
             catch { send(socket, { t: 'term-error', message: 'Could not load the worktree script output.' }) }
@@ -1155,7 +1389,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return
         }
         if (terminals.resume(socket, scope)) return
-        const shellKind = engine.current.settings.terminalShell
+        const shellKind = workspaceSettings(engine.current, scope.workspaceId).terminalShell
         const shell = shellKind === 'den' ? findDenShell() : undefined
         if (shell === null) {
           send(socket, { t: 'term-error', message: 'Den was not found on this host. Install Den or choose System shell in Settings.' })
@@ -1407,7 +1641,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // A browser gets the pairing page rather than a bare 401, because the
           // person holding the phone needs somewhere to type the code.
           if (request.headers.get('accept')?.includes('text/html'))
-            return new Response(pairingPage(null), { status: 401, headers: { 'content-type': 'text/html; charset=utf-8' } })
+            return new Response(pairingPage(null, pairingReturn(url.pathname + url.search)), { status: 401, headers: pairingHeaders })
           return Response.json({ error: 'this harness requires pairing' }, { status: 401 })
         }
       }
@@ -1495,7 +1729,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files))?$/u.exec(url.pathname)
+      const gitRoute = /^\/s\/([1-9]\d*)\/git\/(commit|pull|push|pull-request|pull-request-checks)$/u.exec(url.pathname)
+      if (gitRoute) {
+        if (!isLoopbackHost(srv.requestIP(request)?.address ?? '')) return new Response(null, { status: 403 })
+        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as RepositoryAction, () => srv.timeout(request, 150))
+      }
+
+      const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files|status))?$/u.exec(url.pathname)
       if (request.method === 'GET' && diffRoute) {
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const id = Number(diffRoute[1])
@@ -1522,9 +1762,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (projectScriptsRoute[2] === 'project-settlement') {
           if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
           const receipt = scope && workspaceFileRoot(params) ? projectSetup.latestSettlement(scope) : null
-          return Response.json(receipt && {
-            name: receipt.name, resumeKey: receipt.resumeKey, status: receipt.status, exitCode: receipt.exitCode,
-            output: terminals.projectJobTail(receipt),
+          if (!receipt) return Response.json(null, { headers })
+          const output = terminals.projectJobTail(receipt)
+          // Checkout verification can still be running before the PTY is attachable.
+          const status = receipt.status === 'running' && output === undefined ? 'pending' : receipt.status
+          return Response.json({
+            name: receipt.name, resumeKey: receipt.resumeKey, status, exitCode: receipt.exitCode,
+            output: output ?? '',
           }, { headers })
         }
         if (projectScriptsRoute[2] === 'project-setup') {
@@ -1534,7 +1778,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return Response.json(receipt && {
             name: receipt.name, resumeKey: receipt.resumeKey, status: receipt.status, exitCode: receipt.exitCode,
             blocking: Boolean(receipt.wait),
-            output: scope ? terminals.projectJobTail({ ...scope, resumeKey: receipt.resumeKey }) : '',
+            output: scope ? terminals.projectJobTail({ ...scope, resumeKey: receipt.resumeKey }) ?? '' : '',
             retry: Boolean(script && script.runOnWorktreeCreate),
             previewUrl: script?.autoOpenPreview ? script.previewUrl : '',
           }, { headers })
@@ -1663,33 +1907,185 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // The web surface. Rendered from the in-memory projection — no query
       // runs, so the shell paints immediately — and cached against the state
       // revision, so only the first request after a state change renders.
+      if (url.pathname === '/projects/clone') {
+        const site = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || site === 'cross-site' || site === 'same-site')
+          return new Response(null, { status: 403, headers: { 'cache-control': 'no-store' } })
+        return projectClones.handle(request, url, profile => engine.current.profiles.has(profile))
+      }
+
+      if (url.pathname === '/prompt-link/pull-request')
+        return respondPullRequestLink(request, url, isLoopbackHost(srv.requestIP(request)?.address ?? ''), () => srv.timeout(request, 65))
+
+      if (url.pathname === '/prompt-link/project') {
+        if (request.method !== 'GET') return new Response(null, { status: 405 })
+        if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
+        return promptLinkProjects(engine.current, url.searchParams)
+      }
+
+      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels', '/pull-requests/reviewers'].includes(url.pathname)) {
+        const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
+        const site = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
+        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(120_000)])
+        if (url.pathname === '/pull-requests/comments') {
+          if (request.method !== 'GET') return new Response(null, { status: 405, headers })
+          srv.timeout(request, 150)
+          return loadWorkspaceReviewComments(engine.current, url.searchParams, signal).then(({ status, body }) =>
+            Response.json(body, { status, headers: { ...headers, 'content-type': 'application/json' } }))
+        }
+        const render = async (query: URLSearchParams, status = 200, formState?: {
+          replyDraft?: PullRequestReplyDraft
+          lifecycleDraft?: PullRequestLifecycleDraft
+          lifecycleError?: string
+          labelDraft?: PullRequestLabelDraft
+          labelError?: string
+          reviewerDraft?: PullRequestReviewerDraft
+          reviewerEditor?: PullRequestReviewerEditor
+          reviewerError?: string
+        }) => {
+          try {
+            const view = await pullRequestWorkspace(engine.current, query, signal)
+            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-pull-requests.stx'), { ...view, ...formState })
+            return new Response(renderPullRequestMarkdown(html, view), { status, headers })
+          }
+          catch { return new Response('Could not load the pull request workspace. Try again.', { status: 503, headers }) }
+        }
+        if (url.pathname !== '/pull-requests') {
+          if (request.method !== 'POST') return new Response(null, { status: 405, headers })
+          const referer = request.headers.get('referer')
+          if (request.headers.get('origin') !== url.origin && site !== 'same-origin'
+            && (!referer || URL.parse(referer)?.origin !== url.origin)) return new Response(null, { status: 403, headers })
+          if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
+            return new Response(null, { status: 415, headers })
+          srv.timeout(request, 150)
+          if (url.pathname === '/pull-requests/labels') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            const jsonHeaders = { ...headers, 'content-type': 'application/json' }
+            return updateWorkspacePullRequestLabels(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) {
+                const message = 'Invalid label selection. Open Change labels and try again.'
+                return acceptsJson ? Response.json({ message }, { status: 400, headers: jsonHeaders }) : new Response(message, { status: 400, headers })
+              }
+              const { result, message, location, params, fallback } = submission
+              const statuses = { updated: 200, confirmed: 200, pending: 202, denied: 403, changed: 409, refused: 422, unavailable: 503 }
+              if (acceptsJson) return Response.json({ result, message, location }, { status: statuses[result], headers: jsonHeaders })
+              if (statuses[result] === 200) return new Response(null, { status: 303, headers: { ...headers, location } })
+              return render(params, statuses[result], { labelDraft: fallback, labelError: message })
+            })
+          }
+          if (url.pathname === '/pull-requests/reviewers') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            const jsonHeaders = { ...headers, 'content-type': 'application/json' }
+            return updateWorkspacePullRequestReviewers(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) {
+                const message = 'Invalid reviewer selection. Open Change reviewers and try again.'
+                return acceptsJson ? Response.json({ message }, { status: 400, headers: jsonHeaders }) : new Response(message, { status: 400, headers })
+              }
+              const { result, message, location, params, fallback, editor } = submission
+              const statuses = { updated: 200, confirmed: 200, search: 200, pending: 202, denied: 403, changed: 409, refused: 422, unavailable: 503 }
+              if (acceptsJson) return Response.json({ result, message, location, ...(editor && { editor }) }, { status: statuses[result], headers: jsonHeaders })
+              if (result === 'updated' || result === 'confirmed') return new Response(null, { status: 303, headers: { ...headers, location } })
+              return render(params, statuses[result], { reviewerDraft: fallback, reviewerEditor: editor, reviewerError: message })
+            })
+          }
+          if (url.pathname === '/pull-requests/lifecycle') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            return updateWorkspacePullRequestLifecycle(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) {
+                const message = 'Invalid pull request update. Reopen the request and try again.'
+                return acceptsJson ? Response.json({ message }, { status: 400, headers }) : new Response(message, { status: 400, headers })
+              }
+              const { result, message, location, params, fallback } = submission
+              const statuses = { updated: 200, pending: 202, denied: 403, changed: 409, 'branch-changed': 409, 'approval-changed': 409, busy: 409, refused: 422, unavailable: 503 }
+              if (acceptsJson) return Response.json({ result, message, location }, { status: statuses[result], headers })
+              if (result === 'updated') return new Response(null, { status: 303, headers: { ...headers, location } })
+              return render(params, statuses[result], { lifecycleDraft: fallback, lifecycleError: message })
+            })
+          }
+          if (url.pathname === '/pull-requests/review') {
+            return submitWorkspaceInlineReview(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) return Response.json({ result: 'invalid', message: 'Check the review text and comments before submitting.' }, { status: 400, headers })
+              const statuses = { posted: 200, pending: 202, invalid: 422, changed: 409, denied: 403, unavailable: 503 }
+              return Response.json(submission, { status: statuses[submission.result], headers })
+            })
+          }
+          if (url.pathname === '/pull-requests/reply') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            return submitWorkspaceReviewReply(engine.current, url.searchParams, request, signal, reviewReplies)
+              .then((submission) => {
+                const jsonHeaders = { ...headers, 'content-type': 'application/json' }
+                if (!submission) {
+                  const message = 'Invalid reply request. Reopen the Code view and try again.'
+                  return acceptsJson ? Response.json({ message }, { status: 400, headers: jsonHeaders }) : new Response(message, { status: 400, headers })
+                }
+                const { result, message, comment } = submission
+                const statuses = { posted: 200, pending: 202, invalid: 422, changed: 409, denied: 403, unavailable: 503 }
+                if (acceptsJson) return Response.json({ result, message, comment }, { status: statuses[result], headers: jsonHeaders })
+                if (result === 'posted') return new Response(null, { status: 303, headers: { ...headers, location: submission.location } })
+                return render(submission.params, statuses[result], { replyDraft: submission.fallback })
+              })
+          }
+          const action = url.pathname === '/pull-requests/viewed' ? updateWorkspaceFileViewed : updateWorkspaceReviewConversation
+          return action(engine.current, url.searchParams, request, signal)
+            .then((update) => {
+              const acceptsJson = request.headers.get('accept') === 'application/json'
+              if (!update) {
+                const message = 'Invalid file review request. Reopen the Code view and try again.'
+                return acceptsJson ? Response.json({ message }, { status: 400, headers: { ...headers, 'content-type': 'application/json' } }) : new Response(message, { status: 400, headers })
+              }
+              if (!acceptsJson) return new Response(null, { status: 303, headers: { ...headers, location: update.location } })
+              const status = update.result === 'unavailable' ? 503 : update.result === 'denied' ? 403
+                : update.result === 'changed' || update.result === 'busy' ? 409 : 200
+              const conversation = 'conversation' in update ? update.conversation : undefined
+              return Response.json({ result: update.result, message: update.message, conversation }, { status, headers: { ...headers, 'content-type': 'application/json' } })
+            })
+        }
+        if (request.method !== 'GET') return new Response(null, { status: 405, headers })
+        srv.timeout(request, 150)
+        return render(url.searchParams)
+      }
+
       const settings = settingsSection(url.pathname)
       if (settings === 'general' && url.pathname !== '/settings/general')
         return new Response(null, { status: 307, headers: { location: '/settings/general' + url.search } })
-      if (url.pathname === '/' || url.pathname.startsWith('/s/') || settings) {
+      const sharedDraft = url.pathname === '/new' || url.pathname === '/new/'
+      if (url.pathname === '/' || url.pathname.startsWith('/s/') || sharedDraft || settings) {
         const workspaceUrl = settings ? new URL(workspaceReturn(url.searchParams.get('from')), url.origin) : url
-        const pageHeaders = { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
+        const pageHeaders: Record<string, string> = { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' }
+        const sessionId = /^\/s\/([1-9]\d*)\/?$/u.exec(workspaceUrl.pathname)
+        const id = sessionId ? Number(sessionId[1]) : undefined
+        const missingThread = workspaceUrl.pathname.startsWith('/s/') && !engine.current.sessions.has(id ?? 0)
+        const shared = sharedDraft || workspaceUrl.searchParams.has('prompt') || workspaceUrl.searchParams.has('pr')
+        if (shared) {
+          pageHeaders['cache-control'] = 'no-store'
+          pageHeaders['referrer-policy'] = 'no-referrer'
+        }
         const canLaunchWorkspaceEditor = canUseHostPrivileges(request, url)
           && (!remote || isLoopbackHost(srv?.requestIP(request)?.address ?? ''))
         // The socket URL embedded in the page depends on both host and scheme.
         const cacheKey = `${url.pathname}${url.search}|${url.origin}|${stateRev}|${canLaunchWorkspaceEditor}`
-        const cached = renderCache.get(cacheKey)
+        const cached = shared ? undefined : renderCache.get(cacheKey)
         if (cached !== undefined) {
           return new Response(cached, {
+            status: missingThread ? 404 : 200,
             headers: { ...pageHeaders, 'x-render-cache': 'hit' },
           })
         }
-        const sessionId = workspaceUrl.pathname.startsWith('/s/')
-          ? Number(workspaceUrl.pathname.slice(3)) || undefined
-          : undefined
         return renderHarnessView(viewProps(engine.current, {
-          sessionId,
+          sessionId: id,
+          missingThread,
           // `?profile=` opens the sidebar on a given space. Swiping past the
           // active space's neighbours lands here, so the server renders that
           // space's rows rather than the client rebuilding them.
           profileId: Number(workspaceUrl.searchParams.get('profile')) || undefined,
           workspaceId: Number(workspaceUrl.searchParams.get('workspace')) || undefined,
-          withoutProject: workspaceUrl.searchParams.get('project') === 'none',
+          withoutProject: sharedDraft || workspaceUrl.searchParams.get('project') === 'none',
+          freshDraftId: workspaceUrl.searchParams.get('draft'),
+          pullRequestProfile: sharedDraft ? Number(workspaceUrl.searchParams.get('profile')) || undefined : undefined,
           settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,
@@ -1701,13 +2097,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // Stored under the key captured at request time: if an event landed
           // mid-render, the new revision's requests miss this entry and
           // render fresh, which is the consistency renders had all along.
-          renderCache.set(cacheKey, html)
+          if (!shared) renderCache.set(cacheKey, html)
           if (renderCache.size > RENDER_CACHE_CAP) {
             const oldest = renderCache.keys().next().value
             if (oldest !== undefined) renderCache.delete(oldest)
           }
 
           return new Response(html, {
+            status: missingThread ? 404 : 200,
             headers: { ...pageHeaders, 'x-render-cache': 'miss' },
           })
         }).catch((error: unknown) => {
@@ -1798,6 +2195,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       savedProviders.close()
       projectScripts.close()
       projectSetup.close()
+      projectClones.close()
       store.close()
       throw error
     }
@@ -1809,6 +2207,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   composerStashTimer.unref()
   scheduleThreadMaintenance()
   runPendingSettlements()
+  projectClones.recover()
   return {
     server,
     engine,
@@ -1832,6 +2231,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       savedProviders.close()
       projectScripts.close()
       projectSetup.close()
+      projectClones.close()
       store.close()
     },
   }

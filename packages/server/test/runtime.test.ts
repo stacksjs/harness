@@ -1,16 +1,17 @@
-import type { Command, InputAnswer, WorktreeSelection } from '@harness/contract'
+import type { Command, HostSettings, InputAnswer, WorktreeSelection } from '@harness/contract'
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance, StartTurnInput } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { decode, encode } from '@harness/contract'
+import { decode, defaultHostSettings, encode } from '@harness/contract'
 import { ChatGptCredentialStore, CodexDriver, PREVIEW_THREAD_ENV } from '@harness/drivers'
 import { derivedId } from '@harness/engine'
 import { addSavedProvider, removeSavedProvider } from '../src/provider-instances'
+import { ProviderRuntime } from '../src/runtime'
 import { serve } from '../src/server'
 
 /**
@@ -127,6 +128,19 @@ class Client {
 
   waitForRejection(id: string): Promise<unknown> {
     return this.waitForFrame(frame => frame?.t === 'rejected' && frame.id === id, 3000)
+  }
+
+  async readSettings(): Promise<HostSettings | null> {
+    this.send({ t: 'read-settings' })
+    const frame = await this.waitForFrame(frame => frame?.t === 'host-settings', 3000)
+    return frame?.settings ?? null
+  }
+
+  /** The host's own answers and one project's, which travel apart. */
+  async readProjectSettings(workspaceId: number): Promise<{ settings: HostSettings, projectSettings: Partial<HostSettings> } | null> {
+    this.send({ t: 'read-settings', workspaceId })
+    const frame = await this.waitForFrame(frame => frame?.t === 'host-settings' && frame.workspaceId === workspaceId, 3000)
+    return frame ? { settings: frame.settings, projectSettings: frame.projectSettings } : null
   }
 
   async subscribeCreatedSession(id: string): Promise<number> {
@@ -1732,9 +1746,30 @@ describe('a session can have a checkout of its own', () => {
         }
         throw new Error(`Expected settlement state ${status}`)
       }
-      dispatch('first-settlement', settle)
-      expect(await client.waitForDispatch('first-settlement')).toMatchObject({ t: 'dispatched', replayed: false })
-      expect(await getJob('running')).toMatchObject({ name: 'Clean checkout' })
+      const verificationStarted = Promise.withResolvers<void>()
+      const continueVerification = Promise.withResolvers<void>()
+      const verifyCheckout = ProviderRuntime.prototype.checkProjectWorktree
+      const verification = spyOn(ProviderRuntime.prototype, 'checkProjectWorktree').mockImplementation(async function (this: ProviderRuntime, scope) {
+        verificationStarted.resolve()
+        await continueVerification.promise
+        return verifyCheckout.call(this, scope)
+      })
+      try {
+        dispatch('first-settlement', settle)
+        expect(await client.waitForDispatch('first-settlement')).toMatchObject({ t: 'dispatched', replayed: false })
+        await verificationStarted.promise
+        const waiting = await (await fetch(`${base}/project-settlement`)).json()
+        expect(waiting).toMatchObject({ status: 'pending', output: '' })
+      }
+      finally {
+        continueVerification.resolve()
+        verification.mockRestore()
+      }
+      const running = await getJob('running')
+      expect(running).toMatchObject({ name: 'Clean checkout' })
+      client.send({ t: 'term-open', workspaceId: derivedId('c_w'), sessionId, resumeKey: running.resumeKey, resumeOnly: true })
+      for (let attempt = 0; attempt < 100 && !client.events.some(frame => frame.t === 'term-opened'); attempt++) await Bun.sleep(20)
+      expect(client.events.some(frame => frame.t === 'term-opened')).toBe(true)
       writeFileSync(gate, '')
       const failed = await getJob('failed')
       expect(failed).toMatchObject({ exitCode: 7, output: 'Fixture cleanup' })
@@ -3316,10 +3351,21 @@ describe('host settings belong to the host', () => {
     const { driver } = fakeDriver([])
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
 
-    const first = await Client.connect(`ws://127.0.0.1:${port}/ws`)
-    first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den' } } } })
+    const endpoint = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(endpoint)
+    const observer = await Client.connect(endpoint)
+    const changes = {
+      defaultDriver: 'codex',
+      followUpBehavior: 'steer',
+      terminalShell: 'den',
+      snoozePresets: [{ kind: 'at', day: 'friday', time: '16:15' }, { kind: 'after', minutes: 45 }],
+    } as const
+    const expected = { ...defaultHostSettings, ...changes }
+    first.send({ t: 'dispatch', envelope: { id: 'c_set', at: 1, command: { type: 'settings.update', changes } } })
     expect((await first.waitForDispatch('c_set'))?.t).toBe('dispatched')
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    expect(harness.engine.current.settings).toEqual(expected)
+    expect(await observer.waitFor('settings.updated')).toEqual({ type: 'settings.updated', changes })
+    expect(await observer.readSettings()).toEqual(expected)
 
     // The page a second client is served carries the same answer. This is the
     // difference from a browser-stored preference: the phone and the laptop
@@ -3340,13 +3386,16 @@ describe('host settings belong to the host', () => {
     }
     expect(page).toMatch(/defaultDriver\\?["']\s*:\s*\\?["']codex/)
     expect(page).toMatch(/terminalShell\\?["']\s*:\s*\\?["']den/)
+    observer.close()
     first.close()
     harness.stop()
 
     // The setting is in the log, so a fresh process over the same database
     // still has it.
     harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'steer', terminalShell: 'den', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    const reconnected = await Client.connect(endpoint)
+    expect(await reconnected.readSettings()).toEqual(expected)
+    reconnected.close()
     harness.stop()
 
     // A different host, which is a different log: independent by construction
@@ -3354,7 +3403,70 @@ describe('host settings belong to the host', () => {
     const otherDatabase = join(dir, 'other.sqlite')
     prepareDatabase(otherDatabase)
     harness = await serve({ port: ++portCounter, databasePath: otherDatabase, resolveDriver: () => driver })
-    expect(harness.engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    expect(harness.engine.current.settings).toEqual(defaultHostSettings)
+  })
+
+  it('lets one project answer for itself without moving the host or another project', async () => {
+    const database = join(dir, 'test.sqlite')
+    const { driver } = fakeDriver([])
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+
+    const endpoint = `ws://127.0.0.1:${port}/ws`
+    const first = await Client.connect(endpoint)
+    const observer = await Client.connect(endpoint)
+    first.send({ t: 'dispatch', envelope: { id: 'c_prof', at: 1, command: { type: 'profile.create', name: 'P' } } })
+    const profileId = derivedId('c_prof')
+    first.send({ t: 'dispatch', envelope: { id: 'c_svc', at: 2, command: { type: 'workspace.add', profileId, path: dir } } })
+    first.send({ t: 'dispatch', envelope: { id: 'c_doc', at: 3, command: { type: 'workspace.add', profileId, path: join(dir, 'docs') } } })
+    const service = derivedId('c_svc')
+    const docs = derivedId('c_doc')
+    expect((await first.waitForDispatch('c_doc'))?.t).toBe('dispatched')
+
+    const changes = { defaultDriver: 'codex', terminalShell: 'den' } as const
+    first.send({ t: 'dispatch', envelope: { id: 'c_pin', at: 4, command: { type: 'settings.update', workspaceId: service, changes } } })
+    expect((await first.waitForDispatch('c_pin'))?.t).toBe('dispatched')
+
+    // The host's own answers do not move, and neither does the other project.
+    expect(harness.engine.current.settings).toEqual(defaultHostSettings)
+    expect(harness.engine.current.workspaces.get(service)?.settings).toEqual(changes)
+    expect(harness.engine.current.workspaces.get(docs)?.settings).toBeUndefined()
+
+    // A second client of the same host is served the same answer for the same
+    // project, and the host's own answers alongside it rather than merged in.
+    expect(await observer.waitFor('settings.updated')).toEqual({ type: 'settings.updated', workspaceId: service, changes })
+    expect(await observer.readProjectSettings(service)).toEqual({ settings: defaultHostSettings, projectSettings: changes })
+    expect(await observer.readProjectSettings(docs)).toEqual({ settings: defaultHostSettings, projectSettings: {} })
+    observer.close()
+    first.close()
+    harness.stop()
+
+    // In the log, so a fresh process over the same database still has it.
+    harness = await serve({ port, databasePath: database, resolveDriver: () => driver })
+    const reconnected = await Client.connect(endpoint)
+    expect(await reconnected.readProjectSettings(service)).toEqual({ settings: defaultHostSettings, projectSettings: changes })
+
+    // Handing one key back leaves the other pinned.
+    reconnected.send({
+      t: 'dispatch',
+      envelope: { id: 'c_inherit', at: 5, command: { type: 'settings.update', workspaceId: service, changes: {}, inherit: ['defaultDriver'] } },
+    })
+    expect((await reconnected.waitForDispatch('c_inherit'))?.t).toBe('dispatched')
+    expect(harness.engine.current.workspaces.get(service)?.settings).toEqual({ terminalShell: 'den' })
+    reconnected.close()
+  })
+
+  it('refuses a project override for a project this host does not have', async () => {
+    const { driver } = fakeDriver([])
+    harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
+    const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
+
+    client.send({
+      t: 'dispatch',
+      envelope: { id: 'c_ghost', at: 1, command: { type: 'settings.update', workspaceId: 4242, changes: { defaultDriver: 'codex' } } },
+    })
+    expect((await client.waitForDispatch('c_ghost'))?.t).toBe('rejected')
+    expect(harness.engine.current.settings).toEqual(defaultHostSettings)
+    client.close()
   })
 
   it('rejects a settings command that carries nothing this host accepts', async () => {

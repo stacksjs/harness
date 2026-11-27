@@ -5,6 +5,9 @@
     <button type="button" data-thread-action @click="findFromThreadActions" :aria-keyshortcuts="shortcutKeys('transcript.find')">
       <span class="i-hugeicons-search-list-02" aria-hidden="true"></span>Find in thread
     </button>
+    <button type="button" data-thread-action @click="copyThreadLink" :aria-keyshortcuts="shortcutKeys('thread.copyReference')">
+      <span class="i-hugeicons-link-01" aria-hidden="true"></span>Copy thread link
+    </button>
     <button type="button" data-thread-action :hidden="!threadNavigation().archivedAt" @click="organizeThread('restore')" :disabled="threadActionBusy()">
       <span class="i-hugeicons-archive-02" aria-hidden="true"></span>Restore thread
     </button>
@@ -69,6 +72,7 @@
           <input type="datetime-local" ref="threadWakeTimeBox" aria-label="Wake date and time" :hidden="threadSnoozeMode() !== 'date'" :disabled="threadSnoozeMode() !== 'date'" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
           <input type="number" min="1" step="1" ref="threadWakeDurationBox" aria-label="Wake duration" :hidden="threadSnoozeMode() === 'date'" :disabled="threadSnoozeMode() === 'date'" class="px-2 py-1 min-w-0 text-sm bg-transparent border border-black/15 rounded-md dark:border-white/20" />
           <button type="submit" :disabled="threadActionBusy()" class="px-2 py-1 text-sm border border-black/15 rounded-md dark:border-white/20">Set wake time</button>
+          <button type="button" data-thread-action @click="editSnoozeSettings">Edit snooze options</button>
           <button type="button" data-thread-action @click="openThreadActionForm('snooze')">Back to wake choices</button>
         </form>
       </div>

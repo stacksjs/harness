@@ -1,0 +1,56 @@
+<dialog data-repository-pull-request-dialog ref="repositoryPullRequestDialogBox" aria-labelledby="harness-repository-pull-request-title"
+  @cancel.prevent="closeRepositoryPullRequest" @click.self="closeRepositoryPullRequest">
+  <form data-share-dialog-body @submit.prevent="submitRepositoryPullRequest">
+    <h2 id="harness-repository-pull-request-title">Create pull request</h2>
+    <p role="status" :hidden="!repositoryPullRequestLoading()">Checking branches on GitHub…</p>
+    <dl :hidden="!repositoryPullRequestPreview()" class="grid gap-x-3 gap-y-1 grid-cols-[auto_minmax(0,1fr)]">
+      <dt>Head branch</dt>
+      <dd class="font-mono" :text="repositoryPullRequestPreview()?.headRef"></dd>
+      <dt :hidden="repositoryPullRequestPreview()?.repository === repositoryPullRequestPreview()?.headRepository">Head repository</dt>
+      <dd :hidden="repositoryPullRequestPreview()?.repository === repositoryPullRequestPreview()?.headRepository"
+        class="font-mono" :text="repositoryPullRequestPreview()?.headRepository"></dd>
+      <dt>Base repository</dt>
+      <dd class="font-mono" :text="repositoryPullRequestPreview()?.repository"></dd>
+      <dt>GitHub account</dt>
+      <dd class="break-all" :text="repositoryPullRequestPreview()?.actor"></dd>
+    </dl>
+    <div :hidden="!repositoryPullRequestPreview()" class="grid gap-1">
+      <label for="harness-pr-base">Base branch</label>
+      <input id="harness-pr-base" ref="repositoryPullRequestBaseBox" autocomplete="off" spellcheck="false" maxlength="255"
+        class="px-2 min-h-9 w-full font-mono border border-black/15 rounded-md dark:border-white/20"
+        :disabled="repositoryPullRequestLoading() || repositoryPullRequestBusy()" @input="setRepositoryPullRequestBase($event.target.value)"
+        @keydown.enter.prevent="refreshRepositoryPullRequest" />
+    </div>
+    <a :hidden="!repositoryPullRequestPreview()?.existing" :href="repositoryPullRequestPreview()?.existing?.url || undefined"
+      target="_blank" rel="noopener noreferrer" :text="'Open existing pull request #' + repositoryPullRequestPreview()?.existing?.number"></a>
+    <fieldset :hidden="!repositoryPullRequestPreview() || Boolean(repositoryPullRequestPreview()?.existing)"
+      :disabled="repositoryPullRequestBusy() || Boolean(repositoryPullRequestPreview()?.existing)" class="grid gap-2 min-w-0">
+      <div class="grid gap-1">
+        <label for="harness-pr-title">Title</label>
+        <input id="harness-pr-title" ref="repositoryPullRequestTitleBox" maxlength="256"
+          class="px-2 min-h-9 w-full border border-black/15 rounded-md dark:border-white/20"
+          @input="setRepositoryPullRequestTitle($event.target.value)" />
+      </div>
+      <div class="grid gap-1">
+        <label for="harness-pr-description">Description <span class="opacity-70">(optional)</span></label>
+        <textarea id="harness-pr-description" ref="repositoryPullRequestBodyBox" rows="3" maxlength="16000"
+          class="min-h-16 border border-black/15 dark:border-white/20"></textarea>
+      </div>
+      <label class="flex gap-2 items-center min-h-8">
+        <input type="checkbox" ref="repositoryPullRequestDraftBox" />
+        Open as draft
+      </label>
+    </fieldset>
+    <p :hidden="!repositoryPullRequestPreview()?.publish || Boolean(repositoryPullRequestPreview()?.existing)">
+      This also pushes the reviewed branch to its publishing remote.
+    </p>
+    <p role="alert" :hidden="!repositoryPullRequestError()" :text="repositoryPullRequestError()"></p>
+    <div data-share-dialog-actions>
+      <button type="button" autofocus :disabled="repositoryPullRequestBusy()" @click="closeRepositoryPullRequest">Cancel</button>
+      <button type="button" :hidden="!repositoryPullRequestBaseChanged() && !repositoryPullRequestError()"
+        :disabled="repositoryPullRequestLoading() || repositoryPullRequestBusy()" @click="refreshRepositoryPullRequest">Refresh review</button>
+      <button type="submit" data-share-primary data-repository-pull-request-confirm :disabled="!repositoryPullRequestCanSubmit()"
+        :text="repositoryPullRequestSubmitLabel()"></button>
+    </div>
+  </form>
+</dialog>

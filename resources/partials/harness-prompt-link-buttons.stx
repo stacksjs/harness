@@ -1,0 +1,8 @@
+<div data-prompt-share>
+  <button type="button" data-copy-prompt-link aria-label="Copy prompt link" title="Copy prompt link" class="harness-icon-button">
+    <span class="size-4 i-hugeicons-link-01" aria-hidden="true"></span>
+  </button>
+  <button type="button" data-copy-message-link aria-label="Copy message link" title="Copy message link" class="harness-icon-button">
+    <span class="size-4 i-hugeicons-share-08" aria-hidden="true"></span>
+  </button>
+</div>

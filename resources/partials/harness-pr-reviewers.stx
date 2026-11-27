@@ -1,0 +1,95 @@
+<section id="pr-reviewers" data-pr-reviewers aria-labelledby="pr-reviewers-title">
+  <div data-pr-reviewer-heading>
+    <h3 id="pr-reviewers-title">Reviewers</h3>
+    @if(selected.canEditReviewers && !reviewerEditor && !reviewerDraft)
+      <a href="{{ reviewersHref }}" data-pr-button>Change reviewers</a>
+    @endif
+  </div>
+  @if(selected.reviewDecision)
+    <p data-pr-review-decision>GitHub review status <strong>{{ selected.reviewDecision }}</strong></p>
+  @endif
+  @if(selected.reviewers.length)
+    <ul data-pr-reviewer-list>
+      @foreach(selected.reviewers as reviewer)
+        <li>
+          <span>{{ reviewer.name }}</span>
+          @if(reviewer.team)<small>Team</small>@endif
+          @if(reviewer.outcome)
+            <span data-pr-review-outcome="{{ reviewer.outcome.state }}" @if(reviewer.outcome.commit) title="{{ reviewer.outcome.label }}. Reviewed commit {{ reviewer.outcome.commit.slice(0, 7) }}" @endif>{{ reviewer.outcome.label }}</span>
+          @elseif(reviewer.submitted)
+            <small>{{ reviewer.submitted }}</small>
+          @endif
+          @if(reviewer.requested)<small>{{ reviewer.outcome || reviewer.submitted ? 'Review requested again' : 'Review requested' }}</small>@endif
+        </li>
+      @endforeach
+    </ul>
+  @elseif(!selected.reviewOutcomesNotice)
+    <p>No reviewers yet.</p>
+  @endif
+  @if(selected.reviewOutcomesNotice)
+    <p role="status">{{ selected.reviewOutcomesNotice }}</p>
+  @endif
+  @if(reviewerError || reviewersNotice)
+    <p role="status">{{ reviewerError || reviewersNotice }}</p>
+  @endif
+  @if(reviewerDraft)
+    <form method="post" action="{{ reviewersEndpoint }}" aria-label="Recover review requests">
+      <input type="hidden" name="head" value="{{ reviewerDraft.head }}">
+      <input type="hidden" name="viewer" value="{{ reviewerDraft.viewer }}">
+      <input type="hidden" name="scope" value="{{ reviewerDraft.scope }}">
+      <input type="hidden" name="revision" value="{{ reviewerDraft.revision }}">
+      <input type="hidden" name="intent" value="{{ reviewerDraft.intent }}">
+      @foreach(reviewerDraft.checked as id)
+        <input type="hidden" name="reviewer" value="{{ id }}">
+      @endforeach
+      <button type="submit" data-pr-button>Check GitHub and finish</button>
+    </form>
+  @elseif(reviewerEditor)
+    <form method="post" action="{{ reviewersEndpoint }}" aria-labelledby="pr-reviewer-editor-title" data-pr-reviewer-editor>
+      <h4 id="pr-reviewer-editor-title">Change reviewers</h4>
+      <input type="hidden" name="head" value="{{ reviewerEditor.head }}">
+      <input type="hidden" name="viewer" value="{{ reviewerEditor.viewer }}">
+      <input type="hidden" name="scope" value="{{ reviewerEditor.scope }}">
+      <input type="hidden" name="revision" value="{{ reviewerEditor.revision }}">
+      <input type="hidden" name="intent" value="{{ reviewerEditor.intent }}">
+      <div data-pr-reviewer-search>
+        <label>
+          <span class="sr-only">Search reviewers</span>
+          <input type="search" name="query" value="{{ reviewerEditor.search }}" placeholder="Search reviewers" maxlength="100" autofocus>
+        </label>
+        <button type="submit" name="operation" value="search" data-pr-button>Search GitHub</button>
+      </div>
+      @if(reviewerEditor.more)
+        <p>More people match on GitHub. Refine your search.</p>
+      @elseif(reviewerEditor.matches === 0 && reviewerEditor.search)
+        <p>No people matched your search.</p>
+      @elseif(!reviewerEditor.options.length)
+        <p>No eligible reviewers found.</p>
+      @endif
+      @if(reviewerEditor.options.length)
+        <fieldset data-pr-reviewer-options>
+          <legend class="sr-only">Reviewers</legend>
+          @foreach(reviewerEditor.options as row)
+            <label data-pr-reviewer-option>
+              <input type="checkbox" name="reviewer" value="{{ row.id }}" @if(row.checked) checked @endif>
+              <span>
+                <strong>{{ row.display }}</strong>
+                @if(row.kind === 'team')<small>Team</small>@endif
+                @if(row.requested)<small>Requested</small>@endif
+                @if(row.name)<span data-pr-reviewer-description>{{ row.name }}</span>@endif
+              </span>
+            </label>
+          @endforeach
+        </fieldset>
+      @endif
+      <div data-pr-review-actions>
+        <a href="{{ summaryHref }}#pr-reviewers" data-pr-button>Cancel</a>
+        @if(reviewerEditor.options.length)
+          <button type="submit" name="operation" value="save" data-pr-button data-pr-reviewer-save>Save reviewers</button>
+        @endif
+      </div>
+    </form>
+  @elseif(selected.reviewerEditorUnavailable)
+    <p role="status">Could not read reviewer choices from GitHub.</p>
+  @endif
+</section>

@@ -4,6 +4,8 @@ import type { threadSidebarLayout } from './thread-sidebar'
 const sectionSelector = '[data-sidebar-section], [data-arrangement-section]'
 const threadRowSelector = '[data-sidebar-row]:has(a[data-sidebar-item][href^="/s/"])'
 const targetRowSelector = `${threadRowSelector}, [data-arrangement-row]`
+const threadIcons = ['i-hugeicons-message-01', 'i-hugeicons-loading-03', 'i-hugeicons-help-circle']
+type ThreadLayout = ReturnType<typeof threadSidebarLayout>
 
 interface SidebarDrop {
   marker: HTMLElement
@@ -26,22 +28,27 @@ interface SidebarDrag {
 interface ThreadSidebarOptions {
   root: HTMLElement
   arrangement?: HTMLDialogElement | null
-  onLayout?: (profileId: number, layout: ReturnType<typeof threadSidebarLayout>) => void
+  onLayout?: (profileId: number, layout: ThreadLayout) => void
   save: (sessionId: number, intent: ThreadDrop, fromArrangement: boolean) => Promise<void>
+  rename: (sessionId: number, title: string) => Promise<void>
 }
 
-/** Move existing sidebar rows so their links and keyboard state remain owned by stx. */
-export function createThreadSidebar({ root, arrangement, onLayout, save }: ThreadSidebarOptions) {
+/** Reconcile the host snapshot using the stx-rendered sidebar controls. */
+export function createThreadSidebar({ root, arrangement, onLayout, save, rename }: ThreadSidebarOptions) {
   const document = root.ownerDocument
   const listeners = new AbortController()
   const options = { signal: listeners.signal }
-  const removedRows = new Map<HTMLElement, Map<number, HTMLElement>>()
+  const rowTemplate = root.querySelector<HTMLTemplateElement>('template[data-live-sidebar-row]')?.content.querySelector('[data-sidebar-row]')
+  const projectTemplate = root.querySelector<HTMLTemplateElement>('template[data-live-sidebar-project]')?.content.querySelector('[data-sidebar-section]')
+  const renameTemplate = root.querySelector<HTMLTemplateElement>('template[data-live-sidebar-rename]')?.content.querySelector('input')
+  let editing: { row: HTMLElement, link: HTMLAnchorElement, input: HTMLInputElement, originalTitle: string } | undefined
+  let reconciling = false
   let drag: SidebarDrag | undefined
   let drop: SidebarDrop | undefined
   let suppressClick = false
   let saving = false
   let scrollFrame = 0
-  let latestLayout: ReturnType<typeof threadSidebarLayout> | undefined
+  let latestLayout: ThreadLayout | undefined
   const preview = arrangement?.querySelector<HTMLElement>('[data-arrangement-preview]')
   const previewTitle = preview?.querySelector('[data-arrangement-preview-title]')
   const previewAction = preview?.querySelector('[data-arrangement-preview-action]')
@@ -185,34 +192,108 @@ export function createThreadSidebar({ root, arrangement, onLayout, save }: Threa
     event.stopImmediatePropagation()
   }, { ...options, capture: true })
 
-  function applyOrder(panel: HTMLElement, layout: ReturnType<typeof threadSidebarLayout>): void {
-    const focus = document.activeElement instanceof HTMLElement && panel.contains(document.activeElement) ? document.activeElement : null
-    const viewport = panel.querySelector('.stx-sidebar-scroll')
-    const scrollTop = viewport?.scrollTop ?? 0
-    const sections = new Map(Array.from(panel.querySelectorAll<HTMLElement>(sectionSelector), section => [section.dataset.sectionId, section]))
-    const kept = removedRows.get(panel) ?? new Map<number, HTMLElement>()
-    removedRows.set(panel, kept)
-    const rows = new Map(kept)
-    for (const row of panel.querySelectorAll<HTMLElement>(threadRowSelector)) rows.set(Number(row.dataset.itemId), row)
+  function finishRename(commit: boolean, restoreFocus = false): void {
+    if (!editing) return
+    const { row, link, input, originalTitle } = editing
+    editing = undefined
+    input.remove()
+    link.hidden = false
+    if (restoreFocus && link.isConnected && !link.closest('[inert]')) link.focus({ preventScroll: true })
+    const title = input.value.trim()
+    if (commit && row.isConnected && title && title !== originalTitle && title !== link.dataset.label)
+      void rename(Number(row.dataset.itemId), title)
+  }
 
+  root.addEventListener('keydown', (event) => {
+    if (event.key !== 'F2' || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+      || !(event.target instanceof HTMLAnchorElement) || !event.target.matches('a[data-sidebar-item][href^="/s/"]')) return
+    const link = event.target
+    const row = link.closest<HTMLElement>(threadRowSelector)
+    if (!row || !renameTemplate || row.closest('[inert]')) return
+    event.preventDefault()
+    event.stopPropagation()
+    finishRename(true)
+    const input = renameTemplate.cloneNode(true) as HTMLInputElement
+    input.value = link.dataset.label ?? ''
+    editing = { row, link, input, originalTitle: input.value }
+    input.addEventListener('keydown', (key) => {
+      key.stopPropagation()
+      if (key.isComposing || key.keyCode === 229 || (key.key !== 'Enter' && key.key !== 'Escape')) return
+      key.preventDefault()
+      finishRename(key.key === 'Enter', true)
+    })
+    input.addEventListener('blur', () => { if (!reconciling && editing?.input === input) finishRename(true) })
+    row.append(input)
+    link.hidden = true
+    input.focus({ preventScroll: true })
+    input.select()
+  }, options)
+
+  function createProjectSection(summary: ThreadLayout[number]): HTMLElement | undefined {
+    if (!summary.workspaceId || !projectTemplate) return
+    const section = projectTemplate.cloneNode(true) as HTMLElement
+    section.dataset.sectionId = summary.id
+    const compose = section.querySelector<HTMLElement>('[data-sidebar-row]')
+    if (compose) compose.dataset.itemId = `compose-${summary.workspaceId}`
+    compose?.querySelector('a[data-sidebar-item]')?.setAttribute('href', `/?workspace=${summary.workspaceId}`)
+    return section
+  }
+
+  function updateThreadRow(existing: HTMLElement | undefined, item: ThreadLayout[number]['rows'][number]): HTMLElement | undefined {
+    const row = existing ?? rowTemplate?.cloneNode(true) as HTMLElement | undefined
+    if (!row) return
+    const link = row.querySelector<HTMLAnchorElement>('a[data-sidebar-item]')
+    if (!link) return
+    if (!existing) {
+      row.dataset.itemId = String(item.id)
+      link.setAttribute('href', `/s/${item.id}`)
+    }
+    row.dataset.threadActiveSection = item.activeSection
+    if (link.dataset.label !== item.title) {
+      link.dataset.label = item.title
+      // Harness thread rows have no badge after the label.
+      const label = link.lastElementChild
+      if (label) label.textContent = item.title
+    }
+    if (link.title !== item.title) link.title = item.title
+    const icon = link.querySelector('[data-sidebar-icon]')
+    if (icon && item.icon && !icon.classList.contains(item.icon)) {
+      icon.classList.remove(...threadIcons)
+      icon.classList.add(item.icon)
+    }
+    return row
+  }
+
+  function applyOrder(panel: HTMLElement, layout: ThreadLayout): void {
+    const focus = document.activeElement instanceof HTMLElement && panel.contains(document.activeElement) ? document.activeElement : null
+    const focusSection = focus?.closest(sectionSelector)
+    const viewport = panel.querySelector('.stx-sidebar-scroll')
+    if (!viewport) return
+    const scrollTop = viewport.scrollTop
+    const sections = new Map(Array.from(panel.querySelectorAll<HTMLElement>(sectionSelector), section => [section.dataset.sectionId, section]))
+    const rows = new Map(Array.from(panel.querySelectorAll<HTMLElement>(threadRowSelector), row => [Number(row.dataset.itemId), row]))
+
+    let nextSection = viewport.querySelector('[data-sidebar-section]')
     for (const summary of layout) {
-      const section = sections.get(summary.id)
+      const section = sections.get(summary.id) ?? createProjectSection(summary)
       const group = section?.querySelector<HTMLElement>(':scope > [role="group"]')
       if (!section || !group) continue
+      sections.delete(summary.id)
+      if (section !== nextSection) {
+        if (drag) cancel()
+        viewport.insertBefore(section, nextSection)
+      }
+      nextSection = section.nextElementSibling
       const collapsed = section.dataset.expanded === 'false'
       group.toggleAttribute('data-pin-order-ready', summary.id.startsWith('pinned-'))
-      if (summary.id.startsWith('settled-')) {
-        const label = section.querySelector('[data-sidebar-section-header] > span')
-        if (label && label.textContent !== summary.label) label.textContent = summary.label
-        if (group.getAttribute('aria-label') !== summary.label) group.setAttribute('aria-label', summary.label)
-      }
+      const label = section.querySelector('[data-sidebar-section-header] > span')
+      if (label && label.textContent !== summary.label) label.textContent = summary.label
+      if (group.getAttribute('aria-label') !== summary.label) group.setAttribute('aria-label', summary.label)
       let next = group.querySelector(threadRowSelector)
       for (const item of summary.rows) {
-        const row = rows.get(item.id)
+        const row = updateThreadRow(rows.get(item.id), item)
         if (!row) continue
         rows.delete(item.id)
-        kept.delete(item.id)
-        row.dataset.threadActiveSection = item.activeSection
         if (row !== next) {
           if (drag) cancel()
           group.insertBefore(row, next)
@@ -222,29 +303,39 @@ export function createThreadSidebar({ root, arrangement, onLayout, save }: Threa
         next = row.nextElementSibling
       }
     }
-    // A section for a newly registered project may not have been rendered yet.
-    const stillVisible = new Set(layout.flatMap(section => section.rows.map(item => item.id)))
-    for (const [id, row] of rows) {
-      if (stillVisible.has(id) || !row.isConnected) continue
+    for (const row of rows.values()) {
       if (drag?.row === row) cancel()
-      kept.set(id, row)
+      if (editing?.row === row) finishRename(false)
       row.remove()
     }
-    if (focus && document.activeElement !== focus) {
-      if (focus.isConnected && !focus.closest('[inert]')) focus.focus({ preventScroll: true })
-      else if (focus.isConnected) focus.closest(sectionSelector)?.querySelector<HTMLElement>('[data-sidebar-section-header]')?.focus({ preventScroll: true })
+    for (const section of sections.values()) {
+      if (drag?.section === section) cancel()
+      section.remove()
     }
-    if (viewport && viewport.scrollTop !== scrollTop) viewport.scrollTop = scrollTop
+    if (focus && (document.activeElement !== focus || focus.closest('[inert]'))) {
+      if (focus.isConnected && !focus.closest('[inert]')) focus.focus({ preventScroll: true })
+      else {
+        if (editing?.input === focus) finishRename(false)
+        const header = (focus.closest(sectionSelector) ?? focusSection)?.querySelector<HTMLElement>('[data-sidebar-section-header]')
+        const target = header?.getClientRects().length ? header : root.querySelector<HTMLElement>('[data-nav-search]')
+        target?.focus({ preventScroll: true })
+      }
+    }
+    if (viewport.scrollTop !== scrollTop) viewport.scrollTop = scrollTop
     panel.setAttribute('data-thread-order-ready', '')
   }
 
   return {
     receive(frame: unknown): boolean {
-      const order = frame as { t?: string, profileId?: number, sections?: ReturnType<typeof threadSidebarLayout> } | null
+      const order = frame as { t?: string, profileId?: number, sections?: ThreadLayout } | null
       if (order?.t !== 'sidebar-order') return false
       if (!Number.isSafeInteger(order.profileId) || !Array.isArray(order.sections)) return true
       const panel = root.querySelector<HTMLElement>(`[data-space-id="${order.profileId}"]:not([data-space-deferred])`)
-      if (panel) applyOrder(panel, order.sections)
+      if (panel) {
+        reconciling = true
+        try { applyOrder(panel, order.sections) }
+        finally { reconciling = false }
+      }
       if (drag && drag.panel === arrangement && JSON.stringify(latestLayout) !== JSON.stringify(order.sections)) cancel()
       latestLayout = order.sections
       onLayout?.(order.profileId!, order.sections)
@@ -255,6 +346,7 @@ export function createThreadSidebar({ root, arrangement, onLayout, save }: Threa
     },
     dispose() {
       cancel()
+      finishRename(false)
       listeners.abort()
     },
   }

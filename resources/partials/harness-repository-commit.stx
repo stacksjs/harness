@@ -1,0 +1,28 @@
+<dialog data-repository-commit-dialog ref="repositoryCommitDialogBox" aria-labelledby="harness-repository-commit-title"
+  @cancel.prevent="closeRepositoryCommit" @click.self="closeRepositoryCommit">
+  <form data-share-dialog-body @submit.prevent="submitRepositoryCommit">
+    <h2 id="harness-repository-commit-title">Commit staged changes</h2>
+    <p :hidden="!repositoryCommitPreview()?.branch" :text="'Branch ' + repositoryCommitPreview()?.branch"></p>
+    <p role="status" :hidden="!repositoryCommitLoading()">Reading the staged changes…</p>
+    <p role="alert" :hidden="!repositoryCommitError()" :text="repositoryCommitError()"></p>
+    <div :hidden="!repositoryCommitPreview()?.files.length" class="grid gap-1">
+      <p class="font-medium" :text="repositoryCommitPreview()?.files.length === 1 ? '1 staged file' : repositoryCommitPreview()?.files.length + ' staged files'"></p>
+      <ul aria-label="Staged files" class="overflow-y-auto max-h-[22dvh] list-none rounded-md">
+        <template :for="path in repositoryCommitPreview()?.files.slice(0, repositoryCommitLimit()) || []" :key="path">
+          <li class="px-2 py-1 break-all font-mono text-xs" :text="path"></li>
+        </template>
+      </ul>
+      <button type="button" :hidden="(repositoryCommitPreview()?.files.length || 0) <= repositoryCommitLimit()"
+        @click="repositoryCommitLimit.update(limit => limit + 40)" class="min-h-8 text-start underline">Show more files</button>
+    </div>
+    <label for="harness-repository-commit-message" class="font-medium">Commit message</label>
+    <textarea id="harness-repository-commit-message" rows="3" maxlength="4096" required autofocus
+      :value="repositoryCommitMessage()" :disabled="repositoryCommitBusy()" @input="repositoryCommitMessage.set($event.target.value)"></textarea>
+    <div data-share-dialog-actions>
+      <button type="button" @click="closeRepositoryCommit" :disabled="repositoryCommitBusy()">Cancel</button>
+      <button type="button" @click="loadRepositoryCommit" :hidden="!repositoryCommitError()" :disabled="repositoryCommitBusy() || repositoryCommitLoading()">Refresh staged files</button>
+      <button type="submit" data-share-primary :disabled="repositoryCommitBusy() || repositoryCommitLoading() || Boolean(repositoryCommitError()) || !repositoryCommitMessage().trim() || !repositoryCommitPreview()?.files.length"
+        :text="repositoryCommitBusy() ? 'Committing…' : 'Commit'">Commit</button>
+    </div>
+  </form>
+</dialog>

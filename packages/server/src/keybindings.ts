@@ -34,9 +34,10 @@ export interface KeybindingCommand {
   description: string
   /** Default chord, in the same text form stored overrides use. */
   chord: string
-  scope?: 'terminal' | 'global'
+  scope?: 'terminal' | 'composer' | 'global' | 'model-picker'
   appleChord?: string
   craftChord?: string
+  desktopDefault?: boolean
 }
 
 export interface KeybindingPlatform {
@@ -46,7 +47,11 @@ export interface KeybindingPlatform {
 
 export interface KeybindingContext extends KeybindingPlatform {
   terminalFocus?: boolean
+  composerFocus?: boolean
+  modelPickerOpen?: boolean
 }
+
+const numberedCommands = Array.from({ length: 9 }, (_, index) => index + 1)
 
 /**
  * The registry. Order is display order in the settings pane.
@@ -69,6 +74,12 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     chord: 'Mod+K',
   },
   {
+    id: 'thread.copyReference',
+    label: 'Copy thread link',
+    description: 'Copy a link to the current thread.',
+    chord: 'Mod+Shift+C',
+  },
+  {
     id: 'transcript.find',
     label: 'Find in thread',
     description: 'Find text within the open transcript.',
@@ -87,10 +98,51 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
     chord: 'Mod+Alt+N',
   },
   {
+    id: 'thread.previous',
+    label: 'Previous sidebar item',
+    description: 'Open the visible draft or thread above the current one.',
+    chord: 'Mod+Shift+[',
+  },
+  {
+    id: 'thread.next',
+    label: 'Next sidebar item',
+    description: 'Open the visible draft or thread below the current one.',
+    chord: 'Mod+Shift+]',
+  },
+  ...numberedCommands.map(number => ({
+    id: `thread.jump.${number}`,
+    label: `Open sidebar item ${number}`,
+    description: 'Open a visible draft or thread by position. Default shortcut is available in the desktop app.',
+    chord: `Mod+${number}`,
+    desktopDefault: true,
+  })),
+  ...numberedCommands.map(number => ({
+    id: `modelPicker.jump.${number}`,
+    label: `Choose model ${number}`,
+    description: 'Choose a result by position in the model picker. Default shortcut is available in the desktop app.',
+    chord: `Mod+${number}`,
+    scope: 'model-picker' as const,
+    desktopDefault: true,
+  })),
+  {
     id: 'composer.stash',
     label: 'Stash or restore prompt',
     description: 'Save the draft or open the stash when the composer is empty.',
     chord: 'Mod+S',
+  },
+  {
+    id: 'composer.startBackground',
+    label: 'Start thread in background',
+    description: 'Send a new thread and stay in the new-thread composer.',
+    chord: 'Mod+Enter',
+    scope: 'composer',
+  },
+  {
+    id: 'composer.sendAndNewThread',
+    label: 'Send and open a new draft',
+    description: 'Send the message and open an empty draft in the same project.',
+    chord: 'Mod+Alt+Enter',
+    scope: 'composer',
   },
   {
     id: 'thread.undo',
@@ -143,8 +195,9 @@ export const keybindingCommands: readonly KeybindingCommand[] = [
 const byId = new Map(keybindingCommands.map(command => [command.id, command]))
 
 function keybindingScopes(command: KeybindingCommand): readonly string[] {
-  if (command.scope === 'global') return ['workspace', 'terminal']
-  return [command.scope ?? 'workspace']
+  if (command.scope === 'global') return ['workspace', 'terminal', 'composer']
+  if (!command.scope) return ['workspace', 'composer']
+  return [command.scope]
 }
 
 /**
@@ -315,6 +368,7 @@ export type Keybindings = Record<string, string>
 
 /** Every command at its default chord. */
 function defaultChord(command: KeybindingCommand, platform: KeybindingPlatform): string {
+  if (command.desktopDefault && !platform.craft) return ''
   if (platform.apple && platform.craft && command.craftChord) return command.craftChord
   return (platform.apple && command.appleChord) || command.chord
 }
@@ -362,7 +416,7 @@ export function resolveKeybindings(stored: unknown, platform: KeybindingPlatform
         continue
       }
       const text = chordText(chord)
-      if (text === defaultChord(command, platform)) continue
+      if (!command.desktopDefault && text === defaultChord(command, platform)) continue
       bindings[id] = text
       overrides[id] = text
     }
@@ -381,6 +435,7 @@ export function resolveKeybindings(stored: unknown, platform: KeybindingPlatform
     const claims = new Map<string, string[]>()
     for (const command of keybindingCommands) {
       const text = bindings[command.id] as string
+      if (!text) continue
       for (const scope of keybindingScopes(command)) {
         const claim = `${scope}:${text}`
         const ids = claims.get(claim)
@@ -455,7 +510,9 @@ export function matchCommand(bindings: Keybindings, event: KeyboardEvent, contex
   const pressed = chordFromEvent(event)
   if (!pressed) return null
   for (const command of keybindingCommands) {
+    if ((command.scope === 'model-picker') !== Boolean(context.modelPickerOpen)) continue
     if (command.scope !== 'global' && (command.scope === 'terminal') !== Boolean(context.terminalFocus)) continue
+    if (command.scope === 'composer' && !context.composerFocus) continue
     const chord = parseChord(bindings[command.id] ?? defaultChord(command, context))
     if (!chord || chord.key !== pressed.key) continue
     if (chord.alt !== pressed.alt || chord.shift !== pressed.shift) continue

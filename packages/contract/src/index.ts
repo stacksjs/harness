@@ -23,7 +23,7 @@ export type {
   ModelFavorite,
 } from './commands'
 export { codexSelectionLabel, isClearCommand, isClientCommand, isCompactCommand } from './commands'
-export type { CheckoutIntent, CombinedWorktreeIntent, ConversationRewindPoint, EventBase, EventPayload, EventType, ForkSource, HarnessEvent, ProviderContextUsage, RepositoryCheckpoint, WorktreeIntent, WorktreeSelection } from './events'
+export type { CheckoutIntent, CombinedWorktreeIntent, ConversationRewindPoint, EventBase, EventPayload, EventType, ForkSource, HarnessEvent, ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, RepositoryPullRequest, WorktreeIntent, WorktreeSelection } from './events'
 export { GLOBAL_SESSION_ID, isGlobalEvent } from './events'
 export type { InputAnswer, InputOption, InputQuestion, InputResponse } from './input'
 export { inputResponseValues, MAX_INPUT_ANSWER_LENGTH, validInputAnswers } from './input'
@@ -35,9 +35,9 @@ export { MAX_COMPOSER_ATTACHMENTS } from './composer-attachments'
 export { applyFollowUpEvent } from './follow-ups'
 export type { FollowUpQueue, QueuedFollowUp, SteeringOutcome } from './follow-ups'
 
-export { acceptedClaudeAccountCompaction, acceptedSettings, defaultHostSettings, hostSettings, settingsDelta } from './settings'
+export { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, defaultHostSettings, defaultSnoozePresets, effectiveSettings, hostSettings, maxSnoozeMinutes, maxSnoozePresets, projectSettingsDelta, sameSnoozePresets, settingsDelta, snoozeDays, snoozePresetKey } from './settings'
 export { claudeCompactionReturnAt } from './idle-compaction'
-export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, HostSettings, TerminalShell } from './settings'
+export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, HostSettings, ProjectSettings, SnoozeDay, SnoozePreset, TerminalShell } from './settings'
 
 export { maximumThreadSnooze, pinOrder, threadDisplayTitle, threadPlacementKeys, threadUndoDuration } from './thread-navigation'
 export type { ThreadDrop, ThreadNavigation, ThreadOrganizationAction, ThreadPlacement, ThreadUndoOffer, ThreadUndoRecord, ThreadUndoResult, ThreadUndoScopeUpdate } from './thread-navigation'

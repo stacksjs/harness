@@ -1,0 +1,6 @@
+<input type="hidden" name="base" value="{{ selected.baseSha }}">
+<input type="hidden" name="baseBranch" value="{{ selected.baseRef }}">
+<input type="hidden" name="head" value="{{ selected.head }}">
+<input type="hidden" name="viewer" value="{{ selected.lifecycle.viewer.id }}">
+<input type="hidden" name="revision" value="{{ selected.lifecycle.revision }}">
+<input type="hidden" name="intent" value="{{ selected.lifecycle.token }}">

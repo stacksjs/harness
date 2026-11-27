@@ -160,6 +160,32 @@ describe('viewProps — shaping the read model for the page', () => {
     expect(props.draftWorkspace).toEqual({ id: 11, name: 'beta', trusted: false })
   })
 
+  it('serves the answers of the project in view, for a thread and for a draft', () => {
+    const state = stateWith()
+    state.workspaces.get(10)!.settings = { defaultDriver: 'codex' }
+    state.workspaces.get(20)!.settings = { terminalShell: 'den' }
+
+    // The thread's own project, not the profile's first or the host's.
+    const thread = viewProps(state, { sessionId: 100, serverUrl: 'ws://x/ws' })
+    expect(thread.projectSettingsId).toBe(10)
+    expect(thread.projectSettings).toEqual({ defaultDriver: 'codex' })
+    // Apart from the host's answers, so the page can tell pinned from inherited.
+    expect(thread.hostSettings.defaultDriver).toBe('claude')
+
+    const draft = viewProps(state, { workspaceId: 20, profileId: 2, serverUrl: 'ws://x/ws' })
+    expect(draft.projectSettingsId).toBe(20)
+    expect(draft.projectSettings).toEqual({ terminalShell: 'den' })
+  })
+
+  it('pins nothing for a project that answers nothing, and names no project without one', () => {
+    const props = viewProps(stateWith(), { sessionId: 100, serverUrl: 'ws://x/ws' })
+    expect(props.projectSettings).toEqual({})
+
+    const empty = viewProps(emptyState(), { serverUrl: 'ws://x/ws' })
+    expect(empty.projectSettingsId).toBe(0)
+    expect(empty.projectSettings).toEqual({})
+  })
+
   it('carries no active session when the route names none', () => {
     expect(viewProps(stateWith(), { serverUrl: 'ws://x/ws' }).activeSession).toBeNull()
   })

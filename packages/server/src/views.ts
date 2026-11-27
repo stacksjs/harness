@@ -7,12 +7,13 @@
  * has run.
  */
 
-import type { ClaudeAccountCompaction, HostSettings, ThreadNavigation } from '@harness/contract'
+import type { ClaudeAccountCompaction, HostSettings, ProjectSettings, ThreadNavigation } from '@harness/contract'
 import { codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
 import { checkpointReviewRepositories, claudeIdleCompaction, conversationRewindPoint, isForkableResponse, isolatedRewindScope, providerConversation } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import type { KeybindingCommand } from './keybindings'
 import { ariaKeyshortcuts, formatChord, keybindingCommands, parseChord } from './keybindings'
 import { settingsSections } from './settings-location'
 import type { SettingsSection } from './settings-location'
@@ -41,6 +42,9 @@ export interface ViewProps {
   claudeCompactionByAccount: Record<number, ClaudeAccountCompaction>
   draftWorkspace: ProjectSummary | null
   draftWithoutProject: boolean
+  missingThread: boolean
+  freshDraftId: string | null
+  pullRequestProfile: number | null
   activeSession: {
     turns: ReadonlyArray<{ id: number, response: string, status: string }>
     [key: string]: unknown
@@ -62,6 +66,14 @@ export interface ViewProps {
    */
   hostSettings: HostSettings
   /**
+   * What the project in view answers for itself, where it does not take the
+   * host's answer, and which project that is. Only the keys it pins are here:
+   * the page layers them over `hostSettings` to show what is in force, and
+   * needs them apart to show which of the two a row is following.
+   */
+  projectSettings: ProjectSettings
+  projectSettingsId: number
+  /**
    * The keyboard registry, rendered into the Keyboard section.
    *
    * Both platform spellings travel with each row because the server cannot
@@ -73,7 +85,7 @@ export interface ViewProps {
     label: string
     description: string
     chord: string
-    scope?: 'terminal' | 'global'
+    scope?: KeybindingCommand['scope']
     apple: string
     other: string
     /** `aria-keyshortcuts` value, for the controls that advertise a chord. */
@@ -102,6 +114,7 @@ export interface ViewProps {
  */
 export function viewProps(state: HarnessState, options: {
   sessionId?: number
+  missingThread?: boolean
   /**
    * Profile to open the sidebar on.
    *
@@ -113,6 +126,8 @@ export function viewProps(state: HarnessState, options: {
   profileId?: number
   workspaceId?: number
   withoutProject?: boolean
+  freshDraftId?: string | null
+  pullRequestProfile?: number
   serverUrl: string
   codecUrl?: string
   remoteEnabled?: boolean
@@ -175,6 +190,7 @@ export function viewProps(state: HarnessState, options: {
     ?? selectedProfile?.workspaces[0]
     ?? null
 
+  const settingsWorkspaceId = active?.workspaceId ?? draftWorkspace?.id
   const providerProfileId = (active ? state.workspaces.get(active.workspaceId)?.profileId : undefined) ?? selectedProfile?.id ?? null
   return {
     profiles,
@@ -190,6 +206,8 @@ export function viewProps(state: HarnessState, options: {
     settingsSection: options.settingsSection ?? null,
     settingsSections,
     hostSettings: { ...state.settings },
+    projectSettingsId: settingsWorkspaceId ?? 0,
+    projectSettings: { ...(settingsWorkspaceId === undefined ? undefined : state.workspaces.get(settingsWorkspaceId)?.settings) },
     keybindings: keybindingCommands.map((command) => {
       const chord = parseChord(command.chord)
       const appleChord = parseChord(command.appleChord ?? command.chord)
@@ -199,19 +217,30 @@ export function viewProps(state: HarnessState, options: {
         description: command.description,
         chord: command.chord,
         scope: command.scope,
-        apple: appleChord ? formatChord(appleChord, true) : command.chord,
-        other: chord ? formatChord(chord, false) : command.chord,
-        aria: chord ? ariaKeyshortcuts(chord) : '',
+        apple: command.desktopDefault ? 'Unassigned' : appleChord ? formatChord(appleChord, true) : command.chord,
+        other: command.desktopDefault ? 'Unassigned' : chord ? formatChord(chord, false) : command.chord,
+        aria: chord && !command.desktopDefault ? ariaKeyshortcuts(chord) : '',
       }
     }),
     activeProfile: String(selectedProfile?.id ?? ''),
+    missingThread: options.missingThread === true,
     draftWorkspace,
     draftWithoutProject,
+    pullRequestProfile: options.pullRequestProfile ?? null,
+    freshDraftId: !active && (draftWorkspace || draftWithoutProject) && /^web_[a-z0-9]{1,16}_[a-z0-9]{1,6}$/.test(options.freshDraftId ?? '')
+      ? options.freshDraftId ?? null
+      : null,
     activeSession: active
       ? {
           id: active.id,
           title: threadTitle(active),
           navigation: active.navigation,
+          linkedPullRequests: active.linkedPullRequests,
+          pullRequest: active.pullRequest ? {
+            reference: active.pullRequest,
+            url: 'https://github.com/' + active.pullRequest.repository + '/pull/' + active.pullRequest.number,
+            label: active.pullRequest.repository + '#' + active.pullRequest.number,
+          } : undefined,
           fork: active.fork ? {
             sourceSessionId: active.fork.sessionId,
             sourceTurnId: active.fork.turnId,
@@ -322,31 +351,7 @@ function resolveView(): string | null {
 export async function renderHarnessView(props: ViewProps): Promise<string | null> {
   const path = resolveView()
   if (!path) return null
-  // Imported lazily, not at module load. `@stacksjs/stx` pulls in the whole
-  // template and CSS toolchain; loading it eagerly made every socket test pay
-  // for a renderer it never calls, to the point of being OOM-killed.
-  const { renderView } = await import('@stacksjs/stx')
-  // The app's stx config, loaded explicitly: `renderView` builds its options
-  // from `defaultConfig` alone and never reads `config/ui.ts`, so without
-  // this spread the config was decorative — `autoShell`, `app.head` and
-  // `stateDir` all unreachable, and the page shipped as a bare fragment with
-  // no doctype, no title and no charset (stx-standards §2, §4).
-  const uiPath = join(process.cwd(), 'config/ui.ts')
-  const ui = existsSync(uiPath) ? (await import(uiPath)).default : {}
-  // `renderView` resolves components by filename, and searches only the app's
-  // own directories plus stx's built-ins — so `<Sidebar>` renders as a
-  // "component not found" block unless it is pointed at the library.
-  //
-  // It must point at `src/`, not `dist/`: the published dist ships hashed
-  // filenames (`Sidebar-56px4jha.stx`) that plain-name lookup cannot find,
-  // while `src/ui/<name>/<Name>.stx` keeps the tag name. That is also what the
-  // package's own stx plugin registers, so this matches how a configured stx
-  // build resolves them.
-  const html = await renderView(path, props as unknown as Record<string, unknown>, {
-    ...ui,
-    buildMode: 'serve',
-    componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
-  })
+  const html = await renderHarnessTemplate(path, props as unknown as Record<string, unknown>)
   const responses = props.activeSession?.turns.filter(turn => turn.response)
   if (!responses?.length) return html
 
@@ -366,4 +371,31 @@ export async function renderHarnessView(props: ViewProps): Promise<string | null
       element.setInnerContent(renderTranscriptMarkdown(turn.response), { html: true })
     },
   }).transform(html)
+}
+
+export async function renderHarnessTemplate(path: string, props: Record<string, unknown>) {
+  // Socket-only hosts never need the renderer. Web requests load its STX
+  // subpath directly so rendering does not also load the other SDK features.
+  const { renderView } = await import('@stacksjs/stx/build-views')
+  // The app's stx config, loaded explicitly: `renderView` builds its options
+  // from `defaultConfig` alone and never reads `config/ui.ts`, so without
+  // this spread the config was decorative — `autoShell`, `app.head` and
+  // `stateDir` all unreachable, and the page shipped as a bare fragment with
+  // no doctype, no title and no charset (stx-standards §2, §4).
+  const uiPath = join(process.cwd(), 'config/ui.ts')
+  const ui = existsSync(uiPath) ? (await import(uiPath)).default : {}
+  // `renderView` resolves components by filename, and searches only the app's
+  // own directories plus stx's built-ins — so `<Sidebar>` renders as a
+  // "component not found" block unless it is pointed at the library.
+  //
+  // It must point at `src/`, not `dist/`: the published dist ships hashed
+  // filenames (`Sidebar-56px4jha.stx`) that plain-name lookup cannot find,
+  // while `src/ui/<name>/<Name>.stx` keeps the tag name. That is also what the
+  // package's own stx plugin registers, so this matches how a configured stx
+  // build resolves them.
+  return renderView(path, props, {
+    ...ui,
+    buildMode: 'serve',
+    componentsDir: join(process.cwd(), 'node_modules/@stacksjs/components/src/ui'),
+  })
 }

@@ -1,0 +1,272 @@
+import { createHash } from 'node:crypto'
+import { parseFilePatch } from './diff-patch'
+import { repositoryGitHubRequest } from './repository-pull-request'
+
+type Page<T> = { nodes?: (T | null)[], pageInfo?: { endCursor?: string, hasNextPage?: boolean, startCursor?: string, hasPreviousPage?: boolean } }
+export type ReviewCommentWindow =
+  | { direction: 'after' | 'before', cursor: string }
+  | { direction: 'latest' }
+  | { direction: 'recovery', cursor?: string }
+type CommentNode = { id?: string, author?: { id?: string, login?: string }, body?: string, createdAt?: string, url?: string, isMinimized?: boolean }
+type ThreadState = { id: string, isResolved: boolean, viewerCanResolve: boolean, viewerCanUnresolve: boolean, viewerCanReply: boolean }
+type ThreadNode = Partial<ThreadState> & {
+  path?: string
+  line?: number | null
+  startLine?: number | null
+  diffSide?: string
+  startDiffSide?: string | null
+  originalLine?: number | null
+  originalStartLine?: number | null
+  isOutdated?: boolean
+  comments?: Page<CommentNode>
+}
+
+const threadFields = 'id isResolved viewerCanResolve viewerCanUnresolve viewerCanReply'
+const threadPageQuery = `query PullRequestReviewConversations($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  viewer { id login }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id headRefOid
+      reviewThreads(first: 40, after: $cursor) {
+        nodes {
+          ${threadFields}
+          path line startLine diffSide startDiffSide originalLine originalStartLine isOutdated
+          comments(first: 20) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id author { login } body createdAt url isMinimized }
+          }
+        }
+        pageInfo { endCursor hasNextPage }
+      }
+    }
+  }
+}`
+const commentFields = 'id author { login ... on Node { id } } body createdAt url isMinimized'
+const replyMarker = /^<!-- harness:review-reply:[0-9a-f-]{36} -->\r?\n\r?\n/u
+const singleThreadQuery = `query PullRequestReviewConversation($id: ID!, $replies: Boolean!, $first: Int, $last: Int, $after: String, $before: String) {
+  viewer { id }
+  node(id: $id) {
+    ... on PullRequestReviewThread {
+      ${threadFields}
+      pullRequest { number headRefOid repository { nameWithOwner } }
+      comments(first: $first, last: $last, after: $after, before: $before) @include(if: $replies) {
+        nodes { ${commentFields} }
+        pageInfo { startCursor hasPreviousPage endCursor hasNextPage }
+      }
+    }
+  }
+}`
+
+export const reviewThreadId = /^[A-Za-z0-9_+=/-]{1,256}$/u
+export class ReviewConversationConflict extends Error {}
+
+export function reviewConversationAnchor(id: string): string {
+  return 'review-' + createHash('sha256').update(id).digest('hex').slice(0, 24)
+}
+
+export function reviewCommentCursor(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(value) ? value : null
+}
+
+function threadState(node?: ThreadNode | null): ThreadState | null {
+  if (!node?.id || !reviewThreadId.test(node.id) || typeof node.isResolved !== 'boolean'
+    || typeof node.viewerCanResolve !== 'boolean' || typeof node.viewerCanUnresolve !== 'boolean') return null
+  return { id: node.id, isResolved: node.isResolved, viewerCanResolve: node.viewerCanResolve, viewerCanUnresolve: node.viewerCanUnresolve,
+    viewerCanReply: node.viewerCanReply === true }
+}
+
+export function reviewComment(node: CommentNode | null, thread: string, address: string) {
+  if (!node?.id || !reviewThreadId.test(node.id)) return null
+  const url = typeof node.url === 'string' ? URL.parse(node.url) : null
+  const pull = new URL(address)
+  const href = url && url.origin === pull.origin && !url.username && !url.password && !url.search
+    && url.pathname.toLowerCase() === pull.pathname.toLowerCase() && /^#discussion_r\d+$/u.test(url.hash) ? url.href : ''
+  return { anchor: reviewConversationAnchor(thread + ':' + node.id), href,
+    author: node.author?.login?.slice(0, 128) || 'Unknown author',
+    time: node.createdAt ?? '',
+    text: !node.isMinimized && typeof node.body === 'string' ? node.body.replace(replyMarker, '').slice(0, 32_768) : '',
+    minimized: Boolean(node.isMinimized) }
+}
+
+export type ReviewComment = NonNullable<ReturnType<typeof reviewComment>>
+
+function reviewCommentPage(connection: Page<CommentNode>, id: string, address: string, window?: ReviewCommentWindow) {
+  const comments = Array.isArray(connection.nodes)
+    ? connection.nodes.flatMap(comment => reviewComment(comment, id, address) ?? []) : []
+  const { startCursor, endCursor, hasPreviousPage, hasNextPage } = connection.pageInfo ?? {}
+  // GitHub may omit history in the opposite direction from a bounded request.
+  const nextComments = hasNextPage || (comments.length && window?.direction === 'before') ? reviewCommentCursor(endCursor) : null
+  const previousComments = hasPreviousPage || (comments.length && window?.direction === 'after') ? reviewCommentCursor(startCursor) : null
+  return { comments: [...new Map(comments.map(comment => [comment.anchor, comment])).values()], nextComments, previousComments }
+}
+
+function positiveLine(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+function reviewConversation(node: ThreadNode | null, address: string) {
+  const state = threadState(node)
+  if (!state || !node?.path || typeof node.path !== 'string' || Buffer.byteLength(node.path) > 4096) return null
+  const outdated = Boolean(node.isOutdated)
+  const line = positiveLine(outdated ? node.originalLine : node.line)
+  const start = positiveLine(outdated ? node.originalStartLine : node.startLine)
+  const side = node.diffSide === 'LEFT' ? 'before' : node.diffSide === 'RIGHT' ? 'after' : null
+  const rangeOnSameSide = !node.startDiffSide || node.startDiffSide === node.diffSide
+  const location = line ? start && start < line && rangeOnSameSide ? 'Lines ' + start + ' to ' + line : 'Line ' + line : ''
+  return { ...state, anchor: reviewConversationAnchor(state.id), path: node.path, outdated, line, side,
+    replyIntent: crypto.randomUUID(),
+    location: location && side ? location + (side === 'before' ? ' before changes' : ' after changes') : location,
+    ...reviewCommentPage(node.comments ?? {}, state.id, address) }
+}
+
+export type ReviewConversation = NonNullable<ReturnType<typeof reviewConversation>>
+export type ReviewPatchRow = {
+  kind: 'header' | 'context' | 'addition' | 'deletion' | 'note'
+  text: string
+  hunk: number
+  position: number
+  before?: number
+  after?: number
+}
+export type ReviewPatchSection = { patch: string, rows: ReviewPatchRow[], conversations: ReviewConversation[] }
+const patchPrefixes = { context: ' ', addition: '+', deletion: '-' } as const
+
+export function reviewLineAnchor(file: string, side: 'before' | 'after', line: number): string {
+  return file + '-' + (side === 'before' ? 'L' : 'R') + line
+}
+
+export function reviewLineRange(sections: ReviewPatchSection[], file: string, line: string | null, start: string | null) {
+  if (!line?.startsWith(file + '-') || (start && !start.startsWith(file + '-'))) return null
+  const rows = sections.flatMap(section => section.rows)
+  const find = (anchor: string) => {
+    const match = /-([LR])([1-9][0-9]*)$/u.exec(anchor)
+    if (!match) return undefined
+    const side: 'before' | 'after' = match[1] === 'L' ? 'before' : 'after'
+    const number = Number(match[2])
+    const row = Number.isSafeInteger(number) && anchor === reviewLineAnchor(file, side, number)
+      ? rows.find(row => row[side] === number) : undefined
+    return row && { row, number, side }
+  }
+  const first = find(start || line)
+  const last = find(line)
+  if (!first || !last || first.row.hunk !== last.row.hunk) return null
+  return first.row.position <= last.row.position ? { first, last } : { first: last, last: first }
+}
+
+export function reviewLineSelection(sections: ReviewPatchSection[], file: string, line: string | null, start: string | null) {
+  const range = line && reviewLineRange(sections, file, line, start)
+  return range && line ? { first: range.first.row.position, last: range.last.row.position, line, start: start || line } : null
+}
+
+export function placeReviewConversations(patch: string, conversations: ReviewConversation[]): ReviewPatchSection[] {
+  const pending = new Set(conversations)
+  const byLine = Map.groupBy(conversations.filter(thread => !thread.outdated && thread.line && thread.side), thread => thread.side + ':' + thread.line)
+  const sections: ReviewPatchSection[] = []
+  const rows: ReviewPatchRow[] = []
+  let position = 0
+  const flush = (attached: ReviewConversation[]) => {
+    sections.push({ patch: rows.map(row => row.text).join('\n'), rows: rows.splice(0), conversations: attached })
+  }
+  for (const [index, hunk] of parseFilePatch(patch).entries()) {
+    rows.push({ kind: 'header', text: hunk.header, hunk: index, position: position++ })
+    for (const line of hunk.lines) {
+      rows.push({ kind: line.kind, text: patchPrefixes[line.kind] + line.text, hunk: index, position: position++,
+        before: line.before ?? undefined, after: line.after ?? undefined })
+      if (line.newlineNote) rows.push({ kind: 'note', text: '\\ ' + line.newlineNote, hunk: index, position: position++ })
+      const attached = [...(byLine.get('before:' + line.before) ?? []), ...(byLine.get('after:' + line.after) ?? [])]
+        .filter(thread => pending.delete(thread))
+      if (attached.length) flush(attached)
+    }
+  }
+  if (sections.length) {
+    if (rows.length) flush([])
+  }
+  else if (patch) {
+    const complete = rows.map(row => row.text).join('\n') === patch.replace(/\n$/u, '')
+    sections.push({ patch, rows: complete ? rows : [], conversations: [] })
+  }
+  if (pending.size) sections.push({ patch: '', rows: [], conversations: [...pending] })
+  return sections
+}
+
+export async function readReviewConversations(path: string, repository: string, number: number, head: string, address: string, signal: AbortSignal, credential: string) {
+  const [owner, name] = repository.split('/')
+  type PullPage = { id: string, headRefOid: string, reviewThreads?: Page<ThreadNode> }
+  type Response = { viewer?: { id?: string, login?: string }, repository?: { pullRequest?: PullPage } }
+  const conversations = new Map<string, ReviewConversation>()
+  let cursor: string | undefined
+  let viewer = ''
+  let login = ''
+  let pullId = ''
+  for (let page = 0; page < 25; page++) {
+    signal.throwIfAborted()
+    const reply = await repositoryGitHubRequest(path, 'graphql', { query: threadPageQuery, variables: { owner, name, number, cursor } }, signal, credential)
+    const result = reply.body as { data?: Response, errors?: unknown[] } | null
+    const pull = result?.data?.repository?.pullRequest
+    const account = result?.data?.viewer?.id
+    if (reply.status !== 200 || result?.errors?.length || !account || !pull?.id || !Array.isArray(pull.reviewThreads?.nodes)) return null
+    if (pull.headRefOid !== head || (viewer && viewer !== account) || (pullId && pullId !== pull.id)) throw new ReviewConversationConflict()
+    viewer = account
+    login = result?.data?.viewer?.login ?? login
+    pullId = pull.id
+    for (const node of pull.reviewThreads.nodes) {
+      const thread = reviewConversation(node, address)
+      if (thread) conversations.set(thread.id, thread)
+    }
+    if (!pull.reviewThreads.pageInfo?.hasNextPage) return { viewer, login, conversations: [...conversations.values()], truncated: false }
+    const next = pull.reviewThreads.pageInfo.endCursor
+    if (!next || next === cursor) break
+    cursor = next
+  }
+  return { viewer, login, conversations: [...conversations.values()], truncated: true }
+}
+
+export async function readReviewConversationState(path: string, repository: string, number: number, head: string, id: string,
+  signal: AbortSignal, credential: string, commentWindow?: ReviewCommentWindow) {
+  type ScopedThread = ThreadNode & { pullRequest?: { headRefOid?: string, number?: number, repository?: { nameWithOwner?: string } } }
+  const variables = { id, replies: Boolean(commentWindow),
+    ...(commentWindow?.direction === 'after' ? { first: 20, after: commentWindow.cursor }
+      : commentWindow && { last: commentWindow.direction === 'recovery' ? 50 : 20,
+        ...('cursor' in commentWindow && commentWindow.cursor ? { before: commentWindow.cursor } : {}) }),
+  }
+  const reply = await repositoryGitHubRequest(path, 'graphql', { query: singleThreadQuery, variables }, signal, credential)
+  const result = reply.body as { data?: { viewer?: { id?: string }, node?: ScopedThread }, errors?: unknown[] } | null
+  const node = result?.data?.node
+  const viewer = result?.data?.viewer?.id
+  if (reply.status !== 200 || result?.errors?.length || !viewer) return null
+  const thread = threadState(node)
+  if (!thread || thread.id !== id || node?.pullRequest?.number !== number || node.pullRequest.headRefOid !== head
+    || node.pullRequest.repository?.nameWithOwner?.toLowerCase() !== repository.toLowerCase()) throw new ReviewConversationConflict()
+  return { thread, viewer, comments: node.comments }
+}
+
+export async function readReviewCommentPage(path: string, repository: string, number: number, head: string, viewer: string,
+  id: string, address: string, signal: AbortSignal, credential: string, window: ReviewCommentWindow) {
+  const state = await readReviewConversationState(path, repository, number, head, id, signal, credential, window)
+  if (!state) return null
+  if (state.viewer !== viewer) throw new ReviewConversationConflict()
+  if (!Array.isArray(state.comments?.nodes) || !state.comments.pageInfo) return null
+  const page = reviewCommentPage(state.comments, id, address, window)
+  if (state.comments.pageInfo.hasNextPage && !page.nextComments
+    || state.comments.pageInfo.hasPreviousPage && !page.previousComments
+    || window.direction === 'after' && page.nextComments === window.cursor
+    || window.direction === 'before' && page.previousComments === window.cursor) return null
+  return page
+}
+
+export async function writeReviewConversation(path: string, id: string, resolved: boolean, signal: AbortSignal, credential: string) {
+  const operation = resolved ? 'resolveReviewThread' : 'unresolveReviewThread'
+  const query = `mutation SetPullRequestConversationResolved($id: ID!) { ${operation}(input: { threadId: $id }) { thread { id isResolved } } }`
+  await repositoryGitHubRequest(path, 'graphql', { query, variables: { id } }, signal, credential)
+}
+
+export async function writeReviewReply(path: string, id: string, body: string, signal: AbortSignal, credential: string) {
+  const query = `mutation AddPullRequestConversationReply($id: ID!, $body: String!) {
+    addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) {
+      comment { ${commentFields} }
+    }
+  }`
+  const reply = await repositoryGitHubRequest(path, 'graphql', { query, variables: { id, body } }, signal, credential)
+  const result = reply.body as { data?: { addPullRequestReviewThreadReply?: { comment?: CommentNode } } } | null
+  return reply.status === 200 ? result?.data?.addPullRequestReviewThreadReply?.comment ?? null : null
+}

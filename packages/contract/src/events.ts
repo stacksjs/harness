@@ -37,6 +37,16 @@ export interface WorktreeSelection {
   baseBranch?: string
 }
 
+export interface RepositoryPullRequest {
+  repository: string
+  number: number
+  repositoryKey: string
+}
+
+export interface PullRequestCheckout extends RepositoryPullRequest {
+  commit: string
+}
+
 export interface CombinedWorktreeIntent {
   repository: string
   path: string
@@ -78,7 +88,7 @@ export interface ForkSource {
 }
 
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, worktree?: WorktreeSelection, forkFrom?: ForkSource }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, worktree?: WorktreeSelection, forkFrom?: ForkSource, pullRequest?: PullRequestCheckout }
   | { type: 'session.stopped' }
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation>, undo?: ThreadUndoRecord, undoScope?: ThreadUndoScopeUpdate }
   | { type: 'session.failed', message: string }
@@ -130,11 +140,12 @@ export type EventPayload =
   | { type: 'session.worktree-reserved', intent: WorktreeIntent }
   /** This session got its own checkout and branch. */
   | { type: 'session.isolated', worktreePath: string, branch: string, combined?: CombinedWorktreeIntent }
+  | { type: 'session.pull-request-linked', pullRequest: RepositoryPullRequest }
   | { type: 'session.worktree-restored' }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number, skipped?: string[] }
   | { type: 'checkpoint.restore-failed', checkpointId: number, message: string }
   /** Only the settings that actually changed, for the same reason as below. */
-  | { type: 'settings.updated', changes: Partial<HostSettings> }
+  | { type: 'settings.updated', changes: Partial<HostSettings>, workspaceId?: number, inherit?: Array<keyof HostSettings> }
   | { type: 'profile.created', profileId: number, name: string, icon?: string, tint?: string }
   /**
    * Only the fields that changed. Absent means "leave it alone", which is what

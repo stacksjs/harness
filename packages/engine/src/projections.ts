@@ -6,9 +6,9 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProviderContextUsage, QuestionAttachment, RepositoryCheckpoint, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
-import { acceptedClaudeAccountCompaction, acceptedSettings, applyFollowUpEvent, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
 import type { ThreadUndoStack } from './thread-undo'
 
@@ -40,6 +40,8 @@ export interface SessionState {
   providerConversations?: Record<string, ProviderConversation>
   handoff?: { afterTurnId: number, pending: boolean }
   fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', nativeSessionId?: string, error?: string }
+  pullRequest?: PullRequestCheckout
+  linkedPullRequests?: RepositoryPullRequest[]
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
   lastSeq: number
@@ -219,6 +221,8 @@ export interface WorkspaceState {
   path: string
   trusted: boolean
   scratch?: boolean
+  /** Only the settings this project answers for itself. */
+  settings?: ProjectSettings
 }
 
 /**
@@ -350,6 +354,18 @@ export function isTurnActive(state: SessionState['state']): boolean {
   return state === 'running' || state === 'awaiting-approval' || state === 'awaiting-input'
 }
 
+/**
+ * The settings in force for one project, and so for its threads.
+ *
+ * Everything that reads a preference for a particular thread goes through
+ * here rather than through `state.settings`, so a project that pins the agent
+ * or its settlement window is honored everywhere and not only where the pane
+ * that set it happens to look.
+ */
+export function workspaceSettings(state: HarnessState, workspaceId: number | undefined): HostSettings {
+  return effectiveSettings(state.settings, workspaceId === undefined ? undefined : state.workspaces.get(workspaceId)?.settings)
+}
+
 export function inactivityDeadline(session: SessionState, settings: HostSettings): number | undefined {
   const navigation = session.navigation
   if (settings.autoSettleAfterDays == null || session.lastActivityAt === undefined
@@ -401,7 +417,22 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       // no longer accepts was written by one that did, and replaying it
       // verbatim would put the projection somewhere the type says it cannot
       // be. The setting falls back to its default instead.
-      Object.assign(state.settings, acceptedSettings(p.changes))
+      const changes = acceptedSettings(p.changes)
+      if (p.workspaceId === undefined) {
+        Object.assign(state.settings, changes)
+        return state
+      }
+      // A project that has since been forgotten leaves nothing to carry: the
+      // log still holds the change, and replaying it into a workspace that is
+      // not there would invent one.
+      const workspace = state.workspaces.get(p.workspaceId)
+      if (!workspace) return state
+      const settings: ProjectSettings = { ...workspace.settings, ...changes }
+      for (const key of acceptedSettingKeys(p.inherit)) delete settings[key]
+      // An empty override is the same state as never having pinned anything,
+      // so it is stored as that rather than as an empty object a later replay
+      // would have to treat as equivalent anyway.
+      workspace.settings = Object.keys(settings).length ? settings : undefined
       return state
     }
 
@@ -557,6 +588,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
           ...(!fork.providerSessionId ? { handoff: { afterTurnId: fork.turnId, pending: true } } : {}),
           navigation: { title: threadDisplayTitle(source?.navigation?.title, source?.turns[0]?.prompt) + ' fork' },
         } : {}),
+        ...(p.pullRequest && {
+          pullRequest: p.pullRequest,
+          navigation: { title: p.pullRequest.repository + '#' + p.pullRequest.number },
+        }),
         state: 'idle',
         lastSeq: 0,
         turns: copied,
@@ -804,6 +839,12 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       break
     }
 
+    case 'session.pull-request-linked': {
+      const session = state.sessions.get(event.sessionId)
+      if (session) (session.linkedPullRequests ??= []).push(p.pullRequest)
+      break
+    }
+
     case 'session.worktree-reserved': {
       const session = state.sessions.get(event.sessionId)
       if (session) session.worktreeIntent = p.intent
@@ -815,6 +856,10 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session) break
       session.worktreePath = p.worktreePath
       session.branch = p.branch
+      if (session.pullRequest && !session.turns.length && session.state === 'failed') {
+        session.state = 'idle'
+        delete session.lastError
+      }
       if (p.combined) session.combinedWorktree = p.combined
       delete session.worktreeIntent
       break

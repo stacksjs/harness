@@ -1,0 +1,1086 @@
+<script server>
+export const profiles = $props.profiles || []
+export const repositories = $props.repositories || []
+export const selected = $props.selected || null
+export const pulls = $props.rows || []
+export const failures = $props.failures || []
+export const tab = $props.tab || 'summary'
+export const selectionError = $props.selectionError || ''
+export const hasDetail = Boolean(selected || selectionError)
+export const stateOptions = [{ value: 'open', label: 'Open' }, { value: 'closed', label: 'Closed' }, { value: 'merged', label: 'Merged' }, { value: 'all', label: 'All states' }]
+export const sortOptions = [{ value: 'updated', label: 'Recently updated' }, { value: 'newest', label: 'Newest created' }, { value: 'oldest', label: 'Oldest created' }]
+export const sort = $props.sort
+export const tabOptions = [{ value: 'summary', label: 'Summary', href: $props.summaryHref },
+  { value: 'timeline', label: 'Timeline', href: $props.timelineHref }, { value: 'code', label: 'Code', href: $props.codeHref }]
+const outcomes = { failed: 'Failed', cancelled: 'Cancelled', 'action-required': 'Action required', pending: 'Pending', passed: 'Passed', skipped: 'Skipped', neutral: 'Neutral', unknown: 'Unknown' }
+const attention = check => !['passed', 'neutral', 'skipped'].includes(check.status)
+export const checks = (selected?.checks || []).filter(attention).sort((a, b) => Number(a.status === 'pending') - Number(b.status === 'pending'))
+export const completed = (selected?.checks || []).filter(check => !attention(check))
+export const primaryChecks = checks.length ? checks : completed
+export const approvalRuns = selected?.approvalRuns || []
+export const approvalLookupFailed = selected?.approvalRuns === null
+export const checksLabel = check => outcomes[check.status] || 'Unknown'
+const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+export const dateLabel = date => date && Number.isFinite(Date.parse(date)) ? dates.format(new Date(date)) : ''
+export const detailTitle = selected?.title || 'Pull request unavailable'
+export const headLabel = selected?.head ? selected.head.slice(0, 7) : ''
+
+export const backHref = $props.backHref
+export const search = $props.search
+export const activeProfileId = $props.profile
+export const repositoryFilter = $props.repository
+export const filter = $props.filter
+export const pageBack = $props.pageBack
+export const page = $props.page
+export const pageNext = $props.pageNext
+export const listHref = $props.listHref
+export const detailPage = $props.detailPage
+export const detailBack = $props.detailBack
+export const detailNext = $props.detailNext
+export const viewedAction = $props.viewedAction
+export const viewedAnchor = $props.viewedAnchor
+export const viewedNotice = $props.viewedNotice
+export const trackedFiles = (selected?.files || []).filter(file => file.viewed)
+export const viewedCount = trackedFiles.filter(file => file.viewed === 'VIEWED').length
+export const initialViewedStates = Object.fromEntries(trackedFiles.map(file => [file.anchor, file.viewed]))
+export const conversationAction = $props.conversationAction
+export const conversationAnchor = $props.conversationAnchor
+export const conversationNotice = $props.conversationNotice
+export const replyAction = $props.replyAction
+export const replyNotice = $props.replyNotice
+export const commentsBase = $props.commentsBase
+export const commentsAction = $props.commentsAction
+export const replyDraft = $props.replyDraft?.viewer === selected?.conversationViewer && $props.replyDraft?.head === selected?.head ? $props.replyDraft : null
+export const initialReplyDrafts = replyDraft ? { [replyDraft.anchor]: { text: replyDraft.text, token: replyDraft.token, pending: replyDraft.pending } } : {}
+export const replyDraftStorage = 'harness.pr-reply.v1:' + JSON.stringify([activeProfileId, selected?.url, selected?.head, selected?.conversationViewer])
+export const inlineReviewAvailable = Boolean(selected?.reviewViewer && selected?.head && selected?.baseSha)
+export const inlineReviewAuthor = selected?.reviewViewer?.login.toLowerCase() === selected?.author?.toLowerCase()
+export const inlineReviewStorage = 'harness.pr-review.v1:' + JSON.stringify([activeProfileId, selected?.url, selected?.reviewViewer?.id])
+export const inlineReviewNotice = $props.inlineReviewNotice
+export const inlineReviewAction = $props.inlineReviewAction
+export const inlineReviewEditId = $props.inlineReviewEdit
+export const lifecycleEndpoint = $props.lifecycleEndpoint
+export const labelsHref = $props.labelsHref
+export const labelsEndpoint = $props.labelsEndpoint
+export const labelsNotice = $props.labelsNotice
+export const labelDraft = $props.labelDraft
+export const labelError = $props.labelError
+export const labelOptions = selected?.labelEditor?.labels || []
+export const reviewersHref = $props.reviewersHref
+export const reviewersEndpoint = $props.reviewersEndpoint
+export const reviewersNotice = $props.reviewersNotice
+export const reviewerEditor = $props.reviewerEditor || selected?.reviewerEditor
+export const reviewerDraft = $props.reviewerDraft
+export const reviewerError = $props.reviewerError
+export const lifecycleNotice = $props.lifecycleNotice
+export const lifecycleError = $props.lifecycleError
+export const lifecyclePending = $props.lifecycleDraft || null
+export const conversations = (selected?.files || []).flatMap(file => file.sections.flatMap(section => section.conversations)).concat(selected?.detachedConversations || [])
+export const initialConversationStates = Object.fromEntries(conversations.map(thread => [thread.anchor, {
+  isResolved: thread.isResolved, viewerCanResolve: thread.viewerCanResolve, viewerCanUnresolve: thread.viewerCanUnresolve,
+}]))
+export const initialCommentPages = Object.fromEntries(conversations.map(thread => [thread.anchor, {
+  thread: thread.id, scope: selected.commentScopes[thread.anchor], next: thread.nextComments, existing: thread.comments.map(comment => comment.anchor),
+}]))
+export const commentsHref = (thread, direction) => {
+  const cursor = direction === 'before' ? thread.previousComments : thread.nextComments
+  const key = direction === 'before' ? 'commentsBefore' : 'commentsAfter'
+  return commentsBase + '&conversation=' + thread.anchor + '&commentScope=' + selected.commentScopes[thread.anchor]
+    + '&' + key + '=' + encodeURIComponent(cursor) + '#' + thread.anchor
+}
+export const linkedFile = (selected?.files || []).find(file => file.lineSelection)
+export const linkedPatch = linkedFile ? { ...linkedFile.lineSelection, file: linkedFile.anchor } : null
+export const lineId = (file, side, number) => file.anchor + '-' + side + number
+export const lineLabel = anchor => {
+  const side = anchor.split('-').at(-1)
+  return (side[0] === 'L' ? 'Before line ' : 'After line ') + side.slice(1)
+}
+export const linkedPatchLabel = linkedPatch ? lineLabel(linkedPatch.start)
+  + (linkedPatch.start === linkedPatch.line ? '' : ' to ' + lineLabel(linkedPatch.line).toLowerCase()) : ''
+export const linkedPatchHref = linkedPatch ? commentsBase + '&reviewHead=' + selected.head + '&reviewBase=' + selected.baseSha + '&reviewLine=' + linkedPatch.line
+  + (linkedPatch.line === linkedPatch.start ? '' : '&reviewStart=' + linkedPatch.start) + '#' + linkedPatch.line : ''
+export const conversationOnPage = conversations.some(thread => thread.anchor === conversationAnchor)
+</script>
+@if(tab === 'code')
+<script client>
+import { openLegacyBranchDeletion } from '../functions/pull-request-dialogs'
+
+const deleteBranchDialog = useRef('deleteBranchDialog')
+const deleteBranchTrigger = useRef('deleteBranchTrigger')
+
+function openDeleteBranchDialog() {
+  openLegacyBranchDeletion(deleteBranchDialog.current, deleteBranchTrigger.current)
+}
+
+const fileViewedStates = state(@json(initialViewedStates))
+const viewedUpdate = state('')
+const viewedMessage = state(@json(viewedNotice))
+const reviewThreads = state(@json(initialConversationStates))
+const reviewPending = state({})
+const reviewMessages = state(@json(conversationOnPage && conversationNotice ? { [conversationAnchor]: conversationNotice } : {}))
+const replyDrafts = useSessionStorage(@json(replyDraftStorage), @json(initialReplyDrafts), { listenToStorageChanges: false })
+const replyMessages = state(@json(replyDraft ? { [replyDraft.anchor]: replyDraft.message } : replyNotice ? { [conversationAnchor]: replyNotice } : {}))
+const replySending = state({})
+const sentReviewReplies = state({})
+const knownCommentPages = @json(initialCommentPages)
+const commentsPageBase = @json(commentsBase)
+const commentsApi = @json(commentsAction)
+const commentsAccount = @json(selected?.conversationViewer || '')
+const commentsHead = @json(selected?.head || '')
+const reviewCommentPages = state({})
+const patchSelection = state(@json(linkedPatch))
+const extendPatch = state(false)
+const patchMessage = state('')
+const showPatchLink = state(false)
+const patchBase = @json(commentsBase)
+const patchHead = @json(selected?.head || '')
+const patchBaseSha = @json(selected?.baseSha || '')
+const patchDesktop = useNativeDesktop()
+const inlineReviewApi = @json(inlineReviewAction)
+const inlineReviewViewer = @json(selected?.reviewViewer?.id || '')
+const inlineReviewReady = state(Boolean(inlineReviewViewer))
+const inlineReviewPage = @json(detailPage)
+const requestedReviewEdit = @json(inlineReviewEditId)
+const reviewComposerBox = useRef('reviewComposerBox')
+const reviewPreviewBox = useRef('reviewPreviewBox')
+const reviewDialogBox = useRef('reviewDialogBox')
+const reviewOpenButton = useRef('reviewOpenButton')
+const emptyInlineReview = { head: patchHead, base: patchBaseSha, comments: [], summary: '', verdict: 'COMMENT', intent: '' }
+const inlineReview = useLocalStorage(@json(inlineReviewStorage), emptyInlineReview)
+const reviewEditor = state(null)
+const reviewEditorError = state('')
+const submittingInlineReview = state(false)
+const inlineReviewMessage = state('')
+const draftHasReview = value => Boolean(value.comments.length || value.summary.trim() || value.verdict !== 'COMMENT' || value.intent)
+const reviewIsStale = derived(() => draftHasReview(inlineReview()) && (inlineReview().head !== patchHead || inlineReview().base !== patchBaseSha))
+const reviewIsLocked = derived(() => Boolean(inlineReview().intent || submittingInlineReview()))
+
+function reviewButtonLabel() {
+  const count = inlineReview().comments.length
+  return count ? 'Review pull request, ' + count + (count === 1 ? ' comment pending' : ' comments pending') : 'Review pull request'
+}
+
+function reviewLocation(comment) {
+  return patchLabel(comment.start) + (comment.line === comment.start ? '' : ' to ' + patchLabel(comment.line).toLowerCase())
+}
+
+function matchingReviewComment(selection) {
+  return inlineReview().comments.find(comment =>
+    (comment.line === selection.line && comment.start === selection.start) || (comment.start === selection.line && comment.line === selection.start))
+}
+
+const selectedReviewDraft = derived(() => {
+  const selection = patchSelection()
+  return selection && !reviewIsStale() ? matchingReviewComment(selection) : null
+})
+
+function placeReviewPreview(draft) {
+  const preview = reviewPreviewBox.current
+  if (!preview) return
+  const line = draft && preview.closest('[data-pr-detail-content]').querySelector('#' + draft.line)
+  preview.hidden = !line || Boolean(reviewEditor())
+  if (line) line.closest('[data-pr-line-row]').after(preview)
+}
+
+effect(() => {
+  const draft = selectedReviewDraft()
+  const editor = reviewEditor()
+  void nextTick(() => placeReviewPreview(editor ? null : draft))
+})
+
+function placeReviewEditor(draft) {
+  const composer = reviewComposerBox.current
+  const line = composer?.closest('[data-pr-detail-content]').querySelector('#' + draft.line)
+  if (!line || reviewIsLocked() || reviewIsStale()) return false
+  line.closest('[data-pr-line-row]').after(composer)
+  reviewEditor.set(draft)
+  reviewEditorError.set('')
+  composer.hidden = false
+  const input = composer.querySelector('textarea')
+  input.value = draft.body
+  input.focus({ preventScroll: true })
+  composer.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  return true
+}
+
+function openReviewEditor(event) {
+  const selection = patchSelection()
+  if (!selection) return
+  const file = event.currentTarget.closest('[data-pr-detail-content]').querySelector('#' + selection.file)
+  if (!file) return
+  placeReviewEditor(matchingReviewComment(selection) || { id: crypto.randomUUID(), path: file.dataset.prFilePath, page: inlineReviewPage,
+    line: selection.line, start: selection.start, body: '' })
+}
+
+function closeReviewEditor() {
+  const draft = reviewEditor()
+  const composer = reviewComposerBox.current
+  if (!composer || !draft) return
+  composer.hidden = true
+  reviewEditor.set(null)
+  const scope = composer.closest('[data-pr-detail-content]')
+  scope.querySelector('#' + draft.line)?.focus({ preventScroll: true })
+}
+
+function reviewEditorKeys(event) {
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeReviewEditor()
+  }
+  else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    event.currentTarget.form.requestSubmit()
+  }
+}
+
+function saveReviewComment(event) {
+  const draft = reviewEditor()
+  if (!draft || reviewIsLocked() || reviewIsStale()) return
+  const body = event.currentTarget.elements.namedItem('body').value.trim()
+  if (!body || new TextEncoder().encode(body).byteLength > 8192) {
+    reviewEditorError.set('Enter a comment of up to 8 KB.')
+    return
+  }
+  const current = inlineReview()
+  const comments = current.comments.some(comment => comment.id === draft.id)
+    ? current.comments.map(comment => comment.id === draft.id ? { ...draft, body } : comment)
+    : [...current.comments, { ...draft, body }]
+  if (comments.length > 50) {
+    reviewEditorError.set('A review can contain up to 50 comments.')
+    return
+  }
+  const bytes = new TextEncoder().encode(current.summary.trim() + comments.map(comment => comment.body).join('')).byteLength
+  if (bytes > 65_536) {
+    reviewEditorError.set('Keep the review and its comments within 64 KB.')
+    return
+  }
+  inlineReview.set({ ...current, head: patchHead, base: patchBaseSha, comments })
+  patchMessage.set('Comment added to review.')
+  closeReviewEditor()
+}
+
+function openInlineReview() {
+  const dialog = reviewDialogBox.current
+  if (dialog?.open) return
+  closeReviewEditor()
+  const form = dialog?.querySelector('form')
+  if (!form) return
+  const current = inlineReview()
+  form.elements.namedItem('summary').value = current.summary
+  form.querySelectorAll('input[name="verdict"]').forEach(option => { option.checked = option.value === current.verdict })
+  inlineReviewMessage.set(current.intent ? 'Check GitHub for the outcome of the submitted review.' : '')
+  dialog.showModal()
+}
+
+function closeInlineReview() {
+  reviewDialogBox.current?.close()
+}
+
+function finishInlineReviewClose() {
+  reviewOpenButton.current?.focus()
+}
+
+function editStagedComment(id) {
+  const draft = inlineReview().comments.find(comment => comment.id === id)
+  if (!draft || reviewIsLocked() || reviewIsStale()) return
+  const view = reviewDialogBox.current.ownerDocument.defaultView
+  const target = new URL(patchBase, view.location.origin)
+  target.searchParams.set('detailPage', String(draft.page))
+  target.searchParams.set('reviewHead', patchHead)
+  target.searchParams.set('reviewBase', patchBaseSha)
+  target.searchParams.set('reviewLine', draft.line)
+  if (draft.line !== draft.start) target.searchParams.set('reviewStart', draft.start)
+  target.searchParams.set('reviewEdit', id)
+  target.hash = draft.line
+  view.location.assign(target.href)
+}
+
+if (requestedReviewEdit) void nextTick(() => {
+  const draft = inlineReview().comments.find(comment => comment.id === requestedReviewEdit)
+  if (draft && placeReviewEditor(draft)) {
+    const view = reviewComposerBox.current.ownerDocument.defaultView
+    const address = new URL(view.location.href)
+    address.searchParams.delete('reviewEdit')
+    view.history.replaceState(view.history.state, '', address)
+  }
+})
+
+function removeStagedComment(id) {
+  if (reviewIsLocked()) return
+  inlineReview.update(value => ({ ...value, comments: value.comments.filter(comment => comment.id !== id) }))
+  reviewDialogBox.current?.querySelector('[data-pr-review-close]')?.focus()
+}
+
+function updateReviewSummary(event) {
+  if (reviewIsLocked() || reviewIsStale()) return
+  inlineReview.update(value => ({ ...value, head: patchHead, base: patchBaseSha, summary: event.currentTarget.value }))
+}
+
+function chooseReviewVerdict(event) {
+  if (reviewIsLocked() || reviewIsStale()) return
+  inlineReview.update(value => ({ ...value, head: patchHead, base: patchBaseSha, verdict: event.currentTarget.value }))
+}
+
+function resetInlineReview() {
+  if (reviewIsLocked()) return
+  inlineReview.set(emptyInlineReview)
+  const form = reviewDialogBox.current.querySelector('form')
+  form.elements.namedItem('summary').value = ''
+  const verdict = form.querySelector('[name="verdict"][value="COMMENT"]')
+  if (verdict) verdict.checked = true
+  inlineReviewMessage.set('Draft discarded.')
+}
+
+function inlineReviewCanSubmit() {
+  const value = inlineReview()
+  return !submittingInlineReview() && Boolean(value.intent || (!reviewIsStale()
+    && (value.verdict === 'APPROVE' || value.summary.trim() || value.comments.length)))
+}
+
+function reviewSummaryKeys(event) {
+  if (event.isComposing || event.keyCode === 229 || event.repeat) return
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    event.currentTarget.form.requestSubmit()
+  }
+}
+
+async function submitInlineReview(event) {
+  if (!inlineReviewCanSubmit()) return
+  const form = event.currentTarget
+  const current = inlineReview()
+  const summary = current.summary.trim()
+  const encode = new TextEncoder()
+  if (encode.encode(summary).byteLength > 16_384 || encode.encode(summary + current.comments.map(comment => comment.body).join('')).byteLength > 65_536) {
+    inlineReviewMessage.set('Keep the summary within 16 KB and the full review within 64 KB.')
+    return
+  }
+  const intent = current.intent || crypto.randomUUID()
+  inlineReview.set({ ...current, intent })
+  submittingInlineReview.set(true)
+  inlineReviewMessage.set(current.intent ? 'Checking GitHub…' : 'Submitting review…')
+  const view = form.ownerDocument.defaultView
+  const target = new URL(inlineReviewApi, view.location.origin)
+  const selection = patchSelection()
+  if (selection) {
+    target.searchParams.set('reviewLine', selection.line)
+    target.searchParams.set('reviewStart', selection.start)
+    target.searchParams.set('reviewHead', patchHead)
+    target.searchParams.set('reviewBase', patchBaseSha)
+  }
+  const body = new URLSearchParams({ intent, head: current.head, base: current.base, viewer: inlineReviewViewer,
+    verdict: current.verdict, summary, drafts: JSON.stringify(current.comments) })
+  try {
+    const response = await fetch(target.href, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const result = await response.json()
+    if (result.result === 'posted' && result.location?.startsWith('/pull-requests?')) {
+      if (inlineReview().intent === intent) inlineReview.set(emptyInlineReview)
+      view.location.assign(result.location)
+      return
+    }
+    if (!result.result) throw new Error('Missing review outcome')
+    if (result.result !== 'pending' && (!current.intent || ['denied', 'invalid'].includes(result.result)) && inlineReview().intent === intent)
+      inlineReview.update(value => ({ ...value, intent: '' }))
+    inlineReviewMessage.set(result.message)
+  }
+  catch { inlineReviewMessage.set('Could not confirm this review. Check GitHub again.') }
+  finally { submittingInlineReview.set(false) }
+}
+
+function patchLabel(anchor) {
+  const side = anchor.split('-').at(-1)
+  return (side[0] === 'L' ? 'Before line ' : 'After line ') + side.slice(1)
+}
+
+function patchSelectionLabel() {
+  const selection = patchSelection()
+  if (!selection) return ''
+  return patchLabel(selection.start) + (selection.line !== selection.start ? ' to ' + patchLabel(selection.line).toLowerCase() : '')
+}
+
+function patchSelectionHref() {
+  const selection = patchSelection()
+  return selection ? patchBase + '&reviewHead=' + patchHead + '&reviewBase=' + patchBaseSha + '&reviewLine=' + selection.line
+    + (selection.start !== selection.line ? '&reviewStart=' + selection.start : '') + '#' + selection.line : ''
+}
+
+function selectPatchLine(file, link, extend) {
+  const row = link.closest('[data-pr-line-row]')
+  const previous = patchSelection()
+  const origin = extend && previous?.file === file.id ? file.querySelector('#' + previous.start) : null
+  const originRow = origin?.closest('[data-pr-line-row]')
+  const start = originRow?.dataset.hunk === row.dataset.hunk ? origin : link
+  const first = Number(start.closest('[data-pr-line-row]').dataset.position)
+  const last = Number(row.dataset.position)
+  const low = Math.min(first, last)
+  const high = Math.max(first, last)
+  const list = file.closest('[data-pr-files]')
+  for (const selected of list.querySelectorAll('[data-pr-line-row][data-selected]')) selected.removeAttribute('data-selected')
+  list.querySelector('[data-pr-line][aria-current]')?.removeAttribute('aria-current')
+  for (const candidate of file.querySelectorAll('[data-pr-line-row]')) {
+    const index = Number(candidate.dataset.position)
+    if (index >= low && index <= high) candidate.setAttribute('data-selected', '')
+  }
+  const currentTab = file.querySelector('[data-pr-line][tabindex="0"]')
+  if (currentTab) currentTab.tabIndex = -1
+  link.tabIndex = 0
+  link.setAttribute('aria-current', 'location')
+  link.focus({ preventScroll: true })
+  link.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  patchSelection.set({ file: file.id, line: link.id, start: start.id })
+  patchMessage.set(extend && origin && start === link && origin !== link ? 'Range starts again in this hunk.' : '')
+  extendPatch.set(false)
+  showPatchLink.set(false)
+}
+
+function clickPatchLine(event) {
+  const link = event.target.closest('[data-pr-line]')
+  if (!link || event.metaKey || event.ctrlKey || event.altKey) return
+  event.preventDefault()
+  selectPatchLine(event.currentTarget, link, event.shiftKey || extendPatch())
+}
+
+function navigatePatchLines(event) {
+  const link = event.target.closest('[data-pr-line]')
+  if (!link || event.metaKey || event.ctrlKey || event.altKey) return
+  const file = event.currentTarget
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    clearPatchSelection(file.closest('[data-pr-files]'))
+    return
+  }
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' '].includes(event.key)) return
+  event.preventDefault()
+  const row = link.closest('[data-pr-line-row]')
+  const rows = [...file.querySelectorAll('[data-pr-line-row]')]
+  const index = rows.indexOf(row)
+  const destination = event.key === 'Home' ? rows[0] : event.key === 'End' ? rows.at(-1)
+    : event.key === 'ArrowUp' ? rows[index - 1] : event.key === 'ArrowDown' ? rows[index + 1] : row
+  const horizontal = event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+  const side = horizontal ? (event.key === 'ArrowLeft' ? 'L' : 'R') : link.dataset.prLine
+  const next = destination?.querySelector('[data-pr-line="' + side + '"]') || (!horizontal && destination?.querySelector('[data-pr-line]'))
+  if (next) selectPatchLine(file, next, event.shiftKey || extendPatch())
+}
+
+function clearPatchSelection(list) {
+  const active = list.querySelector('[data-pr-line][aria-current]')
+  for (const selected of list.querySelectorAll('[data-pr-line-row][data-selected]')) selected.removeAttribute('data-selected')
+  active?.removeAttribute('aria-current')
+  active?.focus({ preventScroll: true })
+  const view = list.ownerDocument.defaultView
+  const address = new URL(view.location.href)
+  if (address.searchParams.has('reviewLine')) {
+    for (const key of ['reviewLine', 'reviewStart', 'reviewHead', 'reviewBase']) address.searchParams.delete(key)
+    address.hash = ''
+    view.history.replaceState(view.history.state, '', address)
+  }
+  patchSelection.set(null)
+  extendPatch.set(false)
+  patchMessage.set('')
+  showPatchLink.set(false)
+}
+
+function clearPatchTools(event) {
+  clearPatchSelection(event.currentTarget.closest('[data-pr-detail-content]').querySelector('[data-pr-files]'))
+}
+
+async function copyPatchSelection(event) {
+  const link = event.currentTarget
+  const clipboard = patchDesktop()?.clipboard
+  try {
+    if (clipboard?.writeText) await clipboard.writeText(link.href)
+    else if (clipboard?.write) await clipboard.write(link.href)
+    else await link.ownerDocument.defaultView.navigator.clipboard.writeText(link.href)
+    showPatchLink.set(false)
+    patchMessage.set('Line link copied.')
+  }
+  catch {
+    showPatchLink.set(true)
+    patchMessage.set('Clipboard unavailable. Open the line link to copy its address.')
+  }
+}
+
+const replyDates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+const viewedSummary = derived(() => {
+  const states = Object.values(fileViewedStates())
+  return states.filter(value => value === 'VIEWED').length + ' of ' + states.length + ' viewed on this page'
+})
+
+function fileIsViewed(anchor) {
+  return fileViewedStates()[anchor] === 'VIEWED'
+}
+
+function fileNeedsReview(anchor) {
+  return fileViewedStates()[anchor] === 'DISMISSED'
+}
+
+async function changeFileViewed(event) {
+  if (viewedUpdate()) return
+  const form = event.currentTarget
+  const anchor = form.dataset.fileAnchor
+  const desired = !fileIsViewed(anchor)
+  const body = new URLSearchParams()
+  for (const [key, value] of new FormData(form)) if (typeof value === 'string') body.set(key, value)
+  body.set('viewed', String(desired))
+  viewedUpdate.set(anchor)
+  viewedMessage.set('Updating viewed state…')
+  try {
+    const response = await fetch(form.action, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const update = await response.json().catch(() => ({}))
+    if (response.ok && (update.result === 'viewed' || update.result === 'unviewed')) {
+      fileViewedStates.update(previous => ({ ...previous, [anchor]: update.result === 'viewed' ? 'VIEWED' : 'UNVIEWED' }))
+    }
+    viewedMessage.set(update.message || 'Could not confirm the viewed state on GitHub. Try again.')
+  }
+  catch { viewedMessage.set('Could not confirm the viewed state on GitHub. Try again.') }
+  finally { viewedUpdate.set('') }
+}
+
+function threadResolved(anchor) {
+  return reviewThreads()[anchor]?.isResolved === true
+}
+
+function canChangeThread(anchor) {
+  const thread = reviewThreads()[anchor]
+  return thread?.isResolved ? thread.viewerCanUnresolve : thread?.viewerCanResolve
+}
+
+async function changeConversation(event) {
+  const form = event.currentTarget
+  const anchor = form.dataset.conversationAnchor
+  if (reviewPending()[anchor] || !canChangeThread(anchor)) return
+  const body = new URLSearchParams(new FormData(form))
+  body.set('resolved', String(!threadResolved(anchor)))
+  reviewPending.update(value => ({ ...value, [anchor]: true }))
+  reviewMessages.update(value => ({ ...value, [anchor]: 'Updating conversation…' }))
+  try {
+    const response = await fetch(form.action, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const update = await response.json().catch(() => ({}))
+    if (update.conversation) {
+      reviewThreads.update(value => ({ ...value, [anchor]: update.conversation }))
+      if (!canChangeThread(anchor)) form.closest('details')?.querySelector('summary')?.focus()
+    }
+    reviewMessages.update(value => ({ ...value, [anchor]: update.message || 'Could not confirm the conversation on GitHub. Try again.' }))
+  }
+  catch {
+    reviewMessages.update(value => ({ ...value, [anchor]: 'Could not confirm the conversation on GitHub. Try again.' }))
+  }
+  finally { reviewPending.update(value => ({ ...value, [anchor]: false })) }
+}
+
+function rememberReviewReply(form, text, pending) {
+  const anchor = form.dataset.replyAnchor
+  const saved = replyDrafts()[anchor]
+  const token = saved?.token || form.elements.namedItem('intent').value
+  replyDrafts.update(value => ({ ...value, [anchor]: { text, token, pending } }))
+  return token
+}
+
+function reviewReplyDate(value) {
+  return value && Number.isFinite(Date.parse(value)) ? replyDates.format(new Date(value)) : ''
+}
+
+function latestCommentCursor(anchor) {
+  const page = reviewCommentPages()[anchor]
+  return page ? page.next : knownCommentPages[anchor]?.next
+}
+
+function nextReviewCommentsHref(anchor) {
+  const cursor = latestCommentCursor(anchor)
+  return cursor ? commentsPageBase + '&conversation=' + anchor + '&commentScope=' + knownCommentPages[anchor].scope
+    + '&commentsAfter=' + encodeURIComponent(cursor) + '#' + anchor : ''
+}
+
+function visibleReviewComments(anchor) {
+  const first = new Set(knownCommentPages[anchor]?.existing || [])
+  const loaded = reviewCommentPages()[anchor]?.comments || []
+  const posted = sentReviewReplies()[anchor] || []
+  const combined = new Map([...loaded, ...posted].map(comment => [comment.anchor, comment]))
+  return [...combined.values()].filter(comment => !first.has(comment.anchor))
+}
+
+async function loadReviewComments(event) {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  event.preventDefault()
+  const link = event.currentTarget
+  const anchor = link.dataset.commentAnchor
+  const cursor = latestCommentCursor(anchor)
+  const prior = reviewCommentPages()[anchor]
+  if (!cursor || prior?.pending) return
+  const update = change => reviewCommentPages.update(value => ({ ...value,
+    [anchor]: { ...value[anchor], ...change },
+  }))
+  update({ next: cursor, pending: true, message: '' })
+  const address = new URL(commentsApi, link.href)
+  address.searchParams.set('thread', knownCommentPages[anchor].thread)
+  address.searchParams.set('viewer', commentsAccount)
+  address.searchParams.set('head', commentsHead)
+  address.searchParams.set('after', cursor)
+  try {
+    const response = await fetch(address, { headers: { accept: 'application/json' }, cache: 'no-store' })
+    const page = await response.json()
+    if (!response.ok) throw new Error(page.message || 'Could not load more comments. Try again.')
+    const seen = new Set([...(prior?.seen || []), cursor])
+    const loop = page.nextComments && seen.has(page.nextComments)
+    const existing = new Set([...knownCommentPages[anchor].existing, ...visibleReviewComments(anchor).map(comment => comment.anchor)])
+    const added = page.comments.filter(comment => !existing.has(comment.anchor))
+    const shouldMoveFocus = link.matches(':focus')
+    update({
+      next: loop ? null : page.nextComments,
+      seen: [...seen],
+      pending: false,
+      comments: [...(prior?.comments || []), ...page.comments],
+      message: loop ? 'GitHub did not advance the comment list. Refresh to continue.'
+        : added.length ? 'Loaded ' + added.length + (added.length === 1 ? ' comment.' : ' comments.')
+          : 'No new comments on this page.',
+    })
+    if (shouldMoveFocus && (added.length || !latestCommentCursor(anchor))) {
+      const thread = link.closest('[data-pr-conversation]')
+      await nextTick()
+      const first = added.length ? thread?.querySelector('#' + added[0].anchor) : null
+      const target = first || thread?.querySelector('summary')
+      target?.focus()
+    }
+  }
+  catch (error) {
+    update({ pending: false, message: error.message || 'Could not load more comments. Try again.' })
+  }
+}
+
+function editReviewReply(event) {
+  const input = event.currentTarget
+  if (!replyDrafts()[input.form.dataset.replyAnchor]?.pending) rememberReviewReply(input.form, input.value, false)
+}
+
+function showReviewReply(event) {
+  const editor = event.currentTarget
+  if (!editor.open) return
+  const input = editor.querySelector('textarea')
+  const draft = replyDrafts()[input.form.dataset.replyAnchor]
+  if (draft) input.value = draft.text
+  input.focus()
+}
+
+function closeReviewReply(editor) {
+  editor.open = false
+  editor.querySelector('summary')?.focus()
+}
+
+function cancelReviewReply(event) {
+  closeReviewReply(event.currentTarget.closest('details'))
+}
+
+function reviewReplyKeys(event) {
+  if (event.isComposing || event.keyCode === 229) {
+    event.stopPropagation()
+    return
+  }
+  const form = event.currentTarget.form
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeReviewReply(form.closest('details'))
+  }
+  else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    form.requestSubmit()
+  }
+}
+
+async function sendReviewReply(event) {
+  const form = event.currentTarget
+  const anchor = form.dataset.replyAnchor
+  const input = form.elements.namedItem('body')
+  if (replySending()[anchor] || !input.value.trim()) return
+  const wasPending = Boolean(replyDrafts()[anchor]?.pending)
+  const body = new URLSearchParams(new FormData(form))
+  body.set('intent', rememberReviewReply(form, input.value, true))
+  replySending.update(value => ({ ...value, [anchor]: true }))
+  replyMessages.update(value => ({ ...value, [anchor]: wasPending ? 'Checking GitHub…' : 'Posting reply…' }))
+  try {
+    const response = await fetch(form.action, { method: 'POST', headers: { accept: 'application/json' }, body })
+    const result = await response.json()
+    if (!result.result) throw new Error('Missing reply outcome')
+    if (result.result === 'posted') {
+      if (result.comment && !form.closest('[data-pr-conversation]').querySelector('#' + result.comment.anchor)) {
+        sentReviewReplies.update(value => ({
+          ...value, [anchor]: [...(value[anchor] || []), result.comment],
+        }))
+      }
+      input.value = ''
+      form.elements.namedItem('intent').value = crypto.randomUUID()
+      replyDrafts.update(value => {
+        const updated = { ...value }
+        delete updated[anchor]
+        return updated
+      })
+      closeReviewReply(form.closest('details'))
+    }
+    else if (result.result !== 'pending') rememberReviewReply(form, input.value, wasPending)
+    replyMessages.update(value => ({ ...value, [anchor]: result.message }))
+  }
+  catch {
+    replyMessages.update(value => ({ ...value, [anchor]: 'Could not confirm this reply. Check again to recover it.' }))
+  }
+  finally { replySending.update(value => ({ ...value, [anchor]: false })) }
+}
+</script>
+@elseif(selected?.lifecycle?.branchToDelete || selected?.workflowApproval || selected?.labelEditor)
+<script client>
+import { openLegacyBranchDeletion } from '../functions/pull-request-dialogs'
+
+const deleteBranchDialog = useRef('deleteBranchDialog')
+const deleteBranchTrigger = useRef('deleteBranchTrigger')
+
+function openDeleteBranchDialog() {
+  openLegacyBranchDeletion(deleteBranchDialog.current, deleteBranchTrigger.current)
+}
+
+const workflowApprovalTrigger = useRef('workflowApprovalTrigger')
+const workflowApprovalPanel = useRef('workflowApprovalPanel')
+
+function dismissWorkflowApproval(event) {
+  if (event.type === 'keydown' && event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  workflowApprovalPanel.current?.hidePopover()
+  workflowApprovalTrigger.current?.focus()
+}
+
+const labelSearch = state('')
+const searchableLabels = @json(labelOptions.map(label => [label.id, (label.name + ' ' + label.description).toLowerCase()]))
+const matchingLabelIds = derived(() => {
+  const search = labelSearch().trim().toLowerCase()
+  return new Set(searchableLabels.filter(([, text]) => text.includes(search)).map(([id]) => id))
+})
+</script>
+@endif
+<main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
+  <header data-pr-workspace-header>
+    <a href="{{ backHref }}" data-pr-back>
+      <span class="inline-block size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>Workspace
+    </a>
+    <h1>Pull requests</h1>
+  </header>
+  <div data-pr-workspace-columns data-detail="{{ hasDetail }}">
+    <section aria-label="Pull request list" data-pr-workspace-list>
+      <form method="get" action="/pull-requests" data-pr-filters>
+        <label data-pr-search>
+          <span>Search titles</span>
+          <input type="search" name="q" placeholder="Title keywords" maxlength="120" value="{{ search }}">
+        </label>
+        <label>
+          <span>Profile</span>
+          <select name="profile">
+            @foreach(profiles as profile)
+              <option value="{{ profile.id }}" @if(profile.id === activeProfileId) selected@endif>{{ profile.name }}</option>
+            @endforeach
+          </select>
+        </label>
+        <label>
+          <span>Repository</span>
+          <select name="repository">
+            <option value="">All repositories</option>
+            @foreach(repositories as repository)
+              <option value="{{ repository.name }}" @if(repository.name === repositoryFilter) selected@endif>{{ repository.name }}</option>
+            @endforeach
+          </select>
+        </label>
+        <label>
+          <span>State</span>
+          <select name="state">
+            @foreach(stateOptions as option)
+              <option value="{{ option.value }}" @if(option.value === filter) selected@endif>{{ option.label }}</option>
+            @endforeach
+          </select>
+        </label>
+        <label>
+          <span>Sort</span>
+          <select name="sort">
+            @foreach(sortOptions as option)
+              <option value="{{ option.value }}" @if(option.value === sort) selected@endif>{{ option.label }}</option>
+            @endforeach
+          </select>
+        </label>
+        <button type="submit" data-pr-button>Apply filters</button>
+      </form>
+      @if(failures.length)
+        <details data-pr-list-problems>
+          <summary>Some repositories could not be loaded</summary>
+          @foreach(failures as failure)
+            <p>{{ failure.repository }}. {{ failure.reason }}</p>
+          @endforeach
+        </details>
+      @endif
+      @if(pulls.length)
+        <ul data-pr-list>
+          @foreach(pulls as pull)
+            <li>
+              <a href="{{ pull.href }}" data-pr-row @if(pull.selected) aria-current="page"@endif>
+                <span class="inline-block size-4 i-hugeicons-git-pull-request" data-pr-state="{{ pull.status }}" aria-hidden="true"></span>
+                <span data-pr-row-copy>
+                  <strong><span data-pr-number>#{{ pull.number }}</span> {{ pull.title }}</strong>
+                  <span>{{ pull.repository }} @if(pull.author) · {{ pull.author }}@endif</span>
+                </span>
+                <span data-pr-row-status>
+                  {{ pull.status }}
+                  @if(pull.updated)
+                    <time datetime="{{ pull.updated }}">{{ dateLabel(pull.updated) }}</time>
+                  @endif
+                </span>
+              </a>
+            </li>
+          @endforeach
+        </ul>
+      @elseif(!repositories.length)
+        <p data-pr-empty>Add a trusted project with a GitHub remote to see its pull requests here.</p>
+      @elseif(!failures.length)
+        <p data-pr-empty>No pull requests match these filters.</p>
+      @endif
+      @if(pageBack || pageNext)
+        <nav data-pr-pagination aria-label="Pull request pages">
+          @if(pageBack)<a href="{{ pageBack }}">Previous page</a>@endif
+          <span>Page {{ page }}</span>
+          @if(pageNext)<a href="{{ pageNext }}">Next page</a>@endif
+        </nav>
+      @endif
+    </section>
+    @if(hasDetail)
+      <section aria-labelledby="pr-detail-title" data-pr-workspace-detail>
+        <div data-pr-detail-heading>
+          <a href="{{ listHref }}" data-pr-back>Back to list</a>
+          @if(selected?.title)
+            <span data-pr-detail-repo>{{ selected.repository }} <span data-pr-number>#{{ selected.number }}</span></span>
+          @endif
+          <h2 id="pr-detail-title">{{ detailTitle }}</h2>
+          @if(selected?.title)
+            <p data-pr-detail-meta>
+              <strong data-pr-state="{{ selected.status }}">{{ selected.status }}</strong>
+              @if(selected.lifecycle?.mergeStatus)<span data-pr-merge-status>{{ selected.lifecycle.mergeStatus }}</span>@endif
+              @if(selected.author)<span>{{ selected.author }}</span>@endif
+              @if(selected.updated)<time datetime="{{ selected.updated }}">{{ dateLabel(selected.updated) }}</time>@endif
+              @if(headLabel)<code title="{{ selected.head }}">Head {{ headLabel }}</code>@endif
+            </p>
+            @if(selected.headRef && selected.baseRef)
+              <div data-pr-branches>
+                <code>{{ selected.baseRef }}</code><span aria-label="receives changes from">←</span><code>{{ selected.headRef }}</code>
+                @if(selected.lifecycle?.branchUpdate)
+                  @include('../partials/harness-pr-branch-update')
+                @endif
+              </div>
+            @endif
+            <div data-pr-detail-actions>
+              @if(selected.thread)
+                <a href="{{ selected.thread.href }}" data-pr-button>Open linked thread</a>
+              @else
+                <a href="{{ selected.startHref }}" data-pr-button>Open as thread</a>
+              @endif
+              <a href="{{ selected.url }}" target="_blank" rel="noopener noreferrer">Open on GitHub</a>
+              @include('../partials/harness-pr-lifecycle')
+            </div>
+            @if(lifecycleNotice || lifecycleError)
+              <p data-pr-lifecycle-message role="status">{{ lifecycleError || lifecycleNotice }}</p>
+            @endif
+          @endif
+        </div>
+        @if(selectionError || !selected?.title)
+          <p data-pr-empty role="status">{{ selectionError || selected?.error }}</p>
+        @else
+          <nav aria-label="Pull request views" data-pr-tabs>
+            @foreach(tabOptions as item)
+              <a href="{{ item.href }}" @if(item.value === tab) aria-current="page"@endif>{{ item.label }}</a>
+            @endforeach
+          </nav>
+          <div data-pr-detail-content>
+          @if(tab === 'summary')
+            @if(selected.reviewers.length || selected.reviewDecision || selected.reviewOutcomesNotice || selected.canEditReviewers || reviewerEditor || reviewerDraft || reviewerError || reviewersNotice)
+              @include('../partials/harness-pr-reviewers')
+            @endif
+            @if(selected.labels.length || selected.canEditLabels || labelsNotice || labelError)
+              @include('../partials/harness-pr-labels')
+            @endif
+            <h3>Description</h3>
+            @if(selected.description)
+              <div data-pr-markdown="description" data-transcript-markdown></div>
+            @else
+              <p>No description.</p>
+            @endif
+            <h3>Checks</h3>
+            @if(approvalLookupFailed)
+              <p role="status">GitHub could not confirm which workflows are awaiting approval for this pull request.</p>
+            @elseif(approvalRuns.length)
+              <div class="flex flex-wrap gap-2 items-center justify-between">
+                <h4>{{ approvalRuns.length === 1 ? '1 workflow awaiting approval' : approvalRuns.length + ' workflows awaiting approval' }}</h4>
+                @if(selected.workflowApproval && !lifecyclePending)
+                  @include('../partials/harness-pr-workflow-approval')
+                @endif
+              </div>
+              <ul data-pr-result-list>
+                @foreach(approvalRuns as run)
+                  <li>
+                    <strong>{{ run.name }}</strong>
+                    <span data-check-status="action-required">Awaiting approval</span>
+                    <a href="{{ run.url }}" target="_blank" rel="noopener noreferrer" aria-label="Details for {{ run.name }}" class="underline">Details</a>
+                  </li>
+                @endforeach
+              </ul>
+            @endif
+            @if(selected.error)
+              <p role="status">{{ selected.error }}</p>
+            @elseif(!checks.length && !completed.length)
+              @if(!approvalRuns.length && !approvalLookupFailed)
+                <p>No checks reported for this commit.</p>
+              @endif
+            @else
+              <ul data-pr-result-list>
+                @foreach(primaryChecks as check)
+                  <li>
+                    <div>
+                      <strong>{{ check.name }}</strong>
+                      @if(check.description)<p>{{ check.description }}</p>@endif
+                    </div>
+                    <span data-check-status="{{ check.status }}">{{ checksLabel(check) }}</span>
+                    @if(check.url)<a href="{{ check.url }}" target="_blank" rel="noopener noreferrer" aria-label="Details for {{ check.name }}">Details</a>@endif
+                  </li>
+                @endforeach
+              </ul>
+              @if(checks.length && completed.length)
+                <details data-pr-completed>
+                  <summary>Completed checks ({{ completed.length }})</summary>
+                  <ul data-pr-result-list>
+                    @foreach(completed as check)
+                      <li>
+                        <div>
+                          <strong>{{ check.name }}</strong>
+                          @if(check.description)<p>{{ check.description }}</p>@endif
+                        </div>
+                        <span data-check-status="{{ check.status }}">{{ checksLabel(check) }}</span>
+                        @if(check.url)<a href="{{ check.url }}" target="_blank" rel="noopener noreferrer" aria-label="Details for {{ check.name }}">Details</a>@endif
+                      </li>
+                    @endforeach
+                  </ul>
+                </details>
+              @endif
+              @if(selected.truncated)<p>More checks are available on GitHub.</p>@endif
+            @endif
+          @elseif(selected.error)
+            <p role="status">{{ selected.error }}</p>
+          @elseif(tab === 'timeline')
+            @if(!selected.items?.length)<p>No conversation activity on this page.</p>@endif
+            <ol data-pr-activity>
+              @foreach(selected.items || [] as item)
+                <li>
+                  <p><strong>{{ item.author }}</strong> {{ item.state }} <time datetime="{{ item.time }}">{{ dateLabel(item.time) }}</time></p>
+                  @if(item.commit)<code title="{{ item.commit }}">{{ item.commit.slice(0, 7) }}</code>@endif
+                  @if(item.text)<div data-pr-markdown="{{ item.id }}" data-transcript-markdown></div>@endif
+                </li>
+              @endforeach
+            </ol>
+          @else
+            @if(inlineReviewAvailable)
+              <div id="inline-review-controls" data-pr-review-controls>
+                <span role="status">{{ inlineReviewNotice }}</span>
+                <button type="button" data-pr-button data-pr-review-open ref="reviewOpenButton" hidden :hidden="!inlineReviewReady()"
+                  :aria-label="reviewButtonLabel()" @click="openInlineReview">Review pull request
+                  <span :hidden="!inlineReview().comments.length" :text="String(inlineReview().comments.length)" aria-hidden="true"></span>
+                </button>
+              </div>
+            @endif
+            @if(!selected.files?.length)<p>No files on this page.</p>@endif
+            <p data-pr-viewed-notice role="status" @if(!viewedNotice) hidden@endif :hidden="!viewedMessage()" :text="viewedMessage()">{{ viewedNotice }}</p>
+            @if(trackedFiles.length)
+              <p data-pr-viewed-summary><span :text="viewedSummary()">{{ viewedCount }} of {{ trackedFiles.length }} viewed on this page</span> <span>· {{ selected.viewer.login }}</span></p>
+            @elseif(selected.files?.length)
+              <p data-pr-viewed-notice role="status">Viewed state is unavailable for this GitHub account.</p>
+            @endif
+            @if(selected.conversationsUnavailable)
+              <p data-pr-viewed-notice role="status">Review conversations are unavailable. Open the request on GitHub or refresh to try again.</p>
+            @elseif(selected.conversationsTruncated)
+              <p data-pr-viewed-notice role="status">More review conversations are available on GitHub.</p>
+            @endif
+            @if(selected.commentsNotice)<p role="status">{{ selected.commentsNotice }}</p>@endif
+            @if(conversationNotice && !conversationOnPage)<p role="status">{{ conversationNotice }}</p>@endif
+            @if(selected.lineNotice)<p role="status">{{ selected.lineNotice }}</p>@endif
+            @if(selected.files?.some(file => file.sections.some(section => section.rows.length)))
+              <div data-pr-line-tools @if(!linkedPatch) hidden@endif :hidden="!patchSelection()">
+                <span :text="patchSelectionLabel()">{{ linkedPatchLabel }}</span>
+                @if(inlineReviewAvailable)
+                  <button type="button" data-pr-button data-pr-review-add hidden
+                    :hidden="!patchSelection() || reviewIsLocked() || reviewIsStale()"
+                    :text="patchSelection() && matchingReviewComment(patchSelection()) ? 'Edit inline comment' : 'Add inline comment'"
+                    @click="openReviewEditor">Add inline comment</button>
+                @endif
+                <button type="button" data-pr-button hidden :hidden="!patchSelection()" :aria-pressed="String(extendPatch())"
+                  :text="extendPatch() ? 'Choose end line' : 'Select range'" @click="extendPatch.set(!extendPatch())">Select range</button>
+                <a href="{{ linkedPatchHref }}" :href="patchSelectionHref()" data-pr-button data-pr-open-line-link
+                  :hidden="!showPatchLink()">Open line link</a>
+                <a href="{{ linkedPatchHref }}" :href="patchSelectionHref()" data-pr-button hidden :hidden="!patchSelection()" @click.prevent="copyPatchSelection">Copy line link</a>
+                <button type="button" aria-label="Clear line selection" class="harness-icon-button" hidden :hidden="!patchSelection()" @click="clearPatchTools">
+                  <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+                </button>
+                <span role="status" :text="patchMessage()"></span>
+              </div>
+            @endif
+            <ul data-pr-files>
+              @foreach(selected.files || [] as file)
+                <li id="{{ file.anchor }}" data-pr-file-path="{{ file.path }}" @click="clickPatchLine" @keydown="navigatePatchLines">
+                  <details data-pr-file-patch @if(file.lineSelection || file.anchor === viewedAnchor || file.sections.some(section => section.conversations.some(thread => thread.anchor === conversationAnchor))) open@endif>
+                    <summary>
+                      <code>{{ file.path }}</code>
+                      <span>{{ file.status }} <strong data-pr-additions>+{{ file.additions }}</strong> <strong data-pr-deletions>-{{ file.deletions }}</strong></span>
+                    </summary>
+                    @if(file.previousPath)<p>Renamed from <code>{{ file.previousPath }}</code></p>@endif
+                    @if(!file.patch)<p>No text patch available. Open the request on GitHub to inspect this file.</p>@endif
+                    @foreach(file.sections as section)
+                      @if(section.rows.length)
+                        @include('../partials/harness-pr-patch', { section, file })
+                      @elseif(section.patch)
+                        <pre data-pr-patch tabindex="0" aria-label="Patch for {{ file.path }}"><code>{{ section.patch }}</code></pre>
+                      @endif
+                      @foreach(section.conversations as thread)
+                        @include('../partials/harness-pr-conversation', { thread, detached: !section.patch, showPath: false })
+                      @endforeach
+                    @endforeach
+                  </details>
+                  @if(file.viewed && selected.viewer)
+                    <form method="post" action="{{ viewedAction }}" data-pr-viewed-form data-file-anchor="{{ file.anchor }}" @submit.prevent="changeFileViewed">
+                      <input type="hidden" name="path" value="{{ file.formPath }}">
+                      <input type="hidden" name="head" value="{{ selected.head }}">
+                      <input type="hidden" name="viewer" value="{{ selected.viewer.id }}">
+                      <input type="hidden" name="viewed" value="{{ String(file.viewed !== 'VIEWED') }}">
+                      <button type="submit" aria-label="Viewed {{ file.path }}" aria-pressed="{{ String(file.viewed === 'VIEWED') }}"
+                        :aria-pressed="String(fileIsViewed('{{ file.anchor }}'))" :aria-disabled="viewedUpdate() ? 'true' : 'false'"
+                        @if(file.anchor === viewedAnchor) autofocus@endif data-pr-button>Viewed</button>
+                    </form>
+                    <p data-pr-file-revised @if(file.viewed !== 'DISMISSED') hidden@endif :hidden="!fileNeedsReview('{{ file.anchor }}')">Changed since viewed</p>
+                  @endif
+                </li>
+              @endforeach
+            </ul>
+            @if(inlineReviewAvailable)
+              @include('../partials/harness-pr-inline-review')
+            @endif
+            @if(selected.detachedConversations?.length)
+              <details data-pr-other-conversations @if(selected.detachedConversations.some(thread => thread.anchor === conversationAnchor)) open@endif>
+                <summary>Conversations outside this file page</summary>
+                @foreach(selected.detachedConversations as thread)
+                  @include('../partials/harness-pr-conversation', { thread, detached: true, showPath: true })
+                @endforeach
+              </details>
+            @endif
+          @endif
+          @if(tab !== 'summary' && (detailPage > 1 || selected.more))
+            <nav data-pr-pagination aria-label="Detail pages">
+              @if(detailPage > 1)<a href="{{ detailBack }}">Previous page</a>@endif
+              <span>Page {{ detailPage }}</span>
+              @if(selected.more && detailPage < 100)<a href="{{ detailNext }}">Next page</a>@endif
+            </nav>
+          @endif
+          </div>
+        @endif
+      </section>
+    @endif
+  </div>
+</main>

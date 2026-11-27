@@ -35,6 +35,7 @@ export function createFollowUpActions(options: FollowUpOptions) {
   const { sessionId, editing, local, online, sending, pending, send } = options
   let retry: ReturnType<typeof setTimeout> | undefined
   let disposed = false
+  let flushing: Promise<Set<string>> | undefined
 
   function beginEdit(entry: QueuedFollowUp): void {
     const box = options.editor()
@@ -110,8 +111,9 @@ export function createFollowUpActions(options: FollowUpOptions) {
     history.append(fragment)
   }
 
-  async function flush(retryFailed = false): Promise<void> {
-    if (disposed || !online() || sending()) return
+  async function flushPending(retryFailed: boolean): Promise<Set<string>> {
+    const accepted = new Set<string>()
+    if (disposed || !online()) return accepted
     clearTimeout(retry)
     let entry = local()?.[0]
     while (entry && !disposed && online() && (!entry.error || retryFailed)) {
@@ -120,6 +122,7 @@ export function createFollowUpActions(options: FollowUpOptions) {
       local.set(local().map(item => item.id === id ? { ...item, attempted: true } : item))
       try {
         await send({ type: 'session.queue.add', sessionId, text, ...(uploads ? { uploads } : {}), ...(codexSelection ? { codexSelection } : {}), ...(freshContext ? { freshContext } : {}) }, id)
+        accepted.add(id)
         local.set(local().filter(item => item.id !== id))
       }
       catch (error) {
@@ -130,7 +133,7 @@ export function createFollowUpActions(options: FollowUpOptions) {
           const message = error instanceof Error ? error.message : 'Could not queue the message.'
           local.set(local().map(item => item.id === id ? { ...item, error: message } : item))
         }
-        return
+        return accepted
       }
       finally {
         sending.set('')
@@ -138,12 +141,20 @@ export function createFollowUpActions(options: FollowUpOptions) {
       retryFailed = false
       entry = local()?.[0]
     }
+    return accepted
   }
 
-  function stage(entry: QueuedFollowUp): void {
+  function flush(retryFailed = false): Promise<Set<string>> {
+    // A send that will leave the thread needs the receipt from the active
+    // flush, including when earlier messages are already being submitted.
+    flushing ??= flushPending(retryFailed).finally(() => { flushing = undefined })
+    return flushing
+  }
+
+  async function stage(entry: QueuedFollowUp): Promise<boolean> {
     const entries = local() || []
     if (!entries.some(item => item.id === entry.id)) local.set([...entries, entry])
-    void flush()
+    return (await flush()).has(entry.id)
   }
 
   function removeLocal(id: string): void {

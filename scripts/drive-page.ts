@@ -14,10 +14,12 @@
  * if yours lives somewhere else.
  */
 import type { ConversationRewindInput, Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
+import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from '../packages/server/test/fixtures/git-http'
+import { fixtureGitHubCli } from '../packages/server/test/fixtures/github-cli'
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { delimiter, join, sep } from 'node:path'
 import process from 'node:process'
 import { chromium, webkit } from 'playwright-core'
 import { decode, encode } from '../packages/contract/src/index'
@@ -35,6 +37,7 @@ function check(name: string, ok: boolean): void {
 // Use a stable shell with no user startup files. The provider command exercises
 // terminal input without starting an actual sign-in on the developer's machine.
 const fixtureBin = mkdtempSync(join(tmpdir(), 'harness-page-bin-'))
+process.once('exit', () => rmSync(fixtureBin, { force: true, recursive: true }))
 const fixtureShell = join(fixtureBin, 'harness-test-shell')
 const fixtureEditorArgs = join(fixtureBin, 'editor-args')
 async function editorReceived(expected: string): Promise<boolean> {
@@ -54,6 +57,7 @@ process.env.PATH = `${fixtureBin}:${process.env.PATH ?? ''}`
 
 // --- workspace: a real repo with an uncommitted change, so the diff has content
 const driveRoot = mkdtempSync(join(tmpdir(), 'harness-page-drive-'))
+process.once('exit', () => rmSync(driveRoot, { force: true, recursive: true }))
 const dir = join(driveRoot, 'notes-app')
 const secondProject = join(driveRoot, 'docs-site')
 const scratchDirectory = join(driveRoot, 'scratch')
@@ -87,6 +91,10 @@ const connectorGate = Promise.withResolvers<void>()
 const connectorWithdrawal = Promise.withResolvers<void>()
 const followUpGate = Promise.withResolvers<void>()
 const followUpDelivery: string[] = []
+const liveSidebarPrompt = 'Verify the sidebar updates on another client.'
+const liveSidebarTurn = Promise.withResolvers<void>()
+const backgroundLaunches: StartTurnInput[] = []
+const backgroundSourceGate = Promise.withResolvers<void>()
 const referenceLink = '[parity-notes (draft).md](fixture%20context/parity-notes%20%28draft%29.md)'
 let fixtureMentionContents: string | undefined
 const fixtureHandoffs: StartTurnInput[] = []
@@ -126,6 +134,17 @@ const instance: ProviderInstance = {
     yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0, contextCompacted: true }
   },
   async *startTurn(input) {
+    if (input.text.startsWith('Background fixture:')) {
+      const count = backgroundLaunches.push(input)
+      yield { type: 'session-bound', providerSessionId: `background-fixture-${count}` }
+      if (input.text === 'Background fixture: keep source busy') {
+        yield { type: 'assistant-delta', text: 'Holding the source turn.' }
+        await backgroundSourceGate.promise
+      }
+      yield { type: 'assistant-delta', text: 'Background turn finished.' }
+      yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+      return
+    }
     if (input.text.startsWith('Claude rewind fixture: ')) {
       const sequence = claudeRewindTurns.push(input)
       if (!input.providerSessionId) yield { type: 'session-bound', providerSessionId: `fixture-claude-rewind-${sequence}` }
@@ -297,7 +316,7 @@ function importProjectFixture(workspace: string, name: string) {
   writeFileSync(join(source, name), 'Only the upstream repository wrote this.\n')
   execFileSync('git', ['add', '--', name], { cwd: source })
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', name], { cwd: source })
-  execFileSync('git', ['pull', '-q', '--ff-only', 'fixture-upstream', 'review/fixture'], { cwd: join(workspace, 'api') })
+  execFileSync('git', ['pull', '-q', '--no-rebase', '--ff-only', 'fixture-upstream', 'review/fixture'], { cwd: join(workspace, 'api') })
 }
 
 const providerPreviewScript = join(driveRoot, 'provider-preview.ts')
@@ -334,6 +353,12 @@ const driver: Driver = {
         }
         if (input.text === 'Verify the repositories without editing.') {
           yield { type: 'assistant-delta', text: 'The fixture was checked without edits.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+          return
+        }
+        if (input.text === liveSidebarPrompt) {
+          await liveSidebarTurn.promise
+          yield { type: 'assistant-delta', text: 'Sidebar fixture completed.' }
           yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
           return
         }
@@ -682,6 +707,9 @@ check('tool call rendered in the transcript', toolRows >= 1)
 writeFileSync(join(dir, 'notes.txt'), 'hello from the drive\n')
 await page.click('[data-diff-toggle]')
 await page.waitForFunction(() => (document.querySelector('[data-diff-files]')?.textContent ?? '').includes('notes.txt'), undefined, { timeout: 8000 })
+const gitStatus = page.getByRole('region', { name: 'Repository status' })
+await gitStatus.getByText('1 unstaged', { exact: true }).waitFor()
+check('Changes shows the repository branch and worktree status', await gitStatus.getByText('No upstream', { exact: true }).isVisible())
 check('diff panel lists the changed file', true)
 check('desktop docks Changes beside the conversation', await page.evaluate(() => {
   const changes = document.querySelector('[data-diff]')?.getBoundingClientRect()
@@ -4054,6 +4082,7 @@ await terminalHost.focus()
 await page.keyboard.type('git add ledger.txt && git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm Signed-ledger')
 await page.keyboard.press('Enter')
 await ledgerChanges.getByText('No uncommitted changes.', { exact: true }).waitFor()
+await ledgerPanel.getByRole('region', { name: 'Repository status' }).getByText('Clean working tree', { exact: true }).waitFor()
 check('a terminal Git commit automatically updates the open Changes totals',
   await page.locator('[data-diff-file]').count() === 0
   && execFileSync('git', ['log', '-1', '--format=%s'], { cwd: ledgerRepo, encoding: 'utf8' }).trim() === 'Signed-ledger')
@@ -4799,13 +4828,60 @@ await restoredSetupReplies.nth(responsesBeforeRestore).waitFor()
 await page.waitForFunction(() => document.querySelector('[data-session-state]')?.textContent === 'idle')
 await page.setViewportSize({ width: 1440, height: 900 })
 
+const settlementContext = await browser.newContext({ colorScheme, reducedMotion })
+const settlementPage = await settlementContext.newPage()
+settlementPage.on('pageerror', error => pageErrors.push(error.message))
+const settlementAddress = page.url()
+const settlementRequests = new URL(new URL(settlementAddress).pathname + '/project-settlement', settlementAddress).href
+const releaseSettlementRead = Promise.withResolvers<void>()
+const firstSettlementRead = Promise.withResolvers<void>()
+let settlementReads = 0
+await settlementPage.route(settlementRequests, async (route) => {
+  settlementReads++
+  if (settlementReads === 1) {
+    firstSettlementRead.resolve()
+    await releaseSettlementRead.promise
+  }
+  await route.continue()
+})
+try {
+  await Promise.all([
+    settlementPage.waitForRequest(settlementRequests),
+    settlementPage.goto(settlementAddress),
+  ])
+  await firstSettlementRead.promise
+  const [scriptList] = await Promise.all([
+    settlementPage.waitForResponse(response => response.url() === settlementRequests.replace(/project-settlement$/, 'project-scripts')),
+    settlementPage.locator('[data-header-project-scripts]').click(),
+  ])
+  await scriptList.finished()
+  await settlementPage.getByRole('dialog', { name: 'Project scripts' }).getByRole('button', { name: 'Close project scripts' }).click()
+  check('opening project scripts leaves an in-flight settlement status request intact', settlementReads === 1)
+  const followUpRead = settlementPage.waitForResponse(response => response.url() === settlementRequests && settlementReads === 2)
+  releaseSettlementRead.resolve()
+  const response = await followUpRead
+  check('settlement status refreshes once more after the pending read', response.ok())
+  await response.finished()
+}
+finally {
+  releaseSettlementRead.resolve()
+  await settlementContext.close()
+}
+
 const failedCleanupGate = join(driveRoot, 'finish-failed-cleanup')
 const successfulCleanupGate = join(driveRoot, 'finish-successful-cleanup')
 const cleanupCommand = (gate: string, code: number) => `printf 'Cleaning the fixture checkout\\n'; while /bin/test ! -f "${gate}"; do sleep 0.1; done; exit ${code}`
 await page.locator('[data-header-project-scripts]').click()
 await scriptDialog.getByRole('button', { name: 'Add script', exact: true }).click()
-await scriptDialog.getByLabel('Name', { exact: true }).fill('Clean checkout')
-await scriptDialog.getByLabel('Command', { exact: true }).fill(cleanupCommand(failedCleanupGate, 7))
+const cleanupName = scriptDialog.getByLabel('Name', { exact: true })
+const cleanupBody = scriptDialog.getByLabel('Command', { exact: true })
+await page.waitForFunction(() => document.activeElement === document.querySelector('[data-stx-ref="projectScriptName"]'))
+await cleanupName.fill('Clean checkout')
+const failedCleanup = cleanupCommand(failedCleanupGate, 7)
+await cleanupBody.fill(failedCleanup)
+check('project script focus stays in Command while typing the cleanup script',
+  await cleanupBody.evaluate(element => element === document.activeElement)
+  && await cleanupName.inputValue() === 'Clean checkout' && await cleanupBody.inputValue() === failedCleanup)
 await scriptDialog.getByLabel('Run when the host settles a worktree thread').check()
 await capture('workspace-settlement-script-setting')
 await scriptDialog.getByRole('button', { name: 'Save script' }).click()
@@ -4816,8 +4892,11 @@ const changeSettlement = async (name: string) => {
   await page.getByRole('dialog', { name: 'Thread actions' }).getByRole('button', { name, exact: true }).click()
 }
 const settlementCard = page.locator('[data-project-settlement-status]')
+await page.evaluate(() => { document.documentElement.dataset.settlementDrive = 'active' })
 await changeSettlement('Settle thread')
 await settlementCard.getByText('Running settlement script…').waitFor()
+check('settling an open thread keeps its page mounted',
+  await page.locator('html').getAttribute('data-settlement-drive') === 'active')
 await settlementCard.getByText('Cleaning the fixture checkout').waitFor()
 await capture('workspace-settlement-script-running')
 writeFileSync(failedCleanupGate, '')
@@ -4889,6 +4968,92 @@ check('thread settings fit the phone viewport', await autoSettleDays.evaluate(in
   const rect = input.getBoundingClientRect()
   return rect.left >= 0 && rect.right <= innerWidth
 }))
+
+const snoozeObserverContext = await browser.newContext({ colorScheme, reducedMotion })
+const snoozeObserver = await snoozeObserverContext.newPage()
+await snoozeObserver.goto(`${baseUrl}/settings/threads`)
+const snoozePanel = page.getByRole('region', { name: 'Snooze options' })
+const snoozeRows = snoozePanel.locator('[data-snooze-row]')
+const observeSnoozeRows = snoozeObserver.locator('[data-snooze-row]')
+await snoozeRows.nth(4).waitFor()
+await observeSnoozeRows.nth(4).waitFor()
+await snoozePanel.getByRole('button', { name: 'Add option', exact: true }).click()
+const addedSnoozeId = await snoozeRows.nth(5).getAttribute('data-snooze-id')
+const addedSnooze = snoozeRows.and(page.locator(`[data-snooze-id="${addedSnoozeId}"]`))
+const observedFortyFive = observeSnoozeRows.getByText(/In 45 minutes/)
+await observeSnoozeRows.nth(5).waitFor()
+await page.waitForFunction(() => document.activeElement?.matches('[data-snooze-row]:last-of-type select'))
+const snoozeAmount = addedSnooze.getByLabel('Amount', { exact: true })
+await snoozeAmount.fill('2')
+await snoozeAmount.press('Enter')
+await addedSnooze.getByLabel('Unit', { exact: true }).selectOption('hours')
+await observeSnoozeRows.getByText(/In 2 hours/).waitFor()
+await addedSnooze.getByLabel('Unit', { exact: true }).selectOption('minutes')
+await snoozeAmount.fill('0')
+await snoozeAmount.press('Tab')
+await snoozePanel.getByRole('alert').filter({ hasText: /Enter a whole number/ }).waitFor()
+check('invalid snooze amounts restore the last valid value', await snoozeAmount.inputValue() === '2')
+await snoozeAmount.fill('45')
+await snoozeAmount.press('Tab')
+await observedFortyFive.waitFor()
+const snoozeWhen = addedSnooze.getByLabel('When', { exact: true })
+await snoozeWhen.focus()
+await snoozeWhen.selectOption('friday')
+await addedSnooze.getByLabel('Time').fill('16:15')
+await addedSnooze.getByLabel('Time').press('Tab')
+await snoozeObserver.waitForFunction(() => {
+  return [...document.querySelectorAll('[data-snooze-row]')].some(row =>
+    row.querySelector('select')?.value === 'friday' && row.querySelector('input[type="time"]')?.value === '16:15')
+})
+await snoozeWhen.focus()
+await snoozeWhen.selectOption('after')
+await observedFortyFive.waitFor()
+check('snooze settings edit durations and weekdays on two clients without reloading',
+  await addedSnooze.getByLabel('Amount').inputValue() === '45')
+await snoozeObserver.reload()
+await observedFortyFive.waitFor()
+for (const [width, height] of workspaceViewports) {
+  await page.setViewportSize({ width, height })
+  await snoozePanel.getByRole('heading').scrollIntoViewIfNeeded()
+  await capture(`settings-snooze-${width}x${height}`)
+}
+check('snooze controls stay inside the phone viewport', await snoozePanel.evaluate(panel =>
+  [...panel.querySelectorAll<HTMLElement>('button, select, input')].every((control) => {
+    const rect = control.getBoundingClientRect()
+    return rect.width === 0 || (rect.left >= 0 && rect.right <= innerWidth)
+  })))
+
+await snoozeObserver.goto(`${baseUrl}/s/${staleThread}`)
+await snoozeObserver.locator('[data-thread-actions-trigger]').click()
+const snoozeMenu = snoozeObserver.getByRole('dialog', { name: 'Thread actions' })
+await snoozeMenu.getByRole('button', { name: 'Snooze', exact: true }).click()
+const fortyFive = snoozeMenu.getByRole('button', { name: /^In 45 minutes/ })
+await fortyFive.waitFor()
+const clickedAt = Date.now()
+await fortyFive.click()
+await snoozeMenu.waitFor({ state: 'hidden' })
+const wakeAt = harness.engine.current.sessions.get(staleThread)?.navigation?.snoozedUntil ?? 0
+check('choosing a snooze duration starts it at selection', wakeAt >= clickedAt + 45 * 60_000 - 1000 && wakeAt <= Date.now() + 45 * 60_000 + 1000)
+await snoozeObserver.locator('[data-thread-actions-trigger]').click()
+await snoozeMenu.getByRole('button', { name: 'Wake thread', exact: true }).click()
+await snoozeMenu.waitFor({ state: 'hidden' })
+while (await snoozeRows.count()) await snoozeRows.first().getByRole('button', { name: 'Remove snooze option' }).click()
+await snoozeObserver.goto(`${baseUrl}/settings/threads`)
+await snoozeObserver.getByText('0 of 8 options').waitFor()
+await snoozeObserver.goto(`${baseUrl}/s/${retainedThread}`)
+await snoozeObserver.locator('[data-thread-actions-trigger]').click()
+await snoozeMenu.getByRole('button', { name: 'Snooze', exact: true }).click()
+await snoozeMenu.getByRole('button', { name: 'Custom wake time' }).waitFor()
+check('an empty snooze list offers only a custom date', await snoozeMenu.locator('[data-snooze-label]').count() === 0)
+await snoozeMenu.getByRole('button', { name: 'Custom wake time' }).click()
+await snoozeMenu.getByRole('button', { name: 'Edit snooze options' }).click()
+await snoozeObserver.waitForFunction(() => document.activeElement?.id === 'settings-snooze-heading')
+check('the custom snooze form opens settings at the preset editor', new URL(snoozeObserver.url()).pathname === '/settings/threads')
+await snoozePanel.getByRole('button', { name: 'Reset defaults' }).click()
+await observeSnoozeRows.nth(4).waitFor()
+check('reset restores the five default presets on the host', await observeSnoozeRows.count() === 5)
+await snoozeObserverContext.close()
+
 await page.goto(`${baseUrl}/s/${retainedThread}`)
 const autoSettleMenu = page.getByRole('dialog', { name: 'Thread actions' })
 const openAutoSettleMenu = async () => {
@@ -4924,13 +5089,2030 @@ const automaticallySettled = page.locator('[data-thread-settled-note]')
 await automaticallySettled.getByText('Settled after inactivity', { exact: true }).waitFor()
 check('only a thread following the host policy settles after inactivity', !harness.engine.current.sessions.get(retainedThread)?.navigation?.settledAt)
 await capture('workspace-settled-after-inactivity')
-await Promise.all([
-  page.waitForEvent('load'),
-  automaticallySettled.getByRole('button', { name: 'Un-settle', exact: true }).click(),
-])
+await automaticallySettled.getByRole('button', { name: 'Un-settle', exact: true }).click()
 await automaticallySettled.waitFor({ state: 'hidden' })
 await page.reload()
 check('manually reopened inactive work stays active through reload', !await automaticallySettled.isVisible())
+
+const sidebarProfile = derivedId('live-sidebar-profile')
+const sidebarFirstProject = derivedId('live-sidebar-first-project')
+const sidebarAnchor = derivedId('live-sidebar-anchor')
+const sidebarNewProject = derivedId('live-sidebar-new-project')
+const sidebarNewThread = derivedId('live-sidebar-new-thread')
+const sidebarFolder = join(driveRoot, 'sidebar-fixture')
+const sidebarNewFolder = join(driveRoot, 'new-sidebar-project')
+mkdirSync(sidebarFolder)
+mkdirSync(sidebarNewFolder)
+await harness.engine.dispatch({ id: 'live-sidebar-profile', at: Date.now(), command: { type: 'profile.create', name: 'Sidebar fixture' } })
+await harness.engine.dispatch({ id: 'live-sidebar-first-project', at: Date.now(), command: { type: 'workspace.add', profileId: sidebarProfile, path: sidebarFolder } })
+await harness.engine.dispatch({ id: 'live-sidebar-first-trust', at: Date.now(), command: { type: 'workspace.trust', workspaceId: sidebarFirstProject, trusted: true } })
+await harness.engine.dispatch({ id: 'live-sidebar-anchor', at: Date.now(), command: { type: 'session.create', workspaceId: sidebarFirstProject, driverKind: 'claude' } })
+const sidebarPhone = await browserContext.newPage()
+sidebarPhone.on('pageerror', error => pageErrors.push(error.message))
+await page.setViewportSize({ width: 1440, height: 900 })
+await sidebarPhone.setViewportSize({ width: 390, height: 844 })
+await Promise.all([page.goto(`${baseUrl}/s/${sidebarAnchor}`), sidebarPhone.goto(`${baseUrl}/s/${sidebarAnchor}`)])
+await sidebarPhone.locator('[data-sidebar-toggle]').click()
+const watchedSidebar = `[data-space-id="${sidebarProfile}"][data-thread-order-ready]`
+await Promise.all([page.locator(watchedSidebar).waitFor(), sidebarPhone.locator(watchedSidebar).waitFor()])
+const initialSidebarLink = page.locator(`${watchedSidebar} a[href="/s/${sidebarAnchor}"]`)
+await initialSidebarLink.focus()
+
+const sidebarWriter = new WebSocket(`ws://localhost:${port}/ws`)
+await new Promise<void>((resolve, reject) => {
+  sidebarWriter.addEventListener('open', () => resolve(), { once: true })
+  sidebarWriter.addEventListener('error', reject, { once: true })
+})
+const sidebarDispatch = (id: string, command: unknown) => sidebarWriter.send(encode({ t: 'dispatch', envelope: { id, at: Date.now(), command } }))
+sidebarDispatch('live-sidebar-new-project', { type: 'workspace.add', profileId: sidebarProfile, path: sidebarNewFolder })
+sidebarDispatch('live-sidebar-new-trust', { type: 'workspace.trust', workspaceId: sidebarNewProject, trusted: true })
+const newSidebarSection = `${watchedSidebar} [data-section-id="project-${sidebarNewProject}"]`
+const newSidebarHeader = page.locator(newSidebarSection).getByRole('button', { name: 'new-sidebar-project' })
+await newSidebarHeader.waitFor()
+const newSidebarCompose = page.locator(newSidebarSection).getByRole('link', { name: 'New thread' })
+check('an open sidebar discovers a newly registered project and its compose link',
+  await newSidebarCompose.getAttribute('href') === `/?workspace=${sidebarNewProject}`)
+await newSidebarHeader.click()
+sidebarDispatch('live-sidebar-new-thread', { type: 'session.create', workspaceId: sidebarNewProject, driverKind: 'claude' })
+const newSidebarLink = page.locator(`${watchedSidebar} a[href="/s/${sidebarNewThread}"]`)
+const newPhoneLink = sidebarPhone.locator(`${watchedSidebar} a[href="/s/${sidebarNewThread}"]`)
+await newPhoneLink.waitFor()
+await newSidebarLink.waitFor({ state: 'attached' })
+check('a thread added to a collapsed project starts hidden and inert',
+  await newSidebarLink.isHidden() && await newSidebarLink.locator('..').getAttribute('inert') !== null)
+await newSidebarHeader.click()
+await newSidebarLink.waitFor()
+await initialSidebarLink.focus()
+sidebarDispatch('live-sidebar-first-turn', { type: 'session.turn.start', sessionId: sidebarNewThread, text: liveSidebarPrompt })
+const workingSidebarLink = page.locator(`${watchedSidebar} [data-section-id^="working-"] a[href="/s/${sidebarNewThread}"]`)
+await workingSidebarLink.getByText(liveSidebarPrompt, { exact: true }).waitFor()
+await newPhoneLink.getByText(liveSidebarPrompt, { exact: true }).waitFor()
+check('desktop and phone receive the first prompt title and working icon without a reload',
+  await workingSidebarLink.locator('.i-hugeicons-loading-03').count() === 1
+  && await initialSidebarLink.evaluate(link => link === link.ownerDocument.activeElement))
+await capture('workspace-live-sidebar-working-phone', sidebarPhone)
+liveSidebarTurn.resolve()
+await page.locator(`${newSidebarSection} a[href="/s/${sidebarNewThread}"]`).getByText(liveSidebarPrompt, { exact: true }).waitFor()
+const renamedSidebarTitle = 'Review the new project'
+await newPhoneLink.press('F2')
+const sidebarTitleInput = sidebarPhone.getByRole('textbox', { name: 'Thread title' })
+await sidebarTitleInput.fill('Discard this title')
+await sidebarTitleInput.press('Escape')
+await newPhoneLink.waitFor()
+check('Escape cancels the inline rename and restores focus',
+  await newPhoneLink.getByText(liveSidebarPrompt, { exact: true }).isVisible()
+  && await newPhoneLink.evaluate(link => link === link.ownerDocument.activeElement))
+await newPhoneLink.press('F2')
+await sidebarTitleInput.fill(renamedSidebarTitle)
+check('the inline title editor fits inside phone navigation', await sidebarTitleInput.evaluate(input => {
+  const bounds = input.getBoundingClientRect()
+  const sidebar = input.closest('[data-harness-sidebar]')?.getBoundingClientRect()
+  return Boolean(sidebar && bounds.left >= sidebar.left && bounds.right <= sidebar.right)
+}))
+await capture('workspace-live-sidebar-inline-rename', sidebarPhone)
+await sidebarTitleInput.press('Enter')
+await newSidebarLink.getByText(renamedSidebarTitle, { exact: true }).waitFor()
+await newPhoneLink.getByText(renamedSidebarTitle, { exact: true }).waitFor()
+check('a rename from another client preserves the route, focus, and title tooltip',
+  page.url().endsWith(`/s/${sidebarAnchor}`) && await newSidebarLink.getAttribute('title') === renamedSidebarTitle
+  && await initialSidebarLink.evaluate(link => link === link.ownerDocument.activeElement))
+await capture('workspace-live-sidebar-renamed')
+for (const [width, height] of workspaceViewports) {
+  const target = width < 768 ? sidebarPhone : page
+  await target.setViewportSize({ width, height })
+  await capture(`workspace-live-sidebar-${width}x${height}`, target)
+}
+await newSidebarLink.focus()
+sidebarDispatch('live-sidebar-archive', { type: 'session.organize', sessionId: sidebarNewThread, action: 'archive' })
+await Promise.all([newSidebarLink.waitFor({ state: 'detached' }), newPhoneLink.waitFor({ state: 'detached' })])
+check('archiving the focused row returns focus to the project header',
+  await newSidebarHeader.evaluate(header => header === header.ownerDocument.activeElement))
+sidebarDispatch('live-sidebar-restore', { type: 'session.organize', sessionId: sidebarNewThread, action: 'restore' })
+await newPhoneLink.getByText(renamedSidebarTitle, { exact: true }).waitFor()
+await newSidebarLink.press('Enter')
+await page.waitForURL(url => url.pathname === `/s/${sidebarNewThread}`)
+await page.locator('[data-workspace-title]').getByText(renamedSidebarTitle, { exact: true }).waitFor()
+check('the restored live row supports keyboard navigation', true)
+let delayedArrangementFrames = false
+await sidebarPhone.routeWebSocket('**/ws', (route) => {
+  const upstream = route.connectToServer()
+  upstream.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(new Uint8Array(message)) as { t?: string } | null
+    if (delayedArrangementFrames && frame?.t === 'sidebar-order') setTimeout(() => route.send(message), 250)
+    else route.send(message)
+  })
+})
+await sidebarPhone.goto(`${baseUrl}/s/${sidebarNewThread}`)
+await sidebarPhone.locator('[data-thread-actions-trigger]').click()
+await sidebarPhone.getByRole('dialog', { name: 'Thread actions' }).getByRole('button', { name: 'Arrange threads' }).click()
+const liveArrangement = sidebarPhone.getByRole('dialog', { name: 'Arrange threads' })
+const liveGrip = liveArrangement.getByRole('button', { name: `Reorder ${renamedSidebarTitle}` })
+await liveGrip.press('Enter')
+delayedArrangementFrames = true
+await liveArrangement.getByRole('button', { name: 'Pin', exact: true }).press('Enter')
+const delayedGrip = liveArrangement.locator('[data-section-id^="pinned-"]').getByRole('button', { name: `Reorder ${renamedSidebarTitle}` })
+await delayedGrip.waitFor()
+await sidebarPhone.waitForFunction(() => document.activeElement?.matches('[data-section-id^="pinned-"] [data-arrangement-grip]'))
+check('keyboard movement restores focus after a delayed sidebar snapshot', true)
+sidebarWriter.close()
+await sidebarPhone.close()
+
+if (harness.engine.current.settings.defaultDriver !== 'claude')
+  await harness.engine.dispatch({ id: 'background-fixture-agent', at: Date.now(), command: { type: 'settings.update', changes: { defaultDriver: 'claude' } } })
+execFileSync('git', ['branch', 'background-fixture-base'], { cwd: dir })
+const backgroundContext = await browser.newContext({ colorScheme, reducedMotion })
+const backgroundPage = await backgroundContext.newPage()
+backgroundPage.on('pageerror', error => pageErrors.push(error.message))
+const backgroundDraftUrl = `${baseUrl}/?workspace=${workspaceId}`
+const backgroundMessage = backgroundPage.getByRole('textbox', { name: 'Message', exact: true })
+const backgroundNotice = backgroundPage.locator('[data-background-thread]')
+const backgroundLink = backgroundNotice.getByRole('link', { name: 'Open thread' })
+await backgroundPage.goto(backgroundDraftUrl)
+await backgroundPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
+await backgroundPage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
+await backgroundPage.locator('[data-draft-worktree] summary').click()
+const backgroundMode = backgroundPage.getByLabel('Run in', { exact: true })
+await backgroundMode.selectOption('worktree')
+const backgroundBase = backgroundPage.getByRole('textbox', { name: 'Base branch', exact: true })
+await backgroundBase.fill('background-fixture-base')
+const priorSessions = new Set(harness.engine.current.sessions.keys())
+const firstBackgroundText = 'Background fixture: first isolated thread'
+const secondBackgroundText = 'Background fixture: second isolated thread'
+await backgroundMessage.fill(firstBackgroundText)
+await backgroundPage.locator('[data-composer-file-input]').setInputFiles({
+  name: 'background-notes.txt',
+  mimeType: 'text/plain',
+  buffer: Buffer.from('Background attachment fixture.'),
+})
+await backgroundPage.locator('[data-send]:enabled').waitFor()
+await backgroundMessage.press('Control+Enter')
+await backgroundLink.waitFor()
+const firstBackgroundLink = await backgroundLink.getAttribute('href')
+check('background start stays on the draft and returns its composer focus',
+  backgroundPage.url() === backgroundDraftUrl && await backgroundMessage.inputValue() === ''
+  && await backgroundMessage.evaluate(editor => editor === document.activeElement))
+check('background start retains the selected worktree and base branch',
+  await backgroundMode.inputValue() === 'worktree' && await backgroundBase.inputValue() === 'background-fixture-base')
+await backgroundNotice.getByRole('button', { name: 'Dismiss background notification' }).press('Enter')
+await backgroundNotice.waitFor({ state: 'hidden' })
+check('dismissing a background notification returns focus to the composer',
+  await backgroundMessage.evaluate(editor => editor === document.activeElement))
+await backgroundMessage.fill(secondBackgroundText)
+const backgroundBefore = await backgroundMessage.boundingBox()
+await backgroundMessage.press('Control+Enter')
+await backgroundLink.waitFor()
+await backgroundPage.waitForFunction(first => document.querySelector('[data-background-thread] a')?.getAttribute('href') !== first, firstBackgroundLink)
+const backgroundAfter = await backgroundMessage.boundingBox()
+check('the background notification does not move the composer',
+  Boolean(backgroundBefore && backgroundAfter && Math.abs(backgroundBefore.y - backgroundAfter.y) < 1))
+for (let attempt = 0; attempt < 160 && backgroundLaunches.length < 2; attempt++) await Bun.sleep(50)
+const backgroundThreads = [...harness.engine.current.sessions.values()].filter(thread => !priorSessions.has(thread.id))
+check('repeated background sends start separate threads and isolated checkouts',
+  backgroundThreads.length === 2 && backgroundLaunches.length === 2
+  && backgroundThreads.every(thread => thread.turns.length === 1 && Boolean(thread.worktreePath))
+  && new Set(backgroundThreads.map(thread => thread.worktreePath)).size === 2)
+check('background start transfers its attachment to the launched thread',
+  backgroundThreads.find(thread => thread.turns[0]?.prompt === firstBackgroundText)?.turns[0]?.attachments?.[0]?.name === 'background-notes.txt')
+for (const [width, height] of workspaceViewports) {
+  await backgroundPage.setViewportSize({ width, height })
+  await capture(`workspace-background-thread-${width}x${height}`, backgroundPage)
+}
+async function waitForWorktreeStatusReads(pathname: string | null): Promise<void> {
+  const responses = await Promise.all([
+    backgroundPage.waitForResponse(response => {
+      const url = new URL(response.url())
+      return url.pathname === '/drivers' && !url.searchParams.has('models') && response.ok()
+    }),
+    ...['project-setup', 'project-settlement'].map(endpoint =>
+      backgroundPage.waitForResponse(response => new URL(response.url()).pathname === `${pathname}/${endpoint}` && response.ok())),
+  ])
+  await Promise.all(responses.map(response => response.finished()))
+}
+
+const openedBackgroundPath = await backgroundLink.getAttribute('href')
+await Promise.all([waitForWorktreeStatusReads(openedBackgroundPath), backgroundLink.click()])
+await backgroundPage.getByText('Background turn finished.', { exact: true }).waitFor()
+check('the background notification opens the correct conversation',
+  harness.engine.current.sessions.get(Number(new URL(backgroundPage.url()).pathname.split('/').at(-1)))?.turns[0]?.prompt === secondBackgroundText)
+
+// An existing thread submits before leaving. The regular project draft and
+// the newly opened draft can both retain their own text.
+const sourceThreadUrl = backgroundPage.url()
+const sourceThreadId = Number(new URL(sourceThreadUrl).pathname.split('/').at(-1))
+const savedProjectText = 'Keep this unsent project draft.'
+await backgroundPage.goto(backgroundDraftUrl)
+await backgroundMessage.fill(savedProjectText)
+await backgroundPage.waitForFunction(text => Object.entries(localStorage)
+  .some(([key, value]) => key.startsWith('harness.composer.v1:') && value.includes(text)), savedProjectText)
+await Promise.all([waitForWorktreeStatusReads(new URL(sourceThreadUrl).pathname), backgroundPage.goto(sourceThreadUrl)])
+await backgroundPage.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
+await backgroundMessage.fill('Background fixture: keep source busy')
+await backgroundPage.locator('[data-send]:enabled').waitFor()
+await backgroundMessage.press('Alt+Enter')
+check('Alt+Enter alone preserves the existing-thread prompt',
+  (await backgroundMessage.inputValue()).includes('Background fixture: keep source busy'))
+await backgroundMessage.fill('Background fixture: keep source busy')
+await pressChord('Control+Alt+Enter', backgroundPage)
+const freshProjectDraft = (url: URL) => url.pathname === '/' && url.searchParams.get('workspace') === String(workspaceId)
+  && Boolean(url.searchParams.get('draft'))
+await backgroundPage.waitForURL(freshProjectDraft)
+await backgroundPage.waitForFunction(() => document.activeElement?.matches('textarea[aria-label="Message"]'))
+const firstFreshUrl = backgroundPage.url()
+check('sending from an existing thread opens an empty focused draft in the same project', await backgroundMessage.inputValue() === '')
+check('the existing thread continues running after the composer opens a draft',
+  harness.engine.current.sessions.get(sourceThreadId)?.turns.at(-1)?.prompt === 'Background fixture: keep source busy')
+for (const [width, height] of workspaceViewports) {
+  await backgroundPage.setViewportSize({ width, height })
+  const composer = await backgroundMessage.boundingBox()
+  const send = await backgroundPage.locator('[data-send]').boundingBox()
+  check(`the fresh draft composer and send action fit at ${width}×${height}`,
+    Boolean(composer && send && composer.x >= 0 && composer.x + composer.width <= width
+      && send.y >= 0 && send.y + send.height <= height
+      && await backgroundPage.evaluate(() => document.documentElement.scrollWidth === innerWidth)))
+  await capture(`workspace-send-and-new-${width}x${height}`, backgroundPage)
+}
+await backgroundMessage.fill('Keep this separate fresh draft.')
+await backgroundPage.reload()
+await backgroundPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value === 'Keep this separate fresh draft.')
+await backgroundPage.goto(backgroundDraftUrl)
+await backgroundPage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value === text, savedProjectText)
+check('a fresh draft survives reload and preserves the project draft', true)
+
+await Promise.all([waitForWorktreeStatusReads(new URL(sourceThreadUrl).pathname), backgroundPage.goto(sourceThreadUrl)])
+await backgroundPage.getByText('Holding the source turn.', { exact: true }).waitFor()
+const queuedBackgroundText = 'Background fixture: wait behind the source'
+await backgroundMessage.fill(queuedBackgroundText)
+await backgroundPage.getByRole('button', { name: 'Queue', exact: true }).waitFor()
+await pressChord('Control+Alt+Enter', backgroundPage)
+await backgroundPage.waitForURL(url => freshProjectDraft(url) && url.href !== firstFreshUrl)
+check('a background queue entry is accepted before leaving the running thread',
+  harness.engine.current.sessions.get(sourceThreadId)?.followUps?.entries.some(entry => entry.text === queuedBackgroundText) === true)
+backgroundSourceGate.resolve()
+for (let attempt = 0; attempt < 160 && !backgroundLaunches.some(launch => launch.text === queuedBackgroundText); attempt++) await Bun.sleep(50)
+check('the background queue delivers once without revisiting the source thread',
+  backgroundLaunches.filter(launch => launch.text === queuedBackgroundText).length === 1 && await backgroundMessage.inputValue() === '')
+
+const backgroundRetryText = 'Background fixture: first turn with a lost receipt'
+const scratchFollowUp = 'Background fixture: send and reset the scratch draft'
+const backgroundAttemptIds: string[] = []
+const scratchAttemptIds: string[] = []
+const droppedReceipts = new Set<string>()
+await backgroundPage.routeWebSocket('**/ws', (client) => {
+  const upstream = client.connectToServer()
+  client.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (frame?.t === 'dispatch' && frame.envelope?.command?.text === backgroundRetryText)
+      backgroundAttemptIds.push(frame.envelope.id)
+    if (frame?.t === 'dispatch' && frame.envelope?.command?.text === scratchFollowUp)
+      scratchAttemptIds.push(frame.envelope.id)
+    upstream.send(message)
+  })
+  upstream.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (frame?.t === 'dispatched' && !droppedReceipts.has(frame.id)
+      && (backgroundAttemptIds.includes(frame.id) || scratchAttemptIds.includes(frame.id))) {
+      droppedReceipts.add(frame.id)
+      return
+    }
+    client.send(message)
+  })
+})
+await backgroundPage.setViewportSize({ width: 1280, height: 800 })
+await backgroundPage.goto(`${baseUrl}/?project=none&profile=${providerProfileId}`)
+await backgroundPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
+const countBeforeBackgroundRetry = harness.engine.current.sessions.size
+await backgroundMessage.fill(backgroundRetryText)
+await backgroundMessage.press('Control+Enter')
+await backgroundPage.getByText('The server did not confirm the request. Try again.').waitFor({ timeout: 12_000 })
+check('a lost first-turn receipt keeps the projectless draft available', droppedReceipts.size === 1 && await backgroundMessage.inputValue() === backgroundRetryText)
+await backgroundPage.keyboard.press('Escape')
+await backgroundMessage.press('Enter')
+await backgroundPage.waitForURL(/\/s\/\d+/)
+await backgroundPage.getByText('Background turn finished.', { exact: true }).waitFor()
+const resumedBackgroundId = Number(new URL(backgroundPage.url()).pathname.split('/').at(-1))
+const resumedBackground = harness.engine.current.sessions.get(resumedBackgroundId)
+check('a foreground retry reuses the projectless session and first-turn receipt',
+  backgroundAttemptIds.length === 2 && backgroundAttemptIds[0] === backgroundAttemptIds[1]
+  && harness.engine.current.sessions.size === countBeforeBackgroundRetry + 1
+  && resumedBackground?.turns.length === 1 && harness.engine.current.workspaces.get(resumedBackground.workspaceId)?.scratch === true)
+await backgroundMessage.fill(scratchFollowUp)
+await backgroundPage.locator('[data-send]:enabled').waitFor()
+await pressChord('Control+Alt+Enter', backgroundPage)
+await backgroundPage.getByText('The server did not confirm the request. Try again.').waitFor({ timeout: 12_000 })
+check('an unconfirmed send keeps the source thread and its prompt open',
+  new URL(backgroundPage.url()).pathname === `/s/${resumedBackgroundId}`
+  && await backgroundMessage.inputValue() === scratchFollowUp)
+await backgroundPage.keyboard.press('Escape')
+await backgroundMessage.focus()
+await pressChord('Control+Alt+Enter', backgroundPage)
+await backgroundPage.waitForURL(url => url.pathname === '/' && url.searchParams.get('project') === 'none'
+  && url.searchParams.get('profile') === String(providerProfileId) && Boolean(url.searchParams.get('draft')))
+check('sending from a scratch thread keeps the fresh draft projectless and on the same profile',
+  await backgroundMessage.inputValue() === ''
+  && scratchAttemptIds.length === 2 && scratchAttemptIds[0] === scratchAttemptIds[1]
+  && harness.engine.current.sessions.get(resumedBackgroundId)?.turns.filter(turn => turn.prompt === scratchFollowUp).length === 1)
+await backgroundContext.close()
+
+const modelBatchContext = await browser.newContext({ colorScheme, reducedMotion })
+const modelBatchPage = await modelBatchContext.newPage()
+modelBatchPage.on('pageerror', error => pageErrors.push(error.message))
+const batchEditor = modelBatchPage.getByRole('textbox', { name: 'Message', exact: true })
+const batchPicker = modelBatchPage.locator('[data-model-picker-trigger]')
+const batchDialog = modelBatchPage.getByRole('dialog', { name: 'Agent and model' })
+const batchNotice = modelBatchPage.locator('[data-model-batch]')
+const batchText = 'Background fixture: compare two models'
+const modelBatchIds = new Map<string, string>()
+const modelBatchTurns = new Map<number, string[]>()
+let lostBatchReceipt = false
+await modelBatchPage.routeWebSocket('**/ws', (client) => {
+  const upstream = client.connectToServer()
+  client.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (frame?.t === 'dispatch') {
+      const { command, id } = frame.envelope
+      if (command.type === 'session.create' && ['fixture-fast', 'fixture-balanced'].includes(command.model))
+        modelBatchIds.set(command.model, id)
+      if (command.type === 'session.turn.start' && command.text === batchText) {
+        const attempts = modelBatchTurns.get(command.sessionId) ?? []
+        modelBatchTurns.set(command.sessionId, [...attempts, id])
+      }
+    }
+    upstream.send(message)
+  })
+  upstream.onMessage((message) => {
+    const frame = typeof message === 'string' ? null : decode(message) as any
+    if (!lostBatchReceipt && frame?.t === 'dispatched' && frame.id === modelBatchIds.get('fixture-balanced') + '_first') {
+      lostBatchReceipt = true
+      return
+    }
+    client.send(message)
+  })
+})
+await modelBatchPage.setViewportSize({ width: 1440, height: 900 })
+await modelBatchPage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
+await modelBatchPage.goto(backgroundDraftUrl)
+await batchPicker.click()
+await batchDialog.getByRole('button', { name: 'Codex · Catalog fixture', exact: true }).click()
+const batchFast = batchDialog.getByRole('button', { name: 'Fixture Fast', exact: true })
+const batchBalanced = batchDialog.getByRole('button', { name: 'Fixture Balanced', exact: true })
+const batchCompare = batchDialog.getByRole('button', { name: 'Compare with Fixture Balanced' })
+await batchCompare.waitFor()
+await batchFast.click()
+await batchDialog.getByRole('button', { name: 'High', exact: true }).click()
+await batchBalanced.click({ modifiers: ['Shift'] })
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').nth(1).waitFor()
+check('Shift-click selects two models in a Git project', await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').count() === 2)
+await batchCompare.click()
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').first().waitFor()
+check('the compare button removes the second model', await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').count() === 1)
+await batchCompare.click()
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').nth(1).waitFor()
+const batchSearch = batchDialog.getByRole('combobox', { name: 'Search models' })
+await batchSearch.fill('Fixture Balanced')
+await batchSearch.press('Shift+Enter')
+await batchDialog.locator('[data-draft-model-row][aria-selected="false"]').waitFor()
+check('Shift+Enter toggles a comparison without moving focus out of the model search',
+  await batchSearch.evaluate(search => search === document.activeElement))
+await batchCompare.click()
+await batchSearch.fill('')
+await batchDialog.locator('[data-draft-model-row][aria-selected="true"]').nth(1).waitFor()
+for (const [width, height] of workspaceViewports) {
+  await modelBatchPage.setViewportSize({ width, height })
+  const fitted = await modelBatchPage.waitForFunction(() => {
+    const box = document.querySelector('[data-draft-model-dialog]')?.getBoundingClientRect()
+    return !!box && box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight
+  }, undefined, { timeout: 2000 }).then(() => true, () => false)
+  check(`multi-model selection fits at ${width}×${height}`, fitted)
+  await capture(`workspace-model-batch-picker-${width}x${height}`, modelBatchPage)
+}
+await batchDialog.getByRole('button', { name: 'Done', exact: true }).click()
+check('the mobile composer shows the compact model count with both names accessible',
+  await batchPicker.getByText('2 models', { exact: true }).isVisible()
+  && await batchPicker.getAttribute('aria-label') === 'Choose agent and model'
+  && await batchPicker.getAttribute('aria-describedby') === 'draft-model-comparison-description'
+  && await modelBatchPage.locator('#draft-model-comparison-description').textContent() === 'Fixture Fast, Fixture Balanced')
+await modelBatchPage.locator('[data-draft-worktree] summary').click()
+const batchMode = modelBatchPage.getByLabel('Run in', { exact: true })
+await batchMode.locator('option[value="worktree"]').waitFor({ state: 'attached' })
+check('a comparison forces one new worktree per model', await batchMode.inputValue() === 'worktree' && await batchMode.isDisabled())
+await modelBatchPage.getByRole('textbox', { name: 'Base branch', exact: true }).fill('background-fixture-base')
+await modelBatchPage.locator('[data-draft-worktree] summary').click()
+await batchEditor.fill(batchText)
+await modelBatchPage.locator('[data-composer-file-input]').setInputFiles({
+  name: 'comparison-notes.txt',
+  mimeType: 'text/plain',
+  buffer: Buffer.from('Both model turns receive this attachment.'),
+})
+await modelBatchPage.locator('[data-send]:enabled').waitFor()
+await batchEditor.press('Enter')
+await modelBatchPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === '')
+check('the composer stays open and accepts a new message during multi-model send', modelBatchPage.url() === backgroundDraftUrl)
+await batchEditor.fill('Keep this next draft.')
+await batchNotice.getByRole('button', { name: 'Retry pending' }).waitFor({ timeout: 12_000 })
+check('a lost receipt keeps only the affected model pending', lostBatchReceipt
+  && await batchNotice.getByRole('link', { name: 'Fixture Fast' }).count() === 1
+  && await batchNotice.getByRole('link', { name: 'Fixture Balanced' }).count() === 0)
+await modelBatchPage.reload()
+await modelBatchPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Keep this next draft.')
+await batchNotice.getByRole('button', { name: 'Retry pending' }).click()
+await batchNotice.getByRole('link', { name: 'Fixture Balanced' }).waitFor()
+const batchThreads = () => [...harness.engine.current.sessions.values()].filter(thread => thread.turns.some(turn => turn.prompt === batchText))
+for (let attempt = 0; attempt < 160 && batchThreads().filter(thread => thread.turns.at(-1)?.status === 'complete').length < 2; attempt++) await Bun.sleep(50)
+const finishedBatchThreads = batchThreads()
+check('the two models run the same prompt and file in independent checkouts',
+  finishedBatchThreads.length === 2
+  && finishedBatchThreads.every(thread => thread.turns.length === 1 && thread.turns[0]?.status === 'complete'
+    && thread.turns[0].attachments?.[0]?.name === 'comparison-notes.txt' && thread.providerInstanceId === 4 && thread.worktreePath)
+  && new Set(finishedBatchThreads.map(thread => thread.worktreePath)).size === 2
+  && finishedBatchThreads.find(thread => thread.model === 'fixture-fast')?.codexTurnOptions?.effort === 'high'
+  && finishedBatchThreads.some(thread => thread.model === 'fixture-balanced'))
+const batchFiles = await Promise.all(finishedBatchThreads.map(thread => {
+  const file = thread.turns[0]?.attachments?.[0]
+  return file ? fetch(`${baseUrl}/composer-attachments/${file.id}?session=${thread.id}`).then(response => response.text()) : null
+}))
+check('both threads can download the original attachment bytes',
+  batchFiles.length === 2 && batchFiles.every(contents => contents === 'Both model turns receive this attachment.'))
+check('only the pending model retries and the new draft survives',
+  await batchEditor.inputValue() === 'Keep this next draft.'
+  && await batchNotice.getByRole('link').count() === 2
+  && [...modelBatchTurns.values()].map(attempts => attempts.length).sort().join(',') === '1,2'
+  && [...modelBatchTurns.values()].every(attempts => new Set(attempts).size === 1))
+for (const [width, height] of workspaceViewports) {
+  await modelBatchPage.setViewportSize({ width, height })
+  await capture(`workspace-model-batch-result-${width}x${height}`, modelBatchPage)
+}
+await batchPicker.click()
+await batchDialog.getByRole('button', { name: 'Codex · Catalog fixture', exact: true }).click()
+await batchFast.click()
+await batchDialog.getByRole('button', { name: 'Done', exact: true }).click()
+await modelBatchPage.locator('[data-draft-worktree] summary').click()
+check('a regular model click exits comparison and restores the selected checkout mode',
+  await batchMode.inputValue() === 'project' && await batchMode.isEnabled())
+await modelBatchPage.goto(`${baseUrl}/?project=none&profile=${providerProfileId}`)
+await batchPicker.click()
+await batchDialog.getByRole('button', { name: 'Provider default', exact: true }).waitFor()
+check('projectless drafts offer single-model sends', await batchDialog.locator('[data-compare-model]:visible').count() === 0)
+await modelBatchContext.close()
+
+const savedDraftContext = await browser.newContext({ colorScheme, reducedMotion })
+const savedDraftPage = await savedDraftContext.newPage()
+savedDraftPage.on('pageerror', error => {
+  console.error('Saved draft page error at', new URL(savedDraftPage.url()).pathname, error.message)
+  pageErrors.push(error.message)
+})
+await savedDraftPage.setViewportSize({ width: 1440, height: 900 })
+await savedDraftPage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
+const savedEditor = savedDraftPage.getByRole('textbox', { name: 'Message', exact: true })
+const savedList = savedDraftPage.getByRole('region', { name: 'Unsent drafts' })
+const savedLink = (title: string) => savedList.getByRole('link', { name: new RegExp('^' + title + ', Unsent draft') })
+const savedCheck = (url: URL) => url.pathname === '/' && url.searchParams.get('workspace') === String(workspaceId)
+  && Boolean(url.searchParams.get('draft'))
+await savedDraftPage.goto(backgroundDraftUrl)
+await savedEditor.fill('Saved legacy draft')
+await savedDraftPage.locator('[data-nav-new-thread]').click()
+await savedDraftPage.waitForURL(savedCheck)
+await savedLink('Saved legacy draft').waitFor()
+const savedFirstUrl = savedDraftPage.url()
+await savedDraftPage.clock.setFixedTime(new Date('2026-11-26T17:00:01Z'))
+await savedEditor.fill('Saved draft one\nKeep this second line.')
+const savedWorktree = savedDraftPage.locator('[data-draft-worktree] summary')
+await savedWorktree.click()
+const savedMode = savedDraftPage.getByLabel('Run in', { exact: true })
+await savedMode.locator('option[value="worktree"]').waitFor({ state: 'attached' })
+await savedMode.selectOption('worktree')
+await savedDraftPage.getByRole('textbox', { name: 'Base branch', exact: true }).fill('background-fixture-base')
+const savedModelPicker = savedDraftPage.getByRole('button', { name: 'Choose agent and model', exact: true })
+const savedModelDialog = savedDraftPage.getByRole('dialog', { name: 'Agent and model' })
+await savedModelPicker.click()
+await savedModelDialog.getByRole('button', { name: 'Codex · Catalog fixture', exact: true }).click()
+await savedModelDialog.getByRole('button', { name: 'Fixture Fast', exact: true }).click()
+await savedModelDialog.getByRole('button', { name: 'High', exact: true }).click()
+await savedModelDialog.getByRole('button', { name: 'Done', exact: true }).click()
+check('a new draft stays out of the list while its initial editor is open', await savedLink('Saved draft one').count() === 0)
+const newProjectDraft = savedDraftPage.locator(`[data-section-id="project-${workspaceId}"]`).getByRole('link', { name: 'New thread' })
+await newProjectDraft.click()
+await savedDraftPage.waitForURL(url => savedCheck(url) && url.href !== savedFirstUrl)
+await savedLink('Saved draft one').waitFor()
+const savedSecondUrl = savedDraftPage.url()
+await savedDraftPage.clock.setFixedTime(new Date('2026-11-26T17:00:02Z'))
+await savedEditor.fill('Saved draft two')
+await savedDraftPage.locator('[data-nav-new-thread]').click()
+await savedDraftPage.waitForURL(url => savedCheck(url) && url.href !== savedSecondUrl && url.href !== savedFirstUrl)
+await savedLink('Saved draft two').waitFor()
+check('new-thread actions create distinct drafts and keep previous project drafts above the thread list',
+  await savedList.getByRole('link').count() === 3
+  && (await savedList.getByRole('link').first().getAttribute('aria-label'))?.startsWith('Saved draft two,') === true)
+await savedDraftPage.locator('[data-composer-file-input]').setInputFiles({
+  name: 'unsent-notes.txt',
+  mimeType: 'text/plain',
+  buffer: Buffer.from('Keep this draft attachment.'),
+})
+await savedDraftPage.locator('[data-send]:enabled').waitFor()
+const savedFileUrl = savedDraftPage.url()
+await pressChord('Control+Alt+n', savedDraftPage)
+await savedDraftPage.waitForURL(url => url.searchParams.get('project') === 'none' && Boolean(url.searchParams.get('draft')))
+await savedLink('1 attachment').waitFor()
+await savedDraftPage.clock.setFixedTime(new Date('2026-11-26T17:00:03Z'))
+await savedEditor.fill('Saved scratch draft')
+await savedDraftPage.goto(backgroundDraftUrl)
+await savedLink('Saved scratch draft').waitFor()
+await savedDraftPage.reload()
+await savedLink('Saved draft two').waitFor()
+check('legacy, independent project, file-only, and scratch drafts can all be reopened after reload',
+  await savedList.getByRole('link').count() === 5
+  && await savedLink('Saved legacy draft').getAttribute('href') === `/?workspace=${workspaceId}`
+  && new URL(await savedLink('1 attachment').getAttribute('href') || '', baseUrl).href === savedFileUrl)
+for (const [width, height] of workspaceViewports) {
+  await savedDraftPage.setViewportSize({ width, height })
+  const toggle = savedDraftPage.locator('[data-sidebar-toggle]')
+  if (await toggle.isVisible() && !await savedList.isVisible()) await toggle.click()
+  await savedLink('Saved draft two').waitFor()
+  check(`saved drafts fit at ${width}×${height}`, await savedList.evaluate(list => {
+    const bounds = list.getBoundingClientRect()
+    return bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
+  }))
+  await capture(`workspace-saved-drafts-${width}x${height}`, savedDraftPage)
+  const close = savedDraftPage.locator('[data-sidebar-close]')
+  if (width <= 600 && await close.isVisible()) await close.click()
+}
+await savedDraftPage.setViewportSize({ width: 1440, height: 900 })
+if (!await savedList.isVisible()) await savedDraftPage.locator('[data-sidebar-toggle]').click()
+await savedLink('Saved draft one').focus()
+await savedLink('Saved draft one').press('ArrowUp')
+check('the saved draft group supports keyboard focus between rows',
+  await savedLink('Saved draft two').evaluate(link => link === document.activeElement))
+await savedLink('Saved draft one').press('Enter')
+await savedDraftPage.waitForURL(savedFirstUrl)
+await savedDraftPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Saved draft one\nKeep this second line.')
+check('opening a saved row restores its exact draft and identifies the active link',
+  await savedLink('Saved draft one').getAttribute('aria-current') === 'page')
+await savedWorktree.click()
+await savedMode.locator('option[value="worktree"]').waitFor({ state: 'attached' })
+check('opening a saved draft restores its own worktree mode and base',
+  await savedMode.inputValue() === 'worktree'
+  && await savedDraftPage.getByRole('textbox', { name: 'Base branch', exact: true }).inputValue() === 'background-fixture-base')
+await savedModelPicker.getByText('Fixture Fast · High', { exact: true }).waitFor()
+await savedModelPicker.click()
+check('opening a saved draft restores its named account and model options',
+  await savedModelDialog.getByRole('button', { name: 'Codex · Catalog fixture', exact: true }).getAttribute('aria-pressed') === 'true'
+  && await savedModelDialog.getByRole('button', { name: 'High', exact: true }).getAttribute('aria-pressed') === 'true')
+await savedModelDialog.getByRole('button', { name: 'Done', exact: true }).click()
+await savedEditor.fill('Edited draft one')
+check('the active saved row keeps its arrival preview while editing', await savedLink('Saved draft one').isVisible())
+await savedLink('Saved draft two').click()
+await savedDraftPage.waitForURL(savedSecondUrl)
+await savedDraftPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Saved draft two')
+await savedLink('Edited draft one').waitFor()
+const discardSaved = savedList.getByRole('button', { name: 'Discard draft for Edited draft one', exact: true })
+await discardSaved.press('Enter')
+await savedLink('Edited draft one').waitFor({ state: 'hidden' })
+check('discarding one saved draft leaves the current draft intact', await savedEditor.inputValue() === 'Saved draft two')
+const savedUndo = savedDraftPage.locator('[data-navigation-undo]')
+await savedUndo.getByRole('button', { name: 'Undo', exact: true }).click()
+await savedLink('Edited draft one').waitFor()
+const sharedDraftWriter = await savedDraftContext.newPage()
+try {
+  await sharedDraftWriter.goto(savedFirstUrl)
+  const writerEditor = sharedDraftWriter.getByRole('textbox', { name: 'Message', exact: true })
+  await sharedDraftWriter.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Edited draft one')
+  await writerEditor.fill('Draft changed in another tab')
+  await savedLink('Draft changed in another tab').waitFor()
+  check('the sidebar reflects a saved draft edit from another tab', true)
+}
+finally {
+  await sharedDraftWriter.waitForLoadState('networkidle')
+  await sharedDraftWriter.close()
+}
+await savedLink('1 attachment').click()
+await savedDraftPage.waitForURL(savedFileUrl)
+await savedDraftPage.getByText('unsent-notes.txt', { exact: true }).waitFor()
+check('the file-only draft restores its attachment', await savedEditor.inputValue() === '')
+
+const sendNumber = (number: number) => savedDraftPage.evaluate(number => !window.dispatchEvent(new KeyboardEvent('keydown', {
+  key: String(number), code: 'Digit' + number, metaKey: true, bubbles: true, cancelable: true,
+})), number)
+await savedDraftPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
+check('the browser keeps its numbered tab shortcuts by default', !await sendNumber(1) && savedDraftPage.url() === savedFileUrl)
+await savedDraftPage.getByRole('button', { name: 'Settings', exact: true }).click()
+const jumpSettings = savedDraftPage.getByRole('dialog', { name: 'Settings', exact: true })
+await jumpSettings.getByRole('button', { name: 'Keyboard', exact: true }).click()
+const jumpRow = jumpSettings.locator('[data-keybinding-row="thread.jump.1"]')
+check('the keyboard pane shows unassigned browser jump shortcuts',
+  await jumpRow.locator('[data-keybinding-chord]').textContent() === 'Unassigned')
+await jumpRow.getByRole('button', { name: 'Change', exact: true }).click()
+await pressChord('Meta+1', savedDraftPage)
+await jumpRow.getByRole('button', { name: 'Reset', exact: true }).waitFor()
+check('a browser can opt into the reserved chord explicitly',
+  (await jumpRow.locator('[data-keybinding-chord]').textContent())?.endsWith('1') === true)
+await savedDraftPage.keyboard.press('Escape')
+await savedDraftPage.waitForURL(savedFileUrl)
+const scratchHref = await savedLink('Saved scratch draft').getAttribute('href') || ''
+const scratchDraftUrl = new URL(scratchHref, baseUrl).href
+const scratchKey = await savedLink('Saved scratch draft').locator('xpath=..').getAttribute('data-saved-draft')
+if (!scratchKey) throw new Error('The scratch draft storage key is unavailable')
+await savedDraftPage.addInitScript((target) => {
+  if (location.href !== target) return
+  const frame = window.requestAnimationFrame.bind(window)
+  window.requestAnimationFrame = callback => frame((now) => {
+    const editor = document.querySelector<HTMLTextAreaElement>('[data-prompt]')
+    if (editor && !editor.value) {
+      document.documentElement.dataset.fixtureEarlySelection = 'yes'
+      editor.dispatchEvent(new Event('select', { bubbles: true }))
+    }
+    callback(now)
+  })
+}, scratchDraftUrl)
+await pressChord('Meta+1', savedDraftPage)
+await savedDraftPage.waitForURL(scratchDraftUrl)
+await savedDraftPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Saved scratch draft')
+check('sidebar position one opens the newest saved draft', true)
+check('an empty selection event before the first restore preserves the saved draft',
+  await savedDraftPage.evaluate(() => document.documentElement.dataset.fixtureEarlySelection === 'yes'))
+await pressChord('Meta+Shift+]', savedDraftPage)
+await savedDraftPage.waitForURL(savedFileUrl)
+await pressChord('Meta+Shift+[', savedDraftPage)
+await savedDraftPage.waitForURL(scratchDraftUrl)
+check('previous and next move in sidebar order across saved drafts', true)
+const topBeforePrevious = savedDraftPage.url()
+await pressChord('Meta+Shift+[', savedDraftPage)
+check('previous stays at the first visible item', savedDraftPage.url() === topBeforePrevious)
+
+// The bridge fixture activates desktop defaults. The actual Craft input drive
+// verifies the same route changes without a bridge fixture.
+await savedDraftPage.addInitScript(() => {
+  Object.assign(window, { craft: { menu: { set: () => { document.documentElement.dataset.fixtureDesktopMenu = 'ready' } } } })
+})
+await savedDraftPage.waitForLoadState('networkidle')
+await savedDraftPage.goto(backgroundDraftUrl)
+await savedDraftPage.bringToFront()
+await savedDraftPage.waitForFunction(() => {
+  const { harnessKeyboard, fixtureDesktopMenu } = document.documentElement.dataset
+  return harnessKeyboard === 'ready' && fixtureDesktopMenu === 'ready'
+})
+await savedLink('Saved draft two').waitFor()
+await savedLink('Saved scratch draft').waitFor()
+await savedDraftPage.waitForLoadState('networkidle')
+const primaryModifier = await savedDraftPage.evaluate(() =>
+  /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent) ? 'Meta' : 'Control')
+// Screenshots exercise the held hint through the same events after the simulated
+// menu is ready. Shortcut navigation below still uses Playwright keyboard input.
+const setFixtureModifier = (down: boolean) => savedDraftPage.evaluate(({ down, key }) => {
+  window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', {
+    key, code: key + 'Left', metaKey: down && key === 'Meta', ctrlKey: down && key === 'Control',
+  }))
+}, { down, key: primaryModifier })
+for (const [width, height] of workspaceViewports) {
+  await savedDraftPage.setViewportSize({ width, height })
+  const toggle = savedDraftPage.locator('[data-sidebar-toggle]')
+  if (await toggle.isVisible() && !await savedList.isVisible()) await toggle.click()
+  const scratchHint = savedLink('Saved scratch draft').locator('xpath=self::*[@data-sidebar-jump]')
+  // Resizing or presenting the sidebar can briefly blur the headless window.
+  // Keep the fixture's modifier engaged until the numbered hint is visible.
+  for (let attempt = 0; ; attempt++) {
+    await setFixtureModifier(true)
+    if (await scratchHint.waitFor({ timeout: 1200 }).then(() => true).catch(() => false)) break
+    if (attempt === 3) throw new Error(`Sidebar hint unavailable at ${width}×${height}`)
+  }
+  check(`numbered sidebar hints fit at ${width}×${height}`, await savedList.evaluate(list => {
+    const bounds = list.getBoundingClientRect()
+    const link = list.querySelector('[data-sidebar-jump]')
+    const discard = link?.parentElement?.querySelector('[data-draft-discard-row]')
+    const gutter = link ? Number.parseFloat(getComputedStyle(link).paddingInlineEnd) : 0
+    const discardSpace = discard && link ? link.getBoundingClientRect().right - discard.getBoundingClientRect().left : Infinity
+    return gutter > discardSpace && bounds.left >= 0 && bounds.right <= innerWidth && document.documentElement.scrollWidth === innerWidth
+  }))
+  await capture(`workspace-sidebar-jump-${width}x${height}`, savedDraftPage)
+  await setFixtureModifier(false)
+  await savedDraftPage.locator('[data-sidebar-jump]').first().waitFor({ state: 'detached' })
+  const close = savedDraftPage.locator('[data-sidebar-close]')
+  if (width <= 600 && await close.isVisible()) await close.click()
+}
+await savedDraftPage.setViewportSize({ width: 1440, height: 900 })
+await pressChord('Meta+2', savedDraftPage)
+await savedDraftPage.waitForURL(savedFileUrl)
+check('the inherited desktop shortcut opens the second saved draft', true)
+await savedModelPicker.click()
+await savedModelDialog.getByRole('button', { name: 'Codex · Catalog fixture', exact: true }).click()
+const numberedModels = savedModelDialog.locator('[data-draft-model-option][aria-keyshortcuts]')
+await numberedModels.nth(1).waitFor()
+const modelAtTwo = await numberedModels.nth(1).getAttribute('title')
+check('the provider default does not take a numbered model slot',
+  await savedModelDialog.getByRole('button', { name: 'Provider default', exact: true }).getAttribute('aria-keyshortcuts') === null
+  && await numberedModels.first().getAttribute('title') === 'Fixture Fast')
+for (const [width, height] of workspaceViewports) {
+  await savedDraftPage.setViewportSize({ width, height })
+  await savedDraftPage.waitForFunction(() => {
+    const dialog = document.querySelector('[data-draft-model-dialog][open]')
+    const frame = dialog?.getBoundingClientRect()
+    const done = dialog?.querySelector('[data-draft-model-footer] button')?.getBoundingClientRect()
+    const option = dialog?.querySelector('[data-draft-model-option][aria-keyshortcuts]')
+    const badge = option?.querySelector('[data-model-jump]')?.getBoundingClientRect()
+    const bounds = option?.getBoundingClientRect()
+    return Boolean(frame && done && bounds && badge
+      && frame.left >= 0 && frame.right <= innerWidth + 1
+      && done.left >= frame.left && done.right <= frame.right && done.bottom <= frame.bottom
+      && badge.right <= bounds.right + 1 && bounds.right <= frame.right)
+  })
+  check(`the model shortcuts fit at ${width}×${height}`, true)
+  await capture(`workspace-model-jump-${width}x${height}`, savedDraftPage)
+}
+await savedDraftPage.setViewportSize({ width: 1440, height: 900 })
+await pressChord('Meta+2', savedDraftPage)
+await savedModelDialog.locator('[data-draft-model-row][aria-selected="true"] [data-draft-model-option]').filter({ hasText: modelAtTwo || '' }).waitFor()
+check('while the model picker is open the same number selects its model', savedDraftPage.url() === savedFileUrl)
+await savedModelDialog.getByRole('button', { name: 'Done', exact: true }).click()
+await pressChord('Meta+3', savedDraftPage)
+await savedDraftPage.waitForURL(savedSecondUrl)
+check('closing the model picker gives the number back to sidebar navigation', true)
+
+const jumpActiveId = derivedId('numbered-sidebar-active-thread')
+const jumpPinnedId = derivedId('numbered-sidebar-pinned-thread')
+await harness.engine.dispatch({ id: 'numbered-sidebar-active-thread', at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
+await harness.engine.dispatch({ id: 'numbered-sidebar-pinned-thread', at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
+await harness.engine.dispatch({ id: 'numbered-sidebar-initial-pin', at: Date.now(), command: { type: 'session.organize', sessionId: jumpPinnedId, action: 'pin' } })
+await savedDraftPage.waitForLoadState('networkidle')
+await savedDraftPage.goto(backgroundDraftUrl)
+const selectedPanel = savedDraftPage.locator('[data-space-active="true"]')
+const jumpPinned = selectedPanel.locator(`[data-section-id^="pinned-"] a[href="/s/${jumpPinnedId}"]`)
+await jumpPinned.waitFor()
+await selectedPanel.locator(`[data-section-id="project-${workspaceId}"] a[href="/s/${jumpActiveId}"]`).waitFor()
+const sixthHref = await selectedPanel.locator('[data-saved-draft-link], [data-sidebar-row]:not([data-collapsed]) a[data-sidebar-item][href^="/s/"]').nth(5).getAttribute('href')
+await pressChord('Meta+5', savedDraftPage)
+await savedDraftPage.waitForURL(backgroundDraftUrl)
+await pressChord('Meta+Shift+]', savedDraftPage)
+await savedDraftPage.waitForURL(new URL(sixthHref || '', baseUrl).href)
+check('traversal crosses from the last draft into the visible thread list', new URL(savedDraftPage.url()).pathname.startsWith('/s/'))
+await pressChord('Meta+Shift+[', savedDraftPage)
+await savedDraftPage.waitForURL(backgroundDraftUrl)
+const pinnedShelf = selectedPanel.locator('[data-section-id^="pinned-"]')
+await savedDraftPage.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
+await jumpPinned.waitFor()
+await savedDraftPage.keyboard.down(primaryModifier)
+await jumpPinned.locator('xpath=self::*[@data-sidebar-jump]').waitFor()
+await pinnedShelf.locator('[data-sidebar-section-header]').click()
+await jumpPinned.locator('xpath=self::*[@data-sidebar-jump]').waitFor({ state: 'detached' })
+const expandedSixth = await selectedPanel.locator('[data-saved-draft-link], [data-sidebar-row]:not([data-collapsed]) a[data-sidebar-item][href^="/s/"]').nth(5).getAttribute('href')
+await savedDraftPage.keyboard.up(primaryModifier)
+await pressChord('Meta+6', savedDraftPage)
+await savedDraftPage.waitForURL(new URL(expandedSixth || '', baseUrl).href)
+check('collapsed shelves give their numbers to the following visible threads', Boolean(expandedSixth) && expandedSixth !== sixthHref)
+// A fixture context is torn down immediately. Let the destination's catalog
+// and settlement requests complete first, as they would in an open tab.
+await savedDraftPage.waitForLoadState('networkidle')
+await savedDraftPage.goto(scratchDraftUrl)
+await savedDraftPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Saved scratch draft')
+await savedEditor.fill('')
+await savedDraftPage.waitForFunction(key => !JSON.parse(localStorage.getItem(key) ?? 'null')?.text, scratchKey)
+check('an intentional edit can still empty a saved draft after restore', true)
+await savedDraftContext.close()
+
+
+const shareContext = await browser.newContext({ colorScheme, reducedMotion })
+const sharePage = await shareContext.newPage()
+sharePage.on('pageerror', error => {
+  console.error('Share page error at', new URL(sharePage.url()).pathname, error.message)
+  pageErrors.push(error.message)
+})
+await sharePage.addInitScript(() => {
+  Object.assign(window, { craft: {
+    menu: { set: () => {} },
+    clipboard: { writeText: (text: string) => {
+      if (sessionStorage.getItem('fixture.share.deny')) throw new Error('Clipboard permission denied.')
+      localStorage.setItem('fixture.share.clipboard', text)
+    } },
+  } })
+})
+execFileSync('git', ['config', '--local', 'remote.origin.url', 'git@github.com:Fixture/notes-app.git'], { cwd: dir })
+const sharedThreadId = derivedId('linked-prompt-source-session')
+await harness.engine.dispatch({ id: 'linked-prompt-source-session', at: Date.now(), command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
+const shareWriter = new WebSocket('ws://localhost:' + port + '/ws')
+await new Promise<void>((resolve, reject) => {
+  shareWriter.addEventListener('open', () => resolve(), { once: true })
+  shareWriter.addEventListener('error', () => reject(new Error('Could not open share fixture socket.')), { once: true })
+})
+try {
+  for (const [id, text] of [
+    ['shared-fixture-first', 'Share an earlier prompt & its punctuation?'],
+    ['shared-fixture-second', 'Keep the later message visible in this thread.'],
+  ]) {
+    shareWriter.send(encode({ t: 'dispatch', envelope: {
+      id, at: Date.now(), command: { type: 'session.turn.start', sessionId: sharedThreadId, text },
+    } }))
+    const deadline = Date.now() + 15_000
+    while (!harness.engine.current.sessions.get(sharedThreadId)?.turns.some(turn => turn.prompt === text && turn.status === 'complete')) {
+      if (Date.now() >= deadline) throw new Error('Could not seed the shared thread.')
+      await Bun.sleep(100)
+    }
+  }
+}
+finally { shareWriter.close() }
+const sourceTurnId = harness.engine.current.sessions.get(sharedThreadId)!.turns[0]!.id
+const shareThreadUrl = baseUrl + '/s/' + sharedThreadId
+const sourceTurn = sharePage.locator('[data-turn="' + sourceTurnId + '"]')
+const sharedEditor = sharePage.getByRole('textbox', { name: 'Message', exact: true })
+const shareModal = sharePage.locator('[data-prompt-link-dialog]')
+const clipboard = async () => {
+  await sharePage.waitForFunction(() => Boolean(localStorage.getItem('fixture.share.clipboard')))
+  return new URL(await sharePage.evaluate(() => localStorage.getItem('fixture.share.clipboard') || ''))
+}
+const clearClipboard = () => sharePage.evaluate(() => localStorage.removeItem('fixture.share.clipboard'))
+const shareState = () => [...harness.engine.current.sessions.values()].reduce((totals, thread) =>
+  [totals[0]! + 1, totals[1]! + thread.turns.length], [0, 0])
+const shareBefore = shareState()
+
+await sharePage.setViewportSize({ width: 1440, height: 900 })
+await sharePage.goto(shareThreadUrl)
+await sourceTurn.getByRole('button', { name: 'Copy prompt link', exact: true }).click()
+const sentPrompt = await clipboard()
+check('a sent prompt can be shared as a new editable draft', sentPrompt.pathname === '/new'
+  && sentPrompt.searchParams.get('prompt') === 'Share an earlier prompt & its punctuation?')
+await clearClipboard()
+await sourceTurn.getByRole('button', { name: 'Copy message link', exact: true }).click()
+const sentMessage = await clipboard()
+check('a message link points to its exact historical turn', sentMessage.href === shareThreadUrl + '#turn-' + sourceTurnId)
+await sharePage.evaluate(() => sessionStorage.setItem('fixture.share.deny', '1'))
+const messageCopy = sourceTurn.getByRole('button', { name: 'Copy message link', exact: true })
+await messageCopy.click()
+const clipboardDialog = sharePage.getByRole('dialog', { name: 'Copy link' })
+await clipboardDialog.waitFor()
+check('clipboard denial offers the same address for manual copy',
+  await clipboardDialog.getByRole('textbox', { name: 'Shareable link' }).inputValue() === sentMessage.href)
+await clipboardDialog.getByRole('button', { name: 'Done' }).click()
+await sharePage.waitForFunction(() => document.activeElement?.hasAttribute('data-copy-message-link'))
+await sharePage.evaluate(() => sessionStorage.removeItem('fixture.share.deny'))
+await clearClipboard()
+await sharePage.locator('[data-thread-actions-trigger]').click()
+await sharePage.getByRole('button', { name: 'Copy thread link', exact: true }).click()
+check('Copy thread link uses the clean thread address', (await clipboard()).href === shareThreadUrl)
+await clearClipboard()
+await sharePage.locator('[data-transcript]').focus()
+await pressChord('Control+Shift+C', sharePage)
+check('the registered shortcut copies the same thread link', (await clipboard()).href === shareThreadUrl)
+await sharePage.goto(sentMessage.href)
+await sourceTurn.locator('xpath=self::*[@data-linked-turn]').waitFor()
+await sharePage.waitForFunction(() => document.activeElement?.hasAttribute('data-linked-turn'))
+check('opening a message link focuses its historical turn', true)
+await sharePage.goto(shareThreadUrl + '#turn-999999')
+await sharePage.getByText('This message is unavailable in the current thread.').waitFor()
+check('a missing message shows recovery without losing the thread', await sharedEditor.isVisible())
+
+const unsafeThreadPrompt = 'Review A\u200B&B 👩‍💻\nSecond line'
+await sharePage.goto(shareThreadUrl + '?' + new URLSearchParams({ prompt: unsafeThreadPrompt, branch: 'ignored' }))
+await sharePage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Review A&B 👩‍💻\nSecond line')
+await sharePage.locator('[data-linked-prompt-notice]').getByText('Hidden characters were removed from this prompt.', { exact: false }).waitFor()
+check('an empty thread composer receives sanitized text and consumes the URL prompt',
+  !new URL(sharePage.url()).searchParams.has('prompt') && shareState().join() === shareBefore.join())
+await sharePage.goto(shareThreadUrl + '?' + new URLSearchParams({ prompt: 'Replace this draft only with consent.' }))
+await shareModal.getByRole('heading', { name: 'Replace draft text?' }).waitFor()
+for (const [width, height] of workspaceViewports) {
+  await sharePage.setViewportSize({ width, height })
+  check('linked prompt consent fits at ' + width + '×' + height, await shareModal.evaluate(dialog => {
+    const box = dialog.getBoundingClientRect()
+    const button = dialog.querySelector('[data-share-primary]')?.getBoundingClientRect()
+    return Boolean(button && box.left >= 0 && box.right <= innerWidth + 1 && button.right <= box.right && button.bottom <= box.bottom)
+  }))
+  await capture('linked-prompt-confirmation-' + width + 'x' + height, sharePage)
+}
+await sharePage.keyboard.press('Escape')
+check('cancelling a linked replacement preserves the existing draft', await sharedEditor.inputValue() === 'Review A&B 👩‍💻\nSecond line')
+await sharePage.goto(shareThreadUrl + '?' + new URLSearchParams({ prompt: 'Replace this draft only with consent.' }))
+await shareModal.getByRole('button', { name: 'Replace draft text' }).click()
+check('accepting a linked replacement changes the editor without sending',
+  await sharedEditor.inputValue() === 'Replace this draft only with consent.'
+  && !await sharePage.locator('[data-linked-prompt-notice]').isVisible() && shareState().join() === shareBefore.join())
+
+await sharePage.setViewportSize({ width: 1440, height: 900 })
+await clearClipboard()
+await pressChord('Control+K', sharePage)
+const sharePalette = sharePage.getByRole('dialog', { name: 'Search threads' })
+await sharePalette.getByRole('button', { name: 'Copy prompt link with repo and model', exact: true }).click()
+const contextPrompt = await clipboard()
+check('the palette copies only the public repository and driver context',
+  contextPrompt.searchParams.get('repo')?.toLowerCase() === 'fixture/notes-app'
+  && !contextPrompt.href.includes(dir) && !contextPrompt.href.includes('providerInstance'))
+const repoLink = new URL('/new', baseUrl)
+repoLink.search = new URLSearchParams({
+  prompt: 'Draft in the known project.', repo: 'fixture/notes-app', provider: 'codex', model: 'fixture-fast',
+  branch: 'do-not-checkout', permission: 'full-access',
+}).toString()
+await sharePage.goto(repoLink.href)
+await shareModal.getByRole('button', { name: 'Open project draft' }).click()
+await sharePage.waitForURL(url => url.searchParams.get('workspace') === String(workspaceId) && Boolean(url.searchParams.get('draft')))
+await sharePage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Draft in the known project.')
+await sharePage.locator('[data-model-picker-trigger]').getByText('Fixture Fast', { exact: true }).waitFor()
+check('a known repository opens a fresh draft with the available named model', !new URL(sharePage.url()).searchParams.has('branch'))
+
+await sharePage.waitForLoadState('networkidle')
+await sharePage.goto(sentPrompt.href)
+await sharePage.waitForURL(url => url.searchParams.get('project') === 'none' && Boolean(url.searchParams.get('draft')))
+await sharePage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Share an earlier prompt & its punctuation?')
+check('an unscoped prompt link opens a projectless draft without running it', shareState().join() === shareBefore.join())
+
+await sharePage.waitForLoadState('networkidle')
+await sharePage.goto(baseUrl + '/new?' + new URLSearchParams({ prompt: 'Missing checkout', repo: 'fixture/missing-checkout', provider: 'codex', model: 'missing-model' }))
+await shareModal.getByText('fixture/missing-checkout is unavailable on this host.').waitFor()
+await shareModal.getByRole('button', { name: 'Use without a project' }).click()
+await sharePage.waitForURL(url => url.searchParams.get('project') === 'none' && Boolean(url.searchParams.get('draft')))
+await sharePage.getByText('The linked model is unavailable. Your default model was selected.').waitFor()
+check('missing repositories and models yield a usable draft with an explicit fallback', await sharedEditor.inputValue() === 'Missing checkout')
+
+await sharePage.waitForLoadState('networkidle')
+await sharePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/notes-app/12', prompt: 'Check the PR' }))
+check('pull request links keep an explicit route to GitHub', await shareModal.getByRole('link', { name: 'Open pull request on GitHub' }).getAttribute('href') === 'https://github.com/fixture/notes-app/pull/12')
+await shareModal.getByRole('button', { name: 'Cancel' }).click()
+await sharePage.waitForURL(baseUrl + '/')
+await sharePage.waitForLoadState('networkidle')
+const unavailableThread = await sharePage.goto(baseUrl + '/s/999999999999')
+check('a missing thread has a real 404 and a route back to the workspace',
+  unavailableThread?.status() === 404 && await sharePage.getByRole('link', { name: 'Back to workspace' }).isVisible())
+await sharePage.waitForLoadState('networkidle')
+await shareContext.close()
+
+const cloneContext = await browser.newContext({ colorScheme, reducedMotion })
+const clonePage = await cloneContext.newPage()
+clonePage.on('pageerror', error => {
+  console.error('Clone page error at', new URL(clonePage.url()).pathname, error.message)
+  pageErrors.push(error.message)
+})
+const gitFiles = fixtureGitRepository(join(driveRoot, 'clone-server'))
+const pullRequestHead = fixturePullRequest(join(driveRoot, 'clone-server'), 7)
+const networkGate = Promise.withResolvers<void>()
+let delayGit = true
+const gitFixture = serveFixtureGit(gitFiles.remote, () => delayGit ? networkGate.promise : Promise.resolve())
+const remote = `http://127.0.0.1:${gitFixture.port}/notebook.git`
+const gitConfigCount = process.env.GIT_CONFIG_COUNT
+const nextConfig = Number(gitConfigCount) || 0
+const gitConfigKey = 'GIT_CONFIG_KEY_' + nextConfig
+const gitConfigValue = 'GIT_CONFIG_VALUE_' + nextConfig
+const oldKey = process.env[gitConfigKey]
+const oldValue = process.env[gitConfigValue]
+try {
+  const countBeforeClone = harness.engine.current.sessions.size
+  const destination = join(driveRoot, 'cloned-notebook')
+  await clonePage.setViewportSize({ width: 390, height: 844 })
+  await clonePage.goto(backgroundDraftUrl)
+  await clonePage.getByRole('button', { name: 'Workspace actions' }).click()
+  await clonePage.locator('[data-project-add]').click()
+  await clonePage.getByRole('dialog', { name: 'Add project' }).getByRole('button', { name: 'Clone a repository' }).click()
+  const cloneDialog = clonePage.getByRole('dialog', { name: 'Clone a repository' })
+  const urlBox = cloneDialog.getByRole('textbox', { name: 'Repository URL' })
+  const destinationBox = cloneDialog.getByRole('textbox', { name: 'Destination folder' })
+  const cloneSubmit = cloneDialog.getByRole('button', { name: 'Clone repository', exact: true })
+  async function submitClone(expectedDestination: string) {
+    const [response] = await Promise.all([
+      clonePage.waitForResponse(result => new URL(result.url()).pathname === '/projects/clone' && result.request().method() === 'POST'),
+      cloneSubmit.click(),
+    ])
+    if (response.request().postDataJSON().destination !== expectedDestination)
+      throw new Error('Clone setup submitted a directory other than the one entered in the fixture.')
+    if (response.status() !== 202) throw new Error('Clone setup failed: ' + await response.text())
+  }
+  const suggestionRoute = '**/projects/clone?remote=*'
+  const suggestionStarted = Promise.withResolvers<void>()
+  const answerSuggestion = Promise.withResolvers<void>()
+  await clonePage.route(suggestionRoute, async (route) => {
+    suggestionStarted.resolve()
+    await answerSuggestion.promise
+    await route.fulfill({ json: { destination: join(driveRoot, 'suggested-notebook'), directory: 'notebook' } })
+  })
+  await urlBox.fill(remote)
+  await destinationBox.click()
+  try {
+    const requestStarted = await Promise.race([suggestionStarted.promise.then(() => true), Bun.sleep(4000).then(() => false)])
+    if (!requestStarted) throw new Error('The clone folder suggestion was not requested.')
+    await destinationBox.fill(join(driveRoot, 'typed-notebook'))
+    await destinationBox.fill('')
+  }
+  finally { answerSuggestion.resolve() }
+  await clonePage.waitForLoadState('networkidle')
+  await clonePage.unroute(suggestionRoute)
+  check('a delayed clone suggestion respects a destination the user cleared', await destinationBox.inputValue() === '')
+  await destinationBox.fill(destination)
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    check(`clone setup fits at ${width}×${height}`, await cloneDialog.evaluate(dialog => {
+      const bounds = dialog.getBoundingClientRect()
+      const submit = dialog.querySelector('[type=submit]')?.getBoundingClientRect()
+      return Boolean(submit && bounds.left >= 0 && bounds.right <= innerWidth + 1 && submit.bottom <= bounds.bottom)
+    }))
+    await capture(`workspace-project-clone-${width}x${height}`, clonePage)
+  }
+
+  await submitClone(destination)
+  await cloneDialog.getByRole('button', { name: 'Stop clone' }).waitFor()
+  await clonePage.reload()
+  await cloneDialog.getByRole('button', { name: 'Stop clone' }).click()
+  await cloneDialog.getByText('Clone stopped.', { exact: true }).waitFor()
+  check('reloading reattaches to a cancellable clone and stopping it leaves no checkout', !existsSync(destination))
+
+  delayGit = false
+  networkGate.resolve()
+  await submitClone(destination)
+  await clonePage.waitForURL(url => Boolean(url.searchParams.get('workspace')) && url.href !== backgroundDraftUrl)
+  await clonePage.locator('[data-project-trust]').waitFor()
+  const manualId = Number(new URL(clonePage.url()).searchParams.get('workspace'))
+  check('cloning through Add project registers the real checkout untrusted with no provider turn',
+    harness.engine.current.workspaces.get(manualId)?.trusted === false
+    && harness.engine.current.sessions.size === countBeforeClone
+    && readFileSync(join(destination, 'README.md'), 'utf8') === 'Clone fixture notebook\n')
+
+  process.env.GIT_CONFIG_COUNT = String(nextConfig + 1)
+  process.env[gitConfigKey] = 'url.' + remote + '.insteadOf'
+  process.env[gitConfigValue] = 'https://github.com/fixture/notebook.git'
+  const linkedPrompt = 'Read the notebook before suggesting changes.'
+  const linkDestination = join(driveRoot, 'linked-notebook')
+  await clonePage.waitForLoadState('networkidle')
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ prompt: linkedPrompt, repo: 'fixture/notebook' }))
+  const promptReview = clonePage.locator('[data-prompt-link-dialog]')
+  await promptReview.getByText('fixture/notebook is unavailable on this host.').waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-project-clone-link-${width}x${height}`, clonePage)
+  }
+  await promptReview.getByRole('button', { name: 'Clone repository' }).click()
+  await clonePage.waitForFunction(() => /notebook$/.test(document.querySelector<HTMLInputElement>('[data-project-clone-destination]')?.value || ''))
+  check('an unavailable GitHub repository opens clone settings with its repository and suggested folder',
+    await urlBox.inputValue() === 'fixture/notebook')
+  await destinationBox.fill(linkDestination)
+  await submitClone(linkDestination)
+  await clonePage.waitForURL(url => Boolean(url.searchParams.get('workspace')) && Boolean(url.searchParams.get('draft')))
+  await clonePage.locator('[data-project-trust]').click()
+  const editor = clonePage.getByRole('textbox', { name: 'Message', exact: true })
+  await editor.waitFor()
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, linkedPrompt)
+  check('cloning from a prompt link preserves its draft through project trust without sending',
+    harness.engine.current.sessions.size === countBeforeClone
+    && readFileSync(join(linkDestination, 'README.md'), 'utf8') === 'Clone fixture notebook\n')
+  const pullRequestPrompt = 'Review the notebook pull request.'
+  await clonePage.clock.setFixedTime(new Date('2026-11-26T17:00:00Z'))
+  const pullRequestUrl = baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/notebook/7', prompt: pullRequestPrompt })
+  const checkOut = promptReview.getByRole('button', { name: 'Check out pull request', exact: true })
+  await clonePage.goto(pullRequestUrl)
+  await checkOut.waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    check(`pull request confirmation fits at ${width}×${height}`, await checkOut.evaluate(button => {
+      const frame = button.closest('dialog')!.getBoundingClientRect()
+      const action = button.getBoundingClientRect()
+      return frame.left >= 0 && frame.right <= innerWidth + 1 && action.bottom <= frame.bottom
+    }))
+    await capture(`workspace-pull-request-confirm-${width}x${height}`, clonePage)
+  }
+  await promptReview.getByRole('button', { name: 'Cancel' }).click()
+  await clonePage.waitForURL(baseUrl + '/')
+  check('cancelling a pull request link preserves the project and creates no thread',
+    harness.engine.current.sessions.size === countBeforeClone && !existsSync(join(linkDestination, 'review.txt')))
+  await clonePage.waitForLoadState('networkidle')
+  await clonePage.goto(pullRequestUrl)
+  await checkOut.click()
+  await clonePage.waitForURL(url => /^\/s\/\d+$/.test(url.pathname))
+  const pullRequestSession = Number(new URL(clonePage.url()).pathname.slice(3))
+  await clonePage.waitForFunction(() => document.querySelector('[data-workspace-branch]')?.textContent?.startsWith('harness/session-'))
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pullRequestPrompt)
+  const pullRequestThread = harness.engine.current.sessions.get(pullRequestSession)
+  check('confirmation checks out the exact PR commit with an unsent draft and no provider run',
+    pullRequestThread?.pullRequest?.commit === pullRequestHead && pullRequestThread?.turns.length === 0
+    && readFileSync(join(pullRequestThread.worktreePath, 'review.txt'), 'utf8') === 'Only in the pull request\n'
+    && !existsSync(join(linkDestination, 'review.txt')))
+  await capture('workspace-pull-request-thread-360x800', clonePage)
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'FIXTURE/notebook/7', prompt: 'Replacement text.' }))
+  await promptReview.getByText('Replace draft text?', { exact: true }).waitFor()
+  await promptReview.getByRole('button', { name: 'Cancel' }).click()
+  check('reopening a PR uses the same thread and respects an existing draft',
+    new URL(clonePage.url()).pathname === '/s/' + pullRequestSession && await editor.inputValue() === pullRequestPrompt
+    && harness.engine.current.sessions.size === countBeforeClone + 1)
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/notebook/7' }))
+  await clonePage.waitForURL(baseUrl + '/s/' + pullRequestSession)
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pullRequestPrompt)
+  check('a PR link without a prompt opens the existing draft without a replacement dialog', !await promptReview.isVisible())
+
+  process.env[gitConfigValue] = 'https://github.com/fixture/another-notebook.git'
+  const newCheckout = join(driveRoot, 'second-pr-project')
+  const prSuggestionStarted = Promise.withResolvers<void>()
+  const suggestPrDestination = Promise.withResolvers<void>()
+  await clonePage.route(suggestionRoute, async (route) => {
+    prSuggestionStarted.resolve()
+    await suggestPrDestination.promise
+    await route.fulfill({ json: { destination: join(driveRoot, 'late-pr-suggestion'), directory: 'another-notebook' } }).catch(() => {})
+  })
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ pr: 'fixture/another-notebook/7', prompt: pullRequestPrompt }))
+  await promptReview.getByRole('button', { name: 'Clone repository' }).click()
+  try {
+    const requestStarted = await Promise.race([prSuggestionStarted.promise.then(() => true), Bun.sleep(4000).then(() => false)])
+    if (!requestStarted) throw new Error('The linked PR clone suggestion was not requested.')
+    await destinationBox.fill(newCheckout)
+  }
+  finally { suggestPrDestination.resolve() }
+  await clonePage.waitForLoadState('networkidle')
+  await clonePage.unroute(suggestionRoute)
+  check('a late linked PR clone suggestion preserves the folder the user typed', await destinationBox.inputValue() === newCheckout)
+  await submitClone(newCheckout)
+  await clonePage.waitForURL(url => url.searchParams.has('workspace') && url.searchParams.has('pr'))
+  const trustControl = clonePage.locator('[data-project-trust]')
+  await trustControl.waitFor()
+  check('a PR clone pauses for project trust before asking to check out the pull request',
+    !await promptReview.isVisible() && harness.engine.current.sessions.size === countBeforeClone + 1)
+  await trustControl.click()
+  await checkOut.waitFor()
+  await checkOut.click()
+  await clonePage.waitForURL(url => /^\/s\/\d+$/.test(url.pathname) && url.pathname !== '/s/' + pullRequestSession)
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, pullRequestPrompt)
+  check('after cloning and giving trust, a new PR checkout preserves the original linked draft',
+    harness.engine.current.sessions.size === countBeforeClone + 2 && !existsSync(join(newCheckout, 'review.txt')))
+  await clonePage.waitForLoadState('networkidle')
+
+  if (!pullRequestThread?.worktreePath) throw new Error('The PR fixture checkout is unavailable.')
+  const commitCheckout = pullRequestThread.worktreePath
+  const fixturePath = join(commitCheckout, 'review.txt')
+  const fixtureGit = (...args: string[]) => execFileSync('git', args, { cwd: commitCheckout, encoding: 'utf8' }).trim()
+  fixtureGit('config', 'user.name', 'Fixture Author')
+  fixtureGit('config', 'user.email', 'fixture@example.invalid')
+  writeFileSync(fixturePath, 'Staged review note\n')
+  fixtureGit('add', '--', 'review.txt')
+  writeFileSync(fixturePath, 'Newer working note\n')
+  const beforeCommit = fixtureGit('rev-parse', 'HEAD')
+  await clonePage.setViewportSize({ width: 1440, height: 900 })
+  await clonePage.goto(baseUrl + '/s/' + pullRequestSession)
+  await clonePage.getByRole('button', { name: 'Changes', exact: true }).click()
+  const openCommit = clonePage.getByRole('button', { name: 'Commit staged', exact: true })
+  const commitDialog = clonePage.getByRole('dialog', { name: 'Commit staged changes' })
+  const commitMessage = commitDialog.getByRole('textbox', { name: 'Commit message' })
+  await openCommit.click()
+  await commitDialog.getByText('review.txt', { exact: true }).waitFor()
+  await commitMessage.fill('Review staged note')
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-review-commit-${width}x${height}`, clonePage)
+  }
+  await clonePage.keyboard.press('Escape')
+  await commitDialog.waitFor({ state: 'hidden' })
+  check('Escape closes commit review and leaves the index and branch unchanged',
+    fixtureGit('rev-parse', 'HEAD') === beforeCommit && await openCommit.evaluate(button => button === document.activeElement))
+  await openCommit.click()
+  await commitMessage.fill('Review staged note')
+  await commitDialog.getByRole('button', { name: 'Commit', exact: true }).click()
+  await commitDialog.waitFor({ state: 'hidden' })
+  await clonePage.getByText(/^Committed [0-9a-f]{7}\.$/u).waitFor()
+  check('the commit dialog records the index and keeps newer working changes',
+    fixtureGit('show', 'HEAD:review.txt') === 'Staged review note' && readFileSync(fixturePath, 'utf8') === 'Newer working note\n')
+  await clonePage.waitForLoadState('networkidle')
+
+  const syncRemote = join(driveRoot, 'sync-fixture.git')
+  const syncPeer = join(driveRoot, 'sync-peer')
+  execFileSync('git', ['init', '--bare', '-q', syncRemote])
+  fixtureGit('remote', 'set-url', 'origin', syncRemote)
+  writeFileSync(fixturePath, 'Staged review note\n')
+  const syncBranch = fixtureGit('branch', '--show-current')
+  const gitActions = clonePage.getByRole('group', { name: 'Git actions' })
+  const openPush = gitActions.getByRole('button', { name: 'Push', exact: true })
+  const openPull = gitActions.getByRole('button', { name: 'Pull', exact: true })
+  const pushDialog = clonePage.getByRole('dialog', { name: 'Push commits' })
+  const pullDialog = clonePage.getByRole('dialog', { name: 'Pull changes' })
+  await openPush.click()
+  await pushDialog.getByText('origin/' + syncBranch, { exact: true }).waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-sync-push-${width}x${height}`, clonePage)
+  }
+  await clonePage.keyboard.press('Escape')
+  await pushDialog.waitFor({ state: 'hidden' })
+  check('cancelling a push preserves the empty remote',
+    execFileSync('git', ['--git-dir', syncRemote, 'for-each-ref'], { encoding: 'utf8' }).trim() === ''
+    && await openPush.evaluate(button => button === document.activeElement))
+  await openPush.click()
+  await pushDialog.getByRole('button', { name: 'Push', exact: true }).click()
+  await clonePage.getByText('Pushed to origin/' + syncBranch + '.', { exact: true }).waitFor()
+  check('a first push publishes only the selected branch and sets its upstream',
+    fixtureGit('rev-parse', '--abbrev-ref', '@{upstream}') === 'origin/' + syncBranch
+    && execFileSync('git', ['--git-dir', syncRemote, 'for-each-ref', '--format=%(refname)'], { encoding: 'utf8' }).trim() === 'refs/heads/' + syncBranch)
+  fixtureGit('remote', 'set-head', 'origin', syncBranch)
+  await clonePage.setViewportSize({ width: 1280, height: 800 })
+  await openPush.click()
+  const defaultPush = clonePage.getByRole('dialog', { name: 'Push to default branch?' })
+  await defaultPush.getByText('origin/' + syncBranch, { exact: true }).waitFor()
+  await capture('workspace-sync-default-push-1280x800', clonePage)
+  await defaultPush.getByRole('button', { name: 'Cancel', exact: true }).click()
+  execFileSync('git', ['clone', '-qb', syncBranch, '--', syncRemote, syncPeer])
+  writeFileSync(join(syncPeer, 'review.txt'), 'Upstream review note\n')
+  execFileSync('git', ['-C', syncPeer, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam', 'Peer review note'])
+  execFileSync('git', ['-C', syncPeer, 'push', '-q'])
+  await openPull.click()
+  await pullDialog.getByText('origin/' + syncBranch, { exact: true }).waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-sync-pull-${width}x${height}`, clonePage)
+  }
+  await pullDialog.getByRole('button', { name: 'Pull', exact: true }).click()
+  await clonePage.getByText('Pulled from origin/' + syncBranch + '.', { exact: true }).waitFor()
+  check('pull fast-forwards the isolated thread without changing its source checkout',
+    readFileSync(fixturePath, 'utf8') === 'Upstream review note\n' && !existsSync(join(linkDestination, 'review.txt')))
+  await clonePage.waitForLoadState('networkidle')
+
+  const publishRemote = join(driveRoot, 'sync-publish.git')
+  execFileSync('git', ['init', '--bare', '-q', publishRemote])
+  fixtureGit('remote', 'add', 'publish', publishRemote)
+  fixtureGit('config', 'branch.' + syncBranch + '.pushRemote', 'publish')
+  const upstreamHead = fixtureGit('rev-parse', '@{upstream}')
+  writeFileSync(fixturePath, 'Publishing review note\n')
+  fixtureGit('commit', '-qam', 'Publishing review note')
+  await openPush.click()
+  await pushDialog.getByText('publish/' + syncBranch, { exact: true }).waitFor()
+  await capture('workspace-sync-push-separate-remote-360x800', clonePage)
+  await pushDialog.getByRole('button', { name: 'Push', exact: true }).click()
+  await clonePage.getByText('Pushed to publish/' + syncBranch + '.', { exact: true }).waitFor()
+  check('a separately configured push publishes only to the reviewed publishing remote',
+    execFileSync('git', ['--git-dir', publishRemote, 'rev-parse', 'refs/heads/' + syncBranch], { encoding: 'utf8' }).trim() === fixtureGit('rev-parse', 'HEAD')
+    && execFileSync('git', ['--git-dir', syncRemote, 'rev-parse', 'refs/heads/' + syncBranch], { encoding: 'utf8' }).trim() === upstreamHead
+    && fixtureGit('rev-parse', '--abbrev-ref', '@{upstream}') === 'origin/' + syncBranch)
+  await clonePage.waitForLoadState('networkidle')
+
+  const githubRemote = 'https://github.com/fixture/workspace-pr-review.git'
+  fixtureGit('remote', 'set-url', 'publish', githubRemote)
+  fixtureGit('config', 'url.' + publishRemote + '.insteadOf', githubRemote)
+  execFileSync('git', ['--git-dir', publishRemote, 'update-ref', 'refs/heads/main', upstreamHead])
+  const github = fixtureGitHubCli(driveRoot, { 'fixture/workspace-pr-review': { bare: publishRemote } })
+  const toolPath = process.env.PATH
+  process.env.PATH = github.bin + delimiter + toolPath
+  try {
+    writeFileSync(fixturePath, 'Contents approved for PR review\n')
+    fixtureGit('commit', '-qam', 'Add a release note')
+    const head = fixtureGit('rev-parse', 'HEAD')
+    const openPr = clonePage.locator('[data-repository-pull-request-open]')
+    const prDialog = clonePage.getByRole('dialog', { name: 'Create pull request' })
+    const account = prDialog.getByText('fixture-user', { exact: true })
+    await openPr.click()
+    await account.waitFor()
+    await clonePage.keyboard.press('Escape')
+    await prDialog.waitFor({ state: 'hidden' })
+    check('cancelling the PR review leaves the published head unchanged and returns focus',
+      execFileSync('git', ['--git-dir', publishRemote, 'rev-parse', 'refs/heads/' + syncBranch], { encoding: 'utf8' }).trim() !== head
+      && await openPr.evaluate(button => button === document.activeElement))
+    await openPr.click()
+    await account.waitFor()
+    const baseInput = prDialog.getByRole('textbox', { name: 'Base branch' })
+    await baseInput.fill('missing')
+    await prDialog.getByRole('button', { name: 'Refresh review' }).click()
+    await prDialog.getByRole('alert').getByText('GitHub could not find the selected base branch.').waitFor()
+    await baseInput.fill('main')
+    await prDialog.getByRole('button', { name: 'Refresh review' }).click()
+    const createPr = prDialog.getByRole('button', { name: 'Push and create' })
+    const title = prDialog.getByRole('textbox', { name: 'Title' })
+    await title.fill('Verify the draft pull request')
+    await prDialog.getByRole('textbox', { name: /Description/ }).fill('Synthetic branch content for review.')
+    await prDialog.getByRole('checkbox', { name: 'Open as draft' }).check()
+    await clonePage.waitForFunction(() => {
+      const button = document.querySelector<HTMLButtonElement>('[data-repository-pull-request-confirm]')
+      return button && !button.disabled
+    })
+    check('the PR inputs use the workspace appearance', await title.evaluate(input =>
+      getComputedStyle(input).backgroundColor === getComputedStyle(input.closest('form')!.querySelector('textarea')!).backgroundColor))
+    for (const [width, height] of workspaceViewports) {
+      await clonePage.setViewportSize({ width, height })
+      await capture(`workspace-create-pull-request-${width}x${height}`, clonePage)
+    }
+    await createPr.click()
+    await prDialog.waitFor({ state: 'hidden' })
+    const linkedPr = clonePage.locator('[data-repository-pull-request-link]')
+    const address = 'https://github.com/fixture/workspace-pr-review/pull/1'
+    const data = JSON.parse(readFileSync(github.state, 'utf8'))
+    check('the reviewed branch is published and a draft PR is created with its entered title',
+      data.posts === 1 && data.pulls[0].draft === true && data.pulls[0].head.sha === head
+      && data.pulls[0].title === 'Verify the draft pull request'
+      && await linkedPr.getAttribute('href') === address)
+    await clonePage.setViewportSize({ width: 1280, height: 800 })
+    await clonePage.reload()
+    await clonePage.getByRole('button', { name: 'Changes', exact: true }).click()
+    await linkedPr.waitFor()
+    await openPr.click()
+    await prDialog.getByRole('link', { name: 'Open existing pull request #1' }).waitFor()
+    await prDialog.getByRole('button', { name: 'Link pull request' }).click()
+    await prDialog.waitFor({ state: 'hidden' })
+    check('reload restores the scoped PR link and linking again does not create another PR',
+      await linkedPr.getAttribute('href') === address && JSON.parse(readFileSync(github.state, 'utf8')).posts === 1)
+
+    const checks = [[
+      { __typename: 'StatusContext', id: 'status:pending', context: 'Verify packaging', state: 'PENDING', description: 'Waiting for a runner' },
+      { __typename: 'CheckRun', id: 'check:completed', name: 'Unit tests', conclusion: 'SUCCESS', status: 'COMPLETED' },
+      { __typename: 'CheckRun', id: 'check:failed', name: 'Integration suite', conclusion: 'FAILURE', status: 'COMPLETED', detailsUrl: 'https://ci.example.com/jobs/2' },
+    ]]
+    github.configureChecks(checks)
+    const checksToggle = clonePage.getByRole('button', { name: 'Checks', exact: true })
+    const checksPanel = clonePage.getByRole('region', { name: 'Pull request checks' })
+    await checksToggle.focus()
+    await clonePage.keyboard.press('Enter')
+    await checksPanel.getByText('Integration suite', { exact: true }).waitFor()
+    const checkRows = checksPanel.locator('[data-pull-request-check]')
+    const checkNames = () => checkRows.locator('p.font-medium').allTextContents()
+    check('keyboard opens checks for the linked PR head with attention and pending checks first',
+      await checksToggle.getAttribute('aria-expanded') === 'true' && (await checkNames()).join(',') === 'Integration suite,Verify packaging'
+      && await checksPanel.getByText('Head ' + head.slice(0, 7), { exact: true }).getAttribute('title') === head
+      && await checksPanel.getByRole('link', { name: 'Details for Integration suite' }).getAttribute('href') === 'https://ci.example.com/jobs/2')
+    await checksPanel.getByRole('button', { name: 'Show all', exact: true }).click()
+    await checksPanel.getByText('Unit tests', { exact: true }).waitFor()
+    await clonePage.setViewportSize({ width: 390, height: 844 })
+    await capture('workspace-pull-request-checks-390x844', clonePage)
+    check('Show all reveals completed checks without page overflow',
+      (await checkNames()).join(',') === 'Integration suite,Verify packaging,Unit tests'
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+    await checksPanel.getByRole('button', { name: 'Show less', exact: true }).click()
+    await checksPanel.getByText('Unit tests', { exact: true }).waitFor({ state: 'hidden' })
+    github.configureChecks([], 'unreadable')
+    const refreshChecks = checksPanel.getByRole('button', { name: 'Refresh checks', exact: true })
+    await refreshChecks.click()
+    await checksPanel.getByRole('alert').getByText(/Check the host account/).waitFor()
+    github.configureChecks([])
+    await refreshChecks.click()
+    await checksPanel.getByText('No checks reported for this commit.', { exact: true }).waitFor()
+    await checksToggle.click()
+    await checksPanel.waitFor({ state: 'hidden' })
+    check('refresh recovers from a GitHub read error and closing leaves the linked PR intact',
+      await checksToggle.getAttribute('aria-expanded') === 'false' && await linkedPr.getAttribute('href') === address
+      && JSON.parse(readFileSync(github.state, 'utf8')).posts === 1)
+
+    github.configureChecks(checks)
+    const returnThread = new URL(clonePage.url()).pathname
+    await clonePage.getByRole('link', { name: 'Review PR', exact: true }).click()
+    const reviewTitle = clonePage.getByRole('heading', { name: 'Verify the draft pull request' })
+    await reviewTitle.waitFor()
+    const reviewList = clonePage.getByRole('region', { name: 'Pull request list' })
+    const reviewTabs = clonePage.getByRole('navigation', { name: 'Pull request views' })
+    check('the Changes link opens the selected request directly with the matching thread and responsive list',
+      new URL(clonePage.url()).searchParams.get('selectedUrl') === address && !await reviewList.isVisible()
+      && await clonePage.getByRole('link', { name: 'Open linked thread' }).getAttribute('href') === returnThread)
+    await clonePage.getByText('Integration suite', { exact: true }).waitFor()
+    await capture('pull-requests-summary-390x844', clonePage)
+    await reviewTabs.getByRole('link', { name: 'Timeline' }).click()
+    await clonePage.getByText('fixture-reviewer', { exact: true }).waitFor()
+    await clonePage.locator('[data-pr-activity] strong').filter({ hasText: 'export' }).waitFor()
+    check('review conversation renders safe Markdown in the Timeline view',
+      !await clonePage.evaluate(() => Boolean((globalThis as typeof globalThis & { __pr_html?: boolean }).__pr_html)))
+    github.configureConversations('normal')
+    github.configureCommentPages('normal')
+    await reviewTabs.getByRole('link', { name: 'Code' }).click()
+    await clonePage.locator('[data-pr-file-patch] > summary').click()
+    await clonePage.locator('[data-pr-patch][aria-label="Patch for report.txt"]').getByText('+Report fixture', { exact: false }).waitFor()
+    await clonePage.setViewportSize({ width: 1280, height: 800 })
+    await reviewList.waitFor()
+    await capture('pull-requests-code-1280x800', clonePage)
+    const viewedFile = clonePage.getByRole('button', { name: 'Viewed report.txt' })
+    await clonePage.locator('[data-pr-viewed-form] button[aria-disabled="false"]').waitFor()
+    const openingReviewUrl = clonePage.url()
+    const viewedResponse = (desired: boolean) => clonePage.waitForResponse(response => {
+      const request = response.request()
+      return request.method() === 'POST' && new URL(response.url()).pathname === '/pull-requests/viewed'
+        && new URLSearchParams(request.postData() ?? '').get('viewed') === String(desired)
+    })
+    await clonePage.bringToFront()
+    const [marked] = await Promise.all([viewedResponse(true), viewedFile.press('Enter')])
+    if (!marked.ok()) throw new Error(`Mark Viewed returned HTTP ${marked.status()}: ${await marked.text()}`)
+    await clonePage.getByText('File marked as viewed.', { exact: true }).waitFor()
+    check('mark viewed preserves the exact file, expanded patch and selected request',
+      await viewedFile.getAttribute('aria-pressed') === 'true'
+      && clonePage.url() === openingReviewUrl
+      && await viewedFile.evaluate(button => document.activeElement === button)
+      && await clonePage.locator('details[open] [data-pr-patch]').getByText('+Report fixture', { exact: true }).isVisible())
+    await clonePage.reload()
+    await viewedFile.waitFor()
+    check('viewed state survives reload and matches the forge', await viewedFile.getAttribute('aria-pressed') === 'true'
+      && JSON.parse(readFileSync(github.state, 'utf8')).fileViewed === true)
+    await clonePage.setViewportSize({ width: 390, height: 844 })
+    await capture('pull-requests-viewed-390x844', clonePage)
+    await clonePage.locator('[data-pr-viewed-form] button[aria-disabled="false"]').waitFor()
+    const [unmarked] = await Promise.all([viewedResponse(false), viewedFile.click()])
+    if (!unmarked.ok()) throw new Error(`Unmark Viewed returned HTTP ${unmarked.status()}: ${await unmarked.text()}`)
+    await clonePage.getByText('File marked as unviewed.', { exact: true }).waitFor()
+    check('unmark viewed restores the unchecked file without changing the pull request',
+      await viewedFile.getAttribute('aria-pressed') === 'false' && JSON.parse(readFileSync(github.state, 'utf8')).fileViewed === false)
+
+    const filePatch = clonePage.locator('[data-pr-file-patch]')
+    await filePatch.locator(':scope > summary').click()
+    const conversation = filePatch.locator('[data-pr-conversation]').filter({ hasText: 'Line 1 after changes' })
+    const oldConversation = filePatch.locator('[data-pr-conversation]').filter({ hasText: 'Line 12 before changes' })
+    const comment = conversation.getByText(/Verify the inline report/)
+    const resolveConversation = conversation.getByRole('button', { name: 'Resolve', exact: true })
+    await comment.waitFor()
+    await conversation.locator('[data-pr-conversation-form] button[aria-disabled="false"]').waitFor()
+    check('Code anchors the current review after its line and keeps outdated comments collapsed',
+      await conversation.evaluate(element => element.previousElementSibling?.textContent?.includes('+Report fixture'))
+      && await oldConversation.getAttribute('open') === null)
+    const beforeLine = filePatch.getByRole('link', { name: 'Before line 1', exact: true })
+    const afterLine = filePatch.getByRole('link', { name: 'After line 2', exact: true })
+    await beforeLine.focus()
+    await clonePage.keyboard.press('Enter')
+    await clonePage.keyboard.press('Shift+ArrowDown')
+    await clonePage.keyboard.press('Shift+ArrowDown')
+    const lineTools = clonePage.locator('[data-pr-line-tools]')
+    await lineTools.getByText('Before line 1 to after line 2', { exact: true }).waitFor()
+    check('PR line navigation spans the deletion and additions in one hunk',
+      await afterLine.evaluate(element => element === document.activeElement)
+      && await filePatch.locator('[data-pr-line-row][data-selected]').count() === 3)
+    const lineAddress = await lineTools.locator('[data-pr-open-line-link]').getAttribute('href')
+    if (!lineAddress) throw new Error('Missing PR line selection address')
+    const linked = await clonePage.context().newPage()
+    try {
+      await linked.goto(new URL(lineAddress, clonePage.url()).href)
+      check('a PR line link expands its file and restores the range and focus',
+        await linked.locator('[data-pr-file-patch]').getAttribute('open') !== null
+        && await linked.locator('[data-pr-line-row][data-selected]').count() === 3
+        && await linked.locator('[data-pr-line][aria-current="location"]').evaluate(element => element === document.activeElement))
+    }
+    finally { await linked.close() }
+    await capture('pull-requests-line-range-390x844', clonePage)
+    await filePatch.getByRole('link', { name: 'After line 21', exact: true }).click({ modifiers: ['Shift'] })
+    check('a selection across hunks starts a new range',
+      await filePatch.locator('[data-pr-line-row][data-selected]').count() === 1
+      && await lineTools.getByText('Range starts again in this hunk.', { exact: true }).isVisible())
+    await clonePage.keyboard.press('Escape')
+    check('Escape clears the range without closing the inline conversation',
+      await filePatch.locator('[data-pr-line-row][data-selected]').count() === 0 && await comment.isVisible())
+    await capture('pull-requests-inline-conversation-390x844', clonePage)
+    const [resolution] = await Promise.all([
+      clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/conversation' && response.request().method() === 'POST'),
+      resolveConversation.press('Enter'),
+    ])
+    if (!resolution.ok()) throw new Error(`Resolve conversation returned HTTP ${resolution.status()}: ${await resolution.text()}`)
+    const undoResolution = conversation.getByRole('button', { name: 'Unresolve', exact: true })
+    await conversation.getByText('Conversation resolved.', { exact: true }).waitFor()
+    check('resolving keeps the review and focus visible and updates the forge',
+      await comment.isVisible() && await undoResolution.evaluate(button => button === document.activeElement)
+      && JSON.parse(readFileSync(github.state, 'utf8')).conversationResolved === true)
+    await clonePage.reload()
+    await filePatch.locator(':scope > summary').click()
+    await conversation.getByText('Resolved conversation', { exact: true }).waitFor()
+    check('reloading a resolved thread hides the conversation until expanded', !await comment.isVisible())
+    await conversation.locator(':scope > summary').click()
+    await comment.waitFor()
+    await undoResolution.click()
+    await conversation.getByText('Conversation reopened.', { exact: true }).waitFor()
+    check('unresolving returns the same conversation to the open state',
+      await comment.isVisible() && JSON.parse(readFileSync(github.state, 'utf8')).conversationResolved === false)
+    const openReply = conversation.locator('[data-pr-reply] > summary')
+    const replyInput = conversation.getByRole('textbox', { name: 'Reply to this conversation' })
+    await openReply.click()
+    await replyInput.waitFor()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.getAttribute('name') === 'body')
+    await replyInput.fill('Follow up on the **inline report**.')
+    await replyInput.press('Escape')
+    await replyInput.waitFor({ state: 'hidden' })
+    await openReply.click()
+    check('closing the reply editor restores the draft when reopened',
+      await replyInput.inputValue() === 'Follow up on the **inline report**.')
+    await replyInput.press('Enter')
+    check('plain Enter inserts a line without posting a reply', (await replyInput.inputValue()).includes('\n')
+      && JSON.parse(readFileSync(github.state, 'utf8')).replyRequests === undefined)
+    await conversation.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await replyInput.waitFor({ state: 'hidden' })
+    const cancelledFocus = await openReply.evaluate(element => element === document.activeElement)
+    await openReply.click()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.getAttribute('name') === 'body')
+    check('Cancel keeps the draft available and returns to the reply toggle',
+      cancelledFocus && (await replyInput.inputValue()).includes('\n'))
+    await conversation.locator('[data-pr-reply-form]').scrollIntoViewIfNeeded()
+    await capture('pull-requests-inline-reply-390x844', clonePage)
+    const replyAddress = clonePage.url()
+    const [replyResponse] = await Promise.all([
+      clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/reply' && response.request().method() === 'POST'),
+      replyInput.press('Control+Enter'),
+    ])
+    if (!replyResponse.ok()) throw new Error(`Post reply returned HTTP ${replyResponse.status()}: ${await replyResponse.text()}`)
+    await conversation.getByText('Reply posted.', { exact: true }).waitFor()
+    await conversation.getByText('Follow up on the inline report.', { exact: true }).waitFor()
+    check('a reply renders in place and restores focus to Reply with one write',
+      clonePage.url() === replyAddress && await openReply.evaluate(element => element === document.activeElement)
+      && JSON.parse(readFileSync(github.state, 'utf8')).replyRequests === 1)
+    const loadComments = conversation.getByRole('link', { name: 'Load more comments', exact: true })
+    const postedReply = conversation.getByText('Follow up on the inline report.', { exact: true })
+    await openReply.click()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.getAttribute('name') === 'body')
+    await replyInput.fill('A second unsent review draft.')
+    github.configureCommentPages('unavailable')
+    await loadComments.focus()
+    const [failedComments] = await Promise.all([
+      clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/comments' && response.request().method() === 'GET'),
+      clonePage.keyboard.press('Enter'),
+    ])
+    if (failedComments.status() !== 503) throw new Error(`Load comments returned HTTP ${failedComments.status()}`)
+    await conversation.getByText('Could not load more comments. Try again.', { exact: true }).waitFor()
+    check('a failed comment read leaves the loaded conversation and draft available',
+      await replyInput.inputValue() === 'A second unsent review draft.' && await postedReply.count() === 1)
+    github.configureCommentPages('overlap')
+    await loadComments.press('Enter')
+    const firstAdded = conversation.locator('[data-pr-conversation-comment]').filter({ hasText: /History comment 19\./ })
+    await firstAdded.waitFor()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.textContent?.includes('History comment 19.'))
+    check('loading a page skips boundary duplicates and focuses the first added comment',
+      await conversation.getByText('History comment 18.', { exact: true }).count() === 1
+      && await firstAdded.count() === 1 && clonePage.url() === replyAddress)
+    await loadComments.scrollIntoViewIfNeeded()
+    await capture('pull-requests-inline-comment-pages-390x844', clonePage)
+    await loadComments.press('Enter')
+    await conversation.getByText('History comment 43.', { exact: true }).waitFor()
+    await loadComments.waitFor({ state: 'hidden' })
+    check('the final comment page keeps a draft and shows a concurrently posted reply only once',
+      await replyInput.inputValue() === 'A second unsent review draft.' && await postedReply.count() === 1
+      && await conversation.getByText('History comment 38.', { exact: true }).count() === 1
+      && await conversation.locator('[data-pr-conversation-comment]').count() === 46)
+
+    const editor = clonePage.locator('[data-pr-review-composer]')
+    const reviewDialog = clonePage.getByRole('dialog', { name: 'Review pull request' })
+    const afterThree = filePatch.getByRole('link', { name: 'After line 3', exact: true })
+    await afterLine.click()
+    await afterThree.click({ modifiers: ['Shift'] })
+    await lineTools.getByRole('button', { name: 'Add inline comment', exact: true }).click()
+    const inlineText = editor.getByRole('textbox')
+    await inlineText.fill('Verify **these report lines**.')
+    check('the draft opens directly below the last selected line with textarea focus',
+      await editor.evaluate(element => element.previousElementSibling?.hasAttribute('data-selected')
+        && element.contains(document.activeElement)))
+    await capture('pull-requests-inline-review-editor-390x844', clonePage)
+    await inlineText.press('Control+Enter')
+    await beforeLine.click()
+    await lineTools.getByRole('button', { name: 'Add inline comment', exact: true }).click()
+    await inlineText.fill('Keep this deletion on the left side.')
+    await editor.getByRole('button', { name: 'Add to review', exact: true }).click()
+    await clonePage.reload()
+    const openReview = clonePage.getByRole('button', { name: 'Review pull request, 2 comments pending', exact: true })
+    await openReview.click()
+    await reviewDialog.getByText('Keep this deletion on the left side.', { exact: true }).waitFor()
+    check('both anchors survive reload and a PR author can only comment',
+      await reviewDialog.getByText('Verify **these report lines**.', { exact: true }).isVisible()
+      && await reviewDialog.getByText('Comment as fixture-user', { exact: true }).isVisible()
+      && await reviewDialog.getByRole('radio').count() === 0
+      && await reviewDialog.evaluate(element => element.matches(':modal') && element.contains(document.activeElement)))
+    await clonePage.keyboard.press('Escape')
+    await reviewDialog.waitFor({ state: 'hidden' })
+    check('closing the review returns focus to the toolbar', await openReview.evaluate(element => element === document.activeElement))
+    await openReview.click()
+    await reviewDialog.getByRole('listitem').filter({ hasText: 'Verify **these report lines**.' }).getByRole('button', { name: 'Edit', exact: true }).click()
+    await inlineText.waitFor()
+    check('editing a staged comment reopens its diff range with the staged text',
+      await filePatch.locator('[data-pr-line-row][data-selected]').count() === 2
+      && await inlineText.inputValue() === 'Verify **these report lines**.')
+    await inlineText.fill('Verify the **updated range**.')
+    await editor.getByRole('button', { name: 'Save comment', exact: true }).click()
+    await openReview.click()
+    await reviewDialog.getByRole('textbox', { name: /Summary/ }).fill('Review the exported report.')
+    await capture('pull-requests-inline-review-submit-390x844', clonePage)
+    github.configureInlineReviews('unconfirmed')
+    await reviewDialog.getByRole('button', { name: 'Submit review', exact: true }).click()
+    await reviewDialog.getByText('GitHub has yet to confirm this review.', { exact: false }).waitFor()
+    await clonePage.reload()
+    await openReview.click()
+    const checkReview = reviewDialog.getByRole('button', { name: 'Check GitHub', exact: true })
+    await checkReview.click()
+    await reviewDialog.getByText('GitHub has yet to confirm this review.', { exact: false }).waitFor()
+    check('an unconfirmed review is locked and retrying does not post again',
+      await reviewDialog.getByRole('textbox', { name: /Summary/ }).getAttribute('readonly') !== null
+      && JSON.parse(readFileSync(github.state, 'utf8')).reviewRequests === 1)
+    github.revealInlineReview()
+    await checkReview.click()
+    await clonePage.getByText('Review submitted to GitHub.', { exact: true }).waitFor()
+    const posted = JSON.parse(readFileSync(github.state, 'utf8'))
+    check('the confirmed review contains both validated anchors and clears the local queue',
+      posted.reviewRequests === 1 && posted.inlineReviews[0].comments.length === 2
+      && posted.inlineReviews[0].comments[0].start_line === 2 && posted.inlineReviews[0].comments[0].line === 3
+      && posted.inlineReviews[0].comments[1].side === 'LEFT'
+      && await clonePage.getByRole('button', { name: 'Review pull request', exact: true }).isVisible())
+    const lifecycleMenu = clonePage.locator('[data-pr-lifecycle-menu]')
+    const actions = clonePage.getByRole('button', { name: 'Pull request actions', exact: true })
+    const closeTrigger = lifecycleMenu.getByRole('button', { name: 'Close pull request', exact: true })
+    const confirmClose = clonePage.getByRole('button', { name: 'Confirm close', exact: true })
+    const lifecycleStatus = (text: string) => clonePage.locator('[data-pr-lifecycle-message]').getByText(text, { exact: true })
+    const pullState = () => JSON.parse(readFileSync(github.state, 'utf8'))
+    await actions.press('Enter')
+    await closeTrigger.press('Enter')
+    await confirmClose.waitFor()
+    await capture('pull-requests-lifecycle-close-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('Escape dismisses close confirmation and returns focus without writing to GitHub',
+      await confirmClose.isHidden()
+      && await closeTrigger.evaluate(element => element === document.activeElement)
+      && pullState().lifecycleWrites === undefined)
+    await lifecycleMenu.getByRole('button', { name: 'Ready for review', exact: true }).click()
+    await lifecycleStatus('Pull request is ready for review.').waitFor()
+    check('marking a draft ready keeps Code and the selected diff range intact',
+      new URL(clonePage.url()).searchParams.get('tab') === 'code'
+      && await filePatch.locator('[data-pr-line-row][data-selected]').count() === 2
+      && pullState().pulls[0].draft === false)
+    await actions.click()
+    await lifecycleMenu.getByRole('button', { name: 'Convert to draft', exact: true }).click()
+    await lifecycleStatus('Pull request converted to draft.').waitFor()
+    await actions.click()
+    await closeTrigger.click()
+    github.configureLifecycle('unconfirmed')
+    await confirmClose.click()
+    const checkLifecycle = clonePage.getByRole('button', { name: 'Check GitHub again', exact: true })
+    await checkLifecycle.waitFor()
+    github.revealLifecycle()
+    await checkLifecycle.click()
+    await lifecycleStatus('Pull request closed.').waitFor()
+    github.configureLifecycle('normal')
+    await actions.click()
+    await lifecycleMenu.getByRole('button', { name: 'Reopen pull request', exact: true }).click()
+    await lifecycleStatus('Pull request reopened.').waitFor()
+    check('the draft, close, and reopen transitions are confirmed on GitHub without a repeated close',
+      pullState().lifecycleWrites === 4 && pullState().pulls[0].state === 'open' && pullState().pulls[0].draft === true)
+    const mergeReviewUrl = clonePage.url()
+    await clonePage.setViewportSize({ width: 1280, height: 800 })
+
+    await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()
+    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('unmatched review')
+    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.getByText('No pull requests match these filters.', { exact: true }).waitFor()
+    await reviewList.getByRole('searchbox', { name: 'Search titles' }).fill('draft pull request')
+    await reviewList.getByRole('combobox', { name: 'Sort' }).selectOption('oldest')
+    await reviewList.getByRole('button', { name: 'Apply filters' }).click()
+    await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
+    check('review search reopens a matching title and restores the selected sort from its address',
+      new URL(clonePage.url()).searchParams.get('q') === 'draft pull request'
+      && await reviewList.getByRole('combobox', { name: 'Sort' }).inputValue() === 'oldest')
+
+    github.configureMerge('ready', ['MERGE', 'SQUASH'])
+    await clonePage.setViewportSize({ width: 390, height: 844 })
+    await clonePage.goto(mergeReviewUrl, { waitUntil: 'domcontentloaded' })
+    await actions.click()
+    await lifecycleMenu.getByRole('button', { name: 'Ready for review', exact: true }).click()
+    await lifecycleStatus('Pull request is ready for review.').waitFor()
+    github.configureBranchUpdate(1)
+    await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    const branchTrigger = clonePage.getByRole('button', { name: 'Update branch', exact: true })
+    const branchPanel = clonePage.getByRole('form', { name: 'Update pull request branch', exact: true })
+    await branchTrigger.press('Enter')
+    await branchPanel.waitFor()
+    await capture('pull-requests-update-branch-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('the branch update panel returns focus to the branch control without writing',
+      await branchPanel.isHidden()
+      && await branchTrigger.evaluate(element => element === document.activeElement)
+      && pullState().branchWrites === undefined)
+    await branchTrigger.press('Enter')
+    await branchPanel.getByRole('radio', { name: 'Update with rebase' }).check()
+    github.configureLifecycle('lost-response')
+    await branchPanel.getByRole('button', { name: 'Confirm update', exact: true }).click()
+    await lifecycleStatus('Branch is up to date with the reviewed base.').waitFor()
+    github.configureLifecycle('normal')
+    check('updating the branch reloads Code without carrying the old diff anchor',
+      pullState().branchWrites.length === 1 && pullState().branchWrites[0].updateMethod === 'REBASE'
+      && new URL(clonePage.url()).searchParams.get('tab') === 'code'
+      && !new URL(clonePage.url()).searchParams.has('reviewLine') && await branchTrigger.isHidden())
+    const mergeTrigger = clonePage.getByRole('button', { name: 'Merge pull request', exact: true })
+    const mergeConfirmation = clonePage.getByRole('form', { name: 'Merge pull request', exact: true })
+    await mergeTrigger.press('Enter')
+    await mergeConfirmation.waitFor()
+    await capture('pull-requests-merge-method-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('merging requires confirmation and Escape returns focus to the merge action',
+      await mergeConfirmation.isHidden()
+      && await mergeTrigger.evaluate(element => element === document.activeElement)
+      && pullState().mergeWrites === undefined)
+    await mergeTrigger.press('Enter')
+    await mergeConfirmation.getByRole('radio', { name: 'Squash and merge' }).check()
+    github.configureLifecycle('unconfirmed')
+    await mergeConfirmation.getByRole('button', { name: 'Confirm', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.revealLifecycle()
+    await checkLifecycle.click()
+    await lifecycleStatus('Pull request merged.').waitFor()
+    check('merge recovery retains the chosen method and never submits a second GitHub mutation',
+      pullState().mergeWrites.length === 1 && pullState().mergeWrites[0].input.mergeMethod === 'SQUASH'
+      && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible() && await actions.isHidden())
+
+    const mergedPullUrl = clonePage.url()
+    github.configureRevert('unconfirmed')
+    await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    const revert = lifecycleMenu.getByRole('button', { name: 'Revert changes', exact: true })
+    const revertPanel = clonePage.getByRole('form', { name: 'Open a revert pull request?', exact: true })
+    await actions.press('Enter')
+    await revert.press('Enter')
+    await revertPanel.waitFor()
+    await capture('pull-requests-revert-confirmation-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('Escape closes the revert confirmation and returns focus without writing',
+      await revertPanel.isHidden() && await revert.evaluate(element => document.activeElement === element)
+      && pullState().revertWrites === undefined)
+    await revert.press('Enter')
+    await revertPanel.getByRole('button', { name: 'Create revert PR', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.configureRevert('normal')
+    await checkLifecycle.click()
+    await lifecycleStatus('Revert pull request opened on GitHub.').waitFor()
+    check('revert recovery opens the new PR without replacing or reopening the merged source',
+      pullState().revertWrites.length === 1 && Boolean(pullState().pulls[0].merged_at)
+      && new URL(clonePage.url()).searchParams.get('selectedUrl') === pullState().pulls[1].html_url
+      && await clonePage.locator('strong[data-pr-state="Open"]').isVisible())
+
+    github.configureBranchDeletion({ mode: 'lost-response' })
+    await clonePage.goto(mergedPullUrl, { waitUntil: 'domcontentloaded' })
+    await clonePage.getByRole('link', { name: 'Summary', exact: true }).click()
+    const deleteBranch = lifecycleMenu.getByRole('button', { name: 'Delete branch', exact: true })
+    const deleteBranchPanel = clonePage.getByRole('dialog', { name: 'Delete remote branch?', exact: true })
+    await actions.press('Enter')
+    await deleteBranch.press('Enter')
+    await deleteBranchPanel.waitFor()
+    await capture('pull-requests-delete-branch-390x844', clonePage)
+    const focusesCancel = await deleteBranchPanel.getByRole('button', { name: 'Cancel', exact: true })
+      .evaluate(element => element === document.activeElement)
+    const modal = await deleteBranchPanel.evaluate(element => element.matches(':modal'))
+    await clonePage.keyboard.press('Escape')
+    await clonePage.waitForFunction(() => document.activeElement?.matches('[data-pr-delete-branch-trigger], [data-pr-lifecycle-trigger]'))
+    check('deleting a branch focuses Cancel and Escape returns focus without writing', focusesCancel
+      && modal && await deleteBranchPanel.isHidden() && pullState().deleteBranchWrites === undefined)
+    if (!await deleteBranch.isVisible()) await actions.press('Enter')
+    await deleteBranch.evaluate((element) => {
+      Reflect.deleteProperty(HTMLButtonElement.prototype, 'commandForElement')
+      element.removeAttribute('command')
+    })
+    await deleteBranch.press('Enter')
+    await deleteBranchPanel.waitFor()
+    check('older WebViews can open the modal from the pull request summary', await deleteBranchPanel.evaluate(element => element.matches(':modal')))
+    await deleteBranchPanel.getByRole('button', { name: 'Delete branch', exact: true }).click()
+    await checkLifecycle.waitFor()
+    github.configureBranchDeletion({ mode: 'normal' })
+    await checkLifecycle.click()
+    await lifecycleStatus('Branch deleted on GitHub.').waitFor()
+    await actions.press('Enter')
+    check('branch deletion recovers the remote result without a second write and keeps the merged PR selected',
+      pullState().deleteBranchWrites.length === 1 && pullState().branchDeletion.target === null
+      && await deleteBranch.isHidden() && await revert.isVisible()
+      && await clonePage.locator('strong[data-pr-state="Merged"]').isVisible())
+
+    const workflowState = pullState()
+    const fork = { full_name: 'fixture-fork/notebook', node_id: 'fixture-repo:fixture-fork/notebook' }
+    const openPull = workflowState.pulls[1]
+    openPull.head.repo = fork
+    delete workflowState.branchDeletion
+    workflowState.workflowRuns = [41, 42].map(id => ({ id, run_attempt: 1, name: 'Review workflow ' + id, event: 'pull_request',
+      status: 'completed', conclusion: 'action_required', head_branch: openPull.head.ref, head_sha: openPull.head.sha,
+      repository: openPull.base.repo, head_repository: fork, pull_requests: [] }))
+    workflowState.workflowApprovalStatus = 201
+    workflowState.workflowDropReply = 41
+    writeFileSync(github.state, JSON.stringify(workflowState))
+    const workflowUrl = new URL(clonePage.url())
+    workflowUrl.searchParams.set('selectedUrl', openPull.html_url)
+    workflowUrl.searchParams.set('state', 'open')
+    workflowUrl.searchParams.delete('lifecycleResult')
+    workflowUrl.hash = ''
+    await clonePage.goto(workflowUrl.href, { waitUntil: 'domcontentloaded' })
+    const approve = clonePage.getByRole('button', { name: 'Approve workflows to run', exact: true })
+    const approvalPanel = clonePage.getByRole('form', { name: 'Run the reviewed workflows?', exact: true })
+    await approve.focus()
+    await approve.press('Enter')
+    await approvalPanel.waitFor()
+    await capture('pull-requests-workflow-approval-390x844', clonePage)
+    await approvalPanel.getByRole('button', { name: 'Cancel', exact: true }).press('Escape')
+    await approvalPanel.waitFor({ state: 'hidden' })
+    await clonePage.waitForFunction(() => document.activeElement?.matches('[data-pr-workflow-approval-trigger]'))
+    check('workflow approval cancellation returns focus without writing',
+      await approve.evaluate(element => document.activeElement === element) && pullState().workflowApprovalPosts === undefined)
+    await approve.press('Enter')
+    await approvalPanel.getByRole('button', { name: 'Confirm approval', exact: true }).click()
+    const recoverApproval = clonePage.getByRole('button', { name: 'Check GitHub and finish approval', exact: true })
+    await recoverApproval.waitFor()
+    await recoverApproval.click()
+    await lifecycleStatus('Reviewed workflows are no longer awaiting approval.').waitFor()
+    check('workflow recovery finishes only the reviewed runs and never repeats the accepted approval',
+      JSON.stringify(pullState().workflowApprovalPosts) === '[41,42]' && await approve.isHidden())
+
+    const labelState = pullState()
+    const oldLabel = { id: 11, name: 'Legacy/needs review', color: 'aa2222', archived_at: '2026-11-10T15:00:00Z' }
+    const reportLabel = { id: 31, name: 'Report & analysis', color: '298265', description: 'Check the exported CSV' }
+    const concurrentLabel = { id: 41, name: 'Accessibility', color: 'cc5599' }
+    const person = { id: 'user:accessibility', __typename: 'User', login: 'accessibility-reviewer' }
+    const bot = { id: 'bot:review-check', __typename: 'Bot', login: 'review-check[bot]' }
+    const team = { id: 'team:docs', __typename: 'Team', slug: 'docs-and-release-reviewers', name: 'Docs and release reviewers' }
+    const candidate = { id: 'user:dorian', __typename: 'User', login: 'dorian', name: 'Dorian Reviewer' }
+    labelState.pulls[1].labels = [oldLabel]
+    labelState.pulls[1].requested_reviewers = [person, bot]
+    labelState.pulls[1].requested_teams = [team]
+    labelState.pulls[1].reviewerNodes = [person, bot, team]
+    const verdict = (id: number, login: string, state: string, commit: string) =>
+      ({ id, user: { login }, state, commit_id: commit, submitted_at: '2026-11-01T14:00:00Z' })
+    const reviewedHead = labelState.pulls[1].head.sha
+    labelState.pulls[1].reviewDecision = 'REVIEW_REQUIRED'
+    labelState.pulls[1].latestReviews = [
+      { state: 'COMMENTED', author: { login: 'release-commenter' } },
+      { state: 'DISMISSED', author: { login: 'dismissed-reviewer' } },
+    ]
+    labelState.reviewOutcomePages = [[
+      verdict(101, person.login, 'APPROVED', 'd'.repeat(40)),
+      verdict(102, 'dismissed-reviewer', 'APPROVED', reviewedHead),
+    ], [
+      verdict(103, 'dismissed-reviewer', 'DISMISSED', reviewedHead),
+      verdict(104, 'release-approver', 'APPROVED', reviewedHead),
+      verdict(105, person.login, 'COMMENTED', reviewedHead),
+    ]]
+    labelState.reviewerPeople = [person, candidate]
+    labelState.reviewerPageSize = 1
+    labelState.labelPages = [[oldLabel, concurrentLabel], [reportLabel]]
+    labelState.labelPermission = 'WRITE'
+    writeFileSync(github.state, JSON.stringify(labelState))
+    await clonePage.goto(workflowUrl.href, { waitUntil: 'domcontentloaded' })
+    const changeLabels = clonePage.getByRole('link', { name: 'Change labels', exact: true })
+    const reviewers = clonePage.getByRole('region', { name: 'Reviewers', exact: true })
+    await reviewers.waitFor()
+    check('the Summary joins pending people, bots, teams, and completed outcomes before labels',
+      await reviewers.getByRole('listitem').count() === 6
+      && await reviewers.getByText('@accessibility-reviewer', { exact: true }).isVisible()
+      && await reviewers.getByText('@review-check[bot]', { exact: true }).isVisible()
+      && await reviewers.getByText('Team', { exact: true }).isVisible()
+      && await reviewers.evaluate(section => section.nextElementSibling?.hasAttribute('data-pr-label-section') === true))
+    check('the Summary distinguishes branch policy, current approvals, older approvals, and dismissed reviews',
+      await reviewers.getByText('Review required', { exact: true }).isVisible()
+      && await reviewers.getByText('Approved on an earlier commit', { exact: true }).isVisible()
+      && await reviewers.getByText('Approved', { exact: true }).isVisible()
+      && await reviewers.getByText('Review requested again', { exact: true }).isVisible()
+      && await reviewers.getByRole('listitem').filter({ hasText: '@dismissed-reviewer' }).getByText('Review dismissed', { exact: true }).isVisible()
+      && await reviewers.getByRole('listitem').filter({ hasText: '@release-commenter' }).getByText('Commented', { exact: true }).isVisible()
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+    await capture('pull-requests-reviewers-390x844', clonePage)
+    const changeReviewers = clonePage.getByRole('link', { name: 'Change reviewers', exact: true })
+    const picker = clonePage.getByRole('form', { name: 'Change reviewers', exact: true })
+    const docsTeam = picker.getByRole('checkbox', { name: /docs-and-release-reviewers/u })
+    const searchReviewers = picker.getByRole('searchbox', { name: 'Search reviewers' })
+    const dorian = picker.getByRole('checkbox', { name: /Dorian Reviewer/u })
+    await changeReviewers.click()
+    await docsTeam.uncheck()
+    await searchReviewers.fill('dorian')
+    await searchReviewers.press('Enter')
+    await dorian.waitFor()
+    check('GitHub reviewer search reaches beyond the first page and retains the staged withdrawal',
+      !(await docsTeam.isChecked()) && pullState().reviewerWrites === undefined)
+    await capture('pull-requests-reviewer-picker-390x844', clonePage)
+    await picker.getByRole('link', { name: 'Cancel', exact: true }).click()
+    await changeReviewers.click()
+    check('canceling reviewer edits leaves the existing team requested', await docsTeam.isChecked() && pullState().reviewerWrites === undefined)
+    await docsTeam.uncheck()
+    await searchReviewers.fill('dorian')
+    await picker.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await dorian.check()
+    const reviewInterrupted = pullState()
+    reviewInterrupted.reviewerDropResponse = team.id
+    writeFileSync(github.state, JSON.stringify(reviewInterrupted))
+    await picker.getByRole('button', { name: 'Save reviewers', exact: true }).click()
+    await clonePage.getByRole('button', { name: 'Check GitHub and finish', exact: true }).click()
+    await reviewers.getByRole('status').filter({ hasText: 'Review requests updated on GitHub.' }).waitFor()
+    const reviewed = pullState()
+    check('reviewer recovery issues only the reviewed team withdrawal and person request',
+      JSON.stringify(reviewed.reviewerWrites.map(([, method, id]: [number, string, string]) => [method, id])) === '[["DELETE","team:docs"],["POST","user:dorian"]]'
+      && await reviewers.getByText('@dorian', { exact: true }).isVisible())
+    reviewed.labelPermission = 'TRIAGE'
+    writeFileSync(github.state, JSON.stringify(reviewed))
+    await clonePage.reload({ waitUntil: 'domcontentloaded' })
+    check('triage still edits labels and hides repository-write review requests', await changeLabels.isVisible() && await changeReviewers.isHidden())
+    const labelEditor = clonePage.getByRole('form', { name: 'Change labels', exact: true })
+    const labelSearch = labelEditor.getByRole('searchbox', { name: 'Search labels', exact: true })
+    const legacyLabel = labelEditor.getByRole('checkbox', { name: /Legacy\/needs review/u })
+    const newLabel = labelEditor.getByRole('checkbox', { name: /Report & analysis/u })
+    await changeLabels.click()
+    await legacyLabel.uncheck()
+    await labelSearch.fill('exported')
+    await newLabel.waitFor()
+    await legacyLabel.waitFor({ state: 'hidden' })
+    await capture('pull-requests-labels-390x844', clonePage)
+    check('label search retains an unchecked reviewed choice and fits on the phone',
+      await labelEditor.locator('input[name=label][value="11"]').evaluate((node: HTMLInputElement) => node.closest('label')?.hidden && !node.checked) === true
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth === innerWidth))
+    await labelEditor.getByRole('link', { name: 'Cancel', exact: true }).click()
+    await changeLabels.click()
+    check('closing the label editor cancels draft changes without writing', await legacyLabel.isChecked() && pullState().labelWrites === undefined)
+    await legacyLabel.uncheck()
+    await newLabel.check()
+    const concurrent = pullState()
+    concurrent.pulls[1].labels.push(concurrentLabel)
+    concurrent.labelDropResponse = reportLabel.id
+    writeFileSync(github.state, JSON.stringify(concurrent))
+    await labelEditor.getByRole('button', { name: 'Save labels', exact: true }).click()
+    const recoverLabels = clonePage.getByRole('button', { name: 'Check GitHub and finish labels', exact: true })
+    await recoverLabels.waitFor()
+    await recoverLabels.click()
+    await clonePage.getByRole('status').filter({ hasText: 'Labels updated on GitHub.' }).waitFor()
+    const finalLabels = pullState()
+    check('label recovery preserves a concurrent label and mutates only the reviewed add and removal once',
+      JSON.stringify(finalLabels.labelWrites.map(([, method, id]: [number, string, number]) => [method, id])) === '[["POST",31],["DELETE",11]]'
+      && JSON.stringify(finalLabels.pulls[1].labels.map((label: { id: number }) => label.id)) === '[41,31]')
+  }
+  finally { if (toolPath === undefined) delete process.env.PATH; else process.env.PATH = toolPath }
+
+}
+finally {
+  delayGit = false
+  networkGate.resolve()
+  gitFixture.stop(true)
+  for (const [key, value] of [['GIT_CONFIG_COUNT', gitConfigCount], [gitConfigKey, oldKey], [gitConfigValue, oldValue]] as const) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  await cloneContext.close()
+}
+
+// 16. Project scope: one host, two projects, and an agent pinned to one of
+// them. The project left alone is as much of the point as the pinned one, so
+// the host's own answer is set first and both projects are read against it.
+//
+// On its own page: the main one is still mounted on a live thread from an
+// earlier section, and the events arriving there navigate it out from under a
+// goto.
+const scopePage = await browserContext.newPage()
+scopePage.on('pageerror', error => pageErrors.push(error.message))
+await scopePage.setViewportSize({ width: 1280, height: 800 })
+const scopedServiceFolder = join(driveRoot, 'scoped-service')
+const scopedDocsFolder = join(driveRoot, 'scoped-docs')
+mkdirSync(scopedServiceFolder)
+mkdirSync(scopedDocsFolder)
+// Earlier sections leave the host default wherever they finished with it, and
+// a command that changes nothing is refused, so this only moves it if needed.
+if (harness.engine.current.settings.defaultDriver !== 'claude')
+  await harness.engine.dispatch({ id: 'project-scope-host', at: Date.now(), command: { type: 'settings.update', changes: { defaultDriver: 'claude' } } })
+for (const [id, path] of [['project-scope-service', scopedServiceFolder], ['project-scope-docs', scopedDocsFolder]] as const) {
+  await harness.engine.dispatch({ id, at: Date.now(), command: { type: 'workspace.add', profileId: derivedId(ledgerProfile), path } })
+  await harness.engine.dispatch({ id: `${id}-trust`, at: Date.now(), command: { type: 'workspace.trust', workspaceId: derivedId(id), trusted: true } })
+}
+const scopedService = derivedId('project-scope-service')
+const scopedDocs = derivedId('project-scope-docs')
+
+const scopeSettings = scopePage.getByRole('dialog', { name: 'Settings' })
+const projectAgent = scopePage.locator('#settings-project-driver')
+const projectAgentNote = scopePage.locator('[data-project-settings-note]')
+const composerAgent = scopePage.locator('[data-model-picker-trigger]')
+
+/** The project's own answer as the log holds it, or undefined for inherited. */
+const pinnedAgent = (workspaceId: number): string | undefined =>
+  harness.engine.current.workspaces.get(workspaceId)?.settings?.defaultDriver
+
+async function waitForPinnedAgent(workspaceId: number, driver: string | undefined, timeoutMs = 4000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (pinnedAgent(workspaceId) === driver) return true
+    await scopePage.waitForTimeout(50)
+  }
+  return false
+}
+
+/**
+ * Open a project's draft page.
+ *
+ * Committed rather than loaded: the island replaces the address once it has
+ * picked a profile, and that navigation aborts a goto still waiting on load.
+ */
+async function openProjectDraft(workspaceId: number): Promise<void> {
+  await scopePage.goto(`${baseUrl}/?workspace=${workspaceId}`, { waitUntil: 'commit' })
+  await composerAgent.waitFor({ timeout: 8000 })
+}
+
+async function openProjectGeneral(workspaceId: number): Promise<void> {
+  await openProjectDraft(workspaceId)
+  await pressChord('Meta+,', scopePage)
+  await scopeSettings.waitFor({ state: 'visible', timeout: 4000 })
+  await scopePage.waitForURL(url => url.pathname === '/settings/general')
+}
+
+await openProjectGeneral(scopedService)
+check('a project that pins nothing says it follows the host, and names itself',
+  await projectAgent.inputValue() === ''
+  && ((await projectAgentNote.textContent()) ?? '').includes('scoped-service')
+  && ((await projectAgentNote.textContent()) ?? '').includes('follows the host default'))
+
+await projectAgent.selectOption('codex')
+check('pinning an agent reaches the log as the project\'s answer and leaves the host alone',
+  await waitForPinnedAgent(scopedService, 'codex')
+  && harness.engine.current.settings.defaultDriver === 'claude'
+  && pinnedAgent(scopedDocs) === undefined)
+await capture('settings-project-agent-desktop', scopePage)
+
+// Where the setting actually bites: the agent the project's next thread starts
+// with. A draft already open keeps the agent it was composed with, which is
+// why this is read on a fresh draft rather than on the one behind the sheet.
+await openProjectDraft(scopedService)
+check('the next thread in that project starts with the pinned agent',
+  ((await composerAgent.textContent()) ?? '').includes('Codex'))
+
+await openProjectGeneral(scopedDocs)
+check('the other project is untouched and follows the host',
+  await projectAgent.inputValue() === ''
+  && ((await projectAgentNote.textContent()) ?? '').includes('scoped-docs'))
+await openProjectDraft(scopedDocs)
+check('a project that pinned nothing still starts with the host agent',
+  ((await composerAgent.textContent()) ?? '').includes('Claude'))
+
+// Rendered, not hydrated: the pin is in the page the host serves, so the row
+// is right on first paint rather than correcting itself a moment later. The
+// settings route takes its project from the address it will return to, which
+// is how the sheet itself links to it.
+const scopedServiceSettings = `${baseUrl}/settings/general?from=${encodeURIComponent(`/?workspace=${scopedService}`)}`
+await scopePage.goto(scopedServiceSettings, { waitUntil: 'commit' })
+await scopeSettings.waitFor({ state: 'visible', timeout: 8000 })
+check('a reload shows the pinned agent before the island hydrates',
+  await projectAgent.inputValue() === 'codex'
+  && ((await projectAgentNote.textContent()) ?? '').includes('Only sessions in'))
+
+await projectAgent.selectOption('')
+check('handing the agent back to the host forgets the project override entirely',
+  await waitForPinnedAgent(scopedService, undefined)
+  && harness.engine.current.workspaces.get(scopedService)?.settings === undefined
+  && harness.engine.current.settings.defaultDriver === 'claude')
+await openProjectDraft(scopedService)
+check('the project follows the host again once it pins nothing',
+  ((await composerAgent.textContent()) ?? '').includes('Claude'))
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

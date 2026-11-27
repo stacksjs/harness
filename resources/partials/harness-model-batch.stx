@@ -1,0 +1,29 @@
+@if(!activeSessionId && draftProject?.trusted)
+<div data-model-batch hidden :hidden="!modelBatchNotice().length && !pendingModelBatches().length">
+  <div class="flex flex-wrap gap-2 items-center justify-between">
+    <p role="status" :text="modelBatchBusy() ? 'Starting threads…' : modelBatchNotice().length ? 'Started ' + modelBatchNotice().length + (modelBatchNotice().length === 1 ? ' thread' : ' threads') + ' in background.' : 'Multi-model send needs attention.'"></p>
+    <button type="button" :hidden="pendingModelBatches().length > 0" @click="dismissModelBatch" aria-label="Dismiss model launch notification" class="harness-icon-button">
+      <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+    </button>
+  </div>
+  <ul class="flex flex-wrap gap-2 min-w-0" :hidden="!modelBatchNotice().length">
+    <template :for="thread in modelBatchNotice()" :key="thread.id">
+      <li class="min-w-0"><a :href="'/s/' + thread.id" :text="thread.name"></a></li>
+    </template>
+  </ul>
+  <template :for="batch in pendingModelBatches()" :key="batch.id">
+    <div :hidden="activeModelBatches().includes(batch.id)" class="grid gap-1 min-w-0">
+      <p class="truncate" :text="batch.text || 'Message with attachments'"></p>
+      <ul>
+        <template :for="target in batch.targets" :key="target.id">
+          <li><strong :text="target.name"></strong> <span :text="target.error || 'Awaiting confirmation.'"></span></li>
+        </template>
+      </ul>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" @click="submitModelBatch(batch)">Retry pending</button>
+        <button type="button" @click="discardModelBatch(batch)">Dismiss retry</button>
+      </div>
+    </div>
+  </template>
+</div>
+@endif

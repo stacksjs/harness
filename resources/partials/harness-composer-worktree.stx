@@ -1,11 +1,11 @@
 <details data-draft-worktree @toggle="loadDraftWorktreeOptions" class="text-xs">
   <summary class="px-1 py-1.5 w-fit rounded-md cursor-pointer">
-    <span :text="draftIsolated() ? 'New worktree' : 'Current folder'">Current folder</span>
+    <span :text="draftUsesWorktree() ? 'New worktree' : 'Current folder'">Current folder</span>
   </summary>
   <div class="grid gap-2">
     <label class="flex flex-wrap gap-2 items-center">
       <span>Run in</span>
-      <select aria-label="Run in" :value="draftIsolated() ? 'worktree' : 'project'" @change="changeDraftWorktreeMode" class="px-2 min-h-9 dark:bg-neutral-900 border border-black/15 rounded-md dark:border-white/20">
+      <select aria-label="Run in" :value="draftUsesWorktree() ? 'worktree' : 'project'" :disabled="comparingModels()" @change="changeDraftWorktreeMode" class="px-2 min-h-9 dark:bg-neutral-900 border border-black/15 rounded-md dark:border-white/20">
         <option value="project">Current folder</option>
         <template :if="draftWorktreeOptions()?.canStartWorktree">
           <option value="worktree">New worktree</option>
@@ -13,7 +13,7 @@
       </select>
     </label>
     <p role="status" hidden :hidden="!draftWorktreeLoad()" :text="draftWorktreeLoad()" class="text-neutral-600 dark:text-neutral-300"></p>
-    <div hidden :hidden="!draftIsolated()" class="grid gap-2">
+    <div hidden :hidden="!draftUsesWorktree()" class="grid gap-2">
       <label class="flex flex-wrap gap-2 items-center">
         <span>Base branch</span>
         <input type="text" autocomplete="off" placeholder="Default branch" maxlength="255" aria-label="Base branch"

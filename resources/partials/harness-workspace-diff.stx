@@ -70,7 +70,43 @@
       </select>
     </label>
   </div>
+  <section data-diff-git-status hidden :hidden="!diffGitStatus()" aria-label="Repository status"
+    class="flex flex-wrap gap-x-3 gap-y-1 items-baseline px-3 py-1.5 min-w-0 text-neutral-600 text-xs dark:text-neutral-300">
+    <span class="max-w-full font-mono truncate" :text="diffStatusBranch()" :title="diffStatusBranch()"></span>
+    <span :hidden="!diffStatusTracking()" :text="diffStatusTracking()"></span>
+    <span role="status" :text="diffStatusChanges()"></span>
+    @if(workspaceEditorAllowed)
+      <div data-repository-actions aria-label="Git actions" role="group" class="flex flex-wrap gap-x-3 ms-auto">
+        <button type="button" data-repository-commit-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.staged || !diffGitStatus()?.branch || Boolean(diffGitStatus()?.conflicted)"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit" class="min-h-10 font-medium underline underline-offset-2">Commit staged</button>
+        <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.upstream || !diffGitStatus()?.branch"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('pull', $event)" class="min-h-10 font-medium underline underline-offset-2">Pull</button>
+        <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('push', $event)" class="min-h-10 font-medium underline underline-offset-2">Push</button>
+        <button type="button" data-repository-pull-request-open aria-haspopup="dialog" :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head"
+          :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryPullRequest" class="min-h-10 font-medium underline underline-offset-2">Create pull request</button>
+      </div>
+    @endif
+  </section>
+  <p role="status" data-repository-commit-result hidden :hidden="!repositoryCommitResult()" :text="repositoryCommitResult()" class="px-3 py-1 text-xs"></p>
+  <p role="status" data-repository-sync-result hidden :hidden="!repositorySyncResult() || repositorySyncResult()?.repository !== diffRepository()"
+    :text="repositorySyncResult()?.message" class="px-3 py-1 text-xs"></p>
+  <div class="flex flex-wrap gap-x-2 items-baseline px-3 py-1 text-xs"
+    :hidden="!selectedRepositoryPullRequest() && repositoryPullRequestResult()?.repository !== diffRepository()">
+    <p role="status" :hidden="repositoryPullRequestResult()?.repository !== diffRepository()" :text="repositoryPullRequestResult()?.message"></p>
+    <a data-repository-pull-request-link target="_blank" rel="noopener noreferrer" class="content-center min-h-8 underline underline-offset-2"
+      :href="repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().url : pullRequestLink(selectedRepositoryPullRequest())"
+      :text="'GitHub #' + (repositoryPullRequestResult()?.repository === diffRepository() ? repositoryPullRequestResult().number : selectedRepositoryPullRequest()?.number)"></a>
+    @if(workspaceEditorAllowed)
+      <a class="content-center min-h-8 underline underline-offset-2" :hidden="!selectedRepositoryPullRequest()"
+        :href="reviewPullRequestHref(selectedRepositoryPullRequest())">Review PR</a>
+      <button type="button" data-pull-request-checks-toggle :hidden="!selectedRepositoryPullRequest()" aria-controls="harness-pull-request-checks"
+        :aria-expanded="repositoryChecksOpen() ? 'true' : 'false'" @click="toggleRepositoryChecks" class="min-h-9 font-medium underline underline-offset-2">Checks</button>
+      <span data-pull-request-checks-summary :hidden="!repositoryChecksSummary()" :text="repositoryChecksSummary()"></span>
+    @endif
+  </div>
   <div data-diff-body>
+    @includeWhen(workspaceEditorAllowed, '../partials/harness-pull-request-checks')
     <div data-diff-overview>
       <p data-diff-status role="status" :text="diffStatus()">Loading…</p>
       <button type="button" hidden :hidden="!diffFiles().length" :aria-disabled="diffFileLimits().size ? 'false' : 'true'" @click="collapseDiffFiles">Collapse all</button>

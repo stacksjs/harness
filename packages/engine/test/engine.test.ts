@@ -1,4 +1,5 @@
 import type { CommandEnvelope, Command } from '@harness/contract'
+import { defaultHostSettings, defaultSnoozePresets } from '@harness/contract'
 import { beforeEach, describe, expect, it } from 'bun:test'
 import { CommandRejected, Engine } from '../src/engine'
 import { activeThreadOrder, emptyState, replay, threadShelf } from '../src/projections'
@@ -640,10 +641,10 @@ describe('Engine — the client/internal boundary', () => {
 describe('Host settings', () => {
   it('records only what changed and replays to the same state', async () => {
     const { engine, store } = await bootedEngine()
-    expect(engine.current.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    expect(engine.current.settings).toEqual(defaultHostSettings)
 
     await engine.dispatch(envelope({ type: 'settings.update', changes: { defaultDriver: 'codex', followUpBehavior: 'queue' } }))
-    expect(engine.current.settings).toEqual({ defaultDriver: 'codex', followUpBehavior: 'queue', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    expect(engine.current.settings).toEqual({ ...defaultHostSettings, defaultDriver: 'codex' })
 
     // `followUpBehavior` was already queue, so the log records the one field
     // that moved. Restating the rest would make the log unable to answer what
@@ -677,7 +678,32 @@ describe('Host settings', () => {
       at: clock,
       payload: { type: 'settings.updated', changes: { defaultDriver: 'retired-agent', followUpBehavior: 'steer' } as never },
     }], emptyState())
-    expect(state.settings).toEqual({ defaultDriver: 'claude', followUpBehavior: 'steer', terminalShell: 'system', claudeIdleCompaction: 'whenReturning', claudeAutoCompactAfter: null, autoSettleAfterDays: 7 })
+    expect(state.settings).toEqual({ ...defaultHostSettings, followUpBehavior: 'steer' })
+  })
+
+  it('validates, compares, and restores ordered snooze presets', async () => {
+    const { engine, store } = await bootedEngine()
+    const update = (snoozePresets: unknown) =>
+      engine.dispatch(envelope({ type: 'settings.update', changes: { snoozePresets } as never }))
+    await expect(update(defaultSnoozePresets.map(preset => ({ ...preset })))).rejects.toThrow(/changes nothing/)
+    for (const invalid of [
+      [{ kind: 'after', minutes: 0 }],
+      [{ kind: 'after', minutes: 1.5 }],
+      [{ kind: 'after', minutes: 43_201 }],
+      [{ kind: 'at', day: 'friday', time: '9:00' }],
+      [{ kind: 'at', day: 'friday', time: '24:00' }],
+      [{ kind: 'at', day: 'nextWeek', time: '09:00' }],
+      Array.from({ length: 9 }, () => ({ kind: 'after', minutes: 60 })),
+    ]) {
+      await expect(update(invalid)).rejects.toThrow(/changes nothing/)
+    }
+    const presets = [{ kind: 'at', day: 'friday', time: '07:15' }, { kind: 'after', minutes: 43_200 }]
+    await update(presets)
+    expect(replay(await store.read(0)).settings.snoozePresets).toEqual(presets)
+    await update([...presets, presets[0]])
+    expect(engine.current.settings.snoozePresets).toHaveLength(3)
+    await update([])
+    expect(replay(await store.read(0)).settings.snoozePresets).toEqual([])
   })
 })
 
