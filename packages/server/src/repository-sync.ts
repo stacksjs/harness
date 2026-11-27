@@ -20,36 +20,39 @@ export async function repositorySyncPreview(path: string, action: RepositorySync
   if (operating || status.conflicted) return { ...base, problem: 'Finish the in-progress Git operation first.' }
   const branchRef = 'refs/heads/' + branch
   const { stdout: refs } = await repositoryGit(path, [
-    'for-each-ref', '--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)', branchRef,
+    'for-each-ref', '--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)%00%(push:remotename)', branchRef,
   ])
-  const [, trackedRemote = '', trackedRef = '', upstream = ''] = refs.split('\n').map(line => line.split('\0')).find(([ref]) => ref === branchRef) ?? []
+  const [, trackedRemote = '', trackedRef = '', upstream = '', pushRemote = ''] = refs.split('\n').map(line => line.split('\0')).find(([ref]) => ref === branchRef) ?? []
   const firstPush = !status.upstream && action === 'push'
   let remote = trackedRemote
-  let ref = trackedRef
-  if (firstPush) {
-    const remotes = (await repositoryGit(path, ['remote'])).stdout.trim().split('\n').filter(Boolean)
-    remote = remotes.includes('origin') ? 'origin' : remotes.length === 1 ? remotes[0]! : ''
-    ref = branchRef
+  if (action === 'push') {
+    const remotes = (await repositoryGit(path, ['remote'])).stdout.trim().split('\n')
+    // Git resolves branch.<name>.pushRemote ahead of remote.pushDefault and the pull remote.
+    remote = pushRemote || trackedRemote || (remotes.includes('origin') ? 'origin' : remotes.length === 1 ? remotes[0]! : '')
+    if (!remotes.includes(remote)) return { ...base, problem: 'Configure a named Git remote for this branch before pushing.' }
   }
+  const isUpstreamBranch = branchRef === trackedRef || (upstream === 'refs/remotes/' + branch && trackedRemote !== '.')
+  const ref = action === 'pull' || isUpstreamBranch ? trackedRef : branchRef
+  const targetsUpstream = Boolean(status.upstream && remote === trackedRemote && ref === trackedRef)
   if (!remote || remote === '.' || remote.startsWith('-') || !ref.startsWith('refs/heads/')) {
-    return { ...base, problem: firstPush
-      ? 'Set an upstream or configure an origin remote before pushing.'
+    return { ...base, problem: action === 'push'
+      ? 'Configure a named Git remote for this branch before pushing.'
       : 'Set a remote upstream for this branch first.' }
   }
   const destination = (await repositoryGit(path, [
     'remote', 'get-url', ...(action === 'push' ? ['--push'] : []), '--all', '--', remote,
   ])).stdout.trim().split('\n')
   const trackingPrefix = 'refs/remotes/' + remote + '/'
-  const trackingRef = upstream.startsWith(trackingPrefix) ? upstream : ''
+  const trackingRef = targetsUpstream && upstream.startsWith(trackingPrefix) ? upstream : ''
   const remoteHead = action === 'push'
     ? (await repositoryGit(path, ['symbolic-ref', '--quiet', trackingPrefix + 'HEAD']).catch(() => null))?.stdout.trim()
     : undefined
   const defaultTarget = remoteHead === (trackingRef || trackingPrefix + ref.slice('refs/heads/'.length))
   const problem = destination.length !== 1 || !destination[0] ? 'Configure a single URL for this remote.'
     : action === 'pull' && dirty(status) ? 'Commit or stash working changes before pulling.'
-      : (status.behind ?? 0) > 0 && (status.ahead ?? 0) > 0
+      : targetsUpstream && (status.behind ?? 0) > 0 && (status.ahead ?? 0) > 0
         ? 'The branch has diverged. Merge or rebase it in Git before syncing.'
-        : (status.behind ?? 0) > 0 && action === 'push' ? 'Pull the upstream changes before pushing.' : null
+        : targetsUpstream && (status.behind ?? 0) > 0 && action === 'push' ? 'Pull the upstream changes before pushing.' : null
   const revision = createHash('sha256').update(JSON.stringify([path, action, branch, head, remote, ref, trackingRef, destination, firstPush, defaultTarget])).digest('hex')
   return { branch, trackingRef, head, remote, ref, revision, firstPush, defaultTarget, problem }
 }
