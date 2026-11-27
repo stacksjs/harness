@@ -589,6 +589,67 @@ describe('harness serve — HTTP', () => {
     expect((await getOptions()).repositories.map((item: { key: string }) => item.key)).toEqual(['api', 'deep/tools/composer'])
   })
 
+  it.skipIf(process.platform === 'win32')('commits only the reviewed index and preserves unstaged files on success and failure', async () => {
+    const project = join(dir, 'worktree')
+    mkdirSync(project)
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd: project })
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    git('init', '-qb', 'main')
+    git('config', 'user.name', 'Fixture Author')
+    git('config', 'user.email', 'fixture@example.invalid')
+    writeFileSync(join(project, 'a.txt'), 'Baseline\n')
+    writeFileSync(join(project, 'b.txt'), 'Other baseline\n')
+    git('add', '--', 'a.txt', 'b.txt')
+    git('commit', '-qm', 'Initial')
+    const initial = git('rev-parse', 'HEAD')
+    writeFileSync(join(project, 'a.txt'), 'Staged snapshot\n')
+    git('add', '--', 'a.txt')
+    writeFileSync(join(project, 'a.txt'), 'Newer worktree content\n')
+    writeFileSync(join(project, 'draft.txt'), 'Untracked draft\n')
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    const workspace = derivedId('commit-project')
+    const session = derivedId('commit-thread')
+    await dispatch('commit-project', { type: 'workspace.register', path: realpathSync(project), trusted: true })
+    await dispatch('commit-thread', { type: 'session.create', workspaceId: workspace, driverKind: 'claude' })
+    const route = 'http://127.0.0.1:' + port + '/s/' + session + '/git/commit'
+    const post = (revision: string, message: string, origin?: string) => fetch(route, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(origin && { origin }) },
+      body: JSON.stringify({ revision, message }),
+    })
+    expect((await fetch(route + '?repository=../outside')).status).toBe(404)
+    const preview = await (await fetch(route)).json()
+    expect(preview).toMatchObject({ branch: 'main', files: ['a.txt'], problem: null })
+    expect(git('rev-parse', 'HEAD')).toBe(initial)
+    expect((await post(preview.revision, 'Foreign write', 'https://example.invalid')).status).toBe(403)
+    writeFileSync(join(project, 'b.txt'), 'New staged selection\n')
+    git('add', '--', 'b.txt')
+    expect((await post(preview.revision, 'Stale selection')).status).toBe(409)
+    expect(git('rev-parse', 'HEAD')).toBe(initial)
+    const refreshed = await (await fetch(route)).json()
+    expect(refreshed.files).toEqual(['a.txt', 'b.txt'])
+    const hook = join(project, '.git', 'hooks', 'pre-commit')
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    expect((await post(refreshed.revision, 'Hook will reject')).status).toBe(503)
+    expect(git('rev-parse', 'HEAD')).toBe(initial)
+    expect(git('diff', '--cached', '--name-only')).toBe('a.txt\nb.txt')
+    writeFileSync(hook, '#!/bin/sh\nexit 0\n')
+    const accepted = await post(refreshed.revision, 'Review staged changes')
+    expect(accepted.status).toBe(201)
+    expect(await accepted.json()).toEqual({ commit: git('rev-parse', 'HEAD') })
+    expect(git('log', '-1', '--format=%an%n%s')).toBe('Fixture Author\nReview staged changes')
+    expect(git('show', 'HEAD:a.txt')).toBe('Staged snapshot')
+    expect(readFileSync(join(project, 'a.txt'), 'utf8')).toBe('Newer worktree content\n')
+    expect(readFileSync(join(project, 'draft.txt'), 'utf8')).toBe('Untracked draft\n')
+    expect((await post(refreshed.revision, 'Replay after survival')).status).toBe(409)
+    await dispatch('commit-untrust', { type: 'workspace.trust', workspaceId: workspace, trusted: false })
+    expect((await fetch(route)).status).toBe(404)
+  }, 20_000)
+
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')
     mkdirSync(project)

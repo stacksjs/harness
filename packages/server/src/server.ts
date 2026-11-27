@@ -39,6 +39,7 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
+import { createStagedCommit, readCommitSubmission, stagedCommitPreview } from './repository-commit'
 import { readRepositoryStatus } from './repository-status'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
@@ -524,6 +525,58 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     if (!combined) return repository ? resolveProjectRepository(root, repository) : root
     const checkout = combined.checkouts.find(entry => entry.key === repository)
     return checkout ? openCombinedRepository(combined, checkout) : repository ? null : root
+  }
+
+  const repositoryCommits = new Set<string>()
+
+  async function respondRepositoryCommit(request: Request, url: URL, sessionId: number, extendTimeout: () => void): Promise<Response> {
+    const headers = { 'cache-control': 'private, no-store' }
+    const respond = (body: object, status = 200) => Response.json(body, { headers, status })
+    const site = request.headers.get('sec-fetch-site')
+    if (site === 'cross-site' || site === 'same-site' || !canUseHostPrivileges(request, url))
+      return new Response(null, { status: 403, headers })
+    if (!['GET', 'POST'].includes(request.method)) return new Response(null, { status: 405, headers })
+    const key = url.searchParams.get('repository') ?? ''
+    const input = request.method === 'POST' ? await readCommitSubmission(request) : null
+    if (request.method === 'POST' && !input) return respond({ error: 'Enter a commit message and reopen the staged review if needed.' }, 400)
+
+    const session = engine.current.sessions.get(sessionId)
+    const workspace = session && engine.current.workspaces.get(session.workspaceId)
+    if (!session || !workspace?.trusted || workspace.scratch || session.navigation?.archivedAt
+      || (session.isolate && !session.worktreePath))
+      return respond({ error: 'This thread needs an available, trusted checkout.' }, 404)
+    const worktree = session.worktreePath
+    const root = worktree || workspace.path
+    if (worktree && !await runtime.checkProjectWorktree({ workspaceId: workspace.id, sessionId, checkout: root }))
+      return respond({ error: 'The thread’s worktree is unavailable.' }, 404)
+    const repository = await reviewRepositoryPath(root, session, key).then(path => path && realpath(path)).catch(() => null)
+    if (!repository || !await isWorkspaceGitRoot(repository))
+      return respond({ error: 'This repository is unavailable in the thread’s checkout.' }, 404)
+    if (repositoryCommits.has(repository)) return respond({ error: 'A commit is already running in this repository.' }, 409)
+    if (input) {
+      repositoryCommits.add(repository)
+      extendTimeout()
+    }
+    try {
+      const preview = await stagedCommitPreview(repository)
+      if (!input) return respond(preview)
+      if (preview.problem) return respond({ error: preview.problem }, 409)
+      if (preview.revision !== input.revision)
+        return respond({ error: 'The branch or staged files changed. Review the updated files before committing.' }, 409)
+      const current = engine.current.sessions.get(sessionId)
+      if (closing || current?.worktreePath !== worktree || current?.workspaceId !== workspace.id
+        || current.navigation?.archivedAt || !engine.current.workspaces.get(workspace.id)?.trusted)
+        return respond({ error: 'The thread or its checkout changed during review.' }, 409)
+      if ([...engine.current.sessions.values()].some(thread => isTurnActive(thread.state)
+        && (worktree ? thread.worktreePath === root : thread.workspaceId === workspace.id && !thread.worktreePath)))
+        return respond({ error: 'Wait for the active turn in this checkout to finish before committing.' }, 409)
+      return respond({ commit: await createStagedCommit(repository, input.message) }, 201)
+    }
+    catch {
+      return respond({ error: input ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'
+        : 'Git could not read the staged changes.' }, 503)
+    }
+    finally { if (input) repositoryCommits.delete(repository) }
   }
 
   async function renderWorkspaceReview(root: string | null, url: URL, operation: string | undefined,
@@ -1607,6 +1660,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           .catch(cause => Response.json({ error: cause instanceof AttachmentError ? cause.message : 'Could not save this attachment.' }, {
             status: cause instanceof AttachmentError ? cause.status : 500,
           }))
+      }
+
+      const commitRoute = /^\/s\/([1-9]\d*)\/git\/commit$/u.exec(url.pathname)
+      if (commitRoute) {
+        if (!isLoopbackHost(srv.requestIP(request)?.address ?? '')) return new Response(null, { status: 403 })
+        return respondRepositoryCommit(request, url, Number(commitRoute[1]), () => srv.timeout(request, 65))
       }
 
       const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files|status))?$/u.exec(url.pathname)
