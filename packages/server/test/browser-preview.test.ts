@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'bun:test'
-import { navigatePreviewTab, previewAddress, restoreBrowserPreview, terminalPreviewAddress } from '../src/browser-preview'
+import { canEmbedBrowserPreview, navigatePreviewTab, previewAddress, restoreBrowserPreview, terminalPreviewAddress } from '../src/browser-preview'
 
 const local = 'http://localhost:3973'
 
 describe('workspace browser addresses', () => {
+  it('keeps preview documents out of Android hosts with a frame-wide native interface', () => {
+    expect(canEmbedBrowserPreview(null)).toBeFalse()
+    expect(canEmbedBrowserPreview({})).toBeTrue()
+    expect(canEmbedBrowserPreview({ craft: { platform: 'ios' } })).toBeTrue()
+    expect(canEmbedBrowserPreview({ CraftAndroid: {} })).toBeFalse()
+  })
+
   it('uses HTTP for bare loopback addresses and HTTPS for web addresses', () => {
     expect(previewAddress('localhost:5173/tasks?view=list', local)).toEqual({ url: 'http://localhost:5173/tasks?view=list' })
     expect(previewAddress('[::1]:5173/tasks', local)).toEqual({ url: 'http://[::1]:5173/tasks' })

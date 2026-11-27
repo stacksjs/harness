@@ -25,14 +25,14 @@
     <button type="button" class="harness-icon-button" aria-label="Browser forward" title="Forward" :disabled="!activePreviewTab() || activePreviewTab().index >= activePreviewTab().history.length - 1" @click="stepPreviewHistory(1)">
       <span class="size-4 i-hugeicons-arrow-right-01" aria-hidden="true"></span>
     </button>
-    <button type="button" ref="browserPreviewReloadBox" class="harness-icon-button" aria-label="Reload preview" title="Reload" :disabled="!activePreviewUrl()" @click="reloadBrowserPreview">
+    <button type="button" ref="browserPreviewReloadBox" class="harness-icon-button" aria-label="Reload preview" title="Reload" :disabled="!activePreviewUrl() || !browserPreviewEmbedded()" @click="reloadBrowserPreview">
       <span class="size-4 i-hugeicons-refresh" aria-hidden="true"></span>
     </button>
     <input type="text" inputmode="url" ref="browserPreviewAddressBox" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Preview address" placeholder="Enter a URL" :disabled="!activePreviewTab()" :value="previewAddressDraft()" @input="previewAddressDraft.set($event.currentTarget.value)" @keydown="guardPreviewComposition" class="flex-1 px-2 min-w-0 rounded-md">
     <button type="submit" class="harness-icon-button" aria-label="Open preview address" title="Go" :disabled="!browserPreviewTools() || !previewAddressDraft().trim()">
       <span class="size-4 i-hugeicons-arrow-right-02" aria-hidden="true"></span>
     </button>
-    <a class="harness-icon-button" aria-label="Open preview in browser" title="Open externally" hidden :hidden="!activePreviewUrl()" :href="activePreviewUrl() || null" target="_blank" rel="noopener noreferrer">
+    <a class="harness-icon-button" aria-label="Open preview in browser" title="Open externally" hidden :hidden="!activePreviewUrl() || !browserPreviewEmbedded()" :href="activePreviewUrl() || null" target="_blank" rel="noopener noreferrer">
       <span class="size-4 i-hugeicons-link-square-02" aria-hidden="true"></span>
     </a>
   </form>
@@ -59,10 +59,17 @@
         </template>
       </ul>
     </section>
-    <template :for="tab in browserPreviewTabs()" :key="tab.id">
-      <template :if="tab.history[tab.index]">
-        <iframe :data-preview-frame="tab.id" :title="'Preview of ' + previewTabLabel(tab)" :src="tab.history[tab.index]" :hidden="activePreviewTab()?.id !== tab.id" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+    <template :if="browserPreviewEmbedded()">
+      <template :for="tab in browserPreviewTabs()" :key="tab.id">
+        <template :if="tab.history[tab.index]">
+          <iframe :data-preview-frame="tab.id" :title="'Preview of ' + previewTabLabel(tab)" :src="tab.history[tab.index]" :hidden="activePreviewTab()?.id !== tab.id" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+        </template>
       </template>
+    </template>
+    <template :if="activePreviewUrl() && !browserPreviewEmbedded()">
+      <div class="grid absolute inset-0 place-content-center px-4">
+        <a ref="browserPreviewExternalBox" :href="activePreviewUrl()" target="_blank" rel="noopener noreferrer" class="inline-flex h-11 items-center justify-center rounded-md border border-current px-3 text-sm">Open in browser</a>
+      </div>
     </template>
   </div>
 </section>

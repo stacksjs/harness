@@ -22,6 +22,11 @@ export interface PreviewServerSnapshot {
 export const MAX_PREVIEW_TABS = 12
 const MAX_HISTORY = 30
 
+export function canEmbedBrowserPreview(host: object | null): boolean {
+  // Older Craft Android hosts expose their native interface to every frame.
+  return host !== null && !('CraftAndroid' in host)
+}
+
 function loopback(host: string): boolean {
   return host === 'localhost' || host.endsWith('.localhost') || /^127(?:\.\d+){3}$/u.test(host) || host === '[::1]'
 }

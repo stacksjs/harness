@@ -2522,6 +2522,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const wideWorkspace = useMediaQuery('(min-width: 75rem)')
   const browserPreviewOpen = state(false)
   const browserPreviewTools = state(null)
+  const browserPreviewEmbedded = state(false)
   const storedBrowserPreview = useLocalStorage(`harness.browser-preview.v1:${activeProfile || 0}:${promptScope}`, null, { listenToStorageChanges: false })
   const browserPreview = state(null)
   const browserPreviewTabs = derived(() => browserPreview()?.tabs || [])
@@ -2530,6 +2531,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const previewServers = state(null)
   const previewServerRows = derived(() => previewServers()?.servers || [])
   const browserPreviewReload = useRef('browserPreviewReloadBox')
+  const browserPreviewExternal = useRef('browserPreviewExternalBox')
   let stopPreviewScan = null
   effect(() => {
     const tools = browserPreviewTools()
@@ -3211,7 +3213,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     await showBrowserPreview(event)
   }
 
-  async function showBrowserPreview(event) {
+  async function showBrowserPreview(event, focusAddress = true) {
     if (browserPreviewOpen()) return
     browserPreviewTrigger = workspaceActionsOpen() ? workspaceActionsToggle.current : event?.currentTarget
     workspaceActionsOpen.set(false)
@@ -3222,11 +3224,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     previewError.set('')
     try {
       if (!browserPreviewTools()) browserPreviewTools.set(await import(codecUrl))
+      browserPreviewEmbedded.set(browserPreviewTools().canEmbedBrowserPreview(browserPreviewPane.current?.ownerDocument.defaultView || null))
       if (!browserPreview()) browserPreview.set(browserPreviewTools().restoreBrowserPreview(storedBrowserPreview(), browserPreviewPane.current?.ownerDocument.location.origin))
       previewAddressDraft.set(activePreviewUrl())
     }
     catch { previewError.set('Could not load the browser pane. Close it and try again.') }
-    void nextTick(() => { if (browserPreviewOpen()) browserPreviewAddress.current?.focus() })
+    if (focusAddress) void nextTick(() => { if (browserPreviewOpen()) browserPreviewAddress.current?.focus() })
   }
 
   function closeBrowserPreview(restoreFocus = true) {
@@ -3513,7 +3516,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   function openDiscoveredPreview(server) {
     previewAddressDraft.set(server.url)
     openPreviewAddress()
-    void nextTick(() => { if (activePreviewUrl()) browserPreviewReload.current?.focus() })
+    void nextTick(() => {
+      if (activePreviewUrl()) (browserPreviewEmbedded() ? browserPreviewReload.current : browserPreviewExternal.current)?.focus()
+    })
   }
 
   function previewServerAddress(server) {
@@ -7911,7 +7916,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const url = terminalController()?.previewAddress(link.href, link.ownerDocument.location.origin)
     if (!url) return
     event.preventDefault()
-    await showBrowserPreview(event)
+    await showBrowserPreview(event, false)
     if (!browserPreviewTools() || !browserPreviewOpen()) return
     openDiscoveredPreview({ url })
   }
