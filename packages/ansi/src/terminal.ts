@@ -16,7 +16,7 @@
  * width, and tab stops other than every 8 columns.
  */
 
-import { MAX_TERMINAL_URL, terminalWebUrl } from './links'
+import { MAX_TERMINAL_URL, terminalLinkUrl } from './links'
 
 /** One cell's appearance. Shared by reference; never mutated after creation. */
 export interface Style {
@@ -102,7 +102,7 @@ function validHistoryStyle(value: unknown): boolean {
   const style = value as Record<string, unknown>
   return validHistoryColor(style.fg) && validHistoryColor(style.bg)
     && ['bold', 'dim', 'italic', 'underline', 'inverse', 'strike'].every(key => typeof style[key] === 'boolean')
-    && (style.link === undefined || (typeof style.link === 'string' && terminalWebUrl(style.link) === style.link))
+    && (style.link === undefined || (typeof style.link === 'string' && terminalLinkUrl(style.link) === style.link))
     && (style.wrapFrom === undefined || style.wrapFrom === -1
       || (typeof style.wrapFrom === 'number' && Number.isInteger(style.wrapFrom) && style.wrapFrom >= 2 && style.wrapFrom <= 500))
 }
@@ -528,7 +528,7 @@ export class Terminal {
 
   private applyHyperlink(): void {
     const separator = this.oscData.indexOf(';', 2)
-    const link = separator < 0 || this.oscOverflow ? null : terminalWebUrl(this.oscData.slice(separator + 1))
+    const link = separator < 0 || this.oscOverflow ? null : terminalLinkUrl(this.oscData.slice(separator + 1))
     if (link) this.style = Object.freeze({ ...this.style, link })
     else if (this.style.link !== undefined) {
       const style = { ...this.style }

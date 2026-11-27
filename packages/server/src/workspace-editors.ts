@@ -74,7 +74,7 @@ function installedEditors(): Launcher[] {
   return installed
 }
 
-function launchArgs(launcher: Launcher, root: string, target: string, folder: boolean, line: number): string[] {
+function launchArgs(launcher: Launcher, root: string, target: string, folder: boolean, line: number, column: number): string[] {
   const editor = launcher.editor
   if (!editor) {
     if (process.platform === 'darwin') return folder ? [target] : ['-R', target]
@@ -82,13 +82,17 @@ function launchArgs(launcher: Launcher, root: string, target: string, folder: bo
     return [folder ? target : dirname(target)]
   }
   const base = editor.base ?? []
-  if (editor.style === 'line-column') return line ? [...base, root, '--line', String(line), target] : [...base, target]
+  if (editor.style === 'line-column') {
+    // JetBrains counts CLI columns from zero.
+    return line ? [...base, root, '--line', String(line), ...(column ? ['--column', String(column - 1)] : []), target] : [...base, target]
+  }
   // Numeric colon components in an exact filename can be misread by CLIs
   // that accept path:line syntax. Preserve the file with an unpositioned open.
   const positioned = line > 0 && !target.split(':').slice(1).some(segment => /^\d+$/u.test(segment))
-  if (editor.style === 'direct') return [...base, positioned ? `${target}:${line}` : target]
+  const destination = positioned ? `${target}:${line}${column ? `:${column}` : ''}` : target
+  if (editor.style === 'direct') return [...base, destination]
   if (folder) return [...base, '--new-window', target]
-  return positioned ? [...base, '--goto', `${target}:${line}`] : [...base, target]
+  return positioned ? [...base, '--goto', destination] : [...base, target]
 }
 
 const headers = { 'cache-control': 'private, no-store' }
@@ -102,16 +106,19 @@ export async function respondWorkspaceEditor(workspace: string, url: URL, method
 
   const path = url.searchParams.get('path') ?? ''
   const requestedLine = url.searchParams.get('line') ?? '0'
+  const requestedColumn = url.searchParams.get('column') ?? '0'
   const line = Number(requestedLine)
-  if (path.length > 4096 || !/^\d{1,10}$/u.test(requestedLine) || line > 2147483647 || (!path && line))
-    return failure('Choose a valid workspace file and line.', 400)
+  const column = Number(requestedColumn)
+  const validPosition = (value: string, n: number) => /^\d{1,10}$/u.test(value) && n <= 2147483647
+  if (path.length > 4096 || !validPosition(requestedLine, line) || !validPosition(requestedColumn, column) || (!path && line) || (!line && column))
+    return failure('Choose a valid workspace file and position.', 400)
   const target = path ? await resolveWorkspaceEntry(root, path) : root
   const info = target && await stat(target).catch(() => null)
   if (!target || !info || (path ? !info.isFile() : !info.isDirectory())) return failure('The workspace file is unavailable.', 404)
   const launcher = installed.find(item => item.id === url.searchParams.get('editor'))
   if (!launcher) return failure('This editor is unavailable on the Harness host.', 404)
   try {
-    const child = Bun.spawn([launcher.command, ...launchArgs(launcher, root, target, info.isDirectory(), line)], {
+    const child = Bun.spawn([launcher.command, ...launchArgs(launcher, root, target, info.isDirectory(), line, column)], {
       cwd: root, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore', detached: true,
     })
     child.unref()

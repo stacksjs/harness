@@ -9,7 +9,7 @@
  */
 
 import type { Cell, Style, TerminalRow } from './terminal'
-import { terminalUrlRanges, terminalWebUrl } from './links'
+import { terminalLinkUrl, terminalPathRanges, terminalUrlRanges } from './links'
 
 const ESCAPES: Record<string, string> = {
   '&': '&amp;',
@@ -93,13 +93,13 @@ function openSpan(style: Style): string {
  * the container is expected to be `white-space: pre` and monospace, which is
  * what keeps a grid a grid.
  */
-export function toHtml(rows: TerminalRow[], links = false): string {
+export function toHtml(rows: TerminalRow[], links = false, files = false): string {
   const lines: string[] = []
   const explicitUrls = links ? new Map<string, string | null>() : null
   let start = 0
   let end = 0
   let logical: TerminalRow[] | null = null
-  let ranges: ReturnType<typeof terminalUrlRanges> = []
+  let ranges: Array<{ start: number, end: number, url?: string, path?: string }> = []
   let activeLink: string | null = null
   let textOffset = 0
   let rangeIndex = 0
@@ -107,15 +107,17 @@ export function toHtml(rows: TerminalRow[], links = false): string {
   function explicitTarget(cell: Cell): string | null {
     const raw = cell.style.link
     if (!raw || !explicitUrls) return null
-    if (!explicitUrls.has(raw)) explicitUrls.set(raw, terminalWebUrl(raw))
+    if (!explicitUrls.has(raw)) explicitUrls.set(raw, files || !raw.startsWith('file:') ? terminalLinkUrl(raw) : null)
     return explicitUrls.get(raw) ?? null
   }
 
   function inferredTarget(): string | null {
     while (ranges[rangeIndex] && ranges[rangeIndex]!.end <= textOffset) rangeIndex++
     const range = ranges[rangeIndex]
-    return range && range.start <= textOffset ? range.url : null
+    return range && range.start <= textOffset ? range.url ?? range.path ?? null : null
   }
+
+  const canLink = (row: TerminalRow): boolean => row.some(cell => cell.ch === ':' || (files && '/\\"\'\x60'.includes(cell.ch)))
 
   for (const [index, physicalRow] of rows.entries()) {
     if (index === end) {
@@ -125,12 +127,14 @@ export function toHtml(rows: TerminalRow[], links = false): string {
       const multiline = end > start + 1
       logical = multiline && physicalRow.wrapFrom === undefined ? logicalRows(rows, start, end) : null
       let text = ''
-      if (logical?.some(line => line.some(cell => cell.ch === ':')))
+      if (logical?.some(canLink))
         text = logical.map(line => line.map(cell => cell.ch).join('')).join('')
-      else if (links && !multiline && physicalRow.wrapFrom === undefined && physicalRow.some(cell => cell.ch === ':'))
+      else if (links && !multiline && physicalRow.wrapFrom === undefined && canLink(physicalRow))
         text = physicalRow.map(cell => cell.ch).join('')
       // A full last row can still receive more text in the next output chunk.
-      ranges = text ? terminalUrlRanges(text).filter(range => range.end < text.length) : []
+      const web = text ? terminalUrlRanges(text) : []
+      const paths = files && text ? terminalPathRanges(text) : []
+      ranges = [...web, ...paths].filter(range => range.end < text.length).sort((a, b) => a.start - b.start)
       rangeIndex = 0
       textOffset = 0
     }
@@ -153,7 +157,12 @@ export function toHtml(rows: TerminalRow[], links = false): string {
         if (activeLink) line += '</a>'
         if (link) {
           const label = !explicit && end > start + 1 ? ` aria-label="${escapeHtml(link)}"` : ''
-          line += `<a data-terminal-link href="${escapeHtml(link)}"${label} target="_blank" rel="noopener noreferrer">`
+          if (/^https?:\/\//iu.test(link)) {
+            line += `<a data-terminal-link href="${escapeHtml(link)}"${label} target="_blank" rel="noopener noreferrer">`
+          }
+          else {
+            line += `<a role="link" tabindex="0" data-terminal-link data-terminal-file="${escapeHtml(link)}"${label}>`
+          }
         }
         activeLink = link
         open = ''

@@ -1,8 +1,11 @@
 import type { FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { open, opendir, realpath, stat } from 'node:fs/promises'
-import { basename, extname, isAbsolute, join, relative, sep } from 'node:path'
+import { homedir, hostname } from 'node:os'
+import { basename, extname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path'
 import { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
+import { terminalLinkUrl } from '@harness/ansi'
 
 const PREVIEW_BYTES = 256 * 1024
 const PREVIEW_LINES = 5000
@@ -24,6 +27,13 @@ export interface WorkspaceFilePreview {
   truncated?: boolean
 }
 
+export interface WorkspaceTerminalTarget {
+  path: string
+  kind: 'directory' | 'file'
+  line: number
+  column: number
+}
+
 export async function resolveWorkspaceEntry(root: string, path: string): Promise<string | null> {
   if (path.includes('\0') || isAbsolute(path) || path.split(/[\\/]/u).some(part => /^(?:\.{1,2}|\.git|\.hg|\.svn)$/iu.test(part))) return null
   try {
@@ -38,6 +48,52 @@ export async function resolveWorkspaceEntry(root: string, path: string): Promise
 
 function unavailable(status = 404): Response {
   return Response.json({ error: 'The workspace file or folder is unavailable.' }, { status, headers })
+}
+
+function terminalPosition(value: string | undefined): number {
+  const position = Number(value)
+  return Number.isSafeInteger(position) && position > 0 ? position : 0
+}
+
+function readTerminalTarget(value: string): { path: string, line: number, column: number } | null {
+  if (!value || /[\u0000-\u001F\u007F]/u.test(value)) return null
+  if (/^file:\/\//iu.test(value)) {
+    if (terminalLinkUrl(value) !== value) return null
+    const url = new URL(value)
+    if (url.hostname && url.hostname !== hostname().toLowerCase()) return null
+    url.hostname = ''
+    const position = /^#L(\d+)(?:C(\d+))?$/u.exec(url.hash)
+    try { return { path: fileURLToPath(url), line: terminalPosition(position?.[1]), column: terminalPosition(position?.[2]) } }
+    catch { return null }
+  }
+  if (/^[A-Za-z][\w.+-]+:\/\//u.test(value)) return null
+  const position = /^(.+?):(\d+)(?::(\d+))?$/u.exec(value)
+  return { path: position?.[1] ?? value, line: terminalPosition(position?.[2]), column: terminalPosition(position?.[3]) }
+}
+
+function scopedRelative(root: string, absolute: string): string | null {
+  const path = relative(root, absolute)
+  return path === '..' || path.startsWith('..' + sep) || isAbsolute(path) ? null : path
+}
+
+async function resolveTerminalTarget(workspace: string, root: string, value: string): Promise<WorkspaceTerminalTarget | null> {
+  const target = readTerminalTarget(value)
+  if (!target || (!isAbsolute(target.path) && win32.isAbsolute(target.path))) return null
+  const absolute = /^~[\\/]/u.test(target.path) ? resolve(homedir(), target.path.slice(2)) : resolve(root, target.path)
+  let at = scopedRelative(root, absolute) ?? scopedRelative(resolve(workspace), absolute)
+  if (at === null && isAbsolute(target.path)) {
+    // The shell can report an absolute name through an alias such as macOS
+    // /var. Only use its canonical name when it is inside the checkout.
+    const canonical = await realpath(absolute).catch(() => null)
+    if (canonical) at = scopedRelative(root, canonical)
+  }
+  if (at === null) return null
+  const verified = await resolveWorkspaceEntry(root, at)
+  const info = verified ? await stat(verified).catch(() => null) : null
+  if (!info?.isFile() && !info?.isDirectory()) return null
+  const path = at.split(sep).join('/')
+  return info.isDirectory() ? { path, kind: 'directory', line: 0, column: 0 }
+    : { path, kind: 'file', line: target.line, column: target.line ? target.column : 0 }
 }
 
 async function listFolder(root: string, path: string, params: URLSearchParams): Promise<Response> {
@@ -109,6 +165,10 @@ export async function respondWorkspaceFile(workspace: string, url: URL, request:
   const path = url.searchParams.get('path') ?? ''
   const root = await realpath(workspace).catch(() => null)
   if (!root || path.length > 4096) return unavailable()
+  if (url.pathname === '/workspace-files/terminal-target') {
+    const target = await resolveTerminalTarget(workspace, root, path)
+    return target ? Response.json(target, { headers }) : unavailable()
+  }
   if (url.pathname === '/workspace-files/tree') return listFolder(root, path, url.searchParams)
   const target = path ? await resolveWorkspaceEntry(root, path) : null
   if (!target) return unavailable()

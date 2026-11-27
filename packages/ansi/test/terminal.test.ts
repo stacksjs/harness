@@ -64,6 +64,37 @@ it('recognizes printed web addresses across ANSI spans and leaves nearby punctua
   expect(html).toContain('&amp;two=2</span></a>).')
 })
 
+it('links complete source paths and compiler locations without linking remote addresses as files', () => {
+  const options = { cols: 24, rows: 3, scrollback: 40 }
+  const terminal = new Terminal(options)
+  terminal.write('see "notes & tests/source map.ts":18:7 next\r\n')
+  terminal.write('src/views/(main)/index.ts(42,7): error TS2322: fixture\r\n')
+  terminal.write('src/contact@support.vue:12:3: fixture\r\n')
+  terminal.write('GET /docs/files?q=1 redis://machine/app/logs git@host:group/repo.git\r\n')
+  terminal.write('See https://example.test/fs/file.ts:8:2\r\n')
+  const html = toHtml(terminal.snapshot(true), true, true)
+  expect(html.match(/data-terminal-file=/gu)).toHaveLength(3)
+  expect(html).toContain('data-terminal-file="notes &amp; tests/source map.ts:18:7"')
+  expect(html).toContain('data-terminal-file="src/views/(main)/index.ts:42:7"')
+  expect(html).toContain('data-terminal-file="src/contact@support.vue:12:3"')
+  expect(html).toContain('href="https://example.test/fs/file.ts:8:2"')
+})
+
+it('restores explicit file links without embedding file URLs as browser navigation', () => {
+  const options = { cols: 21, rows: 3, scrollback: 8 }
+  const terminal = new Terminal(options)
+  terminal.write('\x1b]8;;file:///project/source%20map.ts#L4C2\x07Source map\x1b]8;;\x07\r\n')
+  terminal.write('\x1b]8;;file:///project/nope%00.ts\x07Inert\x1b]8;;\x07')
+  const saved = new Terminal(options)
+  expect(saved.restoreHistory(terminal.saveHistory())).toBe(true)
+  const rows = saved.snapshot(true)
+  expect(toHtml(rows, true)).not.toContain('data-terminal-link')
+  const html = toHtml(rows, true, true)
+  expect(html.match(/data-terminal-file=/gu)).toHaveLength(1)
+  expect(html).toContain('data-terminal-file="file:///project/source%20map.ts#L4C2">Source map</a>')
+  expect(html).not.toContain('href="file:')
+})
+
 it('gives every soft-wrapped segment the complete target and one keyboard stop', () => {
   const options = { cols: 18, rows: 2, scrollback: 10, scrollbackBytes: 4096 }
   const url = 'https://example.test/releases/1.2/download'

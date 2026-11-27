@@ -2191,7 +2191,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           .catch(() => Response.json({ error: 'Could not read project repositories.' }, { status: 503, headers }))
       }
 
-      if (request.method === 'GET' && /^\/workspace-files\/(?:search|tree|preview|content|download)$/u.test(url.pathname)) {
+      if (request.method === 'GET' && /^\/workspace-files\/(?:search|tree|preview|content|download|terminal-target)$/u.test(url.pathname)) {
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         const headers = { 'cache-control': 'private, no-store' }
         const root = workspaceFileRoot(url.searchParams)

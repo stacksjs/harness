@@ -2,8 +2,9 @@ import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Database } from 'bun:sqlite'
 import { Terminal } from '@harness/ansi'
 import { decode, encode } from '@harness/contract'
@@ -3275,13 +3276,18 @@ describe('harness serve — HTTP', () => {
     const scopedFile = await fetch(`${worktreeRoute}&path=worktree-parity.md`)
     expect(await scopedFile.json()).toMatchObject({ text: 'worktree fixture\n' })
     expect((await fetch(`${worktreeRoute}&path=parity%20notes%20%5Bdraft%5D.md`)).status).toBe(404)
+    const terminalRoute = `http://127.0.0.1:${port}/workspace-files/terminal-target`
+    const terminalQuery = (path: string) => new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path })
+    expect(await (await fetch(`${terminalRoute}?${terminalQuery('worktree-parity.md:1:3')}`)).json())
+      .toEqual({ path: 'worktree-parity.md', kind: 'file', line: 1, column: 3 })
+    expect((await fetch(`${terminalRoute}?${terminalQuery(join(project, 'parity notes [draft].md'))}`)).status).toBe(404)
 
     const launcher = join(dir, 'code')
     writeFileSync(launcher, '#!/bin/sh\nprintf "%s\\n" "$@" > .editor-args\n', { mode: 0o755 })
     const originalPath = process.env.PATH
     process.env.PATH = [dir, originalPath].filter(Boolean).join(delimiter)
     try {
-      const request = (path: string, line = '2', editor = 'vscode', headers?: HeadersInit) => fetch(`${editorRoute}?${new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path, line, editor })}`, { method: 'POST', headers })
+      const request = (path: string, line = '2', editor = 'vscode', headers?: HeadersInit, column = '0') => fetch(`${editorRoute}?${new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path, line, editor, column })}`, { method: 'POST', headers })
       const editorArguments = join(worktree, '.editor-args')
       async function receiveEditorArguments(expected: string): Promise<string> {
         const deadline = Date.now() + 2_000
@@ -3309,6 +3315,9 @@ describe('harness serve — HTTP', () => {
       expect((await request(filename)).status).toBe(204)
       const openFile = `--goto\n${join(realpathSync(worktree), filename)}:2\n`
       expect(await receiveEditorArguments(openFile)).toBe(openFile)
+      expect((await request(filename, '2', 'vscode', undefined, '3')).status).toBe(204)
+      expect(await receiveEditorArguments(`--goto\n${join(realpathSync(worktree), filename)}:2:3\n`)).toBe(`--goto\n${join(realpathSync(worktree), filename)}:2:3\n`)
+      expect((await request(filename, '0', 'vscode', undefined, '3')).status).toBe(400)
       expect((await request('', '0')).status).toBe(204)
       const openFolder = `--new-window\n${realpathSync(worktree)}\n`
       expect(await receiveEditorArguments(openFolder)).toBe(openFolder)
@@ -3339,6 +3348,7 @@ describe('harness serve — HTTP', () => {
       return fetch(`http://127.0.0.1:${port}/workspace-files/${action}?${params}`, { headers })
     }
     expect((await request('preview', 'print.html')).status).toBe(404)
+    expect((await request('terminal-target', 'print.html')).status).toBe(404)
     await dispatch('preview-trust', { type: 'workspace.trust', workspaceId, trusted: true })
     const listed = await (await request('tree')).json()
     expect(listed.entries).toEqual([
@@ -3348,6 +3358,23 @@ describe('harness serve — HTTP', () => {
     expect((await request('tree', 'notes & tests')).status).toBe(200)
     expect((await request('tree', '', { origin: 'https://isolated.invalid' })).status).toBe(403)
     const path = 'notes & tests/[draft] #1.txt'
+    const target = await request('terminal-target', `${path}:2:7`)
+    expect(target.headers.get('cache-control')).toBe('private, no-store')
+    expect(await target.json()).toEqual({ path, kind: 'file', line: 2, column: 7 })
+    const uri = pathToFileURL(join(project, path))
+    uri.hostname = hostname().toLowerCase()
+    uri.hash = 'L2C4'
+    expect(await (await request('terminal-target', uri.href)).json()).toEqual({ path, kind: 'file', line: 2, column: 4 })
+    const checkoutAlias = join(dir, 'workspace-alias')
+    symlinkSync(project, checkoutAlias)
+    const aliasTarget = `${pathToFileURL(join(checkoutAlias, path)).href}#L2C4`
+    expect(await (await request('terminal-target', aliasTarget)).json()).toEqual({ path, kind: 'file', line: 2, column: 4 })
+    expect(await (await request('terminal-target', folder)).json()).toEqual({ path: 'notes & tests', kind: 'directory', line: 0, column: 0 })
+    uri.hostname = 'other.invalid'
+    for (const denied of [uri.href, '.git/config', '../outside.txt', join(dir, 'outside.txt'), 'outside.txt', 'missing.ts']) {
+      expect((await request('terminal-target', denied)).status).toBe(404)
+    }
+    expect((await request('terminal-target', path, { origin: 'https://isolated.invalid' })).status).toBe(403)
     expect(await (await request('preview', path)).json()).toMatchObject({ kind: 'text', text: 'First line\nSecond line\n', truncated: false })
     expect(await (await request('preview', 'notes & tests/binary.txt')).json()).toMatchObject({ kind: 'binary' })
     expect(await (await request('preview', 'notes & tests/large.txt')).json()).toMatchObject({ truncated: true })
