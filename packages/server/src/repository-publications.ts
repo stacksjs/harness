@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
 import { repositoryGit } from './repository-commit'
+import type { openRepositoryPullRequest } from './repository-pull-request'
 import { readRepositoryStatus } from './repository-status'
 import { featureBranchDestination, RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
 
@@ -8,6 +9,16 @@ export interface PublicationTarget {
   remote: string
   destinationKey: string
   ref: string
+}
+
+export interface PublicationPullRequest {
+  targetKey: string
+  baseRef: string
+  title: string
+  body: string
+  draft: boolean
+  generate?: string
+  result?: Awaited<ReturnType<typeof openRepositoryPullRequest>> & { linked: boolean }
 }
 
 export interface PublicationReceipt extends PublicationTarget {
@@ -20,6 +31,7 @@ export interface PublicationReceipt extends PublicationTarget {
   newBranch: boolean
   commit?: string
   outcome?: string
+  pullRequest?: PublicationPullRequest
 }
 
 export function publicationKey(value: unknown) {
@@ -86,7 +98,7 @@ export class RepositoryPublications {
   save(receipt: PublicationReceipt) {
     this.access(db => db.query(
       'UPDATE harness_repository_publications SET receipt = ?, completed = ? WHERE id = ?',
-    ).run(JSON.stringify(receipt), receipt.outcome ? 1 : 0, receipt.id))
+    ).run(JSON.stringify(receipt), receipt.outcome && (!receipt.pullRequest || receipt.pullRequest.result?.linked) ? 1 : 0, receipt.id))
   }
 
   /** A lost response or restart between the Git write and SQLite update can recover the exact commit. */

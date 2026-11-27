@@ -12,15 +12,39 @@ export class RepositoryPullRequestError extends Error {
 }
 
 export async function readPullRequestSubmission(request: Request) {
-  const value = await readRepositoryInput(request, 65_536)
+  return parsePullRequestSubmission(await readRepositoryInput(request, 65_536))
+}
+
+export function parsePullRequestSubmission(value: Record<string, unknown> | null) {
   const { revision, baseRef, draft } = value ?? {}
+  const generate = value?.generate ?? null
   const title = typeof value?.title === 'string' ? value.title.trim() : ''
   const body = typeof value?.body === 'string' ? value.body : ''
   if (typeof revision !== 'string' || !/^[0-9a-f]{64}$/u.test(revision)
     || typeof baseRef !== 'string' || !baseRef || Buffer.byteLength(baseRef) > 1024
+    || (generate !== null && (typeof generate !== 'string' || !/^[0-9a-f]{64}$/u.test(generate) || Boolean(title)))
     || typeof draft !== 'boolean' || [...title].length > 256 || Buffer.byteLength(body) > 16_384
     || /[\r\n\0]/u.test(title) || body.includes('\0')) return null
-  return { revision, baseRef, title, body, draft }
+  return { revision, baseRef, title, body, draft, generate }
+}
+
+export function generatedPullRequestText(value: unknown) {
+  if (!value || typeof value !== 'object') throw new RepositoryPullRequestError('The provider returned invalid pull request text. Enter a title or try again.')
+  const { title, body } = value as Record<string, unknown>
+  if (typeof title !== 'string' || !title.trim() || [...title].length > 256 || /[\r\n\0]/u.test(title)
+    || typeof body !== 'string' || Buffer.byteLength(body) > 16_384 || body.includes('\0'))
+    throw new RepositoryPullRequestError('The provider returned invalid pull request text. Enter a title or try again.')
+  return { title: title.trim(), body: body.trim() }
+}
+
+export async function readPullRequestPatch(path: string, base: string, head: string) {
+  const { stdout } = await repositoryGit(path, [
+    'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--stat', '--patch', base + '...' + head, '--',
+  ]).catch((error) => {
+    if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && typeof error.stdout === 'string') return { stdout: error.stdout }
+    throw error
+  })
+  return stdout.length > 60_000 ? stdout.slice(0, 60_000) + '\n[Patch truncated]' : stdout
 }
 
 export async function repositoryGitHubCredential(path: string, signal: AbortSignal) {
@@ -84,8 +108,8 @@ async function githubRepository(path: string, name: string) {
   return data
 }
 
-async function githubBranch(path: string, repository: string, branch: string) {
-  const reply = await repositoryGitHubRequest(path, 'repos/' + repository + '/branches/' + encodeURIComponent(branch))
+async function githubBranch(path: string, repository: string, branch: string, credential?: string) {
+  const reply = await repositoryGitHubRequest(path, 'repos/' + repository + '/branches/' + encodeURIComponent(branch), undefined, undefined, credential)
   const data = reply.body as { commit?: { sha?: unknown } } | null
   if (reply.status === 404) return null
   if (reply.status !== 200 || typeof data?.commit?.sha !== 'string' || !/^[0-9a-f]{40}$/u.test(data.commit.sha))
@@ -102,10 +126,10 @@ function pullRequestResult(value: unknown, repository: string, headRepository: s
   return { ...link, headCommit: pull.head.sha, draft: pull.draft === true }
 }
 
-async function findOpenPullRequest(path: string, repository: string, headRepository: string, headRef: string, baseRef: string) {
+async function findOpenPullRequest(path: string, repository: string, headRepository: string, headRef: string, baseRef: string, credential?: string) {
   const owner = headRepository.split('/')[0]
   const query = new URLSearchParams({ state: 'open', head: owner + ':' + headRef, base: baseRef, per_page: '30' })
-  const reply = await repositoryGitHubRequest(path, 'repos/' + repository + '/pulls?' + query)
+  const reply = await repositoryGitHubRequest(path, 'repos/' + repository + '/pulls?' + query, undefined, undefined, credential)
   if (reply.status !== 200 || !Array.isArray(reply.body))
     throw new RepositoryPullRequestError('GitHub could not check for an existing pull request.')
   for (const item of reply.body) {
@@ -115,7 +139,7 @@ async function findOpenPullRequest(path: string, repository: string, headReposit
   return null
 }
 
-export async function prepareRepositoryPullRequest(path: string, selectedBase?: string) {
+export async function prepareRepositoryPullRequest(path: string, selectedBase?: string, beforeCommit = false) {
   const push = await repositorySyncPreview(path, 'push')
   if (!push.branch || !push.head || !push.remote || !push.ref)
     throw new RepositoryPullRequestError(push.problem ?? 'Check out a branch before creating a pull request.')
@@ -151,35 +175,51 @@ export async function prepareRepositoryPullRequest(path: string, selectedBase?: 
     findOpenPullRequest(path, repository, headRepository, headRef, baseRef),
   ])
   const publish = headCommit !== push.head
-  const problem = !baseCommit ? 'GitHub could not find the selected base branch.'
+  const problem = beforeCommit && (push.defaultTarget || headRef === headMetadata.default_branch)
+    ? 'Check out a feature branch before committing, pushing, and opening a pull request.'
+    : !baseCommit ? 'GitHub could not find the selected base branch.'
     : repository.toLowerCase() === headRepository.toLowerCase() && baseRef === headRef
       ? 'Choose a base branch other than the branch you are publishing.'
-      : !existing && push.head === baseCommit ? 'Add a commit before opening this pull request.'
+      : !beforeCommit && !existing && push.head === baseCommit ? 'Add a commit before opening this pull request.'
         : !existing && publish ? push.problem : null
 
+  const targetKey = createHash('sha256').update(JSON.stringify([
+    push.destinationKey, actor, repository, headRepository, baseRef, baseCommit, headRef, headMetadata.default_branch,
+  ])).digest('hex')
   const revision = createHash('sha256').update(JSON.stringify([
-    push.revision, actor, repository, headRepository, baseRef, baseCommit, headCommit, existing?.number ?? null,
+    push.revision, targetKey, headCommit, existing?.number ?? null,
   ])).digest('hex')
   const preview = { revision, actor, repository, headRepository, baseRef, headRef, remote: push.remote, branch: push.branch,
     title: [...suggested].slice(0, 256).join(''), publish, problem, existing }
-  return { preview, push, baseCommit }
+  return { preview, push, baseCommit, targetKey }
 }
 
 export async function openRepositoryPullRequest(path: string, prepared: Awaited<ReturnType<typeof prepareRepositoryPullRequest>>,
-  input: { title: string, body: string, draft: boolean }, authorize: () => boolean) {
+  input: { title: string, body: string, draft: boolean }, authorize: () => boolean, publication = false) {
   const { preview, push } = prepared
   if (!authorize()) throw new RepositoryPullRequestError('The checkout changed. Review the pull request again.')
   if ((await repositorySyncPreview(path, 'push')).revision !== push.revision || !authorize())
     throw new RepositoryPullRequestError('The branch or publishing remote changed. Review the pull request again.')
-  if (preview.existing) return { pullRequest: preview.existing, existing: true, headChanged: false }
-  if (preview.publish) await syncRepository(path, 'push', push, authorize)
+  if (!publication && preview.existing) return { pullRequest: preview.existing, existing: true, headChanged: false }
+  if (!publication && preview.publish) await syncRepository(path, 'push', push, authorize)
 
   const { repository, headRepository, headRef, baseRef } = preview
+  const credential = publication ? await repositoryGitHubCredential(path, AbortSignal.timeout(15_000)) : undefined
+  if (credential) {
+    const identity = await repositoryGitHubRequest(path, 'user', undefined, undefined, credential)
+    if (identity.status !== 200 || (identity.body as { login?: unknown } | null)?.login !== preview.actor)
+      throw new RepositoryPullRequestError('The GitHub account changed. Refresh the review before continuing.')
+  }
   const [publishedHead, currentBase] = await Promise.all([
-    githubBranch(path, headRepository, headRef), githubBranch(path, repository, baseRef),
+    githubBranch(path, headRepository, headRef, credential), githubBranch(path, repository, baseRef, credential),
   ])
   if (publishedHead !== push.head || currentBase !== prepared.baseCommit || !authorize())
     throw new RepositoryPullRequestError('The published branch or base changed. Review the current refs before creating the pull request.')
+  if (preview.existing) {
+    if (preview.existing.headCommit !== push.head)
+      throw new RepositoryPullRequestError('GitHub reports a different pull request head. Refresh the review and try again.')
+    return { pullRequest: preview.existing, existing: true, headChanged: false }
+  }
   const crossRepository = repository.toLowerCase() !== headRepository.toLowerCase()
   const payload = { title: input.title, body: input.body, draft: input.draft, base: baseRef,
     head: crossRepository ? headRepository.split('/')[0] + ':' + headRef : headRef,
@@ -189,11 +229,11 @@ export async function openRepositoryPullRequest(path: string, prepared: Awaited<
   // forge. Resolve it by exact base, head and repository before another write.
   let response: GitHubReply | undefined
   let failure: unknown
-  try { response = await repositoryGitHubRequest(path, 'repos/' + repository + '/pulls', payload) }
+  try { response = await repositoryGitHubRequest(path, 'repos/' + repository + '/pulls', payload, undefined, credential) }
   catch (error) { failure = error }
   let pullRequest = response?.status === 201 ? pullRequestResult(response.body, repository, headRepository, headRef, baseRef) : null
   const created = Boolean(pullRequest)
-  if (!pullRequest) pullRequest = await findOpenPullRequest(path, repository, headRepository, headRef, baseRef).catch(() => null)
+  if (!pullRequest) pullRequest = await findOpenPullRequest(path, repository, headRepository, headRef, baseRef, credential).catch(() => null)
   if (!pullRequest) {
     if (failure) throw failure
     throw new RepositoryPullRequestError('GitHub did not confirm a pull request. Check the account’s write permissions, draft support, and branch differences before retrying.')

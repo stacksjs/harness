@@ -44,7 +44,7 @@ import { planRepositoryBranch, reconcileRepositoryBranch, startRepositoryBranch 
 import type { PublicationReceipt } from './repository-publications'
 import { previewCommitPublication, publicationKey, publicationMarker, RepositoryPublications } from './repository-publications'
 import { readRepositoryStatus } from './repository-status'
-import { openRepositoryPullRequest, prepareRepositoryPullRequest, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
+import { generatedPullRequestText, openRepositoryPullRequest, parsePullRequestSubmission, prepareRepositoryPullRequest, readPullRequestPatch, readPullRequestSubmission, RepositoryPullRequestError } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
 import { featureBranchDestination, RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
 import type { RepositorySyncAction } from './repository-sync'
@@ -543,14 +543,24 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   const repositoryActions = new Set<string>()
   type RepositoryAction = 'commit' | 'pull-request' | 'pull-request-checks' | RepositorySyncAction
 
-  function commitGenerator(session: SessionState, profileId: number, root: string) {
+  function repositoryTextProfile(session: SessionState, profileId: number, root: string) {
     const driver = resolveDriver(session.driverKind)
-    if (!driver?.generateCommitMessage) return null
+    if (!driver?.generateCommitMessage && !driver?.generatePullRequestText) return null
     const launch = session.providerInstanceId === undefined ? {}
       : savedProviders.find(session.providerInstanceId, profileId, session.driverKind, root)
     if (!launch) return null
     const key = createHash('sha256').update(JSON.stringify([session.driverKind, session.providerInstanceId, session.model, launch])).digest('hex')
-    return { key, launch, run: driver.generateCommitMessage }
+    return { key, launch, driver }
+  }
+
+  function commitGenerator(session: SessionState, profileId: number, root: string) {
+    const profile = repositoryTextProfile(session, profileId, root)
+    return profile?.driver.generateCommitMessage && { ...profile, run: profile.driver.generateCommitMessage }
+  }
+
+  function pullRequestGenerator(session: SessionState, profileId: number, root: string) {
+    const profile = repositoryTextProfile(session, profileId, root)
+    return profile?.driver.generatePullRequestText && { ...profile, run: profile.driver.generatePullRequestText }
   }
 
   async function resolveRepositoryBranch(session: SessionState, attempt: GitBranchAttempt, live: boolean): Promise<boolean> {
@@ -591,10 +601,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const key = url.searchParams.get('repository') ?? ''
     const scope = action === 'commit' ? url.searchParams.get('scope') ?? 'staged' : 'staged'
     if (scope !== 'staged' && scope !== 'working') return respond({ error: 'Choose a valid commit scope.' }, 400)
-    const publishing = action === 'commit' && url.searchParams.get('publish') === '1'
+    const publicationMode = action === 'commit' && url.searchParams.get('publish')
+    const stacking = publicationMode === 'pr'
+    const publishing = stacking || publicationMode === '1'
     const retryPublication = url.searchParams.get('publication')
-    if (retryPublication !== null && (action !== 'push' || !/^[0-9a-f-]{36}$/u.test(retryPublication)))
-      return respond({ error: 'Reopen the publication to retry Push.' }, 400)
+    if (retryPublication !== null && ((action !== 'push' && action !== 'pull-request') || !/^[0-9a-f-]{36}$/u.test(retryPublication)))
+      return respond({ error: 'Reopen the publication to retry.' }, 400)
     if (publishing && scope !== 'working') return respond({ error: 'Choose working-tree changes to commit and push.' }, 400)
     const submitted = request.method === 'POST'
     const pullInput = submitted && action === 'pull-request' ? await readPullRequestSubmission(request) : null
@@ -603,6 +615,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
     if (submitted && publishing !== Boolean(input?.publication))
       return respond({ error: 'Review the publishing destination before committing.' }, 400)
+    const stackedInput = input?.pullRequest ? parsePullRequestSubmission(input.pullRequest) : null
+    if (submitted && (stacking !== Boolean(stackedInput) || (input?.pullRequest && !stackedInput) || (stacking && input?.newBranch)))
+      return respond({ error: 'Review the current branch and pull request destination before committing.' }, 400)
     if (input?.newBranch && scope !== 'working') return respond({ error: 'Choose working-tree changes to commit on a new branch.' }, 400)
 
     const session = engine.current.sessions.get(sessionId)
@@ -640,11 +655,99 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           && (worktree ? thread.worktreePath === root : thread.workspaceId === workspace.id && !thread.worktreePath))
     }
 
+    const canPublish = () => authorize() && !request.signal.aborted
+    const linkPullRequest = async (pull: { repository: string, number: number }, id: string = crypto.randomUUID()) =>
+      authorize() && await engine.dispatchInternal({
+        id: 'pull_request_link_' + id, at: Date.now(),
+        command: { type: 'thread.pull-request.link', sessionId, pullRequest: { ...pull, repositoryKey: key } },
+      }).then(() => true, () => false)
+
+    const reviewStackedPullRequest = async (receipt: PublicationReceipt) => {
+      const prepared = await prepareRepositoryPullRequest(repository, receipt.pullRequest?.baseRef)
+      if (prepared.targetKey !== receipt.pullRequest?.targetKey || prepared.push.head !== receipt.commit
+        || prepared.push.branch !== receipt.branch || prepared.push.ref !== receipt.ref)
+        throw new RepositoryPullRequestError('The branch, base, remote, or GitHub account changed. Open a new pull request review to continue.')
+      if (prepared.preview.problem) throw new RepositoryPullRequestError(prepared.preview.problem)
+      return prepared
+    }
+
+    const resumeStackedPullRequest = async (receipt: PublicationReceipt) => {
+      let intent = receipt.pullRequest!
+      if (intent.result?.linked) return intent.result
+      let prepared = await reviewStackedPullRequest(receipt)
+      if (!receipt.outcome) {
+        const outcome = await publications.push(receipt, canPublish)
+        receipt = { ...receipt, outcome }
+        prepared = await reviewStackedPullRequest(receipt)
+      }
+      if (!prepared.preview.existing && intent.generate && !intent.title) {
+        const currentGenerator = () => {
+          const current = engine.current.sessions.get(sessionId)
+          return current && pullRequestGenerator(current, workspace.profileId, root)
+        }
+        const generator = currentGenerator()
+        if (!generator || generator.key !== intent.generate || !canPublish())
+          throw new RepositoryPullRequestError('The thread’s provider changed. Enter a pull request title to continue.')
+        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
+        let output: unknown
+        try {
+          const patch = await readPullRequestPatch(repository, prepared.baseCommit!, receipt.commit!)
+          const config = await providerLaunchConfig(chatGptCredentials, generator.launch)
+          signal.throwIfAborted()
+          output = await generator.run({ ...config, workspacePath: root, model: session.model || undefined }, {
+            patch, base: prepared.preview.baseRef, head: prepared.preview.headRef, signal,
+          })
+          signal.throwIfAborted()
+        }
+        catch {
+          throw new RepositoryPullRequestError('Could not generate pull request text. Check the selected provider or enter a title to continue.')
+        }
+        if (!canPublish() || currentGenerator()?.key !== intent.generate)
+          throw new RepositoryPullRequestError('The checkout or provider changed during generation. Review the pull request again.')
+        const generated = generatedPullRequestText(output)
+        intent = { ...intent, title: generated.title, body: intent.body || generated.body, generate: undefined }
+        publications.save({ ...receipt, pullRequest: intent })
+        prepared = await reviewStackedPullRequest(receipt)
+      }
+      const result = await openRepositoryPullRequest(repository, prepared, intent, canPublish, true)
+      if (result.headChanged) throw new RepositoryPullRequestError('GitHub reports a different pull request head. Refresh the review and try again.')
+      const { repository: name, number } = result.pullRequest
+      const linked = await linkPullRequest({ repository: name, number }, receipt.id)
+      const linkedResult = { ...result, linked }
+      publications.save({ ...receipt, pullRequest: { ...intent, result: linkedResult } })
+      return linkedResult
+    }
+
+    function publicationResult(receipt: PublicationReceipt, error?: string) {
+      const { id, outcome, pullRequest } = receipt
+      const result = pullRequest?.result
+      return { id, pushed: Boolean(outcome), retryable: !pullRequest && !outcome,
+        retryPullRequest: Boolean(pullRequest && !result?.linked), ...(result && { pullRequest: result }),
+        message: [outcome, error].filter(Boolean).join(' ')
+          || (pullRequest ? 'The commit is ready. Continue the pull request to finish publishing.'
+            : 'The local commit is ready. Retry Push to continue.') }
+    }
+
     try {
       if (retryPublication) {
         const saved = publications.read(retryPublication)
         if (!saved || saved.sessionId !== sessionId || saved.path !== repository) return respond({ error: 'This publication is unavailable.' }, 404)
         const receipt = await publications.recover(saved)
+        if (action === 'pull-request') {
+          if (!receipt.pullRequest || !receipt.commit) return respond({ error: 'This pull request publication is unavailable.' }, 404)
+          const { preview } = await reviewStackedPullRequest(receipt)
+          if (!pullInput) {
+            const { title, body, draft, generate } = receipt.pullRequest
+            return respond({ ...preview, title, body, draft, canGenerate: Boolean(generate) })
+          }
+          if (preview.revision !== pullInput.revision || preview.baseRef !== pullInput.baseRef)
+            return respond({ error: 'The branch, remote, or pull request changed. Refresh the review before continuing.' }, 409)
+          const intent = { ...receipt.pullRequest, title: pullInput.title || receipt.pullRequest.title, body: pullInput.body, draft: pullInput.draft,
+            generate: pullInput.title ? undefined : receipt.pullRequest.generate }
+          if (canPublish() && !intent.result?.linked) publications.save({ ...receipt, pullRequest: intent })
+          return respond(await resumeStackedPullRequest({ ...receipt, pullRequest: intent }))
+        }
+        if (receipt.pullRequest) return respond({ error: 'Continue the pull request to finish publishing this commit.' }, 409)
         const preview = await publications.pushReview(receipt)
         if (!submitted) return respond(preview)
         if (receipt.outcome) return respond({ message: receipt.outcome })
@@ -659,10 +762,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (existingPublication.requestKey !== requestKey) return respond({ error: 'Reopen the review to start a new publication.' }, 409)
         const receipt = await publications.recover(existingPublication)
         if (!receipt.commit) return respond({ error: 'Git could not confirm the earlier commit. Review the checkout before starting another publication.' }, 409)
-        return respond({ commit: receipt.commit, branch: receipt.branch, publication: {
-          id: receipt.id, message: receipt.outcome ?? 'The local commit is ready. Retry Push to continue.',
-          pushed: Boolean(receipt.outcome), retryable: !receipt.outcome,
-        } }, 201)
+        return respond({ commit: receipt.commit, branch: receipt.branch, publication: publicationResult(receipt) }, 201)
       }
       if (readingChecks) {
         const link = (thread: SessionState) => thread.linkedPullRequests?.findLast(pull => pull.repositoryKey === key)
@@ -688,10 +788,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (!preview.existing && !pullInput.title) return respond({ error: 'Enter a pull request title.' }, 400)
         const result = await openRepositoryPullRequest(repository, prepared, pullInput, authorize)
         const { repository: name, number } = result.pullRequest
-        const linked = authorize() && await engine.dispatchInternal({
-          id: 'pull_request_link_' + crypto.randomUUID(), at: Date.now(),
-          command: { type: 'thread.pull-request.link', sessionId, pullRequest: { repository: name, number, repositoryKey: key } },
-        }).then(() => true, () => false)
+        const linked = await linkPullRequest({ repository: name, number })
         return respond({ ...result, linked }, result.existing ? 200 : 201)
       }
       const review = action === 'commit'
@@ -706,14 +803,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             publications.latest(sessionId, repository),
           ])
           const pending = saved ? await publications.recover(saved) : null
-          return respond({ ...preview, ...(generator && { generation: generator.key }), publish: { current, feature },
-            ...(pending?.commit && pending.commit === review.head && { pendingPublication: { id: pending.id, commit: pending.commit } }),
+          const pullRequestGeneration = stacking && pullRequestGenerator(session, workspace.profileId, root)
+          const pullRequest = stacking ? await prepareRepositoryPullRequest(repository, undefined, true)
+            .then(result => ({ ...result.preview, generation: pullRequestGeneration ? pullRequestGeneration.key : null }), (error) => ({ problem: error instanceof RepositoryPullRequestError ? error.message : 'Could not review the GitHub destination.' })) : null
+          return respond({ ...preview, ...(generator && { generation: generator.key }), publish: { current, feature }, ...(pullRequest && { pullRequest }),
+            ...(pending?.commit && pending.commit === review.head && { pendingPublication: { id: pending.id, commit: pending.commit, ...(pending.pullRequest && { pullRequest: true }) } }),
           })
         }
         if (review.kind === 'sync' && review.action === 'push' && !review.preview.problem) {
           const saved = publications.latest(sessionId, repository)
           const pending = saved ? await publications.recover(saved) : null
-          if (pending?.commit && pending.commit === review.preview.head && pending.branch === review.preview.branch
+          if (!pending?.pullRequest && pending?.commit && pending.commit === review.preview.head && pending.branch === review.preview.branch
             && pending.destinationKey === review.preview.destinationKey && pending.ref === review.preview.ref)
             return respond({ ...preview, publication: pending.id })
         }
@@ -736,6 +836,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const destination = confirmed && (input.newBranch ? confirmed.feature : confirmed.current)
         if (publicationRequest && (!head || !branch || !destination || destination.problem || destination.revision !== publicationRequest.revision))
           return respond({ error: destination?.problem || 'The publication destination changed. Refresh the review before committing.' }, 409)
+        const pullRequest = stackedInput ? await prepareRepositoryPullRequest(repository, stackedInput.baseRef, true) : null
+        if (pullRequest && (pullRequest.preview.problem || pullRequest.preview.revision !== stackedInput?.revision))
+          return respond({ error: pullRequest.preview.problem ?? 'The pull request destination changed. Refresh the review before committing.' }, 409)
+        if (stackedInput?.generate && pullRequestGenerator(session, workspace.profileId, root)?.key !== stackedInput.generate)
+          return respond({ error: 'The thread’s provider changed. Refresh the review or enter a pull request title.' }, 409)
         let message = input.message
         let branchSuggestion: string | undefined
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
@@ -781,6 +886,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           receipt = {
             id: publicationRequest.id, requestKey, path: repository, sessionId, base: head, branch: newBranch?.to ?? branch,
             newBranch: Boolean(newBranch), remote: target.remote, destinationKey: target.destinationKey, ref,
+            ...(pullRequest && stackedInput && { pullRequest: {
+              targetKey: pullRequest.targetKey, baseRef: pullRequest.preview.baseRef, draft: stackedInput.draft, body: stackedInput.body,
+              title: stackedInput.generate ? '' : stackedInput.title || [...message.split(/\r?\n/u)[0]!.trim()].slice(0, 256).join(''),
+              ...(stackedInput.generate && { generate: stackedInput.generate }),
+            } }),
           }
           publications.begin(receipt)
         }
@@ -792,6 +902,18 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           const resultBranch = newBranch?.to ?? receipt?.branch
           const result = { commit: commit.commit, ...(resultBranch && { branch: resultBranch }), ...(warning && { warning }) }
           if (!receipt) return respond(result, 201)
+          if (receipt.pullRequest) {
+            let error: string | undefined
+            const recorded = await publications.recover(receipt)
+            if (!recorded.commit)
+              return respond({ ...result, publication: { id: receipt.id, message: 'Review the local commit before continuing.', pushed: false } }, 201)
+            try { await resumeStackedPullRequest(recorded) }
+            catch (failure) {
+              error = failure instanceof RepositorySyncError || failure instanceof RepositoryPullRequestError
+                ? failure.message : 'Could not finish publishing. Continue the pull request to retry.'
+            }
+            return respond({ ...result, publication: publicationResult(publications.read(receipt.id) ?? recorded, error) }, 201)
+          }
           let message = 'Could not confirm publication. Review the local commit before pushing.'
           let pushed = false
           let retryable = false
@@ -845,7 +967,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   }
 
   async function renderWorkspaceReview(root: string | null, url: URL, operation: string | undefined,
-    session: SessionState | undefined, trusted: boolean): Promise<Response> {
+    session: SessionState | undefined, trusted: boolean, local: boolean): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
     const errorDiff = (error: string) => ({ isRepository: false, scope: 'working-tree', files: [], patch: '', error })
     const repository = url.searchParams.get('repository')
@@ -880,7 +1002,12 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
     if (operation === 'status') {
       const status = await isWorkspaceGitRoot(path) ? await readRepositoryStatus(path) : null
-      return Response.json({ status }, { headers })
+      const saved = local && trusted && status?.head && session
+        ? await realpath(path).then(path => publications.latest(session.id, path)).catch(() => null) : null
+      const pending = saved?.pullRequest && (!saved.commit || saved.commit === status?.head)
+        ? await publications.recover(saved).catch(() => null) : null
+      const pendingPullRequest = pending?.commit === status?.head ? pending?.id : undefined
+      return Response.json({ status: pendingPullRequest ? { ...status, pendingPullRequest } : status }, { headers })
     }
     const turns = reviewTurns(session, repository || '')
     try {
@@ -1957,7 +2084,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           ? options.workspacePath(engine.current, id)
           : defaultWorkspacePath(engine.current, id))
         const workspace = session && engine.current.workspaces.get(session.workspaceId)
-        return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch))
+        return renderWorkspaceReview(path, url, diffRoute[2], session, Boolean(workspace?.trusted && !workspace.scratch),
+          canUseHostPrivileges(request, url) && isLoopbackHost(srv.requestIP(request)?.address ?? ''))
       }
 
       const projectScriptsRoute = /^\/s\/([1-9]\d*)\/(project-scripts|project-setup|project-settlement)$/u.exec(url.pathname)

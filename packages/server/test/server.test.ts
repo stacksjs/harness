@@ -1089,6 +1089,131 @@ describe('harness serve — HTTP', () => {
     expect(git('--git-dir', publishing, 'rev-parse', 'refs/heads/feature/claimed-sandbox-branch')).toBe(directHead)
   }, 50_000)
 
+  it.skipIf(process.platform === 'win32')('resumes commit, push and pull request from the same head after rejection and restart', async () => {
+    const fixture = fixtureGitRepository(dir)
+    const project = realpathSync(join(dir, 'seed'))
+    const git = (...args: string[]) => {
+      const result = Bun.spawnSync(['git', '-C', project, ...args])
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    const url = 'https://github.com/fixture/notebook.git'
+    git('remote', 'add', 'origin', url)
+    git('config', 'url.' + fixture.bare + '.insteadOf', url)
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    const base = git('rev-parse', 'HEAD')
+    const workspaceId = derivedId('stacked-pr-project')
+    const sessionId = derivedId('stacked-pr-thread')
+    const cli = fixtureGitHubCli(dir, { 'fixture/notebook': { bare: fixture.bare } })
+    const readForge = () => JSON.parse(readFileSync(cli.state, 'utf8'))
+    const setActor = (actor: string) => writeFileSync(cli.state, JSON.stringify({ ...readForge(), actor }))
+    const databasePath = join(dir, 'test.sqlite')
+    const patches: string[] = []
+    let rejectGeneration = true
+    const resolveDriver: NonNullable<Parameters<typeof serve>[0]['resolveDriver']> = kind => ({
+      kind, async probe() { return { status: 'ready' } }, async create() { throw new Error('Unused provider session') },
+      async generatePullRequestText(_config, input) {
+        patches.push(input.patch)
+        expect(input.base).toBe('main')
+        expect(input.head).toBe('review/export')
+        if (rejectGeneration) throw new Error('Fixture driver disconnected')
+        return { title: 'Review the published export', body: 'Validate the committed report.' }
+      },
+    })
+    harness.stop()
+    harness = await serve({ port: 0, databasePath, resolveDriver })
+    port = harness.server.port
+    const previousPath = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + previousPath
+    try {
+      await harness.engine.dispatch({ id: 'stacked-pr-project', at: 1, command: { type: 'workspace.register', path: project, trusted: true } })
+      await harness.engine.dispatch({ id: 'stacked-pr-thread', at: 2, command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
+      writeFileSync(join(project, 'README.md'), 'Compose a reviewed report\n')
+      const route = (action: string) => 'http://127.0.0.1:' + port + '/s/' + sessionId + '/' + action
+      const get = (action: string) => fetch(route(action)).then(response => response.json())
+      const post = async (action: string, body: object) => {
+        const response = await fetch(route(action), {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+        })
+        return { status: response.status, body: await response.json() }
+      }
+      const action = 'git/commit?scope=working&publish=pr'
+      expect((await get(action)).pullRequest.problem).toContain('feature branch')
+      git('switch', '-qc', 'review/export')
+      writeFileSync(join(project, 'excluded.txt'), 'Keep staged locally\n')
+      git('add', 'excluded.txt')
+      const preview = await get(action)
+      expect(preview.pullRequest).toMatchObject({ actor: 'fixture-user', repository: 'fixture/notebook',
+        headRef: 'review/export', baseRef: 'main', problem: null })
+      const id = crypto.randomUUID()
+      const input = { message: 'Review the exported report', revision: preview.revision,
+        excluded: [preview.files.indexOf('excluded.txt')], publication: { id, revision: preview.publish.current.revision },
+        pullRequest: { revision: preview.pullRequest.revision, baseRef: 'main', title: '', body: '', draft: true,
+          generate: preview.pullRequest.generation } }
+      setActor('different-fixture-user')
+      expect((await post(action, input)).status).toBe(409)
+      expect(git('rev-parse', 'HEAD')).toBe(base)
+      setActor('fixture-user')
+      const hook = join(fixture.bare, 'hooks', 'pre-receive')
+      writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+      const first = await post(action, input)
+      const committed = git('rev-parse', 'HEAD')
+      expect(first).toMatchObject({ status: 201, body: { commit: committed, publication: { id, pushed: false, retryPullRequest: true } } })
+      expect(committed).not.toBe(base)
+      expect(git('diff', '--cached', '--name-only')).toBe('excluded.txt')
+      expect(readForge().posts).toBe(0)
+      expect(git('--git-dir', fixture.bare, 'for-each-ref', 'refs/heads/review/export')).toBe('')
+      rmSync(hook)
+
+      const retry = 'git/pull-request?publication=' + id
+      const details = await get(retry)
+      expect(details).toMatchObject({ title: '', body: '', draft: true, publish: true, canGenerate: true })
+      expect(patches).toEqual([])
+      const unavailable = await post(retry, details)
+      expect(unavailable.status).toBe(409)
+      expect(unavailable.body.error).toContain('Could not generate pull request text')
+      expect(readForge().posts).toBe(0)
+      expect(patches).toHaveLength(1)
+      rejectGeneration = false
+      cli.configure('denied')
+      expect((await post(retry, await get(retry))).status).toBe(409)
+      expect(readForge().posts).toBe(1)
+      expect(patches).toHaveLength(2)
+      expect(patches.every(patch => patch.includes('Compose a reviewed report') && !patch.includes('Keep staged locally'))).toBe(true)
+      expect(git('--git-dir', fixture.bare, 'rev-parse', 'refs/heads/review/export')).toBe(committed)
+      expect((await get('diff/status')).status.pendingPullRequest).toBe(id)
+
+      harness.stop()
+      harness = await serve({ port: 0, databasePath, resolveDriver })
+      port = harness.server.port
+      expect((await get('diff/status')).status.pendingPullRequest).toBe(id)
+      setActor('different-fixture-user')
+      expect((await get(retry)).error).toContain('account changed')
+      expect((await post(retry, details)).status).toBe(409)
+      expect(readForge().posts).toBe(1)
+      setActor('fixture-user')
+
+      const ready = await get(retry)
+      expect(ready).toMatchObject({ publish: false, title: 'Review the published export', body: 'Validate the committed report.', canGenerate: false })
+      cli.configure('lost-response')
+      const completed = await post(retry, ready)
+      expect(completed).toMatchObject({ status: 200, body: { linked: true, pullRequest: { number: 1, headCommit: committed, draft: true } } })
+      expect(await post(action, input)).toMatchObject({ status: 201, body: { commit: committed,
+        publication: { id, pushed: true, retryPullRequest: false, pullRequest: { linked: true } } } })
+      expect((await get('diff/status')).status.pendingPullRequest).toBeUndefined()
+      expect((await post(retry, await get(retry))).body).toEqual(completed.body)
+      expect(readForge().posts).toBe(2)
+      expect(patches).toHaveLength(2)
+      expect(readForge().pulls).toMatchObject([{ title: 'Review the published export', body: 'Validate the committed report.', head: { sha: committed } }])
+      expect(harness.engine.current.sessions.get(sessionId)?.linkedPullRequests)
+        .toEqual([{ repository: 'fixture/notebook', repositoryKey: '', number: 1 }])
+      expect(git('rev-parse', 'HEAD')).toBe(committed)
+      expect(git('--git-dir', fixture.bare, 'rev-parse', 'refs/heads/main')).toBe(base)
+    }
+    finally { process.env.PATH = previousPath }
+  }, 60_000)
+
   it.skipIf(process.platform === 'win32')('searches a large GitHub label catalog and verifies the selected identities before saving', async () => {
     const { project, cli, local, url, readState } = seedPullRequestLifecycle('Review the monthly report', false)
     const tag = (id: number, name: string) => ({ id: 13_000_000_000 + id, node_id: 'LA_fixture_' + id, name, color: '336611', description: '' })

@@ -14,6 +14,7 @@ export interface RepositoryStatus {
   unstaged: number
   untracked: number
   conflicted: number
+  pendingPullRequest?: string
 }
 
 /** Porcelain v2 reports branch and index changes without quoting filenames. */

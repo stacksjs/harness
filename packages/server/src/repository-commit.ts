@@ -287,6 +287,7 @@ export async function readRepositorySubmission(request: Request, commit: boolean
   const newBranch = commit ? value?.newBranch ?? false : false
   const generate = commit ? value?.generate ?? null : null
   const publication = commit ? value?.publication ?? null : null
+  const pullRequest = commit ? value?.pullRequest ?? null : null
   const publish = publication && typeof publication === 'object' ? publication as Record<string, unknown> : null
   const publishing = publish && typeof publish.id === 'string' && /^[0-9a-f-]{36}$/u.test(publish.id)
     && typeof publish.revision === 'string' && /^[0-9a-f]{64}$/u.test(publish.revision)
@@ -295,6 +296,7 @@ export async function readRepositorySubmission(request: Request, commit: boolean
     && Array.isArray(excluded) && excluded.every(index => Number.isSafeInteger(index) && index >= 0)
     && typeof newBranch === 'boolean' && (generate === null || (typeof generate === 'string' && /^[0-9a-f]{64}$/u.test(generate) && !message))
     && (publication === null || publishing)
+    && (pullRequest === null || (typeof pullRequest === 'object' && !Array.isArray(pullRequest)))
     && Buffer.byteLength(message) <= 4096 && !message.includes('\0')
-    ? { revision, message, excluded, newBranch, generate, publication: publishing } : null
+    ? { revision, message, excluded, newBranch, generate, publication: publishing, ...(pullRequest && { pullRequest: pullRequest as Record<string, unknown> }) } : null
 }

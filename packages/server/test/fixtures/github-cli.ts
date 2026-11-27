@@ -131,7 +131,7 @@ function commentPage(pull, variables) {
   } }
 }
 
-if (url.pathname === '/user') reply(200, { login: 'fixture-user' })
+if (url.pathname === '/user') reply(200, { login: state.actor ?? 'fixture-user' })
 if (url.pathname === '/graphql' && method === 'POST') {
   const { query, variables } = JSON.parse(await Bun.stdin.text())
   if (query.includes('mutation SetPullRequestFileViewed')) {
