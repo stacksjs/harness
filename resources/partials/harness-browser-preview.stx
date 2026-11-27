@@ -68,7 +68,7 @@
     </template>
     <template :if="activePreviewUrl() && !browserPreviewEmbedded()">
       <div class="grid absolute inset-0 place-content-center px-4">
-        <a ref="browserPreviewExternalBox" :href="activePreviewUrl()" target="_blank" rel="noopener noreferrer" class="inline-flex h-11 items-center justify-center rounded-md border border-current px-3 text-sm">Open in browser</a>
+        <a ref="browserPreviewExternalBox" :href="activePreviewUrl()" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center px-3 h-11 text-sm border border-current rounded-md">Open in browser</a>
       </div>
     </template>
   </div>
