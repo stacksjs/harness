@@ -30,6 +30,15 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, commentMode }))
   }
+  const configureInlineReviews = (reviewMode: 'normal' | 'denied' | 'invalid' | 'lost-response' | 'unconfirmed', reviewAuthor = true) => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, reviewMode, reviewAuthor }))
+  }
+  const revealInlineReview = () => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    const { invisibleReview, ...shown } = previous
+    if (invisibleReview) writeFileSync(state, JSON.stringify({ ...shown, inlineReviews: [...(shown.inlineReviews ?? []), invisibleReview] }))
+  }
   const revealReply = () => {
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     const { invisibleReply, ...shown } = previous
@@ -145,6 +154,10 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query HarnessPullRequestReviewAccount')) {
+    if (!process.env.GH_TOKEN || !pull) reply(404, {})
+    reply(200, { data: { viewer, repository: { pullRequest: { viewerDidAuthor: state.reviewAuthor !== false } } } })
+  }
   if (query.includes('query PullRequestReviewConversations')) {
     if (!pull || state.conversationMode === 'unreadable') reply(200, { errors: [{ message: 'Private conversation diagnostics' }] })
     const inline = {
@@ -156,10 +169,16 @@ if (url.pathname === '/graphql' && method === 'POST') {
       comments: { nodes: [{ id: 'fixture-outdated-comment', body: 'Previous review location' }] },
     }
     const detached = { ...outdated, id: 'fixture-detached', path: 'removed-earlier.txt', comments: { nodes: [{ id: 'fixture-detached-comment', body: 'Earlier file discussion' }] } }
+    const posted = (state.inlineReviews ?? []).filter(review => review.pull === pull.number).flatMap(review => review.comments.map((comment, index) => ({
+      ...thread, id: 'fixture-review-' + review.id + '-' + index, path: comment.path, line: comment.line, startLine: comment.start_line,
+      diffSide: comment.side, startDiffSide: comment.start_side, isOutdated: false,
+      comments: { nodes: [{ id: 'fixture-review-comment-' + review.id + '-' + index, author: viewer, body: comment.body,
+        createdAt: '2026-11-01T16:00:00Z', url: pull.html_url + '#discussion_r' + (500 + review.id * 50 + index) }] },
+    })))
     const second = variables.cursor === 'more-conversations'
     reply(200, { data: { viewer, repository: { pullRequest: { id: 'fixture-pull',
       headRefOid: second && state.conversationMode === 'head-changed' ? 'd'.repeat(40) : pull.head.sha,
-      reviewThreads: { nodes: !state.conversationMode ? [] : second ? [outdated, detached] : [inline],
+      reviewThreads: { nodes: second ? [outdated, detached] : [...(state.conversationMode ? [inline] : []), ...posted],
         pageInfo: { hasNextPage: Boolean(state.conversationMode) && !second, endCursor: 'more-conversations' } },
     } } } })
   }
@@ -199,8 +218,28 @@ const detail = pulls.find(pull => pull.number === Number(parts[5]))
 if (parts[4] === 'issues' && parts[6] === 'timeline' && detail) reply(200, [
   { id: 5, event: 'commented', user: { login: 'fixture-reviewer' }, created_at: '2026-11-01T13:00:00Z', body: 'Check the **export**. <script>globalThis.__pr_html = true</script>' },
   { id: 3, event: 'reviewed', user: { login: 'fixture-approver' }, state: 'approved', submitted_at: '2026-11-01T14:00:00Z' },
+  ...(state.inlineReviews ?? []).filter(review => review.pull === detail.number).map(review => ({ ...review, event: 'reviewed' })),
 ])
 if (parts[4] !== 'pulls') reply(404, {})
+if (parts[6] === 'reviews') {
+  if (!detail || !process.env.GH_TOKEN) reply(404, {})
+  if (method === 'GET') reply(200, (state.inlineReviews ?? []).filter(review => review.pull === detail.number))
+  const input = JSON.parse(await Bun.stdin.text())
+  state.reviewRequests = (state.reviewRequests || 0) + 1
+  const statuses = { COMMENT: 'COMMENTED', APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED' }
+  if (state.reviewMode === 'denied' || state.reviewMode === 'invalid') {
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(state.reviewMode === 'denied' ? 403 : 422, { message: 'Private review diagnostics' })
+  }
+  if (input.commit_id !== detail.head.sha || !statuses[input.event] || !Array.isArray(input.comments)) reply(422, {})
+  const review = { ...input, id: state.reviewRequests, pull: detail.number, state: statuses[input.event],
+    user: { login: 'fixture-user' }, submitted_at: '2026-11-01T16:00:00Z' }
+  if (state.reviewMode === 'unconfirmed') state.invisibleReview = review
+  else state.inlineReviews = [...(state.inlineReviews ?? []), review]
+  writeFileSync(stateFile, JSON.stringify(state))
+  if (state.reviewMode === 'unconfirmed' || state.reviewMode === 'lost-response') process.exit(1)
+  reply(200, review)
+}
 if (method === 'GET' && parts[5]) {
   if (!detail) reply(404, {})
   if (parts[6] === 'files') reply(200, [{ filename: 'report.txt', status: 'modified', additions: 3, deletions: 2,
@@ -232,5 +271,6 @@ writeFileSync(stateFile, JSON.stringify(state))
 if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
-  return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages, revealReply }
+  return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages,
+    revealReply, configureInlineReviews, revealInlineReview }
 }

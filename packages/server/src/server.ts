@@ -58,7 +58,7 @@ import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
 import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
-import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
 import type { PullRequestReplyDraft } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
@@ -1912,7 +1912,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments'].includes(url.pathname)) {
+      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
@@ -1941,6 +1941,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
             return new Response(null, { status: 415, headers })
           srv.timeout(request, 150)
+          if (url.pathname === '/pull-requests/review') {
+            return submitWorkspaceInlineReview(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) return Response.json({ result: 'invalid', message: 'Check the review text and comments before submitting.' }, { status: 400, headers })
+              const statuses = { posted: 200, pending: 202, invalid: 422, changed: 409, denied: 403, unavailable: 503 }
+              return Response.json(submission, { status: statuses[submission.result], headers })
+            })
+          }
           if (url.pathname === '/pull-requests/reply') {
             const acceptsJson = request.headers.get('accept') === 'application/json'
             return submitWorkspaceReviewReply(engine.current, url.searchParams, request, signal, reviewReplies)

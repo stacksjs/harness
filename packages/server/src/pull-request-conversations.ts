@@ -23,7 +23,7 @@ type ThreadNode = Partial<ThreadState> & {
 
 const threadFields = 'id isResolved viewerCanResolve viewerCanUnresolve viewerCanReply'
 const threadPageQuery = `query PullRequestReviewConversations($owner: String!, $name: String!, $number: Int!, $cursor: String) {
-  viewer { id }
+  viewer { id login }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       id headRefOid
@@ -135,21 +135,27 @@ export function reviewLineAnchor(file: string, side: 'before' | 'after', line: n
   return file + '-' + (side === 'before' ? 'L' : 'R') + line
 }
 
-export function reviewLineSelection(sections: ReviewPatchSection[], file: string, line: string | null, start: string | null) {
+export function reviewLineRange(sections: ReviewPatchSection[], file: string, line: string | null, start: string | null) {
   if (!line?.startsWith(file + '-') || (start && !start.startsWith(file + '-'))) return null
   const rows = sections.flatMap(section => section.rows)
   const find = (anchor: string) => {
     const match = /-([LR])([1-9][0-9]*)$/u.exec(anchor)
     if (!match) return undefined
-    const side = match[1] === 'L' ? 'before' : 'after'
+    const side: 'before' | 'after' = match[1] === 'L' ? 'before' : 'after'
     const number = Number(match[2])
-    return Number.isSafeInteger(number) && anchor === reviewLineAnchor(file, side, number)
+    const row = Number.isSafeInteger(number) && anchor === reviewLineAnchor(file, side, number)
       ? rows.find(row => row[side] === number) : undefined
+    return row && { row, number, side }
   }
   const first = find(start || line)
   const last = find(line)
-  if (!first || !last || first.hunk !== last.hunk) return null
-  return { first: Math.min(first.position, last.position), last: Math.max(first.position, last.position), line, start: start || line }
+  if (!first || !last || first.row.hunk !== last.row.hunk) return null
+  return first.row.position <= last.row.position ? { first, last } : { first: last, last: first }
+}
+
+export function reviewLineSelection(sections: ReviewPatchSection[], file: string, line: string | null, start: string | null) {
+  const range = line && reviewLineRange(sections, file, line, start)
+  return range && line ? { first: range.first.row.position, last: range.last.row.position, line, start: start || line } : null
 }
 
 export function placeReviewConversations(patch: string, conversations: ReviewConversation[]): ReviewPatchSection[] {
@@ -186,10 +192,11 @@ export function placeReviewConversations(patch: string, conversations: ReviewCon
 export async function readReviewConversations(path: string, repository: string, number: number, head: string, address: string, signal: AbortSignal, credential: string) {
   const [owner, name] = repository.split('/')
   type PullPage = { id: string, headRefOid: string, reviewThreads?: Page<ThreadNode> }
-  type Response = { viewer?: { id?: string }, repository?: { pullRequest?: PullPage } }
+  type Response = { viewer?: { id?: string, login?: string }, repository?: { pullRequest?: PullPage } }
   const conversations = new Map<string, ReviewConversation>()
   let cursor: string | undefined
   let viewer = ''
+  let login = ''
   let pullId = ''
   for (let page = 0; page < 25; page++) {
     signal.throwIfAborted()
@@ -200,17 +207,18 @@ export async function readReviewConversations(path: string, repository: string, 
     if (reply.status !== 200 || result?.errors?.length || !account || !pull?.id || !Array.isArray(pull.reviewThreads?.nodes)) return null
     if (pull.headRefOid !== head || (viewer && viewer !== account) || (pullId && pullId !== pull.id)) throw new ReviewConversationConflict()
     viewer = account
+    login = result?.data?.viewer?.login ?? login
     pullId = pull.id
     for (const node of pull.reviewThreads.nodes) {
       const thread = reviewConversation(node, address)
       if (thread) conversations.set(thread.id, thread)
     }
-    if (!pull.reviewThreads.pageInfo?.hasNextPage) return { viewer, conversations: [...conversations.values()], truncated: false }
+    if (!pull.reviewThreads.pageInfo?.hasNextPage) return { viewer, login, conversations: [...conversations.values()], truncated: false }
     const next = pull.reviewThreads.pageInfo.endCursor
     if (!next || next === cursor) break
     cursor = next
   }
-  return { viewer, conversations: [...conversations.values()], truncated: true }
+  return { viewer, login, conversations: [...conversations.values()], truncated: true }
 }
 
 export async function readReviewConversationState(path: string, repository: string, number: number, head: string, id: string,

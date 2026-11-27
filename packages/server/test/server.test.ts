@@ -1156,6 +1156,35 @@ describe('harness serve — HTTP', () => {
       expect((await sendReply()).status).toBe(202)
       expect(readState().replyRequests).toBe(1)
 
+      const reviewPath = viewed.replace(host, '').replace('/viewed?', '/review?')
+      const start = lineAnchor!.replace(/R2$/u, 'R1')
+      const rangedComment = { path: 'report.txt', page: 1, line: lineAnchor!, start, body: 'Check this **report range**.' }
+      const removedLine = lineAnchor!.replace(/R2$/u, 'L20')
+      const removedComment = { path: 'report.txt', page: 1, line: removedLine, start: removedLine, body: 'The removal is intentional.' }
+      const reviewInput = { intent: crypto.randomUUID(), head: local, base, viewer: 'fixture-viewer', verdict: 'COMMENT',
+        summary: 'Review **summary**.', drafts: JSON.stringify([rangedComment, removedComment]) }
+      const sendReview = (values: Record<string, string> = {}, origin = replyHost) => fetch(replyHost + reviewPath, {
+        method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+        body: new URLSearchParams({ ...reviewInput, ...values }),
+      })
+      expect((await fetch(replyHost + reviewPath)).status).toBe(405)
+      expect((await sendReview({}, 'https://other.example')).status).toBe(403)
+      expect((await sendReview({ verdict: 'APPROVE' })).status).toBe(403)
+      expect((await sendReview({ viewer: 'other-account' })).status).toBe(409)
+      expect((await sendReview({ head: 'a'.repeat(40) })).status).toBe(409)
+      expect((await sendReview({ base: 'a'.repeat(40) })).status).toBe(409)
+      expect((await sendReview({ drafts: JSON.stringify([{ ...rangedComment, start: removedLine }]) })).status).toBe(409)
+      expect((await sendReview({ drafts: JSON.stringify([{ ...rangedComment, path: 'outside.txt' }]) })).status).toBe(409)
+      expect((await sendReview({ summary: '', drafts: '[]' })).status).toBe(400)
+      expect(readState().reviewRequests ?? 0).toBe(0)
+      cli.configureInlineReviews('unconfirmed')
+      const pendingReview = await sendReview()
+      expect(pendingReview.status).toBe(202)
+      expect(await pendingReview.json()).toMatchObject({ result: 'pending' })
+      expect((await sendReview({ summary: 'Edit a submitted intent.' })).status).toBe(409)
+      expect((await sendReview()).status).toBe(202)
+      expect(readState().reviewRequests).toBe(1)
+
       harness.stop()
       harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
       replyHost = 'http://127.0.0.1:' + harness.server.port
@@ -1191,6 +1220,41 @@ describe('harness serve — HTTP', () => {
       expect(simultaneous.every(response => [200, 202].includes(response.status))).toBe(true)
       expect((await sendReply(sharedReply)).status).toBe(200)
       expect(readState().replyRequests).toBe(3)
+      expect((await sendReview()).status).toBe(202)
+      expect(readState().reviewRequests).toBe(1)
+      cli.revealInlineReview()
+      const confirmedReview = await sendReview()
+      expect(confirmedReview.status).toBe(200)
+      const confirmedLocation = new URL((await confirmedReview.json()).location, replyHost)
+      expect(confirmedLocation.searchParams.get('reviewResult')).toBe('posted')
+      const postedReview = await fetch(confirmedLocation).then(response => response.text())
+      expect(postedReview).toContain('Review submitted to GitHub.')
+      expect(postedReview).toContain('Check this <strong>report range</strong>.')
+      expect(postedReview).toContain('The removal is intentional.')
+      const reviewedTimeline = new URL(confirmedLocation)
+      reviewedTimeline.searchParams.set('tab', 'timeline')
+      const postedTimeline = await fetch(reviewedTimeline).then(response => response.text())
+      expect(postedTimeline).toContain('Review <strong>summary</strong>.')
+      expect(postedTimeline).not.toContain('harness:pr-review:')
+      expect(readState().inlineReviews).toMatchObject([{ commit_id: local, event: 'COMMENT', comments: [
+        { path: 'report.txt', body: rangedComment.body, line: 2, side: 'RIGHT', start_line: 1, start_side: 'RIGHT' },
+        { path: 'report.txt', body: removedComment.body, line: 20, side: 'LEFT' },
+      ] }])
+      expect(readState().inlineReviews[0].comments[1].start_line).toBeUndefined()
+      expect(readState().reviewRequests).toBe(1)
+      const approved = { intent: crypto.randomUUID(), verdict: 'APPROVE', summary: '', drafts: '[]' }
+      cli.configureInlineReviews('denied', false)
+      const deniedReview = await sendReview(approved)
+      expect(deniedReview.status).toBe(403)
+      expect(await deniedReview.text()).not.toContain('Private review diagnostics')
+      cli.configureInlineReviews('invalid', false)
+      expect((await sendReview(approved)).status).toBe(422)
+      cli.configureInlineReviews('lost-response', false)
+      const reviewRequests = await Promise.all([sendReview(approved), sendReview(approved)])
+      expect(reviewRequests.every(response => [200, 202].includes(response.status))).toBe(true)
+      expect((await sendReview(approved)).status).toBe(200)
+      expect(readState().reviewRequests).toBe(4)
+      expect(readState().inlineReviews[1].state).toBe('APPROVED')
     }
     finally {
       process.chdir(previousCwd)

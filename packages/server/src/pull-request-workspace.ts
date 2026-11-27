@@ -7,6 +7,7 @@ import { resolveProjectRepository, scanProjectRepositories } from './project-rep
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
 import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewLineSelection, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
 import { findPullRequestThread } from './pull-request-links'
+import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
@@ -115,14 +116,10 @@ async function readActivity(repository: Repository, pull: Pull, page: number, si
     const state = entry.event === 'reviewed' && Object.hasOwn(reviewLabels, entry.state?.toLowerCase() ?? '')
       ? reviewLabels[entry.state.toLowerCase()]! : activityLabels[entry.event]!
     return [{ id: `activity-${index}`, author: entry.user?.login || entry.actor?.login || 'Unknown author',
-      time: entry.submitted_at || entry.created_at || '', state, text: typeof entry.body === 'string' ? entry.body.slice(0, 32_768) : '' }]
+      time: entry.submitted_at || entry.created_at || '', state, text: typeof entry.body === 'string' ? entry.body.replace(inlineReviewMarker, '').slice(0, 32_768) : '' }]
   })
   if (page === 1 && pull.created) items.push({ id: 'opened', author: pull.author, time: pull.created, state: 'Opened the request', text: '' })
   return { items: items.sort((a, b) => a.time.localeCompare(b.time)), more: reply.hasNextPage }
-}
-
-function fileAnchor(path: string) {
-  return 'file-' + createHash('sha256').update(path).digest('hex').slice(0, 24)
 }
 
 function stillTrusted(state: HarnessState, workspace: WorkspaceState) {
@@ -160,14 +157,19 @@ function selectReviewConversation(params: URLSearchParams, anchor: string) {
   params.set('conversation', anchor)
 }
 
-async function readFiles(repository: Repository, pull: Pull, page: number, signal: AbortSignal, query: URLSearchParams) {
-  const { number, head } = pull
-  const selectedComments = commentView(query)
-  const reply = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}/files?per_page=30&page=${page}`, undefined, signal)
+async function readReviewFiles(repository: Repository, number: number, page: number, signal: AbortSignal, credential?: string) {
+  const reply = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}/files?per_page=30&page=${page}`, undefined, signal, credential)
   if (reply.status !== 200 || !Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitHub could not load changes for this request.')
   const files: ChangedFile[] = reply.body.flatMap(file => typeof file?.filename === 'string' ? [{ path: file.filename,
     previousPath: file.previous_filename, status: file.status, additions: file.additions, deletions: file.deletions,
     patch: typeof file.patch === 'string' ? file.patch : '' }] : [])
+  return { files, more: reply.hasNextPage }
+}
+
+async function readFiles(repository: Repository, pull: Pull, page: number, signal: AbortSignal, query: URLSearchParams) {
+  const { number, head } = pull
+  const selectedComments = commentView(query)
+  const { files, more } = await readReviewFiles(repository, number, page, signal)
   const current = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}`, undefined, signal)
   const currentPull = current.status === 200 ? readPull(current.body, repository.name) : null
   if (!currentPull || !head || currentPull.head !== head || currentPull.baseSha !== pull.baseSha || currentPull.baseRef !== pull.baseRef)
@@ -221,11 +223,12 @@ async function readFiles(repository: Repository, pull: Pull, page: number, signa
     const firstLine = sections.find(section => section.rows.some(row => row.before || row.after))?.rows.find(row => row.before || row.after)?.position
     return { ...file, anchor, firstLine, formPath: encodeURIComponent(file.path), viewed: review?.states.get(file.path), sections, lineSelection }
   })
+  const reviewViewer = review?.viewer ?? (discussion?.login ? { id: discussion.viewer, login: discussion.login } : null)
   return {
     files: lines,
     lineNotice: requestedLine !== null && !lines.some(file => file.lineSelection)
       ? sameDiff ? 'This line selection is unavailable on this file page.' : 'The pull request comparison changed. Select a line in the current diff.' : '',
-    viewer: review?.viewer, more: reply.hasNextPage, conversationViewer: discussion?.viewer,
+    viewer: review?.viewer, reviewViewer, more, conversationViewer: discussion?.viewer,
     conversationsUnavailable: !discussion, conversationsTruncated: discussion?.truncated,
     detachedConversations: page === 1 ? assigned.get(undefined) ?? [] : [],
     commentsNotice,
@@ -329,6 +332,9 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     conversationNotice: conversationMessages.get(query.get('conversationResult') ?? '') ?? '',
     replyAction: reviewAction('reply'),
     replyNotice: query.get('replyResult') === 'posted' ? 'Reply posted.' : '',
+    inlineReviewAction: reviewAction('review'),
+    inlineReviewNotice: query.get('reviewResult') === 'posted' ? 'Review submitted to GitHub.' : '',
+    inlineReviewEdit: reviewCommentCursor(query.get('reviewEdit')) ?? '',
     commentsBase,
     commentsAction: commentsBase.replace('/pull-requests?', '/pull-requests/comments?'),
   }
@@ -581,6 +587,115 @@ export async function submitWorkspaceReviewReply(state: HarnessState, query: URL
   catch (error) {
     return finish(error instanceof ReviewConversationConflict ? 'changed' : confirmed ? 'posted' : attempted ? 'pending' : 'unavailable')
   }
+}
+
+const inlineReviewMessages = {
+  posted: 'Review submitted to GitHub.',
+  invalid: 'GitHub rejected the review. Check its verdict and comments before submitting again.',
+  changed: 'The pull request, selected lines, or GitHub account changed. Refresh the Code view before continuing.',
+  denied: 'This GitHub account cannot submit that review.',
+  unavailable: 'Could not prepare the review with GitHub. Your draft is still here.',
+  pending: 'GitHub has yet to confirm this review. Check again to recover it.',
+}
+
+export async function submitWorkspaceInlineReview(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
+  receipts: PullRequestReplyReceipts) {
+  const submission = await readReviewSubmission(state, query, request, 900_000)
+  if (!submission) return null
+  const { profile, selection, values, head, viewer } = submission
+  const input = readInlineReview(values)
+  if (!input) return null
+  const { token, base, verdict, summary, drafts } = input
+  const finish = (result: keyof typeof inlineReviewMessages) => {
+    const params = reviewReturnParams(query, profile, selection.url)
+    params.set('reviewResult', 'posted')
+    return { result, message: inlineReviewMessages[result],
+      location: result === 'posted' ? '/pull-requests?' + params + '#inline-review-controls' : undefined }
+  }
+  let attempted = false
+  try {
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
+    if (!repository || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const api = (endpoint: string, payload?: object) => repositoryGitHubRequest(repository.path, endpoint, payload, signal, credential)
+    const [owner, name] = repository.name.split('/')
+    const identity = await api('graphql', {
+      query: `query HarnessPullRequestReviewAccount($owner: String!, $name: String!, $number: Int!) {
+        viewer { id login }
+        repository(owner: $owner, name: $name) { pullRequest(number: $number) { viewerDidAuthor } }
+      }`,
+      variables: { owner, name, number: selection.number },
+    })
+    const response = identity.body as { data?: { viewer?: { id?: string, login?: string }, repository?: { pullRequest?: { viewerDidAuthor?: boolean } } }, errors?: unknown[] } | null
+    const account = response?.data?.viewer
+    const author = response?.data?.repository?.pullRequest?.viewerDidAuthor
+    if (identity.status !== 200 || response?.errors?.length || !account?.login || typeof author !== 'boolean') return finish('unavailable')
+    if (account.id !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const endpoint = `repos/${repository.name}/pulls/${selection.number}`
+    const fingerprint = createHash('sha256').update(JSON.stringify(['inline-review', profile, repository.workspace.id,
+      repository.name.toLowerCase(), selection.number, head, base, viewer, verdict, summary, drafts])).digest('hex')
+    const body = inlineReviewBody(token, summary)
+    const matches = (value: unknown) => matchesInlineReview(value, account.login!, head, body, verdict)
+    const recover = async () => {
+      for (let page = 1; page <= 10; page++) {
+        if (!stillTrusted(state, repository.workspace)) return finish('changed')
+        const list = await api(`${endpoint}/reviews?per_page=100&page=${page}`)
+        if (list.status !== 200 || !Array.isArray(list.body)) break
+        if (list.body.some(matches)) {
+          receipts.confirm(token, fingerprint)
+          return finish('posted')
+        }
+        if (!list.hasNextPage) break
+      }
+      return finish('pending')
+    }
+    const existing = receipts.inspect(token, fingerprint)
+    if (existing === 'confirmed') return finish('posted')
+    if (existing === 'conflict') return finish('changed')
+    if (existing === 'pending') {
+      attempted = true
+      return await recover()
+    }
+    if (author && verdict !== 'COMMENT') return finish('denied')
+    const pages = [...new Set(drafts.map(draft => draft.page))]
+    const files = new Map<number, Map<string, string>>()
+    for (let index = 0; index < pages.length; index += 4) {
+      await Promise.all(pages.slice(index, index + 4).map(async (page) => {
+        const change = await readReviewFiles(repository, selection.number, page, signal, credential)
+        files.set(page, new Map(change.files.map(file => [file.path, file.patch])))
+      }))
+    }
+    const comments = drafts.map(draft => anchoredReviewComment(draft, files.get(draft.page)?.get(draft.path) ?? ''))
+    if (comments.some(comment => !comment)) return finish('changed')
+    const current = await api(endpoint)
+    const pull = current.status === 200 ? readPull(current.body, repository.name) : null
+    if (!pull || pull.number !== selection.number || pull.head !== head || pull.baseSha !== base || !stillTrusted(state, repository.workspace))
+      return finish('changed')
+    const claimed = receipts.claim(token, fingerprint, true)
+    if (claimed === 'confirmed') return finish('posted')
+    if (claimed === 'conflict') return finish('changed')
+    attempted = true
+    if (claimed === 'pending') return await recover()
+    try {
+      const posted = await api(endpoint + '/reviews', { commit_id: head, event: verdict, body, comments })
+      if ([404, 409, 422].includes(posted.status)) {
+        receipts.reject(token, fingerprint)
+        return finish(posted.status === 422 ? 'invalid' : 'changed')
+      }
+      if ([200, 201].includes(posted.status) && matches(posted.body)) {
+        receipts.confirm(token, fingerprint)
+        return finish('posted')
+      }
+    }
+    catch (error) {
+      if (error instanceof RepositoryPullRequestError && (error.status === 401 || error.status === 403)) {
+        receipts.reject(token, fingerprint)
+        return finish('denied')
+      }
+    }
+    return await recover()
+  }
+  catch { return finish(attempted ? 'pending' : 'unavailable') }
 }
 
 export function renderPullRequestMarkdown(html: string, view: Awaited<ReturnType<typeof pullRequestWorkspace>>) {
