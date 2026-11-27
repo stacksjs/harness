@@ -2634,7 +2634,14 @@ await steeringReady.waitFor()
 await originalTurn.getByText('Steer from a queued row.').waitFor()
 check('the original turn retains its steer after a reload', await originalTurn.locator('[data-steered-message]').count() === 1)
 await pressChord('Control+,')
+await page.waitForFunction(() => document.documentElement.dataset.harnessKeyboard === 'ready')
 await page.locator('#settings-follow-up').selectOption('steer')
+const followUpSaveDeadline = performance.now() + 10_000
+while (harness.engine.current.settings.followUpBehavior !== 'steer' && performance.now() < followUpSaveDeadline) await Bun.sleep(50)
+if (harness.engine.current.settings.followUpBehavior !== 'steer') {
+  const error = await page.locator('[data-settings-error]').textContent()
+  throw new Error('The host did not save the steering preference.' + (error ? ' ' + error : ''))
+}
 await page.keyboard.press('Escape')
 await promptBox.focus()
 await promptBox.press('Control+f')
