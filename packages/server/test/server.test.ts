@@ -1,6 +1,6 @@
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -8,6 +8,7 @@ import { Terminal } from '@harness/ansi'
 import { decode, encode } from '@harness/contract'
 import { derivedId } from '@harness/engine'
 import { serve } from '../src/server'
+import { fixtureGitRepository, serveFixtureGit } from './fixtures/git-http'
 
 let dir: string
 let harness: HarnessServer
@@ -110,6 +111,126 @@ beforeEach(async () => {
 afterEach(() => {
   harness.stop()
   rmSync(dir, { recursive: true, force: true })
+})
+
+describe('repository cloning', () => {
+  const cloneId = 'web_clone_1'
+  const cloneUrl = (suffix = '') => `http://127.0.0.1:${port}/projects/clone${suffix}`
+  const start = (input: { id?: string, remote: string, destination: string }) => fetch(cloneUrl(), {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: cloneId, ...input }),
+  })
+  async function jobAfter(id = cloneId) {
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const result = await fetch(cloneUrl('?id=' + id))
+      const job = await result.json()
+      if (['done', 'failed', 'cancelled'].includes(job.phase)) return job
+      await Bun.sleep(50)
+    }
+    throw new Error('Clone did not finish.')
+  }
+
+  it('uses real Git, replays one intent and registers an untrusted checkout', async () => {
+    const fixture = fixtureGitRepository(dir)
+    const entered = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    const git = serveFixtureGit(fixture.remote, () => { entered.resolve(); return resume.promise })
+    const destination = join(dir, 'working-copy')
+    const remote = `http://127.0.0.1:${git.port}/notebook.git`
+    try {
+      expect((await start({ remote: 'ext::anything', destination })).status).toBe(400)
+      expect((await start({ remote, destination })).status).toBe(202)
+      await entered.promise
+      expect((await start({ remote, destination })).status).toBe(200)
+      expect((await start({ id: 'web_clone_2', remote, destination })).status).toBe(409)
+      expect(existsSync(destination)).toBe(false)
+      resume.resolve()
+      const job = await jobAfter()
+      expect(job).toMatchObject({ phase: 'done', destination: realpathSync(destination) })
+      expect(typeof job.workspace).toBe('number')
+      expect(typeof job.profile).toBe('number')
+      expect(readFileSync(join(destination, 'README.md'), 'utf8')).toBe('Clone fixture notebook\n')
+      expect(harness.engine.current.workspaces.get(job.workspace)).toMatchObject({ path: realpathSync(destination), trusted: false })
+      expect(harness.engine.current.sessions.size).toBe(0)
+      expect(await (await start({ remote, destination })).json()).toMatchObject({ workspace: job.workspace, phase: 'done' })
+    }
+    finally { resume.resolve(); git.stop(true) }
+  }, 20_000)
+
+  it('stops Git or preserves a folder that arrives during a clone', async () => {
+    const fixture = fixtureGitRepository(dir)
+    for (const cancel of [true, false]) {
+      const entered = Promise.withResolvers<void>()
+      const resume = Promise.withResolvers<void>()
+      const git = serveFixtureGit(fixture.remote, () => { entered.resolve(); return resume.promise })
+      const id = cancel ? 'web_clone_3' : 'web_clone_4'
+      const destination = join(dir, id)
+      const remote = `http://127.0.0.1:${git.port}/notebook.git`
+      try {
+        expect((await start({ id, remote, destination })).status).toBe(202)
+        await entered.promise
+        if (cancel) {
+          expect((await fetch(cloneUrl('?id=' + id), { method: 'DELETE' })).status).toBe(200)
+          expect(await jobAfter(id)).toMatchObject({ phase: 'cancelled' })
+          expect(existsSync(destination)).toBe(false)
+        }
+        else {
+          mkdirSync(destination)
+          writeFileSync(join(destination, 'keep.txt'), 'existing data')
+          resume.resolve()
+          expect(await jobAfter(id)).toMatchObject({ phase: 'failed', error: 'The destination folder already exists. Choose a new folder.' })
+          expect(readFileSync(join(destination, 'keep.txt'), 'utf8')).toBe('existing data')
+          expect(existsSync(join(destination, '.git'))).toBe(false)
+        }
+      }
+      finally { resume.resolve(); git.stop(true) }
+    }
+    expect(harness.engine.current.workspaces.size).toBe(0)
+  }, 25_000)
+
+  it('finishes publishing an owned checkout after restart', async () => {
+    const fixture = fixtureGitRepository(dir)
+    const stage = join(dir, '.harness-clone-fixture')
+    const checkout = join(stage, 'checkout')
+    const destination = join(dir, 'interrupted-checkout')
+    mkdirSync(checkout, { recursive: true })
+    mkdirSync(destination)
+    cpSync(fixture.bare, join(checkout, '.git'), { recursive: true })
+    copyFileSync(join(dir, 'seed', 'README.md'), join(destination, 'README.md'))
+    writeFileSync(join(destination, '.harness-clone-fixture'), cloneId)
+    harness.stop()
+    const databasePath = join(dir, 'test.sqlite')
+    {
+      using db = new Database(databasePath)
+      db.run("INSERT INTO harness_project_clones (id, remote, destination, stage, phase) VALUES (?, ?, ?, ?, 'publishing')",
+        [cloneId, 'https://github.com/fixture/notebook.git', realpathSync(destination), realpathSync(stage)])
+    }
+    harness = await serve({ port, databasePath })
+    const job = await jobAfter()
+    expect(job.phase).toBe('done')
+    expect(harness.engine.current.workspaces.get(job.workspace)).toMatchObject({ trusted: false })
+    expect(existsSync(join(destination, '.git'))).toBe(true)
+    expect(readFileSync(join(destination, 'README.md'), 'utf8')).toBe('Clone fixture notebook\n')
+  }, 20_000)
+
+  it('blocks clone requests from another web origin and from a paired device', async () => {
+    const foreign = await fetch(cloneUrl('?remote=fixture/notebook'), { headers: { origin: 'https://example.org' } })
+    expect(foreign.status).toBe(403)
+    const databasePath = join(dir, 'paired-clone.sqlite')
+    prepareDatabase(databasePath)
+    const remote = await serve({ port: 0, remote: true, databasePath, localTokenPath: join(dir, 'clone-token') })
+    try {
+      const base = `http://127.0.0.1:${remote.server.port}`
+      const pair = await fetch(base + '/pair', {
+        method: 'POST', redirect: 'manual',
+        body: new URLSearchParams({ code: remote.access!.openPairing().code, name: 'Clone fixture' }),
+      })
+      const cookie = pair.headers.get('set-cookie')!.split(';')[0]!
+      expect((await fetch(base + '/projects/clone?remote=fixture/notebook', { headers: { cookie } })).status).toBe(403)
+    }
+    finally { remote.stop() }
+  })
 })
 
 describe('shared workspace addresses', () => {

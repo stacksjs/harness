@@ -29,6 +29,7 @@ import { openCombinedRepository } from './combined-worktree'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
+import { ProjectClones } from './project-clones'
 import type { ProjectScript } from './project-scripts'
 import { ProjectScripts, respondProjectScripts, scriptIdPattern } from './project-scripts'
 import type { ProjectSetupScope, SettlementReceipt } from './project-setup'
@@ -422,6 +423,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   // half-built read model would be served a projection missing everything the
   // log has not replayed yet, and it has no way to tell.
   await engine.hydrate()
+  const projectClones = new ProjectClones(databasePath, async (id, path, profileId) => {
+    const result = await engine.dispatch({
+      id, at: Date.now(),
+      command: { type: 'workspace.register', path, trusted: false, ...(profileId === null ? {} : { profileId }) },
+    })
+    const added = result.events.find(event => event.payload.type === 'workspace.added')?.payload
+    if (added?.type !== 'workspace.added' || added.path !== path || (profileId !== null && added.profileId !== profileId))
+      throw new Error('The cloned folder could not be registered.')
+    if (!result.replayed) broadcast(result.events)
+    return { workspace: added.workspaceId, profile: added.profileId }
+  })
 
   // Close out turns that were in flight when the process last stopped.
   //
@@ -1697,6 +1709,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       // The web surface. Rendered from the in-memory projection — no query
       // runs, so the shell paints immediately — and cached against the state
       // revision, so only the first request after a state change renders.
+      if (url.pathname === '/projects/clone') {
+        const site = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || site === 'cross-site' || site === 'same-site')
+          return new Response(null, { status: 403, headers: { 'cache-control': 'no-store' } })
+        return projectClones.handle(request, url, profile => engine.current.profiles.has(profile))
+      }
+
       if (url.pathname === '/prompt-link/project') {
         if (request.method !== 'GET') return new Response(null, { status: 405 })
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
@@ -1848,6 +1868,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       savedProviders.close()
       projectScripts.close()
       projectSetup.close()
+      projectClones.close()
       store.close()
       throw error
     }
@@ -1859,6 +1880,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   composerStashTimer.unref()
   scheduleThreadMaintenance()
   runPendingSettlements()
+  projectClones.recover()
   return {
     server,
     engine,
@@ -1882,6 +1904,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       savedProviders.close()
       projectScripts.close()
       projectSetup.close()
+      projectClones.close()
       store.close()
     },
   }
