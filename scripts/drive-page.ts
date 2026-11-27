@@ -7435,15 +7435,18 @@ check('the project follows the host again once it pins nothing',
     const historyList = welcomePage.locator('[data-project-history]')
     const historyRows = welcomePage.locator('[data-history-row]')
     const addButton = welcomePage.locator('[data-history-add]')
-    await historyRows.first().waitFor({ timeout: 8000 })
-    const names = await historyRows.locator('[data-history-name]').allTextContents()
+    // Both rows, not just the first: `allTextContents` does not wait, so
+    // reading while the list is still arriving saw one row on CI and passed
+    // locally, which is the least useful way for a check to be wrong.
+    await historyRows.nth(1).waitFor({ timeout: 8000 })
+    const names = (await historyRows.locator('[data-history-name]').allTextContents()).map(name => name.trim())
     // The group label sits above its row rather than inside it, and every
     // other one is hidden, so this reads the shown labels without waiting.
-    const groups = await welcomePage.locator('[data-history-group]:not([hidden])').allTextContents()
-    check('the welcome screen offers what the agents used, repositories first',
-      names.map(name => name.trim()).join() === 'ledger-api,notes'
-      && groups.map(group => group.trim()).join() === 'Other folders'
-      && ((await historyRows.first().locator('[data-history-note]').textContent()) ?? '').startsWith('3 conversations · 2 days ago'))
+    const groups = (await welcomePage.locator('[data-history-group]:not([hidden])').allTextContents()).map(group => group.trim())
+    const note = (await historyRows.first().locator('[data-history-note]').textContent()) ?? ''
+    check('the welcome screen lists the repository before the plain folder', names.join() === 'ledger-api,notes')
+    check('folders that are not repositories get their own group', groups.join() === 'Other folders')
+    check('each row says how many conversations it has and how long ago', note.startsWith('3 conversations · 2 days ago'))
     // Downloads is someone else's scratch space, not a project of theirs.
     check('a clone under Downloads is left out of the list',
       !names.some(name => name.includes('cloned')) && !(await historyList.textContent())?.includes('Downloads'))
