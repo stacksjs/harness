@@ -1860,6 +1860,8 @@ describe('harness serve — HTTP', () => {
       const detail = review + '?' + new URLSearchParams({ selectedUrl: url })
       const summary = await fetch(detail).then(response => response.text())
       expect(summary).toContain('Details')
+      expect(summary).toMatch(/href="#pr-detail-checks" data-pr-check-rollup data-check-status="failed">1 of 4 failing<\/a>/u)
+      expect(summary).toContain('id="pr-detail-checks" tabindex="-1"')
       expect(summary).toContain('Verify the export.')
       expect(summary).toContain('href="/s/' + sessionId + '"')
       const timeline = await fetch(detail + '&tab=timeline').then(response => response.text())

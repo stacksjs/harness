@@ -732,9 +732,14 @@ html:has(> body > [data-pr-workspace]), body:has(> [data-pr-workspace]) {
   [data-pr-delete-branch-confirm] { grid-row: 1; }
   :is([data-pr-merge-confirmation], [data-pr-branch-update-panel]) label { min-height: 44px; }
 }
-[data-pr-tabs] { display: flex; padding-inline: clamp(12px, 2vw, 26px); gap: 16px; border-block: 1px solid var(--workspace-line); }
+[data-pr-detail-tab-bar] { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; column-gap: 16px; padding-inline: clamp(12px, 2vw, 26px); border-block: 1px solid var(--workspace-line); }
+[data-pr-tabs] { display: flex; flex-wrap: wrap; gap: 0 16px; }
 [data-pr-tabs] a { display: inline-flex; align-items: center; min-height: 42px; color: inherit; font-size: 13px; }
 [data-pr-tabs] a[aria-current] { box-shadow: inset 0 -2px var(--workspace-accent); font-weight: 650; }
+[data-pr-check-rollup], [data-pr-change-totals] { display: inline-flex; flex-wrap: wrap; align-items: center; font-size: 12px; font-weight: 650; }
+[data-pr-check-rollup] { min-height: 42px; }
+[data-pr-change-totals] { column-gap: 8px; margin-inline-start: auto; }
+#pr-detail-checks { scroll-margin-block-start: 12px; }
 [data-pr-detail-content] { font-size: 13px; }
 [data-pr-detail-content] h3 { font-size: 13px; font-weight: 650; margin-block: 8px; }
 [data-pr-detail-content] h3:not(:first-child) { margin-block-start: 20px; }
@@ -867,7 +872,7 @@ html:has(> body > [data-pr-workspace]), body:has(> [data-pr-workspace]) {
   [data-pr-workspace-header] { padding-inline: 12px; }
   [data-pr-workspace-columns][data-detail="true"] [data-pr-workspace-list] { display: none; }
   [data-pr-workspace-detail] { flex: 1; border: 0; }
-  [data-pr-filters] :is(input, select), [data-pr-button], [data-pr-back], [data-pr-tabs] a { min-height: 44px; }
+  [data-pr-filters] :is(input, select), [data-pr-button], [data-pr-back], [data-pr-tabs] a, [data-pr-check-rollup], [data-pr-change-totals] { min-height: 44px; }
   [data-navigation-pr] { min-height: 44px; }
   [data-pr-files] > li:has([data-pr-viewed-form]) [data-pr-file-patch] > summary { min-height: 48px; }
   [data-pr-conversation] > summary { min-height: 44px; }

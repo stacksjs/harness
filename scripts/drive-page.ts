@@ -6465,6 +6465,13 @@ try {
     check('the Changes link opens the selected request directly with the matching thread and responsive list',
       new URL(clonePage.url()).searchParams.get('selectedUrl') === address && !await reviewList.isVisible()
       && await clonePage.getByRole('link', { name: 'Open linked thread' }).getAttribute('href') === returnThread)
+    const checksRollup = clonePage.getByRole('link', { name: '1 of 3 failing', exact: true })
+    await checksRollup.press('Enter')
+    await clonePage.waitForURL(url => url.hash === '#pr-detail-checks')
+    check('the review check summary reaches the checks heading on a phone',
+      new URL(clonePage.url()).hash === '#pr-detail-checks'
+      && await clonePage.locator('#pr-detail-checks').evaluate(heading => heading === document.activeElement)
+      && await clonePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
     await clonePage.getByText('Integration suite', { exact: true }).waitFor()
     await capture('pull-requests-summary-390x844', clonePage)
     await reviewTabs.getByRole('link', { name: 'Timeline' }).click()
