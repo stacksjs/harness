@@ -1,0 +1,170 @@
+// Adapted from T3 Code packages/client-runtime/src/pullRequestQuery.ts at
+// 431da7f4e55b82b386e68a9f32c543fac2efedf5. See ../../drivers/T3CODE-LICENSE.md.
+
+export interface PullRequestQueryFilters {
+  labels?: string[][]
+  excludedLabels?: string[]
+  author?: string
+  draft?: 'only' | 'hide'
+  review?: 'approved' | 'changes-requested' | 'review-required' | 'none'
+  checks?: 'passing' | 'failing'
+}
+
+const REVIEW_VALUES: Record<string, PullRequestQueryFilters["review"]> = {
+  approved: "approved",
+  changes_requested: "changes-requested",
+  "changes-requested": "changes-requested",
+  required: "review-required",
+  "review-required": "review-required",
+  none: "none",
+};
+const CHECKS_VALUES: Record<string, PullRequestQueryFilters["checks"]> = {
+  success: "passing",
+  passing: "passing",
+  failure: "failing",
+  failing: "failing",
+};
+
+const QUERY_TOKEN = /(?:[^\s"]|"[^"]*")+/g;
+const MAX_QUALIFIER_VALUES = 10;
+const MAX_QUALIFIER_LENGTH = 200;
+const MAX_TEXT_LENGTH = 200;
+
+function qualifierValue(raw: string): string {
+  return raw.replaceAll('"', "").trim();
+}
+
+function splitQualifierList(raw: string): string[] {
+  return (raw.match(/(?:[^,"]|"[^"]*")+/g) ?? [])
+    .map((part) => qualifierValue(part))
+    .filter((part) => part.length > 0);
+}
+
+/** `me` and `@me` both name the viewer; logins are case-insensitive. */
+function authorKey(login: string): string {
+  return login.toLowerCase().replace(/^@me$/, "me");
+}
+
+function boundedNames(names: ReadonlyArray<string>): string[] {
+  return names
+    .slice(0, MAX_QUALIFIER_VALUES)
+    .map((name) => name.slice(0, MAX_QUALIFIER_LENGTH).trim())
+    .filter((name) => name.length > 0);
+}
+
+export function parsePullRequestQuery(raw: string): {
+  readonly text: string;
+  readonly filters: PullRequestQueryFilters;
+} {
+  const text: string[] = [];
+  const labels: string[][] = [];
+  const excludedLabels: string[] = [];
+  // `null` once two different logins are named: GitHub ORs them, the contract carries one.
+  let author: string | null | undefined;
+  let draft: PullRequestQueryFilters["draft"];
+  let review: PullRequestQueryFilters["review"];
+  let checks: PullRequestQueryFilters["checks"];
+  for (const [token] of raw.matchAll(QUERY_TOKEN)) {
+    const qualifier = /^(-?)([A-Za-z][A-Za-z0-9_-]*):(.*)$/.exec(token);
+    const value = qualifier === null ? "" : qualifierValue(qualifier[3] ?? "");
+    const negated = qualifier?.[1] === "-";
+    switch (value.length === 0 ? "" : (qualifier?.[2]?.toLowerCase() ?? "")) {
+      case "label": {
+        const names = boundedNames(splitQualifierList(qualifier?.[3] ?? ""));
+        if (names.length === 0) break;
+        if (negated) excludedLabels.push(...names);
+        else labels.push(names);
+        continue;
+      }
+      case "author": {
+        if (negated) break;
+        const login = value.slice(0, MAX_QUALIFIER_LENGTH).trim();
+        if (author === undefined) author = login;
+        else if (author === null || authorKey(author) !== authorKey(login)) author = null;
+        continue;
+      }
+      case "draft":
+        if (value.toLowerCase() !== "true" && value.toLowerCase() !== "false") break;
+        draft = (value.toLowerCase() === "true") !== negated ? "only" : "hide";
+        continue;
+      case "review": {
+        const key = value.toLowerCase();
+        const decision =
+          !negated && Object.hasOwn(REVIEW_VALUES, key) ? REVIEW_VALUES[key] : undefined;
+        if (decision === undefined) break;
+        review = decision;
+        continue;
+      }
+      case "status":
+      case "checks": {
+        const key = value.toLowerCase();
+        const state =
+          !negated && Object.hasOwn(CHECKS_VALUES, key) ? CHECKS_VALUES[key] : undefined;
+        if (state === undefined) break;
+        checks = state;
+        continue;
+      }
+      // GitHub's own search qualifiers, not labels: the list sets scope and order itself.
+      case "is":
+      case "archived":
+      case "state":
+      case "repo":
+      case "org":
+      case "user":
+      case "sort":
+        continue;
+      case "":
+        break;
+      default:
+        if (!value.startsWith("/")) {
+          const names = boundedNames(
+            splitQualifierList(qualifier?.[3] ?? "").map((name) =>
+              name.includes(":") ? name : `${qualifier?.[2] ?? ""}:${name}`,
+            ),
+          );
+          if (names.length === 0) break;
+          if (negated) excludedLabels.push(...names);
+          else labels.push(names);
+          continue;
+        }
+    }
+    text.push(token);
+  }
+  return {
+    text: text.join(" ").slice(0, MAX_TEXT_LENGTH).trim(),
+    filters: {
+      ...(labels.length === 0 ? {} : { labels: labels.slice(0, MAX_QUALIFIER_VALUES) }),
+      ...(excludedLabels.length === 0
+        ? {}
+        : { excludedLabels: excludedLabels.slice(0, MAX_QUALIFIER_VALUES) }),
+      ...(typeof author === "string" ? { author } : {}),
+      ...(draft === undefined ? {} : { draft }),
+      ...(review === undefined ? {} : { review }),
+      ...(checks === undefined ? {} : { checks }),
+    },
+  };
+}
+
+/**
+ * The Draft menu shows a typed `draft:` qualifier, so picking another value has to take the
+ * qualifier out of the query: left in, it would keep outranking whatever the menu stores.
+ */
+export function applyPullRequestDraftFilterChange(
+  query: string,
+  menuFilters: PullRequestQueryFilters,
+  next: PullRequestQueryFilters,
+) {
+  const typedDraft = parsePullRequestQuery(query).filters.draft;
+  if (next.draft === (typedDraft ?? menuFilters.draft))
+    return { query, filters: { ...next, draft: menuFilters.draft } };
+  return {
+    query:
+      typedDraft === undefined
+        ? query
+        : [...query.matchAll(QUERY_TOKEN)]
+            .map(([token]) => token)
+            .filter((token) => parsePullRequestQuery(token).filters.draft === undefined)
+            .join(" "),
+    filters: next,
+  };
+}
