@@ -7467,6 +7467,11 @@ check('the project follows the host again once it pins nothing',
   })
   const welcomePage = await browserContext.newPage()
   welcomePage.on('pageerror', error => pageErrors.push(error.message))
+  // Earlier sections pin the clock to a fixed date for snooze previews, and
+  // that install reaches pages opened later in the same context: this page
+  // read "today" on CI for a transcript stamped two days ago. Pinning it to
+  // now makes the age the fixture's own doing rather than the runner's.
+  await welcomePage.clock.setFixedTime(new Date())
   try {
     await welcomePage.setViewportSize({ width: 1280, height: 800 })
     await welcomePage.goto(`http://localhost:${welcomePort}/`, { waitUntil: 'commit' })
@@ -7483,15 +7488,13 @@ check('the project follows the host again once it pins nothing',
     const groups = (await welcomePage.locator('[data-history-group]:not([hidden])').allTextContents()).map(group => group.trim())
     const note = (await historyRows.first().locator('[data-history-note]').textContent()) ?? ''
     const noteParts = note.split(' · ')
-    // The age is whole days from the file's own timestamp, so a fixture two
-    // days old must not read as today; the window allows for the boundary
-    // rather than pinning the exact word, and anything outside it is printed
-    // so the next failure does not need another run to explain itself.
+    // Printed when it is not what it should be, so a failure explains itself
+    // in the same run rather than costing another.
     if (noteParts[1] !== '2 days ago') console.log('[welcome] note read as', JSON.stringify(note))
     check('the welcome screen lists the repository before the plain folder', names.join() === 'ledger-api,notes')
     check('folders that are not repositories get their own group', groups.join() === 'Other folders')
     check('each row says how many conversations it has and how long ago',
-      noteParts[0] === '3 conversations' && /^[123] days ago$/u.test(noteParts[1] ?? ''))
+      noteParts[0] === '3 conversations' && noteParts[1] === '2 days ago')
     // Downloads is someone else's scratch space, not a project of theirs.
     check('a clone under Downloads is left out of the list',
       !names.some(name => name.includes('cloned')) && !(await historyList.textContent())?.includes('Downloads'))
