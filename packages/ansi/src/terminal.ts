@@ -40,6 +40,8 @@ export interface Cell {
 export interface TerminalRow extends Array<Cell> {
   /** Width of the preceding row at automatic wrap, or -1 if it was clipped. */
   wrapFrom?: number
+  /** OSC 7 file URI in effect when the logical line was written. */
+  cwd?: string
 }
 
 export const DEFAULT_STYLE: Style = Object.freeze({
@@ -59,9 +61,9 @@ function blankRow(cols: number): TerminalRow {
   return Array<Cell>(cols).fill(BLANK)
 }
 
-type PackedRow = Array<[text: string, style: (Style & { wrapFrom?: number }) | null]>
+type PackedRow = Array<[text: string, style: (Style & { wrapFrom?: number, cwd?: string }) | null]>
 
-function packRow(row: Cell[]): PackedRow {
+function packRow(row: TerminalRow): PackedRow {
   const result: PackedRow = []
   let lastStyle: Style | undefined
   for (const { ch, style } of row) {
@@ -69,12 +71,19 @@ function packRow(row: Cell[]): PackedRow {
     else result.push([ch, style === DEFAULT_STYLE ? null : style])
     lastStyle = style
   }
+  const first = result[0]
+  if (first && row.cwd) first[1] = { ...(first[1] ?? DEFAULT_STYLE), cwd: row.cwd }
   return result
 }
 
 function unpackRow(row: PackedRow, wrapFrom?: number): TerminalRow {
-  const cells: TerminalRow = row.flatMap(([text, style]) => [...text].map(ch => ch === ' ' && !style ? BLANK : { ch, style: style ?? DEFAULT_STYLE }))
+  const cells: TerminalRow = row.flatMap(([text, packed]) => {
+    const style = packed?.cwd === undefined ? packed : { ...packed }
+    if (style?.cwd !== undefined) delete style.cwd
+    return [...text].map(ch => ch === ' ' && !style ? BLANK : { ch, style: style ?? DEFAULT_STYLE })
+  })
   if (wrapFrom) cells.wrapFrom = wrapFrom
+  if (row[0]?.[1]?.cwd) cells.cwd = row[0][1].cwd
   return cells
 }
 
@@ -96,6 +105,10 @@ function validHistoryColor(value: unknown): boolean {
     || (typeof value === 'string' && /^#[\da-f]{6}$/iu.test(value))
 }
 
+function directoryUri(value: string): string | null {
+  return /^file:\/\//iu.test(value) && !value.includes('#') ? terminalLinkUrl(value) : null
+}
+
 function validHistoryStyle(value: unknown): boolean {
   if (value === null) return true
   if (!value || typeof value !== 'object') return false
@@ -103,6 +116,7 @@ function validHistoryStyle(value: unknown): boolean {
   return validHistoryColor(style.fg) && validHistoryColor(style.bg)
     && ['bold', 'dim', 'italic', 'underline', 'inverse', 'strike'].every(key => typeof style[key] === 'boolean')
     && (style.link === undefined || (typeof style.link === 'string' && terminalLinkUrl(style.link) === style.link))
+    && (style.cwd === undefined || (typeof style.cwd === 'string' && directoryUri(style.cwd) === style.cwd))
     && (style.wrapFrom === undefined || style.wrapFrom === -1
       || (typeof style.wrapFrom === 'number' && Number.isInteger(style.wrapFrom) && style.wrapFrom >= 2 && style.wrapFrom <= 500))
 }
@@ -177,6 +191,7 @@ function reflowRows(rows: TerminalRow[], cols: number, points: Position[], defer
   let line: Cell[] = []
   let incomplete = false
   let last = -1
+  let cwd: string | undefined
 
   function finishLine() {
     const count = Math.max(1, Math.ceil(line.length / cols), last + 1)
@@ -185,15 +200,20 @@ function reflowRows(rows: TerminalRow[], cols: number, points: Position[], defer
       if (row.length < cols) row.push(...blankRow(cols - row.length))
       if (index > 0) row.wrapFrom = cols
       else if (incomplete) row.wrapFrom = -1
+      if (cwd) row.cwd = cwd
       result.push(row)
     }
     line = []
     incomplete = false
     last = -1
+    cwd = undefined
   }
 
   for (const [index, row] of rows.entries()) {
-    if (line.length === 0 && row.wrapFrom !== undefined) incomplete = true
+    if (line.length === 0) {
+      incomplete = row.wrapFrom !== undefined
+      cwd = row.cwd
+    }
     const nextWidth = rows[index + 1]?.wrapFrom
     const soft = nextWidth !== undefined && nextWidth >= 2 && nextWidth <= row.length
       && (nextWidth === row.length || !row.slice(nextWidth).some(visibleCell))
@@ -249,6 +269,7 @@ export class Terminal {
   private bracketedPaste = false
   private shellPhase: ShellPhase = 'unavailable'
   private lastExitStatus: number | null = null
+  private cwd: string | undefined
 
   /** The main buffer, parked while the alternate screen is active. */
   private savedMain: Screen | null = null
@@ -309,6 +330,7 @@ export class Terminal {
       ...(mainWraps && { mainWraps }),
       parser: this.state, csi: this.csiParams, csiPrivate: this.csiPrivate, osc: this.oscData, oscEscape: this.oscEscape,
       ...(this.oscOverflow && { oscOverflow: true }),
+      ...(this.cwd && { cwd: this.cwd }),
       bracketedPaste: this.bracketedPaste, shellPhase: this.shellPhase, lastExitStatus: this.lastExitStatus,
     }
   }
@@ -333,6 +355,7 @@ export class Terminal {
     terminal.oscData = checkpoint.osc
     terminal.oscEscape = checkpoint.oscEscape
     terminal.oscOverflow = checkpoint.oscOverflow === true
+    terminal.cwd = checkpoint.cwd
     terminal.bracketedPaste = checkpoint.bracketedPaste
     terminal.shellPhase = checkpoint.shellPhase
     terminal.lastExitStatus = checkpoint.lastExitStatus
@@ -433,6 +456,7 @@ export class Terminal {
     const grid = screen.grid.slice(top).map((row, index) => {
       if (row.length === cols) return row
       const fitted: TerminalRow = row.slice(0, cols)
+      if (row.cwd) fitted.cwd = row.cwd
       if (fitted.length < cols) fitted.push(...blankRow(cols - fitted.length))
       if (row.wrapFrom !== undefined) {
         const previous = screen.grid[top + index - 1]
@@ -505,15 +529,19 @@ export class Terminal {
         if (ch === '\x07' || (this.oscEscape && ch === '\\')) {
           this.state = ParseState.Ground
           if (this.oscData.startsWith('8;')) this.applyHyperlink()
+          else if (!this.oscOverflow && this.oscData.startsWith('7;')) {
+            const cwd = directoryUri(this.oscData.slice(2))
+            if (cwd) this.cwd = cwd
+          }
           else if (!this.oscOverflow) this.applyShellMarker()
         }
         else if (ch === '\x1b') {
           this.oscEscape = true
         }
         else {
-          // OSC 8 needs room for its target. Other commands keep the small
-          // OSC 133 budget. An incomplete target must never become a link.
-          const limit = this.oscData.startsWith('8;') ? MAX_TERMINAL_URL + 128 : 32
+          // OSC 7 and 8 carry URIs. Discard overflow rather than using a
+          // truncated directory or hyperlink.
+          const limit = /^[78];/u.test(this.oscData) ? MAX_TERMINAL_URL + 128 : 32
           const payload = (this.oscEscape ? '\x1b' : '') + ch
           if (this.oscData.length + payload.length <= limit && !this.oscOverflow) this.oscData += payload
           else this.oscOverflow = true
@@ -586,12 +614,18 @@ export class Terminal {
       this.x = 0
       this.lineFeed(this.cols)
     }
-    this.grid[this.y]![this.x] = { ch, style: this.style }
+    const row = this.grid[this.y]!
+    if (this.x === 0 && row.wrapFrom === undefined) {
+      if (this.cwd) row.cwd = this.cwd
+      else delete row.cwd
+    }
+    row[this.x] = { ch, style: this.style }
     if (this.x === this.cols - 1) this.pendingWrap = true
     else this.x += 1
   }
 
   private lineFeed(wrapFrom?: number): void {
+    const cwd = this.grid[this.y]!.cwd
     if (this.y < this.rows - 1) this.y += 1
     else {
       const scrolled = this.grid.shift()!
@@ -601,7 +635,11 @@ export class Terminal {
     }
     const row = this.grid[this.y]!
     if (wrapFrom === undefined) delete row.wrapFrom
-    else row.wrapFrom = wrapFrom
+    else {
+      row.wrapFrom = wrapFrom
+      if (cwd) row.cwd = cwd
+      else delete row.cwd
+    }
   }
 
   private csi(final: string): void {

@@ -95,6 +95,28 @@ it('restores explicit file links without embedding file URLs as browser navigati
   expect(html).not.toContain('href="file:')
 })
 
+it('keeps each relative link in its original OSC 7 directory after reflow and replay', () => {
+  const options = { cols: 18, rows: 3, scrollback: 20 }
+  const terminal = new Terminal(options)
+  terminal.write('\x1b]7;file:///checkout/team%20')
+  const attached = Terminal.fromCheckpoint(terminal.checkpoint(), options)
+  attached.write('A\x1b\\src/compiler-output.ts:2:7 \r\n')
+  attached.write('\x1b]7;file:///checkout/team-B\x07src/compiler-output.ts:2:7 \r\n')
+  attached.write('\x1b]7;file:///checkout/rejected%00\x07')
+  attached.write('\x1b]7;file:///checkout/' + 'x'.repeat(4300) + '\x07')
+  const reopened = Terminal.fromCheckpoint(JSON.parse(JSON.stringify(attached.checkpoint())), options)
+  reopened.write('src/next.ts:3:4\r\n')
+  reopened.resize(38, 3)
+  const saved = new Terminal({ ...options, cols: 20 })
+  expect(saved.restoreHistory(reopened.saveHistory())).toBe(true)
+  const html = toHtml(saved.snapshot(true), true, true)
+  expect(html).toContain('data-terminal-file="src/compiler-output.ts:2:7" data-terminal-cwd="file:///checkout/team%20A"')
+  expect(html).toContain('data-terminal-file="src/compiler-output.ts:2:7" data-terminal-cwd="file:///checkout/team-B"')
+  expect(html).toContain('data-terminal-file="src/next.ts:3:4" data-terminal-cwd="file:///checkout/team-B"')
+  expect(toHtml(saved.snapshot(true), true)).not.toContain('data-terminal-cwd')
+  expect(saved.toText()).not.toContain('file:///')
+})
+
 it('gives every soft-wrapped segment the complete target and one keyboard stop', () => {
   const options = { cols: 18, rows: 2, scrollback: 10, scrollbackBytes: 4096 }
   const url = 'https://example.test/releases/1.2/download'

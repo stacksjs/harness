@@ -150,8 +150,9 @@ export function createTerminalDock(options: TerminalDockOptions) {
       if (pane.selectionDeferred) return
       const targetAttribute = link?.hasAttribute('data-terminal-file') ? 'data-terminal-file' : 'href'
       const target = link?.getAttribute(targetAttribute)
+      const cwd = link?.getAttribute('data-terminal-cwd')
       const matchingLinks = () => [...screen.querySelectorAll<HTMLElement>('[data-terminal-link]')]
-        .filter(candidate => candidate.getAttribute(targetAttribute) === target)
+        .filter(candidate => candidate.getAttribute(targetAttribute) === target && candidate.getAttribute('data-terminal-cwd') === cwd)
       const occurrence = link ? matchingLinks().findIndex(candidate => candidate === link) : -1
       pane.layoutChanged = false
       screen.innerHTML = toHtml(pane.model.snapshot(true), true, options.workspaceLinks === true)

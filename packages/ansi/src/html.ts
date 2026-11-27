@@ -161,7 +161,9 @@ export function toHtml(rows: TerminalRow[], links = false, files = false): strin
             line += `<a data-terminal-link href="${escapeHtml(link)}"${label} target="_blank" rel="noopener noreferrer">`
           }
           else {
-            line += `<a role="link" tabindex="0" data-terminal-link data-terminal-file="${escapeHtml(link)}"${label}>`
+            const cwd = !explicit && rows[start]?.cwd
+            const directory = cwd ? ` data-terminal-cwd="${escapeHtml(cwd)}"` : ''
+            line += `<a role="link" tabindex="0" data-terminal-link data-terminal-file="${escapeHtml(link)}"${directory}${label}>`
           }
         }
         activeLink = link
