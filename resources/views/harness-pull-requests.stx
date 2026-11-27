@@ -17,6 +17,8 @@ const attention = check => !['passed', 'neutral', 'skipped'].includes(check.stat
 export const checks = (selected?.checks || []).filter(attention).sort((a, b) => Number(a.status === 'pending') - Number(b.status === 'pending'))
 export const completed = (selected?.checks || []).filter(check => !attention(check))
 export const primaryChecks = checks.length ? checks : completed
+export const approvalRuns = selected?.approvalRuns || []
+export const approvalLookupFailed = selected?.approvalRuns === null
 export const checksLabel = check => outcomes[check.status] || 'Unknown'
 const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 export const dateLabel = date => date && Number.isFinite(Date.parse(date)) ? dates.format(new Date(date)) : ''
@@ -870,10 +872,26 @@ function openDeleteBranchDialog() {
               <p>No description.</p>
             @endif
             <h3>Checks</h3>
+            @if(approvalLookupFailed)
+              <p role="status">GitHub could not confirm which workflows are awaiting approval for this pull request.</p>
+            @elseif(approvalRuns.length)
+              <h4>{{ approvalRuns.length === 1 ? '1 workflow awaiting approval' : approvalRuns.length + ' workflows awaiting approval' }}</h4>
+              <ul data-pr-result-list>
+                @foreach(approvalRuns as run)
+                  <li>
+                    <strong>{{ run.name }}</strong>
+                    <span data-check-status="action-required">Awaiting approval</span>
+                    <a href="{{ run.url }}" target="_blank" rel="noopener noreferrer" aria-label="Details for {{ run.name }}" class="underline">Details</a>
+                  </li>
+                @endforeach
+              </ul>
+            @endif
             @if(selected.error)
               <p role="status">{{ selected.error }}</p>
             @elseif(!checks.length && !completed.length)
-              <p>No checks reported for this commit.</p>
+              @if(!approvalRuns.length && !approvalLookupFailed)
+                <p>No checks reported for this commit.</p>
+              @endif
             @else
               <ul data-pr-result-list>
                 @foreach(primaryChecks as check)

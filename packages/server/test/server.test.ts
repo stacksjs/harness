@@ -456,6 +456,57 @@ describe('harness serve — HTTP', () => {
       else process.env.PATH = path
     }
   })
+
+  it.skipIf(process.platform === 'win32')('shows only GitHub workflows awaiting approval for the exact fork head', async () => {
+    const { project, cli, local, url, readState } = seedPullRequestLifecycle('Check the report workflow', false)
+    const fixture = readState()
+    const fork = { full_name: 'contributor/notebook', node_id: 'fixture-repo:contributor/notebook' }
+    fixture.pulls[0].head.repo = fork
+    const run = { id: 41, run_attempt: 1, name: 'Check report on Linux', event: 'pull_request',
+      status: 'completed', conclusion: 'action_required', head_branch: 'report', head_sha: local,
+      repository: { full_name: 'fixture/notebook' }, head_repository: fork, pull_requests: [] }
+    fixture.workflowRuns = [
+      run,
+      { ...run, id: 42, name: 'Wrong fork', head_repository: { full_name: 'other/notebook' } },
+      { ...run, id: 43, name: 'Wrong commit', head_sha: 'e'.repeat(40) },
+      { ...run, id: 44, name: 'Different pull request', pull_requests: [{ number: 2 }] },
+      { ...run, id: 45, name: 'Wrong event', event: 'push' },
+      { ...run, id: 46, name: 'Already running', status: 'in_progress', conclusion: null },
+      { ...run, id: 47, name: 'Replaced fork', head_repository: { ...fork, node_id: 'replaced-fork-id' } },
+    ]
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const path = process.env.PATH
+    const cwd = process.cwd()
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      await harness.engine.dispatch({ id: 'pr-workflow-approval-project', at: Date.now(),
+        command: { type: 'workspace.register', path: realpathSync(project), trusted: true } })
+      const summary = 'http://127.0.0.1:' + port + '/pull-requests?' + new URLSearchParams({ selectedUrl: url })
+      const read = () => fetch(summary).then(response => response.text())
+      const html = await read()
+      expect(html).toContain('1 workflow awaiting approval')
+      expect(html).toContain('Check report on Linux')
+      expect(html).toContain('https://github.com/fixture/notebook/actions/runs/41')
+      expect(html).not.toMatch(/Wrong fork|Wrong commit|Different pull request|Wrong event|Already running|Replaced fork|No checks reported/u)
+
+      fixture.pulls.push({ ...fixture.pulls[0], number: 2, html_url: url.replace(/1$/u, '2') })
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const ambiguous = await read()
+      expect(ambiguous).toContain('GitHub could not confirm which workflows are awaiting approval')
+      expect(ambiguous).not.toContain('Check report on Linux')
+
+      fixture.pulls[0].head = { ...fixture.pulls[0].head, repo: { full_name: 'fixture/notebook' } }
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const sameRepository = await read()
+      expect(sameRepository).not.toMatch(/workflow awaiting approval|workflows are awaiting approval/u)
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 30_000)
   it('reports health with the hydrated projection', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`)
     expect(response.status).toBe(200)

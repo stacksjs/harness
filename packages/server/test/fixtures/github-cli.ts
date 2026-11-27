@@ -300,6 +300,12 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query HarnessPullRequestWorkflowHeads')) {
+    const nodes = state.pulls.filter(pull => pull.base.repo.full_name === name && pull.head.ref === variables.branch)
+      .map(pull => ({ id: 'fixture-pull-' + pull.number, number: pull.number, headRefOid: pull.head.sha,
+        headRepository: { id: 'fixture-repo:' + (pull.head.repo?.full_name ?? name), nameWithOwner: pull.head.repo?.full_name ?? name } }))
+    reply(200, { data: { viewer, repository: { nameWithOwner: name, pullRequests: { nodes, pageInfo: { hasNextPage: false } } } } })
+  }
   if (query.includes('query HarnessPullRequestLifecycle')) {
     const enabled = Boolean(state.mergeMode)
     const missing = pull?.branchMode === 'missing-ref'
@@ -318,6 +324,8 @@ if (url.pathname === '/graphql' && method === 'POST') {
       mergeCommit: pull.merged_at ? { oid: 'd'.repeat(40) } : null,
       ...(pull === branchPull && branchDeletion && { viewerCanDeleteHeadRef: Boolean(sourceRef), headRefName: pull.head.ref,
         headRef: sourceRef, headRepository: sourceRepository, stack: branchDeletion.stacked ? { id: 'fixture-stack' } : null }),
+      ...(pull.head.repo?.full_name && !branchDeletion && { headRefName: pull.head.ref,
+        headRepository: { id: 'fixture-repo:' + pull.head.repo.full_name, nameWithOwner: pull.head.repo.full_name } }),
       isMergeQueueEnabled: state.mergeMode === 'queue', mergeQueueEntry: pull.queueEntry ? { id: pull.queueEntry } : null,
       autoMergeRequest: pull.autoMergeMethod ? { mergeMethod: pull.autoMergeMethod } : null,
       viewerCanEnableAutoMerge: state.mergeMode === 'blocked', viewerCanDisableAutoMerge: Boolean(pull.autoMergeMethod),
@@ -377,6 +385,8 @@ if (url.pathname === '/search/issues') {
   reply(200, { items: state.pulls.filter(pull => pull.base.repo.full_name === selected && pull.title.toLowerCase().includes(title.toLowerCase())) })
 }
 if (!repo) reply(404, {})
+if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs')
+  reply(200, { workflow_runs: state.workflowRuns ?? [] })
 if (method === 'POST' && parts[4] === 'actions' && parts[5] === 'runs' && parts[7] === 'approve') {
   const run = state.workflowRuns?.find(run => run.id === Number(parts[6]))
   if (!run) reply(404, {})

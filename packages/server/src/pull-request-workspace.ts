@@ -18,6 +18,7 @@ import { readRepositoryPullRequestChecks } from './repository-pull-request-check
 import { threadTitle } from './thread-search'
 import { renderPullRequestCommentMarkdown } from './transcript-markdown'
 import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-request-viewed'
+import { readWorkflowApprovals, workflowApprovalHead } from './pull-request-workflow-approvals'
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
@@ -305,7 +306,11 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
           branchUpdate: behind === null ? null : { behind, canUpdate: actions.includes('update-branch'), methods: branchUpdateMethods },
           mergeAction: mergeAction ? { action: mergeAction, label: lifecycleActions[mergeAction].label, chooseMethod: takesMergeMethod(mergeAction) } : null }
       : null
-    return { ...data, lifecycle, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
+    const fork = tab === 'summary' && lifecycle && current?.headRefName === data.headRef ? workflowApprovalHead(selectionRepo.name, current) : null
+    const approvalRuns = fork
+      ? await readWorkflowApprovals(selectionRepo.path, selectionRepo.name, fork, signal).catch(() => null)
+      : undefined
+    return { ...data, lifecycle, approvalRuns, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
       startHref: '/new?' + new URLSearchParams({ pr: data.url, profile: String(profile) }), ...result }
   })().catch(error => ({ error: message(error) })) : Promise.resolve(null)
 
