@@ -6485,9 +6485,15 @@ try {
     const loadComments = conversation.getByRole('link', { name: 'Load more comments', exact: true })
     const postedReply = conversation.getByText('Follow up on the inline report.', { exact: true })
     await openReply.click()
+    await clonePage.waitForFunction(() => globalThis.document.activeElement?.getAttribute('name') === 'body')
     await replyInput.fill('A second unsent review draft.')
     github.configureCommentPages('unavailable')
-    await loadComments.press('Enter')
+    await loadComments.focus()
+    const [failedComments] = await Promise.all([
+      clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/comments' && response.request().method() === 'GET'),
+      clonePage.keyboard.press('Enter'),
+    ])
+    if (failedComments.status() !== 503) throw new Error(`Load comments returned HTTP ${failedComments.status()}`)
     await conversation.getByText('Could not load more comments. Try again.', { exact: true }).waitFor()
     check('a failed comment read leaves the loaded conversation and draft available',
       await replyInput.inputValue() === 'A second unsent review draft.' && await postedReply.count() === 1)
