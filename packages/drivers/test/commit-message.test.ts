@@ -16,9 +16,9 @@ const schema = await Bun.file(args[args.indexOf('--output-schema') + 1]).json()
 await Bun.write(${JSON.stringify(observed)}, JSON.stringify({
   args, schema, home: process.env.CODEX_HOME, cwd: process.cwd(), prompt: await Bun.stdin.text(),
 }))
-await Bun.write(args[args.indexOf('--output-last-message') + 1], JSON.stringify({
-  subject: 'Describe the selected edit', body: '', branch: 'feature/selected-edit',
-}))
+await Bun.write(args[args.indexOf('--output-last-message') + 1], JSON.stringify(schema.properties.title
+  ? { title: 'Review the selected edit', body: 'Review the published report.' }
+  : { subject: 'Describe the selected edit', body: '', branch: 'feature/selected-edit' }))
 `, { mode: 0o700 })
     const result = await CodexDriver.generateCommitMessage!({ workspacePath: fixture, home: account, binaryPath: binary, model: 'fixture-model' }, {
       patch: '+Selected code', includeBranch: true, signal: AbortSignal.timeout(5000),
@@ -44,6 +44,18 @@ await Bun.write(args[args.indexOf('--output-last-message') + 1], JSON.stringify(
       home: account, schema: { required: ['subject', 'body'] }, prompt: expect.stringContaining('+Selected plan edit'),
     })
     expect(managed).not.toContain('fixture-private-plan-token')
+
+    const pullRequest = await CodexDriver.generatePullRequestText!({
+      workspacePath: fixture, home: account, binaryPath: binary, model: 'fixture-model',
+    }, { base: 'main', head: 'feature/selected-edit', patch: '+Published edit', signal: AbortSignal.timeout(5000) })
+    expect(pullRequest).toEqual({ title: 'Review the selected edit', body: 'Review the published report.' })
+    const prLaunch = JSON.parse(await readFile(observed, 'utf8'))
+    expect(prLaunch).toMatchObject({ home: account, schema: { required: ['title', 'body'], additionalProperties: false },
+      args: expect.arrayContaining(['--ephemeral', 'read-only', 'never', 'fixture-model']) })
+    expect(prLaunch.prompt).toContain('Base branch: main')
+    expect(prLaunch.prompt).toContain('Head branch: feature/selected-edit')
+    expect(prLaunch.prompt).toContain('+Published edit')
+    expect(await Bun.file(join(prLaunch.cwd, 'message.json')).exists()).toBe(false)
   }
   finally { await rm(fixture, { recursive: true, force: true }) }
 })

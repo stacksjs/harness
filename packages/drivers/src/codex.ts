@@ -21,7 +21,7 @@ import type { ApprovalChoice, InputAnswer, ProviderContextUsage, SteeringOutcome
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { codexEnvironment } from './account-environment'
-import { generateCodexCommitMessage } from './commit-message'
+import { generateCodexCommitMessage, generateCodexPullRequestText } from './commit-message'
 import { parseCodexModelPage } from './codex-models'
 import { managedChatGptArgs, openManagedChatGptBroker } from './chatgpt/token-broker'
 import { probeBinary } from './cli-driver'
@@ -927,6 +927,7 @@ class CodexInstance implements ProviderInstance {
 export const CodexDriver: Driver = {
   kind: 'codex',
   generateCommitMessage: generateCodexCommitMessage,
+  generatePullRequestText: generateCodexPullRequestText,
 
   async probe(config: DriverConfig, { includeModels = false } = {}): Promise<ProbeResult> {
     const result = await probeBinary(config.binaryPath ?? 'codex')
