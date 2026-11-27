@@ -1,0 +1,32 @@
+<dialog data-project-clone-dialog ref="projectCloneDialogBox" aria-labelledby="clone-project-title" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel.prevent="closeProjectClone">
+  <form class="flex flex-col gap-4 p-5" @submit.prevent="startProjectClone">
+    <div class="flex flex-col gap-1">
+      <h2 id="clone-project-title" class="font-semibold text-[17px]">Clone a repository</h2>
+      <p class="text-[13px] text-neutral-600 dark:text-neutral-300">Choose where to save the checkout on this host.</p>
+    </div>
+    <div class="flex flex-col gap-2">
+      <label for="clone-project-remote" class="font-medium text-[13px]">Repository URL</label>
+      <input id="clone-project-remote" data-project-clone-remote ref="projectCloneRemoteBox" type="text" required autocomplete="off" spellcheck="false"
+        :value="cloneRemoteText()" :disabled="cloneBusy()" @input="changeCloneRemote($event.target.value)" @blur="suggestCloneDestination"
+        class="px-3 py-2 min-w-0 w-full font-mono text-[13px] bg-neutral-50 dark:bg-neutral-950 border border-black/15 rounded-[8px] dark:border-white/20" />
+    </div>
+    <div class="flex flex-col gap-2">
+      <label for="clone-project-destination" class="font-medium text-[13px]">Destination folder</label>
+      <div class="flex gap-2">
+        <input id="clone-project-destination" data-project-clone-destination ref="projectCloneDestinationBox" type="text" required autocomplete="off" spellcheck="false"
+          :value="cloneDestination()" :disabled="cloneBusy()" @input="cloneDestination.set($event.target.value)"
+          class="px-3 py-2 min-w-0 w-full font-mono text-[13px] bg-neutral-50 dark:bg-neutral-950 border border-black/15 rounded-[8px] dark:border-white/20" />
+        <button type="button" :hidden="!hasFolderPicker()" :disabled="cloneBusy()" @click="browseCloneFolder"
+          class="px-3 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Browse</button>
+      </div>
+    </div>
+    <p data-project-clone-status role="status" :hidden="!cloneStatusText()" :text="cloneStatusText()" class="text-[13px] text-neutral-700 dark:text-neutral-200"></p>
+    <p data-project-clone-error role="alert" :hidden="!cloneError()" :text="cloneError()" class="text-[13px] text-red-700 dark:text-red-300"></p>
+    <div class="flex flex-wrap gap-2 justify-end">
+      <button type="button" :disabled="cloneBusy()" @click="closeProjectClone" class="px-3 h-9 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Close</button>
+      <button type="button" :hidden="cloneReceipt()?.phase !== 'cloning'" :disabled="cloneCancelling()" @click="cancelProjectClone"
+        class="px-3 h-9 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Stop clone</button>
+      <button type="submit" :disabled="cloneBusy()" class="px-3 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Clone repository</button>
+    </div>
+  </form>
+</dialog>

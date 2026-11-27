@@ -14,6 +14,7 @@
  * if yours lives somewhere else.
  */
 import type { ConversationRewindInput, Driver, ForkInput, ProviderEvent, ProviderInstance, StartTurnInput } from '../packages/drivers/src/types'
+import { fixtureGitRepository, serveFixtureGit } from '../packages/server/test/fixtures/git-http'
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { release, tmpdir } from 'node:os'
@@ -5924,6 +5925,112 @@ check('a missing thread has a real 404 and a route back to the workspace',
   unavailableThread?.status() === 404 && await sharePage.getByRole('link', { name: 'Back to workspace' }).isVisible())
 await sharePage.waitForLoadState('networkidle')
 await shareContext.close()
+
+const cloneContext = await browser.newContext({ colorScheme, reducedMotion })
+const clonePage = await cloneContext.newPage()
+clonePage.on('pageerror', error => {
+  console.error('Clone page error at', new URL(clonePage.url()).pathname, error.message)
+  pageErrors.push(error.message)
+})
+const gitFiles = fixtureGitRepository(join(driveRoot, 'clone-server'))
+const networkGate = Promise.withResolvers<void>()
+let delayGit = true
+const gitFixture = serveFixtureGit(gitFiles.remote, () => delayGit ? networkGate.promise : Promise.resolve())
+const remote = `http://127.0.0.1:${gitFixture.port}/notebook.git`
+const gitConfigCount = process.env.GIT_CONFIG_COUNT
+const nextConfig = Number(gitConfigCount) || 0
+const gitConfigKey = 'GIT_CONFIG_KEY_' + nextConfig
+const gitConfigValue = 'GIT_CONFIG_VALUE_' + nextConfig
+const oldKey = process.env[gitConfigKey]
+const oldValue = process.env[gitConfigValue]
+try {
+  const countBeforeClone = harness.engine.current.sessions.size
+  const destination = join(driveRoot, 'cloned-notebook')
+  await clonePage.setViewportSize({ width: 390, height: 844 })
+  await clonePage.goto(backgroundDraftUrl)
+  await clonePage.getByRole('button', { name: 'Workspace actions' }).click()
+  await clonePage.locator('[data-project-add]').click()
+  await clonePage.getByRole('dialog', { name: 'Add project' }).getByRole('button', { name: 'Clone a repository' }).click()
+  const cloneDialog = clonePage.getByRole('dialog', { name: 'Clone a repository' })
+  const urlBox = cloneDialog.getByRole('textbox', { name: 'Repository URL' })
+  const destinationBox = cloneDialog.getByRole('textbox', { name: 'Destination folder' })
+  const cloneSubmit = cloneDialog.getByRole('button', { name: 'Clone repository', exact: true })
+  async function submitClone() {
+    const [response] = await Promise.all([
+      clonePage.waitForResponse(result => new URL(result.url()).pathname === '/projects/clone' && result.request().method() === 'POST'),
+      cloneSubmit.click(),
+    ])
+    if (response.status() !== 202) throw new Error('Clone setup failed: ' + await response.text())
+  }
+  await urlBox.fill(remote)
+  await destinationBox.fill(destination)
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    check(`clone setup fits at ${width}×${height}`, await cloneDialog.evaluate(dialog => {
+      const bounds = dialog.getBoundingClientRect()
+      const submit = dialog.querySelector('[type=submit]')?.getBoundingClientRect()
+      return Boolean(submit && bounds.left >= 0 && bounds.right <= innerWidth + 1 && submit.bottom <= bounds.bottom)
+    }))
+    await capture(`workspace-project-clone-${width}x${height}`, clonePage)
+  }
+
+  await submitClone()
+  await cloneDialog.getByRole('button', { name: 'Stop clone' }).waitFor()
+  await clonePage.reload()
+  await cloneDialog.getByRole('button', { name: 'Stop clone' }).click()
+  await cloneDialog.getByText('Clone stopped.', { exact: true }).waitFor()
+  check('reloading reattaches to a cancellable clone and stopping it leaves no checkout', !existsSync(destination))
+
+  delayGit = false
+  networkGate.resolve()
+  await submitClone()
+  await clonePage.waitForURL(url => Boolean(url.searchParams.get('workspace')) && url.href !== backgroundDraftUrl)
+  await clonePage.locator('[data-project-trust]').waitFor()
+  const manualId = Number(new URL(clonePage.url()).searchParams.get('workspace'))
+  check('cloning through Add project registers the real checkout untrusted with no provider turn',
+    harness.engine.current.workspaces.get(manualId)?.trusted === false
+    && harness.engine.current.sessions.size === countBeforeClone
+    && readFileSync(join(destination, 'README.md'), 'utf8') === 'Clone fixture notebook\n')
+
+  process.env.GIT_CONFIG_COUNT = String(nextConfig + 1)
+  process.env[gitConfigKey] = 'url.' + remote + '.insteadOf'
+  process.env[gitConfigValue] = 'https://github.com/fixture/notebook.git'
+  const linkedPrompt = 'Read the notebook before suggesting changes.'
+  const linkDestination = join(driveRoot, 'linked-notebook')
+  await clonePage.waitForLoadState('networkidle')
+  await clonePage.goto(baseUrl + '/new?' + new URLSearchParams({ prompt: linkedPrompt, repo: 'fixture/notebook' }))
+  const promptReview = clonePage.locator('[data-prompt-link-dialog]')
+  await promptReview.getByText('fixture/notebook is unavailable on this host.').waitFor()
+  for (const [width, height] of workspaceViewports) {
+    await clonePage.setViewportSize({ width, height })
+    await capture(`workspace-project-clone-link-${width}x${height}`, clonePage)
+  }
+  await promptReview.getByRole('button', { name: 'Clone repository' }).click()
+  await clonePage.waitForFunction(() => /notebook$/.test(document.querySelector<HTMLInputElement>('[data-project-clone-destination]')?.value || ''))
+  check('an unavailable GitHub repository opens clone settings with its repository and suggested folder',
+    await urlBox.inputValue() === 'fixture/notebook')
+  await destinationBox.fill(linkDestination)
+  await submitClone()
+  await clonePage.waitForURL(url => Boolean(url.searchParams.get('workspace')) && Boolean(url.searchParams.get('draft')))
+  await clonePage.locator('[data-project-trust]').click()
+  const editor = clonePage.getByRole('textbox', { name: 'Message', exact: true })
+  await editor.waitFor()
+  await clonePage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === text, linkedPrompt)
+  check('cloning from a prompt link preserves its draft through project trust without sending',
+    harness.engine.current.sessions.size === countBeforeClone
+    && readFileSync(join(linkDestination, 'README.md'), 'utf8') === 'Clone fixture notebook\n')
+  await clonePage.waitForLoadState('networkidle')
+}
+finally {
+  delayGit = false
+  networkGate.resolve()
+  gitFixture.stop(true)
+  for (const [key, value] of [['GIT_CONFIG_COUNT', gitConfigCount], [gitConfigKey, oldKey], [gitConfigValue, oldValue]] as const) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  await cloneContext.close()
+}
 
 check('browser reported no script errors', pageErrors.length === 0)
 for (const error of pageErrors) console.error('PAGEERROR:', error)

@@ -11,6 +11,7 @@
       <button type="button" @click="acceptLinkedPrompt('scratch')" :hidden="!linkReview()?.prompt?.text || linkReview()?.replace" :disabled="linkOpening()">
         Use without a project
       </button>
+      <button type="button" data-share-primary @click="openProjectClone(linkReview()?.prompt)" :hidden="!linkReview()?.canClone" :disabled="linkOpening()">Clone repository</button>
       <button type="button" data-share-primary @click="acceptLinkedPrompt('selected')" :hidden="!linkReview()?.replace && !linkReview()?.project" :disabled="linkOpening()" :text="linkReview()?.replace ? 'Replace draft text' : 'Open project draft'"></button>
     </div>
   </div>

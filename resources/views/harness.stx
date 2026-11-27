@@ -116,6 +116,7 @@ const activeWorkspace = activeSession && !activeScratchSession
   : draftProject
 export const workspaceName = activeWorkspace?.name
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
+export const projectCloneAllowed = Boolean($props.canLaunchWorkspaceEditor)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
 export const previewDiscoveryAllowed = Boolean(activeSession && $props.canLaunchWorkspaceEditor)
 export const canCompose = !missingThread && Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
@@ -1042,6 +1043,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   </dialog>
 
   @include('../partials/harness-prompt-link-dialogs')
+  @include('../partials/harness-project-clone')
 
   <dialog data-project-dialog ref="projectDialogBox" aria-labelledby="project-dialog-heading" class="m-auto p-0 text-neutral-900 dark:text-neutral-100 bg-white dark:bg-neutral-900 border border-black/10 rounded-[14px] dark:border-white/15 shadow-xl" @cancel="cancelProjectPicker">
     <form class="flex flex-col gap-4 p-5" @submit.prevent="registerProject">
@@ -1061,7 +1063,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         <span>Trust this folder for agent sessions</span>
       </label>
       <p data-project-error role="alert" :text="projectError()" :hidden="!projectError()" hidden class="text-[13px] text-red-700 dark:text-red-300"></p>
-      <div class="flex gap-2 justify-end">
+      <div class="flex flex-wrap gap-2 justify-end">
+        @if(projectCloneAllowed)
+          <button type="button" :disabled="projectBusy()" @click="openProjectClone(null)" class="me-auto px-2 h-9 text-[13px] underline underline-offset-4">Clone a repository</button>
+        @endif
         <button type="button" :disabled="projectBusy()" @click="closeProjectPicker" class="px-3 h-9 text-[13px] border border-black/15 rounded-[8px] dark:border-white/20">Cancel</button>
         <button type="submit" data-project-submit :disabled="projectBusy()" :text="projectBusy() ? 'Adding…' : 'Add project'" class="px-3 h-9 text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[8px]">Add project</button>
       </div>
@@ -2243,6 +2248,31 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const projectDialog = useRef('projectDialogBox')
   const projectPath = useRef('projectPathBox')
   const projectTrust = useRef('projectTrustBox')
+  const cloneDialog = useRef('projectCloneDialogBox')
+  const cloneRemoteInput = useRef('projectCloneRemoteBox')
+  const cloneDestinationInput = useRef('projectCloneDestinationBox')
+  const cloneRemoteText = state('')
+  const cloneDestination = state('')
+  const cloneSuggestion = state('')
+  const cloneError = state('')
+  const cloneReceipt = state(null)
+  const cloneSubmitting = state(false)
+  const cloneCancelling = state(false)
+  const pendingProjectClone = useLocalStorage('harness.projectClone.v1', null)
+  const cloneBusy = derived(() => Boolean(pendingProjectClone()?.input?.id) || cloneSubmitting() || ['cloning', 'publishing'].includes(cloneReceipt()?.phase))
+  const cloneStatusText = derived(() => {
+    if (cloneCancelling()) return 'Stopping clone…'
+    if (cloneReceipt()?.phase === 'cloning') return cloneReceipt().progress || 'Connecting to the repository…'
+    if (cloneReceipt()?.phase === 'publishing') return 'Adding the cloned project…'
+    if (cloneReceipt()?.phase === 'cancelled') return 'Clone stopped.'
+    if (cloneReceipt()?.phase === 'done') return 'Repository cloned.'
+    return cloneSubmitting() ? 'Starting clone…' : ''
+  })
+  let clonePoll
+  let cloneRequest
+  let cloneLinkedPrompt = null
+  let cloneReturnToPicker = false
+
   const sidebarOpen = state(false)
   const sidebarCollapsed = useLocalStorage('harness.sidebarCollapsed', false)
   const desktopSidebar = useMediaQuery('(min-width: 48rem)')
@@ -2815,6 +2845,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     draftWorktreeRequest?.abort()
     shareRepositoryRequest?.abort()
     linkedPromptRequest?.abort()
+    clonePoll?.stop()
+    cloneRequest?.abort()
     projectSetupRequest?.abort()
     projectSetupPoll?.stop()
     projectSettlementPending = false
@@ -3285,6 +3317,156 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     catch {
       projectError.set('Could not open the folder picker. You can enter the path above.')
     }
+  }
+
+
+  function openProjectClone(prompt) {
+    if (!projectCloneAllowed || cloneDialog.current?.open) return
+    cloneReturnToPicker = Boolean(projectDialog.current?.open)
+    projectDialog.current?.close()
+    promptLinkDialog.current?.close()
+    const operation = pendingProjectClone()
+    cloneLinkedPrompt = operation?.prompt ?? prompt
+    cloneRemoteText.set(operation?.input?.remote || prompt?.repository || '')
+    cloneDestination.set(operation?.input?.destination || '')
+    cloneSuggestion.set('')
+    cloneError.set('')
+    cloneReceipt.set(null)
+    cloneDialog.current?.showModal()
+    if (operation?.input?.id) {
+      cloneSubmitting.set(true)
+      void showCloneProgress(operation)
+    }
+    else if (prompt) void suggestCloneDestination()
+    else cloneRemoteInput.current?.focus()
+  }
+
+  function closeProjectClone() {
+    if (cloneBusy()) return
+    cloneDialog.current?.close()
+    if (cloneReturnToPicker) {
+      projectDialog.current?.showModal()
+      projectPath.current?.focus()
+    }
+    else if (cloneLinkedPrompt && linkReview()) showLinkedPrompt(linkReview())
+    else (projectPickerTrigger || sidebarRef.current)?.focus()
+    cloneLinkedPrompt = null
+    cloneReturnToPicker = false
+  }
+
+  function changeCloneRemote(value) {
+    cloneRemoteText.set(value)
+    cloneError.set('')
+  }
+
+  async function suggestCloneDestination() {
+    const remote = cloneRemoteText().trim()
+    if (!remote || (cloneDestination() && cloneDestination() !== cloneSuggestion()) || cloneBusy()) return
+    const response = await fetch('/projects/clone?' + new URLSearchParams({ remote })).then(result => result.ok ? result.json() : null).catch(() => null)
+    if (response?.destination && cloneDialog.current?.open && cloneRemoteText().trim() === remote
+      && (!cloneDestination() || cloneDestination() === cloneSuggestion())) {
+      cloneSuggestion.set(response.destination)
+      cloneDestination.set(response.destination)
+      if (cloneLinkedPrompt) cloneDestinationInput.current?.focus()
+    }
+  }
+
+  async function browseCloneFolder() {
+    const craft = desktop()
+    if (typeof craft?.dialog?.showOpenDialog !== 'function') return
+    try {
+      const { directory } = composerDraftTools.cloneRemote(cloneRemoteText())
+      const selection = await craft.dialog.showOpenDialog({ title: 'Choose where to clone', properties: ['openDirectory'] })
+      const parent = selection?.filePaths?.[0]
+      if (!selection?.canceled && typeof parent === 'string') {
+        const separator = parent.includes('\\') ? '\\' : '/'
+        cloneDestination.set(parent.replace(/[\\/]+$/, '') + separator + directory)
+      }
+    }
+    catch (error) { cloneError.set(error.message || 'Could not open the folder picker.') }
+  }
+
+  async function showCloneProgress(operation, start = false) {
+    const request = new AbortController()
+    cloneRequest = request
+    try {
+      const endpoint = '/projects/clone'
+      const response = start
+        ? await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(operation.input), signal: request.signal })
+        : await fetch(endpoint + '?' + new URLSearchParams({ id: operation.input.id }), { signal: request.signal })
+      if (!start && response.status === 404 && !request.signal.aborted) return showCloneProgress(operation, true)
+      const result = await response.json().catch(() => ({}))
+      if (request.signal.aborted) return
+      if (!response.ok) {
+        pendingProjectClone.set(null)
+        throw new Error(result.error || 'Could not start the clone.')
+      }
+      cloneReceipt.set(result)
+      cloneError.set('')
+      cloneSubmitting.set(false)
+      if (['cloning', 'publishing'].includes(result.phase)) {
+        clonePoll = useTimeout(() => void showCloneProgress(operation), 500)
+        return
+      }
+      cloneCancelling.set(false)
+      pendingProjectClone.set(null)
+      if (result.phase === 'done') {
+        const target = cloneDialog.current
+        target?.close()
+        if (operation.prompt && target) {
+          try {
+            await openLinkedDraft(operation.prompt, { id: result.workspace, profile: result.profile }, target)
+            return
+          }
+          catch { /* Keep access to the registered checkout if browser storage is unavailable. */ }
+        }
+        openDraftAddress('/?workspace=' + result.workspace)
+      }
+      else cloneError.set(result.error || '')
+    }
+    catch (error) {
+      if (request.signal.aborted) return
+      cloneSubmitting.set(false)
+      cloneCancelling.set(false)
+      cloneError.set(error.message || 'Could not read clone progress.')
+      if (pendingProjectClone()?.input?.id === operation.input.id)
+        clonePoll = useTimeout(() => void showCloneProgress(operation), 1000)
+    }
+    finally { if (cloneRequest === request) cloneRequest = null }
+  }
+
+  function startProjectClone() {
+    if (cloneBusy() || !composerDraftTools || !projectCloneAllowed) return
+    try {
+      const { remote } = composerDraftTools.cloneRemote(cloneRemoteText())
+      const operation = { input: { id: newCommandId(), remote, destination: cloneDestination().trim(), profile: Number(visibleProfile()) || null }, prompt: cloneLinkedPrompt }
+      cloneSubmitting.set(true)
+      cloneError.set('')
+      pendingProjectClone.set(operation)
+      void showCloneProgress(operation, true)
+    }
+    catch (error) { cloneError.set(error.message || 'Could not start the clone.') }
+  }
+
+  async function cancelProjectClone() {
+    const receipt = cloneReceipt()
+    if (receipt?.phase !== 'cloning' || cloneCancelling()) return
+    cloneCancelling.set(true)
+    try {
+      const response = await fetch('/projects/clone?' + new URLSearchParams({ id: receipt.id }), { method: 'DELETE' })
+      if (!response.ok) throw new Error('The host could not stop the clone.')
+    }
+    catch (error) {
+      cloneCancelling.set(false)
+      cloneError.set(error.message)
+    }
+  }
+
+  function resumeProjectClone() {
+    const current = pendingProjectClone()
+    if (!projectCloneAllowed || !current?.input?.id || !cloneDialog.current) return false
+    openProjectClone(current.prompt)
+    return true
   }
 
   async function registerProject() {
@@ -5489,7 +5671,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const detail = prompt.pullRequest
       ? 'Open the pull request to review it, or start a draft without a project.'
       : project ? 'Open a draft in ' + project.name + '.' : prompt.repository + ' is unavailable on this host.'
-    showLinkedPrompt({ title: 'Open linked prompt', detail, prompt, newThread, project })
+    showLinkedPrompt({ title: 'Open linked prompt', detail, prompt, newThread, project, canClone: projectCloneAllowed && !project && !prompt.pullRequest })
   }
 
   async function connectComposerDrafts() {
@@ -5530,7 +5712,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     draftDiscardReady.set(true)
     expireUndoNotices()
     if (initialRewoundPrompt && requestedRewind() === initialRewoundPrompt.operation) await restoreEarlierPrompt()
-    await openIncomingPromptLink()
+    if (!resumeProjectClone()) await openIncomingPromptLink()
   }
 
   function discardDraft(key) {
@@ -6485,7 +6667,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }, { target: window })
 
   function threadUndoBlocked() {
-    return projectDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open
+    return projectDialog.current?.open || cloneDialog.current?.open || settingsDialogRef.current?.open || threadSearchDialog.current?.open
       || threadActionsDialog.current?.open || workspaceEditorDialog.current?.open
       || promptLinkDialog.current?.open || shareClipboardDialog.current?.open
   }

@@ -692,7 +692,7 @@ const RESPONSIVE_SHELL = `
 @media (pointer: coarse) {
   [data-files] :is(.harness-icon-button, [data-workspace-file-row]), [data-workspace-file-options] :is(input, button) { min-height: 44px; }
 }
-[data-project-dialog]::backdrop, [data-settings-modal]::backdrop,
+[data-project-dialog]::backdrop, [data-project-clone-dialog]::backdrop, [data-settings-modal]::backdrop,
 [data-thread-search]::backdrop, [data-prompt-stash]::backdrop, [data-sent-image-dialog]::backdrop { background: rgb(0 0 0 / 45%); }
 [data-sent-image-dialog] { width: max-content; min-width: min(90vw, 360px); max-width: min(90vw, 980px); }
 [data-sent-image-dialog] img { min-width: min(100%, 128px); }
@@ -725,7 +725,7 @@ const RESPONSIVE_SHELL = `
   [data-thread-action]:not([hidden]), #harness-thread-actions form button { min-height: 44px; }
 }
 #harness-thread-actions [hidden] { display: none; }
-[data-project-dialog] { width: min(480px, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); }
+[data-project-dialog], [data-project-clone-dialog] { width: min(480px, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); }
 [data-settings-modal] {
   width: min(78rem, calc(100% - 4rem)); height: min(51rem, calc(100dvh - 4rem));
   max-height: none; border-radius: 14px; background: var(--workspace-bg);
