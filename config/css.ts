@@ -1444,8 +1444,18 @@ const TERMINAL_PANEL = `
   color: inherit; background: #11151e; border: 1px solid #4a5260; border-radius: 5px;
   font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; resize: vertical;
 }
+[data-terminal-paste-dialog] h2 { margin: 0; font-size: 15px; font-weight: 650; }
+[data-terminal-paste-dialog] p { margin: 4px 0 0; font-size: 13px; color: #bdc7d6; }
+[data-terminal-paste-dialog] textarea {
+  height: min(20dvh, 8rem); font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+[data-terminal-paste-actions] { display: flex; justify-content: flex-end; gap: 8px; margin-block-start: 8px; }
+[data-terminal-paste-actions] button { min-height: 44px; padding-inline: 12px; border-radius: 5px; font-size: 13px; }
+[data-terminal-paste-actions] button[type="submit"] { color: #10151e; background: #a8c6ff; font-weight: 600; }
+[data-terminal-paste-actions] button:disabled { opacity: .5; }
 @media (pointer: coarse) {
   [data-terminal-actions] button { min-height: 44px; }
+  [data-terminal-paste-dialog] { inset-block: max(12px, env(safe-area-inset-top)) auto; }
   [data-terminal-toolbar] [data-terminal-keyboard-toggle] {
     display: grid; width: 44px; height: 44px; flex-basis: 44px;
   }

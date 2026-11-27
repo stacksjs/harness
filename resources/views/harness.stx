@@ -994,6 +994,18 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         </div>
         <textarea aria-label="Visible terminal output" readonly :value="terminalReadableText()" spellcheck="false"></textarea>
       </dialog>
+      <dialog ref="terminalPasteDialog" data-terminal-text-dialog data-terminal-paste-dialog aria-labelledby="terminal-paste-title" @close="finishTerminalPaste">
+        <form @submit.prevent="submitTerminalPaste">
+          <h2 id="terminal-paste-title">Paste into terminal</h2>
+          <p id="terminal-paste-help">Use the system Paste command in the text field.</p>
+          <textarea aria-label="Terminal paste text" aria-describedby="terminal-paste-help" x-model="terminalPasteText"
+            autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" wrap="soft"></textarea>
+          <div data-terminal-paste-actions>
+            <button type="button" autofocus @click="terminalPasteDialog.current?.close()">Cancel</button>
+            <button type="submit" :disabled="!terminalPasteText()">Paste text</button>
+          </div>
+        </form>
+      </dialog>
       <p data-terminal-action-status role="status" hidden :hidden="!terminalClipboardNotice()" :text="terminalClipboardNotice()"></p>
     </section>
   @endif
@@ -3100,6 +3112,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const termHeaderToggle = useRef('termHeaderToggle')
   const terminalTabStrip = useRef('terminalTabStrip')
   const terminalKeyboardInput = useRef('terminalKeyboardInput')
+  const terminalPasteDialog = useRef('terminalPasteDialog')
 
   function toggleSidebar() {
     if (desktopSidebar()) {
@@ -7227,11 +7240,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const terminalActionWritable = state(false)
   const terminalClipboardNotice = state('')
   const terminalReadableText = state('')
+  const terminalPasteText = state('')
   const terminalKeyboardOpen = state(false)
   const terminalKeyboardViewport = state(0)
   let terminalKeyboardRestingHeight = 0
   let terminalActionKey = ''
   let terminalActionOrigin = null
+  let terminalPasteTarget = null
   let terminalTrigger = null
 
   function boundedTerminalHeight(height) {
@@ -7553,12 +7568,32 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     else if (action === 'paste' && dock.canPaste(key)) {
       try {
         const text = await composerDraftTools.readClipboardText(target, desktop()?.clipboard)
-        dock.pasteText(key, text)
+        if (text) {
+          dock.pasteText(key, text)
+          return
+        }
       }
-      catch {
-        terminalClipboardNotice.set('Could not paste. Use the system Paste command.')
-      }
+      catch { /* The system edit menu can still accept an explicit paste. */ }
+      if (!termOpen() || terminalController() !== dock || !dock.canPaste(key)) return
+      terminalPasteTarget = { dock, key }
+      terminalPasteText.set('')
+      terminalPasteDialog.current?.showModal()
     }
+  }
+
+  function submitTerminalPaste() {
+    const text = terminalPasteText()
+    const target = terminalPasteTarget
+    if (!text || !target || terminalController() !== target.dock || !target.dock.canPaste(target.key)) return
+    target.dock.pasteText(target.key, text)
+    terminalPasteDialog.current?.close()
+  }
+
+  function finishTerminalPaste() {
+    const target = terminalPasteTarget
+    terminalPasteTarget = null
+    terminalPasteText.set('')
+    if (termOpen() && target?.dock === terminalController()) target.dock.focus(target.key)
   }
 
   function closeTerminalTextDialog() {
