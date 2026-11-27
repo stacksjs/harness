@@ -1,0 +1,28 @@
+<div data-pr-patch role="group" aria-label="Patch for {{ file.path }}">
+  @foreach(section.rows as row)
+    @if(row.kind === 'header' || row.kind === 'note')
+      <code data-pr-patch-meta>{{ row.text }}</code>
+    @else
+      <div data-pr-line-row data-kind="{{ row.kind }}" data-position="{{ row.position }}" data-hunk="{{ row.hunk }}"
+        @if(file.lineSelection && row.position >= file.lineSelection.first && row.position <= file.lineSelection.last) data-selected@endif>
+        @if(row.before)
+          <a id="{{ lineId(file, 'L', row.before) }}" href="#{{ lineId(file, 'L', row.before) }}" data-pr-line="L"
+            aria-label="Before line {{ row.before }}"
+            @if(file.lineSelection?.line === lineId(file, 'L', row.before)) autofocus aria-current="location" tabindex="0"
+            @elseif(!file.lineSelection && row.position === file.firstLine) tabindex="0"@else tabindex="-1"@endif>{{ row.before }}</a>
+        @else
+          <span></span>
+        @endif
+        @if(row.after)
+          <a id="{{ lineId(file, 'R', row.after) }}" href="#{{ lineId(file, 'R', row.after) }}" data-pr-line="R"
+            aria-label="After line {{ row.after }}"
+            @if(file.lineSelection?.line === lineId(file, 'R', row.after)) autofocus aria-current="location" tabindex="0"
+            @elseif(!file.lineSelection && row.position === file.firstLine && !row.before) tabindex="0"@else tabindex="-1"@endif>{{ row.after }}</a>
+        @else
+          <span></span>
+        @endif
+        <code>{{ row.text }}</code>
+      </div>
+    @endif
+  @endforeach
+</div>

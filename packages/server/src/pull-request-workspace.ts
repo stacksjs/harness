@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { isWorkspaceGitRoot } from './diff'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
-import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
+import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewLineSelection, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
 import { findPullRequestThread } from './pull-request-links'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -16,10 +16,10 @@ import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-req
 
 type Repository = { name: string, path: string, workspace: WorkspaceState }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
-  updated: string, created: string, head: string, headRef: string, baseRef: string, description: string, additions?: number, deletions?: number, changedFiles?: number }
+  updated: string, created: string, head: string, headRef: string, baseRef: string, baseSha: string, description: string, additions?: number, deletions?: number, changedFiles?: number }
 type GitHubPull = { html_url?: string, number?: number, title?: string, body?: string | null, user?: { login?: string },
   state?: string, draft?: boolean, merged_at?: string | null, pull_request?: { merged_at?: string | null }, updated_at?: string, created_at?: string,
-  head?: { sha?: string, ref?: string }, base?: { ref?: string }, additions?: number, deletions?: number, changed_files?: number }
+  head?: { sha?: string, ref?: string }, base?: { ref?: string, sha?: string }, additions?: number, deletions?: number, changed_files?: number }
 type Activity = { id: string, author: string, time: string, state: string, text: string, commit?: string }
 type ChangedFile = { path: string, previousPath?: string, status: string, additions: number, deletions: number, patch: string }
 
@@ -44,7 +44,7 @@ function readPull(value: unknown, repository: string): Pull | null {
   const status = pull.merged_at || pull.pull_request?.merged_at ? 'Merged'
     : pull.state === 'closed' ? 'Closed' : pull.draft ? 'Draft' : 'Open'
   return { ...address, title: pull.title.slice(0, 512), status, author: pull.user?.login ?? '', updated: pull.updated_at ?? '', created: pull.created_at ?? '',
-    head: pull.head?.sha ?? '', headRef: pull.head?.ref ?? '', baseRef: pull.base?.ref ?? '',
+    head: pull.head?.sha ?? '', headRef: pull.head?.ref ?? '', baseRef: pull.base?.ref ?? '', baseSha: pull.base?.sha ?? '',
     description: typeof pull.body === 'string' ? pull.body.slice(0, 32_768) : '',
     additions: pull.additions, deletions: pull.deletions, changedFiles: pull.changed_files }
 }
@@ -159,16 +159,18 @@ function selectReviewConversation(params: URLSearchParams, anchor: string) {
   params.set('conversation', anchor)
 }
 
-async function readFiles(repository: Repository, pull: Pull, page: number, signal: AbortSignal, selectedComments: ReturnType<typeof commentView>) {
+async function readFiles(repository: Repository, pull: Pull, page: number, signal: AbortSignal, query: URLSearchParams) {
   const { number, head } = pull
+  const selectedComments = commentView(query)
   const reply = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}/files?per_page=30&page=${page}`, undefined, signal)
   if (reply.status !== 200 || !Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitHub could not load changes for this request.')
   const files: ChangedFile[] = reply.body.flatMap(file => typeof file?.filename === 'string' ? [{ path: file.filename,
     previousPath: file.previous_filename, status: file.status, additions: file.additions, deletions: file.deletions,
     patch: typeof file.patch === 'string' ? file.patch : '' }] : [])
   const current = await repositoryGitHubRequest(repository.path, `repos/${repository.name}/pulls/${number}`, undefined, signal)
-  if (current.status !== 200 || !head || readPull(current.body, repository.name)?.head !== head)
-    throw new RepositoryPullRequestError('The pull request head changed during the read. Refresh to load its current files.')
+  const currentPull = current.status === 200 ? readPull(current.body, repository.name) : null
+  if (!currentPull || !head || currentPull.head !== head || currentPull.baseSha !== pull.baseSha || currentPull.baseRef !== pull.baseRef)
+    throw new RepositoryPullRequestError('The pull request changed during the read. Refresh to load its current files.')
   let review = null
   let discussion = null
   let commentsNotice = ''
@@ -208,9 +210,20 @@ async function readFiles(repository: Repository, pull: Pull, page: number, signa
   const byPreviousPath = new Map(files.flatMap(file => file.previousPath ? [[file.previousPath, file] as const] : []))
   const assigned = Map.groupBy(discussion?.conversations ?? [], thread =>
     byPath.get(thread.path) ?? (thread.outdated || thread.side === 'before' ? byPreviousPath.get(thread.path) : undefined))
+  const requestedLine = query.get('reviewLine')
+  const requestedStart = query.get('reviewStart')
+  const sameDiff = query.get('reviewHead') === head && query.get('reviewBase') === pull.baseSha
+  const lines = files.map(file => {
+    const anchor = fileAnchor(file.path)
+    const sections = placeReviewConversations(file.patch, assigned.get(file) ?? [])
+    const lineSelection = sameDiff ? reviewLineSelection(sections, anchor, requestedLine, requestedStart) : null
+    const firstLine = sections.find(section => section.rows.some(row => row.before || row.after))?.rows.find(row => row.before || row.after)?.position
+    return { ...file, anchor, firstLine, formPath: encodeURIComponent(file.path), viewed: review?.states.get(file.path), sections, lineSelection }
+  })
   return {
-    files: files.map(file => ({ ...file, anchor: fileAnchor(file.path), formPath: encodeURIComponent(file.path),
-      viewed: review?.states.get(file.path), sections: placeReviewConversations(file.patch, assigned.get(file) ?? []) })),
+    files: lines,
+    lineNotice: requestedLine !== null && !lines.some(file => file.lineSelection)
+      ? sameDiff ? 'This line selection is unavailable on this file page.' : 'The pull request comparison changed. Select a line in the current diff.' : '',
     viewer: review?.viewer, more: reply.hasNextPage, conversationViewer: discussion?.viewer,
     conversationsUnavailable: !discussion, conversationsTruncated: discussion?.truncated,
     detachedConversations: page === 1 ? assigned.get(undefined) ?? [] : [],
@@ -257,7 +270,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const data = reply.status === 200 ? readPull(reply.body, selectionRepo.name) : null
     if (!data || data.number !== selection.number) throw new RepositoryPullRequestError('This pull request is unavailable to the GitHub account on this host.')
     const tabData = tab === 'timeline' ? readActivity(selectionRepo, data, detailPage, signal)
-      : tab === 'code' ? readFiles(selectionRepo, data, detailPage, signal, commentView(query))
+      : tab === 'code' ? readFiles(selectionRepo, data, detailPage, signal, query)
         : readRepositoryPullRequestChecks(selectionRepo.path, { ...selection, repositoryKey: '' }, signal)
     const extra = await tabData.catch(error => ({ error: message(error) }))
     const result = 'checks' in extra ? extra.head === data.head

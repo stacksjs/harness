@@ -6382,7 +6382,7 @@ try {
     github.configureCommentPages('normal')
     await reviewTabs.getByRole('link', { name: 'Code' }).click()
     await clonePage.locator('[data-pr-file-patch] > summary').click()
-    await clonePage.locator('pre[aria-label="Patch for report.txt"]').getByText('+Report fixture', { exact: false }).waitFor()
+    await clonePage.locator('[data-pr-patch][aria-label="Patch for report.txt"]').getByText('+Report fixture', { exact: false }).waitFor()
     await clonePage.setViewportSize({ width: 1280, height: 800 })
     await reviewList.waitFor()
     await capture('pull-requests-code-1280x800', clonePage)
@@ -6402,7 +6402,7 @@ try {
       await viewedFile.getAttribute('aria-pressed') === 'true'
       && clonePage.url() === openingReviewUrl
       && await viewedFile.evaluate(button => document.activeElement === button)
-      && await clonePage.locator('details[open] pre[aria-label="Patch for report.txt"]').isVisible())
+      && await clonePage.locator('details[open] [data-pr-patch]').getByText('+Report fixture', { exact: true }).isVisible())
     await clonePage.reload()
     await viewedFile.waitFor()
     check('viewed state survives reload and matches the forge', await viewedFile.getAttribute('aria-pressed') === 'true'
@@ -6427,6 +6427,36 @@ try {
     check('Code anchors the current review after its line and keeps outdated comments collapsed',
       await conversation.evaluate(element => element.previousElementSibling?.textContent?.includes('+Report fixture'))
       && await oldConversation.getAttribute('open') === null)
+    const beforeLine = filePatch.getByRole('link', { name: 'Before line 1', exact: true })
+    const afterLine = filePatch.getByRole('link', { name: 'After line 2', exact: true })
+    await beforeLine.focus()
+    await clonePage.keyboard.press('Enter')
+    await clonePage.keyboard.press('Shift+ArrowDown')
+    await clonePage.keyboard.press('Shift+ArrowDown')
+    const lineTools = clonePage.locator('[data-pr-line-tools]')
+    await lineTools.getByText('Before line 1 to after line 2', { exact: true }).waitFor()
+    check('PR line navigation spans the deletion and additions in one hunk',
+      await afterLine.evaluate(element => element === document.activeElement)
+      && await filePatch.locator('[data-pr-line-row][data-selected]').count() === 3)
+    const lineAddress = await lineTools.locator('[data-pr-open-line-link]').getAttribute('href')
+    if (!lineAddress) throw new Error('Missing PR line selection address')
+    const linked = await clonePage.context().newPage()
+    try {
+      await linked.goto(new URL(lineAddress, clonePage.url()).href)
+      check('a PR line link expands its file and restores the range and focus',
+        await linked.locator('[data-pr-file-patch]').getAttribute('open') !== null
+        && await linked.locator('[data-pr-line-row][data-selected]').count() === 3
+        && await linked.locator('[data-pr-line][aria-current="location"]').evaluate(element => element === document.activeElement))
+    }
+    finally { await linked.close() }
+    await capture('pull-requests-line-range-390x844', clonePage)
+    await filePatch.getByRole('link', { name: 'After line 21', exact: true }).click({ modifiers: ['Shift'] })
+    check('a selection across hunks starts a new range',
+      await filePatch.locator('[data-pr-line-row][data-selected]').count() === 1
+      && await lineTools.getByText('Range starts again in this hunk.', { exact: true }).isVisible())
+    await clonePage.keyboard.press('Escape')
+    check('Escape clears the range without closing the inline conversation',
+      await filePatch.locator('[data-pr-line-row][data-selected]').count() === 0 && await comment.isVisible())
     await capture('pull-requests-inline-conversation-390x844', clonePage)
     const [resolution] = await Promise.all([
       clonePage.waitForResponse(response => new URL(response.url()).pathname === '/pull-requests/conversation' && response.request().method() === 'POST'),

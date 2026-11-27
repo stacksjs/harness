@@ -203,8 +203,9 @@ if (parts[4] === 'issues' && parts[6] === 'timeline' && detail) reply(200, [
 if (parts[4] !== 'pulls') reply(404, {})
 if (method === 'GET' && parts[5]) {
   if (!detail) reply(404, {})
-  if (parts[6] === 'files') reply(200, [{ filename: 'report.txt', status: 'added', additions: 1, deletions: 0,
-    patch: '@@ -0,0 +1 @@' + String.fromCharCode(10) + '+Report fixture' }])
+  if (parts[6] === 'files') reply(200, [{ filename: 'report.txt', status: 'modified', additions: 3, deletions: 2,
+    patch: ['@@ -1,2 +1,3 @@', '-Old report', '+Report fixture', '+Report details', ' Shared context',
+      '@@ -20 +21 @@', '-Old ending', '+New ending'].join(String.fromCharCode(10)) }])
   reply(200, detail)
 }
 if (method === 'GET') reply(200, pulls.filter(pull => !url.searchParams.has('head')
@@ -224,7 +225,7 @@ const sha = headRepository && head(headRepository, headRef)
 if (!sha) reply(422, {})
 const number = state.pulls.length + 1
 const pull = { ...input, number, state: 'open', user: { login: 'fixture-user' }, created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z', html_url: 'https://github.com/' + name + '/pull/' + number,
-  base: { ref: input.base, repo: { full_name: name } },
+  base: { ref: input.base, sha: repo && head(repo, input.base), repo: { full_name: name } },
   head: { ref: headRef, sha, label: owner + ':' + headRef, repo: { full_name: repositoryName } } }
 state.pulls.push(pull)
 writeFileSync(stateFile, JSON.stringify(state))

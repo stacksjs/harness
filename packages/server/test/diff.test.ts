@@ -7,7 +7,7 @@ import { expandWorkspaceDiffGap, parseWorkspacePatch, revealWorkspaceDiffContext
 import { capture } from '../src/checkpoint'
 import { MAX_PATCH_BYTES, parseNumstat, parseStatus, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff } from '../src/diff'
 import type { ReviewConversation } from '../src/pull-request-conversations'
-import { placeReviewConversations } from '../src/pull-request-conversations'
+import { placeReviewConversations, reviewLineAnchor, reviewLineSelection } from '../src/pull-request-conversations'
 
 it('attaches review conversations to the matching side and preserves unanchored history', () => {
   const patch = [
@@ -32,6 +32,16 @@ it('attaches review conversations to the matching side and preserves unanchored 
   ])
   expect(sections.filter(section => section.patch).map(section => section.patch).join('\n')).toBe(patch)
   expect(placeReviewConversations(patch, [conversation('outside', 'after', 99)]).map(section => section.patch)).toEqual([patch, ''])
+  const file = 'file-fixture'
+  const before = reviewLineAnchor(file, 'before', 1)
+  const after = reviewLineAnchor(file, 'after', 3)
+  expect(reviewLineSelection(sections, file, after, before)).toEqual({ first: 1, last: 4, line: after, start: before })
+  expect(reviewLineSelection(sections, file, before, after)).toEqual({ first: 1, last: 4, line: before, start: after })
+  expect(reviewLineSelection(sections, file, reviewLineAnchor(file, 'after', 63), before)).toBeNull()
+  expect(reviewLineSelection(sections, 'other-file', after, before)).toBeNull()
+  expect(reviewLineSelection(sections, file, reviewLineAnchor(file, 'after', 99), null)).toBeNull()
+  const unknown = 'Unparsed patch fixture'
+  expect(placeReviewConversations(unknown, [])).toEqual([{ patch: unknown, rows: [], conversations: [] }])
 })
 
 it('expands unchanged lines with distinct before and after numbers across an insertion', () => {

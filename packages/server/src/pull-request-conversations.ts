@@ -120,33 +120,66 @@ function reviewConversation(node: ThreadNode | null, address: string) {
 }
 
 export type ReviewConversation = NonNullable<ReturnType<typeof reviewConversation>>
-export type ReviewPatchSection = { patch: string, conversations: ReviewConversation[] }
+export type ReviewPatchRow = {
+  kind: 'header' | 'context' | 'addition' | 'deletion' | 'note'
+  text: string
+  hunk: number
+  position: number
+  before?: number
+  after?: number
+}
+export type ReviewPatchSection = { patch: string, rows: ReviewPatchRow[], conversations: ReviewConversation[] }
 const patchPrefixes = { context: ' ', addition: '+', deletion: '-' } as const
 
+export function reviewLineAnchor(file: string, side: 'before' | 'after', line: number): string {
+  return file + '-' + (side === 'before' ? 'L' : 'R') + line
+}
+
+export function reviewLineSelection(sections: ReviewPatchSection[], file: string, line: string | null, start: string | null) {
+  if (!line?.startsWith(file + '-') || (start && !start.startsWith(file + '-'))) return null
+  const rows = sections.flatMap(section => section.rows)
+  const find = (anchor: string) => {
+    const match = /-([LR])([1-9][0-9]*)$/u.exec(anchor)
+    if (!match) return undefined
+    const side = match[1] === 'L' ? 'before' : 'after'
+    const number = Number(match[2])
+    return Number.isSafeInteger(number) && anchor === reviewLineAnchor(file, side, number)
+      ? rows.find(row => row[side] === number) : undefined
+  }
+  const first = find(start || line)
+  const last = find(line)
+  if (!first || !last || first.hunk !== last.hunk) return null
+  return { first: Math.min(first.position, last.position), last: Math.max(first.position, last.position), line, start: start || line }
+}
+
 export function placeReviewConversations(patch: string, conversations: ReviewConversation[]): ReviewPatchSection[] {
-  if (!conversations.length) return patch ? [{ patch, conversations }] : []
   const pending = new Set(conversations)
   const byLine = Map.groupBy(conversations.filter(thread => !thread.outdated && thread.line && thread.side), thread => thread.side + ':' + thread.line)
   const sections: ReviewPatchSection[] = []
-  let lines: string[] = []
-  if (byLine.size) for (const hunk of parseFilePatch(patch)) {
-    lines.push(hunk.header)
+  const rows: ReviewPatchRow[] = []
+  let position = 0
+  const flush = (attached: ReviewConversation[]) => {
+    sections.push({ patch: rows.map(row => row.text).join('\n'), rows: rows.splice(0), conversations: attached })
+  }
+  for (const [index, hunk] of parseFilePatch(patch).entries()) {
+    rows.push({ kind: 'header', text: hunk.header, hunk: index, position: position++ })
     for (const line of hunk.lines) {
-      lines.push(patchPrefixes[line.kind] + line.text)
-      if (line.newlineNote) lines.push('\\ ' + line.newlineNote)
+      rows.push({ kind: line.kind, text: patchPrefixes[line.kind] + line.text, hunk: index, position: position++,
+        before: line.before ?? undefined, after: line.after ?? undefined })
+      if (line.newlineNote) rows.push({ kind: 'note', text: '\\ ' + line.newlineNote, hunk: index, position: position++ })
       const attached = [...(byLine.get('before:' + line.before) ?? []), ...(byLine.get('after:' + line.after) ?? [])]
         .filter(thread => pending.delete(thread))
-      if (attached.length) {
-        sections.push({ patch: lines.join('\n'), conversations: attached })
-        lines = []
-      }
+      if (attached.length) flush(attached)
     }
   }
   if (sections.length) {
-    if (lines.length) sections.push({ patch: lines.join('\n'), conversations: [] })
+    if (rows.length) flush([])
   }
-  else if (patch) sections.push({ patch, conversations: [] })
-  if (pending.size) sections.push({ patch: '', conversations: [...pending] })
+  else if (patch) {
+    const complete = rows.map(row => row.text).join('\n') === patch.replace(/\n$/u, '')
+    sections.push({ patch, rows: complete ? rows : [], conversations: [] })
+  }
+  if (pending.size) sections.push({ patch: '', rows: [], conversations: [...pending] })
   return sections
 }
 
