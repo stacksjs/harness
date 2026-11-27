@@ -39,8 +39,10 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
-import { createStagedCommit, readCommitSubmission, stagedCommitPreview } from './repository-commit'
+import { createStagedCommit, readRepositorySubmission, stagedCommitPreview } from './repository-commit'
 import { readRepositoryStatus } from './repository-status'
+import { RepositorySyncError, repositorySyncPreview, syncRepository } from './repository-sync'
+import type { RepositorySyncAction } from './repository-sync'
 import { chatGptCredentialDirectory, providerLaunchConfig, SavedProviderInstances } from './provider-instances'
 import { defaultWorkspacePath, ProviderRuntime, releaseWorktrees, worktreesOfProfile } from './runtime'
 import { openScratchWorkspace, scratchWorkspacePath } from './scratch-workspace'
@@ -527,9 +529,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     return checkout ? openCombinedRepository(combined, checkout) : repository ? null : root
   }
 
-  const repositoryCommits = new Set<string>()
+  const repositoryActions = new Set<string>()
 
-  async function respondRepositoryCommit(request: Request, url: URL, sessionId: number, extendTimeout: () => void): Promise<Response> {
+  async function respondRepositoryAction(request: Request, url: URL, sessionId: number, action: 'commit' | RepositorySyncAction, extendTimeout: () => void): Promise<Response> {
     const headers = { 'cache-control': 'private, no-store' }
     const respond = (body: object, status = 200) => Response.json(body, { headers, status })
     const site = request.headers.get('sec-fetch-site')
@@ -537,8 +539,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       return new Response(null, { status: 403, headers })
     if (!['GET', 'POST'].includes(request.method)) return new Response(null, { status: 405, headers })
     const key = url.searchParams.get('repository') ?? ''
-    const input = request.method === 'POST' ? await readCommitSubmission(request) : null
-    if (request.method === 'POST' && !input) return respond({ error: 'Enter a commit message and reopen the staged review if needed.' }, 400)
+    const input = request.method === 'POST' ? await readRepositorySubmission(request) : null
+    if (request.method === 'POST' && (!input || (action === 'commit' && !input.message)))
+      return respond({ error: action === 'commit' ? 'Enter a commit message and reopen the staged review if needed.' : 'Reopen the Git action to confirm it.' }, 400)
 
     const session = engine.current.sessions.get(sessionId)
     const workspace = session && engine.current.workspaces.get(session.workspaceId)
@@ -552,31 +555,40 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     const repository = await reviewRepositoryPath(root, session, key).then(path => path && realpath(path)).catch(() => null)
     if (!repository || !await isWorkspaceGitRoot(repository))
       return respond({ error: 'This repository is unavailable in the thread’s checkout.' }, 404)
-    if (repositoryCommits.has(repository)) return respond({ error: 'A commit is already running in this repository.' }, 409)
+    if (repositoryActions.has(repository)) return respond({ error: 'A Git action is already running in this repository.' }, 409)
     if (input) {
-      repositoryCommits.add(repository)
+      repositoryActions.add(repository)
       extendTimeout()
     }
+
+    const authorize = () => {
+      const current = engine.current.sessions.get(sessionId)
+      return !closing && current?.worktreePath === worktree && current.workspaceId === workspace.id
+        && !current.navigation?.archivedAt && engine.current.workspaces.get(workspace.id)?.trusted === true
+        && ![...engine.current.sessions.values()].some(thread => isTurnActive(thread.state)
+          && (worktree ? thread.worktreePath === root : thread.workspaceId === workspace.id && !thread.worktreePath))
+    }
+
     try {
-      const preview = await stagedCommitPreview(repository)
+      const preview = action === 'commit' ? await stagedCommitPreview(repository) : await repositorySyncPreview(repository, action)
       if (!input) return respond(preview)
       if (preview.problem) return respond({ error: preview.problem }, 409)
       if (preview.revision !== input.revision)
-        return respond({ error: 'The branch or staged files changed. Review the updated files before committing.' }, 409)
-      const current = engine.current.sessions.get(sessionId)
-      if (closing || current?.worktreePath !== worktree || current?.workspaceId !== workspace.id
-        || current.navigation?.archivedAt || !engine.current.workspaces.get(workspace.id)?.trusted)
-        return respond({ error: 'The thread or its checkout changed during review.' }, 409)
-      if ([...engine.current.sessions.values()].some(thread => isTurnActive(thread.state)
-        && (worktree ? thread.worktreePath === root : thread.workspaceId === workspace.id && !thread.worktreePath)))
-        return respond({ error: 'Wait for the active turn in this checkout to finish before committing.' }, 409)
-      return respond({ commit: await createStagedCommit(repository, input.message) }, 201)
+        return respond({ error: action === 'commit' ? 'The branch or staged files changed. Review the updated files before committing.'
+          : 'The branch or remote changed. Review the Git action again.' }, 409)
+      if (!authorize())
+        return respond({ error: 'The checkout changed or a turn is still active. Wait for it to finish and try again.' }, 409)
+      if ('files' in preview) return respond({ commit: await createStagedCommit(repository, input.message) }, 201)
+      return respond(await syncRepository(repository, action as RepositorySyncAction, preview, authorize))
     }
-    catch {
-      return respond({ error: input ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'
-        : 'Git could not read the staged changes.' }, 503)
+    catch (error) {
+      if (error instanceof RepositorySyncError) return respond({ error: error.message }, 409)
+      return respond({ error: action === 'commit' ? (input
+        ? 'Git could not confirm the commit. Check the repository, hooks, and signing before retrying.'
+        : 'Git could not read the staged changes.')
+        : 'Git could not complete this action. Check the remote, connection, and Git credentials, then review the branch.' }, 503)
     }
-    finally { if (input) repositoryCommits.delete(repository) }
+    finally { if (input) repositoryActions.delete(repository) }
   }
 
   async function renderWorkspaceReview(root: string | null, url: URL, operation: string | undefined,
@@ -1662,10 +1674,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }))
       }
 
-      const commitRoute = /^\/s\/([1-9]\d*)\/git\/commit$/u.exec(url.pathname)
-      if (commitRoute) {
+      const gitRoute = /^\/s\/([1-9]\d*)\/git\/(commit|pull|push)$/u.exec(url.pathname)
+      if (gitRoute) {
         if (!isLoopbackHost(srv.requestIP(request)?.address ?? '')) return new Response(null, { status: 403 })
-        return respondRepositoryCommit(request, url, Number(commitRoute[1]), () => srv.timeout(request, 65))
+        return respondRepositoryAction(request, url, Number(gitRoute[1]), gitRoute[2] as 'commit' | RepositorySyncAction, () => srv.timeout(request, 110))
       }
 
       const diffRoute = /^\/s\/(\d+)\/diff(?:\/(options|context|turn-files|status))?$/u.exec(url.pathname)

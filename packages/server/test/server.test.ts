@@ -650,6 +650,95 @@ describe('harness serve — HTTP', () => {
     expect((await fetch(route)).status).toBe(404)
   }, 20_000)
 
+  it('publishes and fast-forwards the selected branch through its configured remote', async () => {
+    const remote = join(dir, 'remote.git')
+    const project = join(dir, 'project')
+    const other = join(dir, 'other')
+    const git = (cwd: string, ...args: string[]) => {
+      const result = Bun.spawnSync(['git', ...args], { cwd })
+      if (!result.success) throw new Error(result.stderr.toString())
+      return result.stdout.toString().trim()
+    }
+    const setIdentity = (path: string) => {
+      git(path, 'config', 'user.name', 'Fixture')
+      git(path, 'config', 'user.email', 'fixture@example.invalid')
+    }
+    git(dir, 'init', '--bare', '-qb', 'main', remote)
+    git(dir, 'clone', '-q', '--', remote, project)
+    setIdentity(project)
+    git(project, 'switch', '-qc', 'review/topic')
+    writeFileSync(join(project, 'note.txt'), 'First note\n')
+    git(project, 'add', '--', 'note.txt')
+    git(project, 'commit', '-qm', 'First note')
+    const initial = git(project, 'rev-parse', 'HEAD')
+    git(project, 'branch', 'private')
+    git(project, 'tag', '-am', 'Private tag', 'private-tag')
+    git(project, 'config', 'push.followTags', 'true')
+    git(project, 'config', 'remote.origin.mirror', 'true')
+    const workspace = derivedId('sync-workspace')
+    const session = derivedId('sync-thread')
+    const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+      harness.engine.dispatch({ id, at: Date.now(), command })
+    await dispatch('sync-workspace', { type: 'workspace.register', path: realpathSync(project), trusted: true })
+    await dispatch('sync-thread', { type: 'session.create', workspaceId: workspace, driverKind: 'claude' })
+    const base = 'http://127.0.0.1:' + port + '/s/' + session + '/git/'
+    const read = (action: string) => fetch(base + action).then(result => result.json())
+    const send = async (action: string, revision: string, origin?: string) => {
+      const response = await fetch(base + action, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...(origin && { origin }) },
+        body: JSON.stringify({ revision }),
+      })
+      return { status: response.status, body: await response.json().catch(() => null) }
+    }
+
+    const publish = await read('push')
+    expect(publish).toMatchObject({ branch: 'review/topic', remote: 'origin', ref: 'refs/heads/review/topic', firstPush: true, problem: null })
+    expect(git(remote, 'for-each-ref', '--format=%(refname)')).toBe('')
+    expect((await send('push', publish.revision, 'https://example.invalid')).status).toBe(403)
+    git(project, 'remote', 'set-url', '--push', 'origin', join(dir, 'missing.git'))
+    expect(await send('push', publish.revision)).toMatchObject({ status: 409, body: { error: expect.stringContaining('remote changed') } })
+    git(project, 'remote', 'set-url', '--push', 'origin', remote)
+    expect(await send('push', publish.revision)).toEqual({ status: 200, body: { message: 'Pushed to origin/review/topic.' } })
+    expect(git(remote, 'for-each-ref', '--format=%(refname)')).toBe('refs/heads/review/topic')
+    expect(git(project, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/review/topic')
+    git(project, 'remote', 'set-head', 'origin', 'review/topic')
+    expect(await read('push')).toMatchObject({ defaultTarget: true })
+
+    git(dir, 'clone', '-qb', 'review/topic', '--', remote, other)
+    setIdentity(other)
+    writeFileSync(join(other, 'note.txt'), 'Upstream note\n')
+    git(other, 'commit', '-qam', 'Upstream note')
+    git(other, 'push', '-q')
+    const upstream = git(other, 'rev-parse', 'HEAD')
+    const pull = await read('pull')
+    expect(pull).toMatchObject({ firstPush: false, problem: null })
+    writeFileSync(join(project, 'draft.txt'), 'Keep this draft\n')
+    expect(await send('pull', pull.revision)).toMatchObject({ status: 409, body: { error: expect.stringContaining('Commit or stash') } })
+    expect(git(project, 'rev-parse', 'HEAD')).toBe(initial)
+    rmSync(join(project, 'draft.txt'))
+    expect(await send('pull', pull.revision)).toEqual({ status: 200, body: { message: 'Pulled from origin/review/topic.' } })
+    expect(git(project, 'rev-parse', 'HEAD')).toBe(upstream)
+    expect(git(project, 'rev-parse', '@{upstream}')).toBe(upstream)
+    expect(readFileSync(join(project, 'note.txt'), 'utf8')).toBe('Upstream note\n')
+    expect(git(project, 'for-each-ref', 'refs/harness/sync')).toBe('')
+    expect((await send('pull', pull.revision)).status).toBe(409)
+
+    writeFileSync(join(project, 'note.txt'), 'Local note\n')
+    git(project, 'commit', '-qam', 'Local note')
+    const local = git(project, 'rev-parse', 'HEAD')
+    writeFileSync(join(other, 'note.txt'), 'Concurrent note\n')
+    git(other, 'commit', '-qam', 'Concurrent note')
+    git(other, 'push', '-q')
+    const concurrent = git(other, 'rev-parse', 'HEAD')
+    const push = await read('push')
+    expect(await send('push', push.revision)).toMatchObject({ status: 409, body: { error: expect.stringContaining('remote branch moved') } })
+    expect(await send('pull', (await read('pull')).revision)).toMatchObject({ status: 409, body: { error: expect.stringContaining('diverged') } })
+    expect(git(project, 'rev-parse', 'HEAD')).toBe(local)
+    expect(git(remote, 'rev-parse', 'refs/heads/review/topic')).toBe(concurrent)
+    expect(git(project, 'for-each-ref', 'refs/harness/sync')).toBe('')
+    expect(readFileSync(join(project, 'note.txt'), 'utf8')).toBe('Local note\n')
+  }, 25_000)
+
   it('reviews uncommitted changes, branch comparisons, and commits without altering the working tree or index', async () => {
     const project = join(dir, 'review')
     mkdirSync(project)
