@@ -1,0 +1,41 @@
+@if(lifecyclePending || selected.lifecycle?.actions.length)
+  <div id="pr-lifecycle" data-pr-lifecycle>
+    @if(lifecyclePending)
+      <form method="post" action="{{ lifecycleEndpoint }}">
+        <input type="hidden" name="action" value="{{ lifecyclePending.action }}">
+        <input type="hidden" name="base" value="{{ lifecyclePending.base }}">
+        <input type="hidden" name="head" value="{{ lifecyclePending.head }}">
+        <input type="hidden" name="viewer" value="{{ lifecyclePending.viewer }}">
+        <input type="hidden" name="revision" value="{{ lifecyclePending.revision }}">
+        <input type="hidden" name="intent" value="{{ lifecyclePending.token }}">
+        <button type="submit" data-pr-button>Check GitHub again</button>
+      </form>
+    @else
+      <button type="button" popovertarget="pr-lifecycle-menu" data-pr-button data-pr-lifecycle-trigger aria-label="Pull request actions">
+        Actions <span class="inline-block size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+      </button>
+      <form method="post" action="{{ lifecycleEndpoint }}" aria-label="Update pull request" id="pr-lifecycle-menu" data-pr-lifecycle-menu data-pr-lifecycle-panel popover>
+        @include('./harness-pr-lifecycle-fields')
+        @foreach(selected.lifecycle.actions as item)
+          @if(item.action === 'close')
+            <button type="button" popovertarget="pr-close-confirmation" data-pr-lifecycle-action data-pr-close-trigger>{{ item.label }}</button>
+          @else
+            <button type="submit" name="action" value="{{ item.action }}" data-pr-lifecycle-action>{{ item.label }}</button>
+          @endif
+        @endforeach
+      </form>
+      @if(selected.lifecycle.actions.some(item => item.action === 'close'))
+        <form method="post" action="{{ lifecycleEndpoint }}" aria-labelledby="pr-close-title" id="pr-close-confirmation" data-pr-close-confirmation data-pr-lifecycle-panel popover>
+          @include('./harness-pr-lifecycle-fields')
+          <p id="pr-close-title">Close this pull request on GitHub?</p>
+          <div data-pr-review-actions>
+            <button type="button" popovertarget="pr-close-confirmation" popovertargetaction="hide" data-pr-button>Cancel</button>
+            <button type="submit" name="action" value="close" data-pr-button data-pr-close-confirm>Confirm close</button>
+          </div>
+        </form>
+      @endif
+    @endif
+  </div>
+@elseif(lifecycleNotice || lifecycleError)
+  <span id="pr-lifecycle"></span>
+@endif

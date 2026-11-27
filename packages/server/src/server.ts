@@ -58,8 +58,8 @@ import { escapeTranscriptText } from './transcript-markdown'
 import { open as openTunnel } from './tunnel'
 import { renderHarnessTemplate, renderHarnessView, viewProps } from './views'
 import { PullRequestReplyReceipts } from './pull-request-reply-receipts'
-import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspaceReviewConversation } from './pull-request-workspace'
-import type { PullRequestReplyDraft } from './pull-request-workspace'
+import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMarkdown, submitWorkspaceInlineReview, submitWorkspaceReviewReply, updateWorkspaceFileViewed, updateWorkspacePullRequestLifecycle, updateWorkspaceReviewConversation } from './pull-request-workspace'
+import type { PullRequestLifecycleDraft, PullRequestReplyDraft } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import type { TerminalScope } from './workspace-terminals'
@@ -1912,7 +1912,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams)
       }
 
-      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review'].includes(url.pathname)) {
+      if (['/pull-requests', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
@@ -1925,10 +1925,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return loadWorkspaceReviewComments(engine.current, url.searchParams, signal).then(({ status, body }) =>
             Response.json(body, { status, headers: { ...headers, 'content-type': 'application/json' } }))
         }
-        const render = async (query: URLSearchParams, status = 200, replyDraft?: PullRequestReplyDraft) => {
+        const render = async (query: URLSearchParams, status = 200, formState?: {
+          replyDraft?: PullRequestReplyDraft
+          lifecycleDraft?: PullRequestLifecycleDraft
+          lifecycleError?: string
+        }) => {
           try {
             const view = await pullRequestWorkspace(engine.current, query, signal)
-            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-pull-requests.stx'), { ...view, replyDraft })
+            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-pull-requests.stx'), { ...view, ...formState })
             return new Response(renderPullRequestMarkdown(html, view), { status, headers })
           }
           catch { return new Response('Could not load the pull request workspace. Try again.', { status: 503, headers }) }
@@ -1941,6 +1945,20 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
             return new Response(null, { status: 415, headers })
           srv.timeout(request, 150)
+          if (url.pathname === '/pull-requests/lifecycle') {
+            const acceptsJson = request.headers.get('accept') === 'application/json'
+            return updateWorkspacePullRequestLifecycle(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
+              if (!submission) {
+                const message = 'Invalid pull request update. Reopen the request and try again.'
+                return acceptsJson ? Response.json({ message }, { status: 400, headers }) : new Response(message, { status: 400, headers })
+              }
+              const { result, message, location, params, fallback } = submission
+              const statuses = { updated: 200, pending: 202, denied: 403, changed: 409, busy: 409, refused: 422, unavailable: 503 }
+              if (acceptsJson) return Response.json({ result, message, location }, { status: statuses[result], headers })
+              if (result === 'updated') return new Response(null, { status: 303, headers: { ...headers, location } })
+              return render(params, statuses[result], { lifecycleDraft: fallback, lifecycleError: message })
+            })
+          }
           if (url.pathname === '/pull-requests/review') {
             return submitWorkspaceInlineReview(engine.current, url.searchParams, request, signal, reviewReplies).then((submission) => {
               if (!submission) return Response.json({ result: 'invalid', message: 'Check the review text and comments before submitting.' }, { status: 400, headers })
@@ -1961,7 +1979,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
                 const statuses = { posted: 200, pending: 202, invalid: 422, changed: 409, denied: 403, unavailable: 503 }
                 if (acceptsJson) return Response.json({ result, message, comment }, { status: statuses[result], headers: jsonHeaders })
                 if (result === 'posted') return new Response(null, { status: 303, headers: { ...headers, location: submission.location } })
-                return render(submission.params, statuses[result], submission.fallback)
+                return render(submission.params, statuses[result], { replyDraft: submission.fallback })
               })
           }
           const action = url.pathname === '/pull-requests/viewed' ? updateWorkspaceFileViewed : updateWorkspaceReviewConversation

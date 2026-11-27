@@ -1255,6 +1255,84 @@ describe('harness serve — HTTP', () => {
       expect((await sendReview(approved)).status).toBe(200)
       expect(readState().reviewRequests).toBe(4)
       expect(readState().inlineReviews[1].state).toBe('APPROVED')
+
+      const lifecycleView = () => replyHost + '/pull-requests?' + new URLSearchParams({
+        selectedUrl: url, profile: String(profileId), sort: 'oldest', tab: 'code', detailPage: '1',
+        reviewHead: local, reviewBase: base, reviewLine: lineAnchor!,
+      })
+      const lifecycleForm = async () => {
+        const html = await fetch(lifecycleView()).then(response => response.text())
+        const form = html.match(/<form method="post" action="([^"]+)" aria-label="Update pull request"[^>]*>([\s\S]*?)<\/form>/u)
+        if (!form) throw new Error('Missing pull request lifecycle form')
+        return { endpoint: new URL(form[1]!.replaceAll('&amp;', '&'), replyHost), values: Object.fromEntries(
+          [...form[2]!.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)"/gu)].map(field => [field[1]!, field[2]!]),
+        ), html }
+      }
+      const changeLifecycle = (form: Awaited<ReturnType<typeof lifecycleForm>>, action: string, overrides: Record<string, string> = {},
+        accept = 'application/json', origin = replyHost) => fetch(new URL(form.endpoint.pathname + form.endpoint.search, replyHost), {
+        method: 'POST', redirect: 'manual', headers: { accept, origin, 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ ...form.values, action, ...overrides }),
+      })
+      const draftForm = await lifecycleForm()
+      expect(draftForm.html).toContain('Ready for review')
+      expect(draftForm.html).toContain('Confirm close')
+      expect((await fetch(draftForm.endpoint)).status).toBe(405)
+      expect((await changeLifecycle(draftForm, 'ready', {}, 'application/json', 'https://other.example')).status).toBe(403)
+      expect((await changeLifecycle(draftForm, 'destroy')).status).toBe(400)
+      expect((await changeLifecycle(draftForm, 'ready', { base: 'd'.repeat(40) })).status).toBe(409)
+      expect((await changeLifecycle(draftForm, 'ready', { viewer: 'other-account' })).status).toBe(409)
+      expect((await changeLifecycle(draftForm, 'draft')).status).toBe(409)
+      cli.configureLifecycle('readonly')
+      expect((await fetch(lifecycleView()).then(response => response.text()))).not.toContain('aria-label="Pull request actions"')
+      expect((await changeLifecycle(draftForm, 'ready')).status).toBe(403)
+      cli.configureLifecycle('archived')
+      expect((await changeLifecycle(draftForm, 'ready')).status).toBe(403)
+      cli.configureLifecycle('denied')
+      const deniedLifecycle = await changeLifecycle(draftForm, 'ready')
+      expect(deniedLifecycle.status).toBe(403)
+      expect(await deniedLifecycle.text()).not.toContain('Private lifecycle diagnostics')
+      expect(readState().lifecycleWrites ?? 0).toBe(0)
+      cli.configureLifecycle('lost-response')
+      const ready = await changeLifecycle(draftForm, 'ready', {}, 'text/html')
+      expect(ready.status).toBe(303)
+      const readyLocation = new URL(ready.headers.get('location')!, replyHost)
+      expect(readyLocation.searchParams.get('tab')).toBe('code')
+      expect(readyLocation.searchParams.get('reviewLine')).toBe(lineAnchor)
+      expect(readyLocation.searchParams.get('sort')).toBe('oldest')
+      expect(await fetch(readyLocation).then(response => response.text())).toContain('Pull request is ready for review.')
+      expect((await changeLifecycle(draftForm, 'ready', { intent: crypto.randomUUID() })).status).toBe(409)
+      expect((await changeLifecycle(draftForm, 'ready')).status).toBe(200)
+      expect(readState().lifecycleWrites).toBe(1)
+      const openForm = await lifecycleForm()
+      expect(openForm.html).toContain('Convert to draft')
+      cli.configureLifecycle('refused')
+      expect((await changeLifecycle(openForm, 'draft')).status).toBe(422)
+      cli.configureLifecycle('normal')
+      expect((await changeLifecycle(openForm, 'draft')).status).toBe(200)
+      const closeForm = await lifecycleForm()
+      cli.configureLifecycle('unconfirmed')
+      const delayedClose = await changeLifecycle(closeForm, 'close', {}, 'text/html')
+      expect(delayedClose.status).toBe(202)
+      expect(await delayedClose.text()).toContain('Check GitHub again')
+      expect(readState().lifecycleWrites).toBe(3)
+      harness.stop()
+      harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite') })
+      replyHost = 'http://127.0.0.1:' + harness.server.port
+      expect((await changeLifecycle(closeForm, 'close')).status).toBe(202)
+      cli.revealLifecycle()
+      expect((await changeLifecycle(closeForm, 'close')).status).toBe(200)
+      const closedForm = await lifecycleForm()
+      expect(closedForm.html).toContain('Reopen pull request')
+      expect(closedForm.html).not.toContain('Confirm close')
+      cli.configureLifecycle('normal')
+      const reopened = await Promise.all([changeLifecycle(closedForm, 'reopen'), changeLifecycle(closedForm, 'reopen')])
+      expect(reopened.every(response => [200, 409].includes(response.status))).toBe(true)
+      expect((await changeLifecycle(closedForm, 'reopen')).status).toBe(200)
+      const earlierClose = await changeLifecycle(closeForm, 'close')
+      expect(earlierClose.status).toBe(200)
+      expect(await earlierClose.json()).toMatchObject({ message: 'GitHub already confirmed the earlier update.' })
+      expect(readState().lifecycleWrites).toBe(4)
+      expect(readState().pulls[0].state).toBe('open')
     }
     finally {
       process.chdir(previousCwd)

@@ -34,6 +34,18 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     writeFileSync(state, JSON.stringify({ ...previous, reviewMode, reviewAuthor }))
   }
+  const configureLifecycle = (lifecycleMode: 'normal' | 'readonly' | 'archived' | 'denied' | 'refused' | 'lost-response' | 'unconfirmed') => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    writeFileSync(state, JSON.stringify({ ...previous, lifecycleMode }))
+  }
+  const revealLifecycle = () => {
+    const previous = JSON.parse(readFileSync(state, 'utf8'))
+    const { invisibleLifecycle, ...shown } = previous
+    if (invisibleLifecycle) {
+      shown.pulls = shown.pulls.map((pull: { number: number }) => pull.number === invisibleLifecycle.number ? invisibleLifecycle : pull)
+      writeFileSync(state, JSON.stringify(shown))
+    }
+  }
   const revealInlineReview = () => {
     const previous = JSON.parse(readFileSync(state, 'utf8'))
     const { invisibleReview, ...shown } = previous
@@ -115,6 +127,25 @@ if (url.pathname === '/graphql' && method === 'POST') {
     reply(200, { data: { [marked ? 'markFileAsViewed' : 'unmarkFileAsViewed']: { clientMutationId: null } } })
   }
   const viewer = { id: state.viewer || 'fixture-viewer', login: 'fixture-user' }
+  if (query.includes('mutation HarnessSetPullRequestLifecycle')) {
+    const pull = state.pulls.find(pull => 'fixture-pull-' + pull.number === variables.id)
+    const mutation = ['markPullRequestReadyForReview', 'convertPullRequestToDraft', 'closePullRequest', 'reopenPullRequest'].find(key => query.includes(key + '('))
+    if (!pull || !mutation || !process.env.GH_TOKEN || state.lifecycleMode === 'denied')
+      reply(200, { errors: [{ type: 'FORBIDDEN', message: 'Private lifecycle diagnostics' }] })
+    if (state.lifecycleMode === 'refused')
+      reply(200, { errors: [{ type: 'UNPROCESSABLE', message: 'Private lifecycle diagnostics' }] })
+    state.lifecycleWrites = (state.lifecycleWrites || 0) + 1
+    const updated = { ...pull, updated_at: new Date(Date.UTC(2026, 10, 1, 16, 0, state.lifecycleWrites)).toISOString() }
+    if (mutation === 'markPullRequestReadyForReview') updated.draft = false
+    if (mutation === 'convertPullRequestToDraft') updated.draft = true
+    if (mutation === 'closePullRequest') updated.state = 'closed'
+    if (mutation === 'reopenPullRequest') updated.state = 'open'
+    if (state.lifecycleMode === 'unconfirmed') state.invisibleLifecycle = updated
+    else Object.assign(pull, updated)
+    writeFileSync(stateFile, JSON.stringify(state))
+    if (state.lifecycleMode === 'unconfirmed' || state.lifecycleMode === 'lost-response') process.exit(1)
+    reply(200, { data: { [mutation]: { pullRequest: { id: variables.id } } } })
+  }
   const isResolved = Boolean(state.conversationResolved)
   const allowed = state.conversationMode !== 'readonly'
   const thread = { id: 'fixture-conversation', isResolved, viewerCanResolve: allowed && !isResolved,
@@ -154,6 +185,13 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
+  if (query.includes('query HarnessPullRequestLifecycle')) {
+    reply(200, { data: { viewer, repository: { nameWithOwner: name, isArchived: state.lifecycleMode === 'archived', pullRequest: pull ? {
+      id: 'fixture-pull-' + pull.number, number: pull.number, state: pull.merged_at ? 'MERGED' : pull.state.toUpperCase(),
+      isDraft: pull.draft, headRefOid: pull.head.sha, baseRefOid: pull.base.sha, updatedAt: pull.updated_at,
+      viewerCanUpdate: state.lifecycleMode !== 'readonly',
+    } : null } } })
+  }
   if (query.includes('query HarnessPullRequestReviewAccount')) {
     if (!process.env.GH_TOKEN || !pull) reply(404, {})
     reply(200, { data: { viewer, repository: { pullRequest: { viewerDidAuthor: state.reviewAuthor !== false } } } })
@@ -272,5 +310,5 @@ if (state.mode === 'lost-response') process.exit(1)
 reply(201, pull)
 `, { mode: 0o700 })
   return { bin, state, configure, configureChecks, configureViewed, configureConversations, configureReplies, configureCommentPages,
-    revealReply, configureInlineReviews, revealInlineReview }
+    revealReply, configureInlineReviews, revealInlineReview, configureLifecycle, revealLifecycle }
 }

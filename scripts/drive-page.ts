@@ -6612,6 +6612,45 @@ try {
       && posted.inlineReviews[0].comments[0].start_line === 2 && posted.inlineReviews[0].comments[0].line === 3
       && posted.inlineReviews[0].comments[1].side === 'LEFT'
       && await clonePage.getByRole('button', { name: 'Review pull request', exact: true }).isVisible())
+    const lifecycleMenu = clonePage.locator('[data-pr-lifecycle-menu]')
+    const actions = clonePage.getByRole('button', { name: 'Pull request actions', exact: true })
+    const closeTrigger = lifecycleMenu.getByRole('button', { name: 'Close pull request', exact: true })
+    const confirmClose = clonePage.getByRole('button', { name: 'Confirm close', exact: true })
+    const lifecycleStatus = (text: string) => clonePage.locator('[data-pr-lifecycle-message]').getByText(text, { exact: true })
+    const pullState = () => JSON.parse(readFileSync(github.state, 'utf8'))
+    await actions.press('Enter')
+    await closeTrigger.press('Enter')
+    await confirmClose.waitFor()
+    await capture('pull-requests-lifecycle-close-390x844', clonePage)
+    await clonePage.keyboard.press('Escape')
+    check('Escape dismisses close confirmation and returns focus without writing to GitHub',
+      await confirmClose.isHidden()
+      && await closeTrigger.evaluate(element => element === document.activeElement)
+      && pullState().lifecycleWrites === undefined)
+    await lifecycleMenu.getByRole('button', { name: 'Ready for review', exact: true }).click()
+    await lifecycleStatus('Pull request is ready for review.').waitFor()
+    check('marking a draft ready keeps Code and the selected diff range intact',
+      new URL(clonePage.url()).searchParams.get('tab') === 'code'
+      && await filePatch.locator('[data-pr-line-row][data-selected]').count() === 2
+      && pullState().pulls[0].draft === false)
+    await actions.click()
+    await lifecycleMenu.getByRole('button', { name: 'Convert to draft', exact: true }).click()
+    await lifecycleStatus('Pull request converted to draft.').waitFor()
+    await actions.click()
+    await closeTrigger.click()
+    github.configureLifecycle('unconfirmed')
+    await confirmClose.click()
+    const checkLifecycle = clonePage.getByRole('button', { name: 'Check GitHub again', exact: true })
+    await checkLifecycle.waitFor()
+    github.revealLifecycle()
+    await checkLifecycle.click()
+    await lifecycleStatus('Pull request closed.').waitFor()
+    github.configureLifecycle('normal')
+    await actions.click()
+    await lifecycleMenu.getByRole('button', { name: 'Reopen pull request', exact: true }).click()
+    await lifecycleStatus('Pull request reopened.').waitFor()
+    check('the draft, close, and reopen transitions are confirmed on GitHub without a repeated close',
+      pullState().lifecycleWrites === 4 && pullState().pulls[0].state === 'open' && pullState().pulls[0].draft === true)
     await clonePage.setViewportSize({ width: 1280, height: 800 })
 
     await clonePage.getByRole('link', { name: 'Back to list', exact: true }).click()

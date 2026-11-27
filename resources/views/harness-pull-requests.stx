@@ -57,6 +57,10 @@ export const inlineReviewStorage = 'harness.pr-review.v1:' + JSON.stringify([act
 export const inlineReviewNotice = $props.inlineReviewNotice
 export const inlineReviewAction = $props.inlineReviewAction
 export const inlineReviewEditId = $props.inlineReviewEdit
+export const lifecycleEndpoint = $props.lifecycleEndpoint
+export const lifecycleNotice = $props.lifecycleNotice
+export const lifecycleError = $props.lifecycleError
+export const lifecyclePending = $props.lifecycleDraft || null
 export const conversations = (selected?.files || []).flatMap(file => file.sections.flatMap(section => section.conversations)).concat(selected?.detachedConversations || [])
 export const initialConversationStates = Object.fromEntries(conversations.map(thread => [thread.anchor, {
   isResolved: thread.isResolved, viewerCanResolve: thread.viewerCanResolve, viewerCanUnresolve: thread.viewerCanUnresolve,
@@ -816,7 +820,11 @@ async function sendReviewReply(event) {
                 <a href="{{ selected.startHref }}" data-pr-button>Open as thread</a>
               @endif
               <a href="{{ selected.url }}" target="_blank" rel="noopener noreferrer">Open on GitHub</a>
+              @include('../partials/harness-pr-lifecycle')
             </div>
+            @if(lifecycleNotice || lifecycleError)
+              <p data-pr-lifecycle-message role="status">{{ lifecycleError || lifecycleNotice }}</p>
+            @endif
           @endif
         </div>
         @if(selectionError || !selected?.title)

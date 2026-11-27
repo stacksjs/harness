@@ -7,6 +7,8 @@ import { resolveProjectRepository, scanProjectRepositories } from './project-rep
 import { parsePullRequest, repositoryFromRemote } from './prompt-links'
 import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewLineSelection, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
 import { findPullRequestThread } from './pull-request-links'
+import type { LifecycleAction } from './pull-request-lifecycle'
+import { availableLifecycleActions, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, readPullRequestLifecycle, writePullRequestLifecycle } from './pull-request-lifecycle'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
 import { readRepositoryBody, repositoryGit } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -276,13 +278,22 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     const tabData = tab === 'timeline' ? readActivity(selectionRepo, data, detailPage, signal)
       : tab === 'code' ? readFiles(selectionRepo, data, detailPage, signal, query)
         : readRepositoryPullRequestChecks(selectionRepo.path, { ...selection, repositoryKey: '' }, signal)
-    const extra = await tabData.catch(error => ({ error: message(error) }))
+    const [extra, current] = await Promise.all([
+      tabData.catch(error => ({ error: message(error) })),
+      readPullRequestLifecycle(selectionRepo.path, selectionRepo.name, data.number, signal).catch(() => null),
+    ])
     const result = 'checks' in extra ? extra.head === data.head
       ? { checks: extra.checks, truncated: extra.truncated }
       : { error: 'The pull request head changed during the read. Refresh to load its current checks.' }
       : extra
     const session = findPullRequestThread(state, selection, profile)
-    return { ...data, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
+    const currentStatus = current?.state === 'OPEN' ? current.isDraft ? 'Draft' : 'Open'
+      : current?.state === 'CLOSED' ? 'Closed' : 'Merged'
+    const lifecycle = current && current.headRefOid === data.head && current.baseRefOid === data.baseSha && currentStatus === data.status
+      ? { viewer: current.viewer, revision: lifecycleRevision(current), token: crypto.randomUUID(),
+          actions: availableLifecycleActions(current).map(action => ({ action, label: lifecycleActions[action].label })) }
+      : null
+    return { ...data, lifecycle, thread: session ? { href: '/s/' + session.id, title: threadTitle(session) } : null,
       startHref: '/new?' + new URLSearchParams({ pr: data.url, profile: String(profile) }), ...result }
   })().catch(error => ({ error: message(error) })) : Promise.resolve(null)
 
@@ -305,6 +316,8 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   const selectedUrl = selection?.url ?? ''
   const detailsHref = (detailTab: string, nextPage = 1) => href({ selectedUrl, tab: detailTab, detailPage: nextPage })
   const commentsBase = detailsHref('code', detailPage)
+  const lifecycleParams = new URLSearchParams(detailsHref(tab, detailPage).split('?')[1])
+  if (tab === 'code') carryReviewView(query, lifecycleParams)
   const reviewAction = (action: string) => {
     const actionParams = new URLSearchParams(commentsBase.split('?')[1])
     carryReviewView(query, actionParams)
@@ -335,18 +348,20 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     inlineReviewAction: reviewAction('review'),
     inlineReviewNotice: query.get('reviewResult') === 'posted' ? 'Review submitted to GitHub.' : '',
     inlineReviewEdit: reviewCommentCursor(query.get('reviewEdit')) ?? '',
+    lifecycleEndpoint: '/pull-requests/lifecycle?' + lifecycleParams,
+    lifecycleNotice: lifecycleSuccess(query.get('lifecycleResult')),
     commentsBase,
     commentsAction: commentsBase.replace('/pull-requests?', '/pull-requests/comments?'),
   }
 }
 
-function reviewReturnParams(query: URLSearchParams, profile: number, url: string) {
-  const params = new URLSearchParams({ profile: String(profile), selectedUrl: url, tab: 'code' })
+function reviewReturnParams(query: URLSearchParams, profile: number, url: string, tab: typeof tabs[number] = 'code') {
+  const params = new URLSearchParams({ profile: String(profile), selectedUrl: url, tab })
   for (const key of ['state', 'sort', 'q', 'repository', 'page', 'detailPage']) {
     const value = query.get(key)
     if (value && value.length <= 512) params.set(key, value)
   }
-  carryReviewView(query, params)
+  if (tab === 'code') carryReviewView(query, params)
   return params
 }
 
@@ -364,6 +379,91 @@ async function readReviewSubmission(state: HarnessState, query: URLSearchParams,
 async function reviewRepository(state: HarnessState, profile: number, repository: string, signal: AbortSignal) {
   const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
   return (await trustedRepositories(workspaces, signal)).get(repository.toLowerCase())
+}
+
+const lifecycleMessages = {
+  changed: 'The pull request or GitHub account changed. Review its current state before trying again.',
+  unavailable: 'Could not reach GitHub. Try again when the host is connected.',
+  denied: 'This GitHub account cannot update the pull request.',
+  refused: 'GitHub refused this transition. Check the pull request on GitHub for more details.',
+  busy: 'A pull request update is in progress. Try again shortly.',
+  pending: 'GitHub has yet to confirm this update. Check GitHub again to recover its result.',
+}
+
+function lifecycleSuccess(value: string | null) {
+  if (value === 'confirmed') return 'GitHub already confirmed the earlier update.'
+  const action = lifecycleAction(value)
+  return action ? lifecycleActions[action].success : ''
+}
+
+export type PullRequestLifecycleDraft = { action: LifecycleAction, revision: string, token: string, head: string, base: string, viewer: string, message: string }
+
+const lifecycleWrites = new Set<string>()
+
+export async function updateWorkspacePullRequestLifecycle(state: HarnessState, query: URLSearchParams, request: Request, signal: AbortSignal,
+  receipts: PullRequestReplyReceipts) {
+  const submission = await readReviewSubmission(state, query, request)
+  if (!submission) return null
+  const { profile, selection, values, head, viewer } = submission
+  const action = lifecycleAction(values.get('action'))
+  const base = values.get('base') ?? ''
+  const token = values.get('intent') ?? ''
+  const revision = values.get('revision') ?? ''
+  if (!action || !/^[0-9a-f]{40}$/u.test(base) || !/^[0-9a-f]{64}$/u.test(revision)
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(token)) return null
+  const tab = tabs.find(value => query.get('tab') === value) ?? 'summary'
+  const params = reviewReturnParams(query, profile, selection.url, tab)
+  const finish = (result: 'updated' | keyof typeof lifecycleMessages, previous = false) => {
+    const message = result === 'updated' ? lifecycleSuccess(previous ? 'confirmed' : action) : lifecycleMessages[result]
+    const fallback: PullRequestLifecycleDraft | undefined = result === 'pending' ? { action, revision, token, head, base, viewer, message } : undefined
+    const target = new URLSearchParams(params)
+    if (result === 'updated') target.set('lifecycleResult', previous ? 'confirmed' : action)
+    return { result, message, fallback, params, location: '/pull-requests?' + target + '#pr-lifecycle' }
+  }
+  const key = selection.repository.toLowerCase() + '#' + selection.number
+  if (lifecycleWrites.has(key)) return finish('busy')
+  lifecycleWrites.add(key)
+  let attempted = false
+  try {
+    const repository = await reviewRepository(state, profile, selection.repository, signal)
+    if (!repository || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const credential = await repositoryGitHubCredential(repository.path, signal)
+    const read = () => readPullRequestLifecycle(repository.path, repository.name, selection.number, signal, credential)
+    const before = await read()
+    if (!before) return finish('unavailable')
+    if (before.viewer.id !== viewer || !stillTrusted(state, repository.workspace)) return finish('changed')
+    const fingerprint = createHash('sha256').update(JSON.stringify(['lifecycle', profile, repository.workspace.id, key,
+      before.id, viewer, action, revision, head, base])).digest('hex')
+    const result = receipts.inspect(token, fingerprint)
+    if (result === 'confirmed') return finish('updated', !lifecycleTargetReached(before, action))
+    if (result === 'conflict' || before.headRefOid !== head || before.baseRefOid !== base) return finish('changed')
+    if (result === 'pending') {
+      if (!lifecycleTargetReached(before, action)) return finish('pending')
+      receipts.confirm(token, fingerprint)
+      return finish('updated')
+    }
+    if (!before.viewerCanUpdate) return finish('denied')
+    if (revision !== lifecycleRevision(before) || !availableLifecycleActions(before).includes(action)) return finish('changed')
+    const claimed = receipts.claim(token, fingerprint, true)
+    if (claimed === 'confirmed') return finish('updated', !lifecycleTargetReached(before, action))
+    if (claimed === 'conflict') return finish('changed')
+    if (claimed !== 'claimed') return finish('pending')
+    attempted = true
+    const write = await writePullRequestLifecycle(repository.path, before.id, action, signal, credential)
+    if (write === 'denied' || write === 'refused') {
+      receipts.reject(token, fingerprint)
+      return finish(write)
+    }
+    const after = await read()
+    if (!after) return finish('pending')
+    if (after.viewer.id !== viewer || after.id !== before.id || after.headRefOid !== head || after.baseRefOid !== base
+      || !stillTrusted(state, repository.workspace)) return finish('changed')
+    if (!lifecycleTargetReached(after, action)) return finish('pending')
+    receipts.confirm(token, fingerprint)
+    return finish('updated')
+  }
+  catch { return finish(attempted ? 'pending' : 'unavailable') }
+  finally { lifecycleWrites.delete(key) }
 }
 
 function renderReviewComment(comment: ReviewComment) {
