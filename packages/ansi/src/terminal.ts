@@ -155,6 +155,69 @@ export interface TerminalOptions {
 }
 
 type ShellPhase = 'unavailable' | 'prompt' | 'ready' | 'running'
+type Position = { x: number, y: number }
+type Screen = Position & {
+  grid: TerminalRow[]
+  wrap?: boolean
+  cursor?: Position | null
+}
+
+function visibleCell(cell: Cell): boolean {
+  return cell.ch !== ' ' || cell.style.bg !== null || cell.style.inverse
+    || cell.style.underline || cell.style.strike || cell.style.link !== undefined
+}
+
+/** Join recorded soft wraps and map each position by its offset in the line. */
+function reflowRows(rows: TerminalRow[], cols: number, points: Position[], deferredWrap: boolean): {
+  rows: TerminalRow[], points: Position[], wrap: boolean
+} {
+  const result: TerminalRow[] = []
+  const mapped: Position[] = []
+  let pendingWrap = false
+  let line: Cell[] = []
+  let incomplete = false
+  let last = -1
+
+  function finishLine() {
+    const count = Math.max(1, Math.ceil(line.length / cols), last + 1)
+    for (let index = 0; index < count; index++) {
+      const row: TerminalRow = line.slice(index * cols, (index + 1) * cols)
+      if (row.length < cols) row.push(...blankRow(cols - row.length))
+      if (index > 0) row.wrapFrom = cols
+      else if (incomplete) row.wrapFrom = -1
+      result.push(row)
+    }
+    line = []
+    incomplete = false
+    last = -1
+  }
+
+  for (const [index, row] of rows.entries()) {
+    if (line.length === 0 && row.wrapFrom !== undefined) incomplete = true
+    const nextWidth = rows[index + 1]?.wrapFrom
+    const soft = nextWidth !== undefined && nextWidth >= 2 && nextWidth <= row.length
+      && (nextWidth === row.length || !row.slice(nextWidth).some(visibleCell))
+    const width = soft ? nextWidth : row.findLastIndex(visibleCell) + 1
+    const offset = line.length
+
+    for (const [key, point] of points.entries()) {
+      if (point.y !== index) continue
+      // The live cursor is first. Saved positions represent a cell, not a pending write.
+      const deferred = key === 0 && deferredWrap
+      const insertion = offset + point.x + Number(deferred)
+      const onBoundary = deferred && insertion % cols === 0
+      const column = onBoundary ? insertion - 1 : insertion
+      const rowIndex = Math.floor(column / cols)
+      mapped[key] = { x: column % cols, y: result.length + rowIndex }
+      last = Math.max(last, rowIndex)
+      if (key === 0) pendingWrap = onBoundary
+    }
+
+    line.push(...row.slice(0, width))
+    if (!soft) finishLine()
+  }
+  return { rows: result, points: mapped, wrap: pendingWrap }
+}
 
 export class Terminal {
   private _cols: number
@@ -188,8 +251,8 @@ export class Terminal {
   private lastExitStatus: number | null = null
 
   /** The main buffer, parked while the alternate screen is active. */
-  private savedMain: { grid: TerminalRow[], x: number, y: number } | null = null
-  private savedCursor: { x: number, y: number } | null = null
+  private savedMain: Screen | null = null
+  private savedCursor: Position | null = null
 
   constructor(options: TerminalOptions = {}) {
     this._cols = Math.max(2, options.cols ?? 80)
@@ -305,64 +368,83 @@ export class Terminal {
     try { rows = JSON.parse(saved) }
     catch { return false }
     if (!Array.isArray(rows) || rows.length > this.scrollbackLimit || !rows.every(validHistoryRow)) return false
-    for (const row of rows) this.rememberRow(unpackHistoryRow(row))
+    const history = rows.map(unpackHistoryRow)
+    const restored = history.some(row => row.length !== this.cols)
+      ? reflowRows(history, this.cols, [], false).rows : history
+    for (const row of restored.slice(Math.max(0, restored.length - this.scrollbackLimit))) this.rememberRow(row)
     return rows.length > 0
   }
 
-  /**
-   * Change the grid's dimensions in place, the way a real terminal does on
-   * SIGWINCH: no reflow. Rows pad or truncate to the new width; growing adds
-   * blank rows at the bottom; shrinking pushes rows off the *top* into
-   * scrollback, so the cursor's neighbourhood — the part being looked at —
-   * survives. Scrollback keeps its historical widths, which the renderer
-   * already tolerates.
-   */
+  /** Reflow main output at the new width. The alternate screen is a fixed grid. */
   resize(cols: number, rows: number): void {
     const nextCols = Math.max(2, Math.floor(cols))
     const nextRows = Math.max(1, Math.floor(rows))
     if (nextCols === this._cols && nextRows === this._rows) return
 
-    const fit = (grid: TerminalRow[]): TerminalRow[] => grid.map((row) => {
-      if (row.length === nextCols) return row
-      const fitted: TerminalRow = row.slice(0, nextCols)
-      if (fitted.length < nextCols) fitted.push(...blankRow(nextCols - fitted.length))
-      if (row.wrapFrom !== undefined) {
-        const clipped = row.wrapFrom > nextCols || row.slice(nextCols).some(cell => cell.ch !== ' ')
-        fitted.wrapFrom = clipped ? -1 : row.wrapFrom
-      }
-      return fitted
-    })
-
-    this.grid = fit(this.grid)
-    if (this.savedMain) this.savedMain.grid = fit(this.savedMain.grid)
-
-    const fitRows = (grid: TerminalRow[], intoScrollback: boolean): { grid: TerminalRow[], removed: number } => {
-      let removed = 0
-      while (grid.length > nextRows) {
-        const top = grid.shift()
-        removed++
-        if (intoScrollback && top) this.rememberRow(top)
-      }
-      while (grid.length < nextRows) grid.push(blankRow(nextCols))
-      return { grid, removed }
-    }
-
-    // The alternate screen has no scrollback by design; its rows just drop.
-    const main = fitRows(this.grid, !this.onAltScreen)
-    this.grid = main.grid
-    this.y = Math.max(0, this.y - main.removed)
+    const current = { grid: this.grid, x: this.x, y: this.y, wrap: this.pendingWrap, cursor: this.savedCursor }
+    let screen: Screen
     if (this.savedMain) {
-      const saved = fitRows(this.savedMain.grid, this.onAltScreen === true)
-      this.savedMain.grid = saved.grid
-      this.savedMain.y = Math.min(Math.max(0, this.savedMain.y - saved.removed), nextRows - 1)
-      this.savedMain.x = Math.min(this.savedMain.x, nextCols - 1)
+      this.savedMain = this.resizeMain(this.savedMain, nextCols, nextRows)
+      screen = this.resizeAlternate(current, nextCols, nextRows)
     }
+    else screen = this.resizeMain(current, nextCols, nextRows)
 
     this._cols = nextCols
     this._rows = nextRows
-    this.x = Math.min(this.x, nextCols - 1)
-    this.y = Math.min(this.y, nextRows - 1)
-    this.pendingWrap = false
+    this.grid = screen.grid
+    this.x = screen.x
+    this.y = screen.y
+    this.pendingWrap = screen.wrap ?? false
+    this.savedCursor = screen.cursor ?? null
+  }
+
+  private resizeMain(screen: Screen, cols: number, rows: number): Screen {
+    const last = Math.max(screen.y, screen.cursor?.y ?? 0,
+      screen.grid.findLastIndex(row => row.wrapFrom !== undefined || row.some(visibleCell)))
+    const drawn = screen.grid.slice(0, last + 1)
+    if (cols === this.cols) {
+      const top = Math.min(screen.y, Math.max(0, drawn.length - rows))
+      for (const row of drawn.slice(0, top)) this.rememberRow(row)
+      const grid = drawn.slice(top, top + rows)
+      while (grid.length < rows) grid.push(blankRow(cols))
+      const cursor = screen.cursor && { x: screen.cursor.x, y: clamp(screen.cursor.y - top, 0, rows - 1) }
+      return { ...screen, grid, y: screen.y - top, cursor }
+    }
+
+    const historyLength = this.scrollback.length
+    const points = [{ x: screen.x, y: historyLength + screen.y }, { x: 0, y: historyLength }]
+    if (screen.cursor) points.push({ x: screen.cursor.x, y: historyLength + screen.cursor.y })
+    const layout = reflowRows([...this.scrollback, ...drawn], cols, points, screen.wrap ?? false)
+    const [active, visibleStart, saved] = layout.points
+    // Keep the active cursor on screen even when content below it wraps.
+    const top = Math.min(active!.y, Math.max(visibleStart!.y, layout.rows.length - rows))
+    this.scrollback = []
+    this.scrollbackRowBytes = []
+    this.scrollbackBytes = 0
+    for (const row of layout.rows.slice(Math.max(0, top - this.scrollbackLimit), top)) this.rememberRow(row)
+    const grid = layout.rows.slice(top, top + rows)
+    while (grid.length < rows) grid.push(blankRow(cols))
+    const cursor = saved && { x: saved.x, y: clamp(saved.y - top, 0, rows - 1) }
+    return { grid, x: active!.x, y: active!.y - top, wrap: layout.wrap, cursor }
+  }
+
+  private resizeAlternate(screen: Screen, cols: number, rows: number): Screen {
+    const top = Math.max(0, this.rows - rows)
+    const grid = screen.grid.slice(top).map((row, index) => {
+      if (row.length === cols) return row
+      const fitted: TerminalRow = row.slice(0, cols)
+      if (fitted.length < cols) fitted.push(...blankRow(cols - fitted.length))
+      if (row.wrapFrom !== undefined) {
+        const previous = screen.grid[top + index - 1]
+        const clipped = row.wrapFrom > cols || row.slice(cols).some(visibleCell)
+        fitted.wrapFrom = clipped || !previous ? -1 : row.wrapFrom
+      }
+      return fitted
+    })
+    while (grid.length < rows) grid.push(blankRow(cols))
+    const cursor = screen.cursor && { x: Math.min(screen.cursor.x, cols - 1), y: clamp(screen.cursor.y - top, 0, rows - 1) }
+    return { grid, x: Math.min(screen.x, cols - 1), y: clamp(screen.y - top, 0, rows - 1),
+      wrap: screen.wrap && cols === this.cols, cursor }
   }
 
   write(text: string): void {
@@ -609,10 +691,12 @@ export class Terminal {
 
   private enterAlt(): void {
     if (this.onAltScreen) return
-    this.savedMain = { grid: this.grid, x: this.x, y: this.y }
+    this.savedMain = { grid: this.grid, x: this.x, y: this.y, wrap: this.pendingWrap, cursor: this.savedCursor }
     this.grid = Array.from({ length: this.rows }, () => blankRow(this.cols))
     this.x = 0
     this.y = 0
+    this.pendingWrap = false
+    this.savedCursor = null
   }
 
   private exitAlt(): void {
@@ -620,6 +704,8 @@ export class Terminal {
     this.grid = this.savedMain.grid
     this.x = this.savedMain.x
     this.y = this.savedMain.y
+    this.pendingWrap = this.savedMain.wrap ?? false
+    this.savedCursor = this.savedMain.cursor ?? null
     this.savedMain = null
   }
 

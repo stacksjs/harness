@@ -99,7 +99,7 @@ it('requires a complete soft wrap and keeps explicit line feeds separate', () =>
   expect(toHtml(space.snapshot(true), true)).toContain('href="' + url + '/"')
 })
 
-it('retains links after expansion and rejects clipped wraps across resize and restore', () => {
+it('retains the complete wrapped link through narrowing, widening, and restore', () => {
   const options = { cols: 20, rows: 4, scrollback: 10 }
   const url = 'https://example.test/more/longer-url'
   const t = new Terminal(options)
@@ -107,11 +107,13 @@ it('retains links after expansion and rejects clipped wraps across resize and re
   t.resize(44, 4)
   expect(toHtml(t.snapshot(true), true)).toContain('href="' + url + '"')
   t.resize(12, 4)
+  expect(toHtml(t.snapshot(true), true)).toContain('href="' + url + '"')
   t.resize(44, 4)
-  expect(toHtml(t.snapshot(true), true)).not.toContain('<a ')
+  expect(t.toText()).toBe(url)
   const restored = new Terminal(options)
   expect(restored.restoreHistory(t.saveHistory())).toBe(true)
-  expect(toHtml(restored.snapshot(true), true)).not.toContain('<a ')
+  expect(restored.scrollback.every(row => row.length === options.cols)).toBe(true)
+  expect(toHtml(restored.snapshot(true), true)).toContain('href="' + url + '"')
 })
 
 it('loads old main-screen rows without reviving the previous shell’s modes', () => {
@@ -468,22 +470,73 @@ describe('resize', () => {
     expect(term.toText()).toContain('four!')
   })
 
-  it('truncates and clamps the cursor when narrowing', () => {
+  it('wraps text when narrowing and keeps the insertion point after it', () => {
     const term = new Terminal({ cols: 20, rows: 2 })
     term.write('0123456789abcdefghij')
     term.resize(8, 2)
     expect(term.cols).toBe(8)
-    expect(term.toText()).toBe('01234567')
-    // Writing after the clamp must not throw or land off-grid.
+    expect(term.toText()).toBe('01234567\n89abcdef\nghij')
     term.write('X')
-    expect(term.toText().length).toBeGreaterThan(0)
+    expect(term.toText()).toBe('01234567\n89abcdef\nghijX')
+    term.resize(40, 2)
+    expect(term.toText()).toBe('0123456789abcdefghijX')
   })
 
-  it('is SIGWINCH-shaped: no reflow, scrollback keeps its historical width', () => {
+  it('reflows scrollback and joins a previously wrapped line across the viewport boundary', () => {
     const term = new Terminal({ cols: 12, rows: 2, scrollback: 10 })
-    term.write('wide-history\r\n\r\n\r\n')
+    term.write('wide-history-line\r\nseparate')
     term.resize(6, 2)
-    const historical = term.scrollback[0] ?? []
-    expect(historical.length).toBe(12)
+    expect(term.toText()).toBe('wide-h\nistory\n-line\nsepara\nte')
+    expect(term.scrollback.every(row => row.length === 6)).toBe(true)
+    term.resize(32, 2)
+    expect(term.toText()).toBe('wide-history-line\nseparate')
+  })
+
+  it('keeps a deferred wrap and maps a saved cursor in the same logical line', () => {
+    const term = new Terminal({ cols: 12, rows: 3 })
+    term.write('abcdef\x1b7ghijkl')
+    term.resize(4, 3)
+    expect(term.checkpoint().wrap).toBe(true)
+    term.write('m')
+    expect(term.toText()).toBe('abcd\nefgh\nijkl\nm')
+
+    const saved = new Terminal({ cols: 12, rows: 3 })
+    saved.write('abcde\x1b7fghijk')
+    saved.resize(4, 4)
+    saved.write('\x1b8!')
+    expect(saved.toText()).toBe('abcd\ne!gh\nijk')
+  })
+
+  it('preserves styled blank cells and cursor positioning past the last visible character', () => {
+    const term = new Terminal({ cols: 12, rows: 2 })
+    term.write('start\x1b[41m  \x1b[0m\x1b[11G')
+    term.resize(4, 4)
+    term.write('!')
+    expect(term.toText()).toBe('star\nt\n  !')
+    expect(term.viewport()[1]?.slice(1, 3).map(cell => cell.style.bg)).toEqual([1, 1])
+  })
+
+  it('keeps the alternate grid fixed and reflows the parked main buffer', () => {
+    const term = new Terminal({ cols: 12, rows: 2 })
+    term.write('abcdefghijkl\x1b[?1049hSCREEN')
+    term.resize(4, 3)
+    expect(term.toText()).toBe('SCRE')
+    const restored = Terminal.fromCheckpoint(JSON.parse(JSON.stringify(term.checkpoint())))
+    restored.write('\x1b[?1049l!')
+    expect(restored.toText()).toBe('abcd\nefgh\nijkl\n!')
+  })
+
+  it('does not create a link from a clipped legacy line or join unrelated history', () => {
+    const term = new Terminal({ cols: 22, rows: 3, scrollback: 4 })
+    term.write('https://example.test/partial-data ')
+    const checkpoint = term.checkpoint()
+    const legacy = Terminal.fromCheckpoint({ ...checkpoint, gridWraps: [0, -1, 0] })
+    legacy.resize(44, 3)
+    expect(toHtml(legacy.snapshot(true), true)).not.toContain('<a ')
+
+    const short = new Terminal({ cols: 8, rows: 1, scrollback: 1 })
+    short.write('lost-head on this line https://example.test/remaining  ')
+    short.resize(32, 2)
+    expect(toHtml(short.snapshot(true), true)).not.toContain('<a ')
   })
 })
