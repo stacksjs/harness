@@ -71,7 +71,9 @@ describe('dashboard sidebar data', () => {
       },
     ])
     const dataItems = sections.find(([id]) => id === 'data')?.[2] ?? []
-    const auditItem = dataItems.find(item => item.id === 'models-more')?.children?.find(item => item.to === '/models/audit-log')
+    const models = dataItems.find(item => item.id === 'models')
+    expect(models).toMatchObject({ to: '/models', text: 'All Models', expanded: false })
+    const auditItem = models?.children?.find(item => item.to === '/models/audit-log')
 
     expect(auditItem).toEqual({
       to: '/models/audit-log',
@@ -92,15 +94,17 @@ describe('dashboard sidebar data', () => {
     ]
     const items = buildNavSections(models).find(([id]) => id === 'data')![2]
     expect(items.filter(item => item.to.startsWith('/models/')).map(item => item.to)).toEqual(['/models/z', '/models/a', '/models/c'])
-    const more = items.find(item => item.id === 'models-more')!
-    expect(more.expanded).toBe(false)
-    expect(more.children?.map(item => item.to)).toEqual(['/models/b'])
+    const allModels = items.find(item => item.id === 'models')
+    expect(allModels).toMatchObject({ to: '/models', expanded: false })
+    expect(allModels?.children?.map(item => item.to)).toEqual(['/models/b'])
     const allPinned = buildNavSections(models.filter(model => model.dashboard?.highlight)).find(([id]) => id === 'data')![2]
-    expect(allPinned.some(item => item.id === 'models-more')).toBe(false)
+    const registry = allPinned.find(item => item.id === 'models')
+    expect(registry?.to).toBe('/models')
+    expect(registry?.children).toBeUndefined()
   })
 
   it('retains role gates on nested model rows', () => {
-    expect(webSidebarRoleMap([{ id: 'data', label: 'Data', items: [{ id: 'models-more', label: 'More models', icon: '', iconColor: '', children: [{ id: 'models-private', label: 'Restricted', icon: '', iconColor: '', roles: ['admin'] }] }] }]))
+    expect(webSidebarRoleMap([{ id: 'data', label: 'Data', items: [{ id: 'models', label: 'All Models', icon: '', iconColor: '', children: [{ id: 'models-private', label: 'Restricted', icon: '', iconColor: '', roles: ['admin'] }] }] }]))
       .toEqual({ 'models-private': ['admin'] })
   })
 
