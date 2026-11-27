@@ -85,7 +85,8 @@ export function pullRequestLiveSearch(input: HTMLInputElement, results: HTMLElem
         if (address) link.setAttribute(attribute, withCurrentPullRequestQuery(address, browser.location))
       }
       applied(result)
-      status(fragment.querySelector('[data-pr-empty]')?.textContent?.trim() ?? 'Pull requests updated.')
+      const count = fragment.querySelectorAll('[data-pr-row]').length
+      status(count === 1 ? '1 pull request shown.' : count + ' pull requests shown.')
     }
     catch {
       if (!controller.signal.aborted) status('Could not update pull requests. Edit your search or press Enter to retry.')
