@@ -304,6 +304,7 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   if (repository) params.set('repository', repository.name)
   const clearFiltersHref = '/pull-requests?' + new URLSearchParams(params)
   writePullRequestFilters(params, menu)
+  const savedViewScope = params.toString()
   if (page > 1) params.set('page', String(page))
   const href = (overrides: Record<string, string | number> = {}) => {
     const next = new URLSearchParams(params)
@@ -408,6 +409,13 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
   signal.throwIfAborted()
   if ([...repositories.values()].some(item => !stillTrusted(state, item.workspace))) throw new RepositoryPullRequestError('The trusted projects changed while loading pull requests.')
   const selectedUrl = selection?.url ?? ''
+  const savedViewDetail = new URLSearchParams()
+  if (selectionRepo) {
+    savedViewDetail.set('selectedUrl', selectedUrl)
+    savedViewDetail.set('tab', tab)
+    if (detailPage > 1) savedViewDetail.set('detailPage', String(detailPage))
+    if (tab === 'code') carryReviewView(query, savedViewDetail)
+  }
   const detailsHref = (detailTab: string, nextPage = 1) => href({ selectedUrl, tab: detailTab, detailPage: nextPage })
   const commentsBase = detailsHref('code', detailPage)
   const lifecycleParams = new URLSearchParams(detailsHref(tab, detailPage).split('?')[1])
@@ -429,7 +437,8 @@ export async function pullRequestWorkspace(state: HarnessState, query: URLSearch
     filter, filters: menu, draftChoice: filters.draft, choices, clearFiltersHref, incompleteSearch, cappedSearch, sort, search, page, tab, detailPage, rows: rows.map(marks), failures,
     pageBack: page > 1 ? href({ page: page - 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
     pageNext: nextPage && page < MAX_LIST_PAGE ? href({ page: page + 1, ...(selectedUrl && { selectedUrl, tab }) }) : '',
-    selected, selectionError: query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
+    selected, savedViewScope, savedViewDetail: savedViewDetail.toString(),
+    selectionError: query.has('selectedUrl') && !selectionRepo ? 'Choose a pull request in a trusted GitHub project in this profile.' : '',
     listHref: href(), summaryHref: detailsHref('summary'), timelineHref: detailsHref('timeline'), codeHref: detailsHref('code'),
     detailBack: detailsHref(tab, detailPage - 1), detailNext: detailsHref(tab, detailPage + 1),
     viewedAction: reviewAction('viewed'),

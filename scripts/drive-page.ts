@@ -6755,7 +6755,8 @@ try {
     try {
       await clonePage.setViewportSize({ width: 390, height: 844 })
       const filters = reviewList.locator('[data-pr-filters]')
-      await filters.locator('summary').press('Enter')
+      const additionalFilters = filters.locator('[data-pr-additional-filters] > summary')
+      await additionalFilters.press('Enter')
       await filters.getByRole('combobox', { name: 'Draft', exact: true }).selectOption('only')
       await filters.getByRole('combobox', { name: 'Review', exact: true }).selectOption('none')
       await filters.getByRole('combobox', { name: 'Checks', exact: true }).selectOption('passing')
@@ -6782,7 +6783,33 @@ try {
       await reviewList.locator('[data-pr-row]').getByText(/Verify the draft pull request/).waitFor()
       check('typed PR search handles OR labels, exclusions, viewer alias, and literal title words',
         await reviewList.locator('[data-pr-row]').count() === 1 && await search.inputValue() === typed)
-      await filters.locator('summary').press('Enter')
+      const savedViews = filters.locator('[data-pr-views] > summary')
+      const saveView = filters.getByRole('button', { name: 'Save current view…', exact: true })
+      const viewName = clonePage.getByRole('textbox', { name: 'Name', exact: true })
+      const viewSave = clonePage.getByRole('button', { name: 'Save view', exact: true })
+      await savedViews.press('ArrowDown')
+      check('the saved PR views disclosure can be opened and navigated by keyboard',
+        await saveView.evaluate(element => element === element.ownerDocument.activeElement))
+      await saveView.press('Enter')
+      await viewName.waitFor()
+      await capture('pull-requests-save-view-390x844', clonePage)
+      await viewName.fill('Draft release reviews')
+      await viewSave.click()
+      await reviewList.getByText('View saved.', { exact: true }).waitFor()
+      await clonePage.reload()
+      await savedViews.getByText('Draft release reviews', { exact: true }).waitFor()
+      await savedViews.click()
+      await capture('pull-requests-saved-views-390x844', clonePage)
+      await saveView.click()
+      await viewName.fill('draft release reviews')
+      await viewSave.click()
+      await clonePage.getByRole('dialog').getByText('A view with this name already exists.', { exact: true }).waitFor()
+      await clonePage.keyboard.press('Escape')
+      await viewName.waitFor({ state: 'hidden' })
+      check('cancelling a duplicate saved name returns focus to the Views control',
+        await savedViews.evaluate(element => element === element.ownerDocument.activeElement))
+
+      await additionalFilters.press('Enter')
       const draftFilter = filters.getByRole('combobox', { name: 'Draft', exact: true })
       await draftFilter.selectOption('hide')
       await filters.getByRole('button', { name: 'Apply filters' }).click()
@@ -6790,6 +6817,34 @@ try {
       check('changing the draft menu removes its typed qualifier and preserves the rest of the PR search',
         await search.inputValue() === typed.replace('draft:true ', '')
         && new URL(clonePage.url()).searchParams.get('chooseDraft') === 'hide')
+      await savedViews.getByText('Modified', { exact: true }).waitFor()
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Update saved view', exact: true }).click()
+      await savedViews.getByText('Modified', { exact: true }).waitFor({ state: 'hidden' })
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Rename view…', exact: true }).click()
+      await viewName.fill('Reviewed release drafts')
+      await viewSave.click()
+      await savedViews.getByText('Reviewed release drafts', { exact: true }).waitFor()
+
+      await clonePage.setViewportSize({ width: 1280, height: 800 })
+      await clonePage.goto(mergeReviewUrl)
+      await clonePage.getByRole('link', { name: 'Timeline', exact: true }).click()
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Reviewed release drafts', exact: true }).click()
+      await savedViews.getByText('Reviewed release drafts', { exact: true }).waitFor()
+      const appliedView = new URL(clonePage.url()).searchParams
+      check('applying a saved PR view restores the updated filters and keeps the selected request and tab',
+        appliedView.get('selectedUrl') === address && appliedView.get('tab') === 'timeline'
+        && appliedView.get('q') === typed.replace('draft:true ', '') && appliedView.get('draft') === 'hide'
+        && appliedView.get('sort') === 'oldest' && !appliedView.has('page'))
+      await savedViews.click()
+      await filters.getByRole('button', { name: 'Delete view', exact: true }).click()
+      await reviewList.getByText('View deleted.', { exact: true }).waitFor()
+      await clonePage.reload()
+      await savedViews.getByText('Views', { exact: true }).waitFor()
+      check('deleting a saved view clears the local preset and leaves its applied filters in place',
+        await search.inputValue() === typed.replace('draft:true ', ''))
     }
     finally { writeFileSync(github.state, JSON.stringify(beforeFilters)) }
 
