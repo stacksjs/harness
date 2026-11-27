@@ -851,6 +851,43 @@ await capture('workspace-terminal-phone')
 await phoneTerminal.getByRole('button', { name: 'Hide terminal dock' }).click()
 await page.waitForFunction(() => document.activeElement?.matches('[data-header-terminal]'))
 check('phone Terminal opens directly and returns focus to the header', !await phoneTerminal.isVisible())
+
+// A second browser context uses real touch events and the IME edit path.
+const terminalTouchContext = await browser.newContext({ colorScheme, hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } })
+try {
+  const touch = await terminalTouchContext.newPage()
+  await touch.goto(page.url())
+  await touch.locator('[data-header-terminal]').tap()
+  const screen = touch.locator('[data-terminal-screen]')
+  await screen.filter({ hasText: 'Harness test terminal' }).waitFor()
+  const keyboard = touch.getByRole('button', { name: 'Terminal keyboard', exact: true })
+  await capture('terminal-touch-keyboard-closed', touch)
+  await keyboard.tap()
+  const input = touch.getByRole('textbox', { name: 'Terminal input', exact: true })
+  const enter = touch.getByRole('button', { name: 'Return', exact: true })
+  await enter.waitFor()
+  check('touch terminal opens the editable keyboard input', await input.evaluate(element => element === document.activeElement))
+  await touch.keyboard.insertText('echo "touch-$((15+9))"x')
+  await touch.keyboard.press('Backspace')
+  await enter.tap()
+  await touch.waitForFunction(() => document.querySelector('[data-terminal-screen]')?.textContent?.split('\n').some(row => row.trim() === 'touch-24'))
+  check('touch terminal Return runs the edited line and keeps keyboard focus', await input.evaluate(element => element === document.activeElement))
+  await capture('terminal-touch-keyboard-open', touch)
+  await keyboard.tap()
+  check('closing the touch keyboard restores terminal scrollback focus', !await enter.isVisible()
+    && await touch.locator('[data-terminal-host]').evaluate(element => element === document.activeElement))
+  await keyboard.tap()
+  await touch.setViewportSize({ width: 390, height: 510 })
+  await touch.locator('[data-terminal-keyboard-visible="true"]').waitFor()
+  check('touch terminal keeps the keys and output inside the keyboard viewport', await enter.evaluate(element =>
+    element.getBoundingClientRect().bottom <= (element.ownerDocument.defaultView?.visualViewport?.height ?? 0) + 1)
+    && await screen.isVisible() && !await touch.locator('[data-composer]').isVisible())
+  await capture('terminal-touch-keyboard-short-viewport', touch)
+  await touch.setViewportSize({ width: 390, height: 844 })
+  await enter.waitFor({ state: 'hidden' })
+  check('dismissing the system keyboard restores the thread composer', await touch.locator('[data-composer]').isVisible())
+}
+finally { await terminalTouchContext.close() }
 await page.setViewportSize({ width: 1280, height: 800 })
 
 // 4. Terminal.
