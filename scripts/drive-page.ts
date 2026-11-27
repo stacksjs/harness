@@ -5640,10 +5640,26 @@ await savedDraftPage.keyboard.press('Escape')
 await savedDraftPage.waitForURL(savedFileUrl)
 const scratchHref = await savedLink('Saved scratch draft').getAttribute('href') || ''
 const scratchDraftUrl = new URL(scratchHref, baseUrl).href
+const scratchKey = await savedLink('Saved scratch draft').locator('xpath=..').getAttribute('data-saved-draft')
+if (!scratchKey) throw new Error('The scratch draft storage key is unavailable')
+await savedDraftPage.addInitScript((target) => {
+  if (location.href !== target) return
+  const frame = window.requestAnimationFrame.bind(window)
+  window.requestAnimationFrame = callback => frame((now) => {
+    const editor = document.querySelector<HTMLTextAreaElement>('[data-prompt]')
+    if (editor && !editor.value) {
+      document.documentElement.dataset.fixtureEarlySelection = 'yes'
+      editor.dispatchEvent(new Event('select', { bubbles: true }))
+    }
+    callback(now)
+  })
+}, scratchDraftUrl)
 await pressChord('Meta+1', savedDraftPage)
 await savedDraftPage.waitForURL(scratchDraftUrl)
 await savedDraftPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Saved scratch draft')
 check('sidebar position one opens the newest saved draft', true)
+check('an empty selection event before the first restore preserves the saved draft',
+  await savedDraftPage.evaluate(() => document.documentElement.dataset.fixtureEarlySelection === 'yes'))
 await pressChord('Meta+Shift+]', savedDraftPage)
 await savedDraftPage.waitForURL(savedFileUrl)
 await pressChord('Meta+Shift+[', savedDraftPage)
@@ -5775,6 +5791,11 @@ check('collapsed shelves give their numbers to the following visible threads', B
 // A fixture context is torn down immediately. Let the destination's catalog
 // and settlement requests complete first, as they would in an open tab.
 await savedDraftPage.waitForLoadState('networkidle')
+await savedDraftPage.goto(scratchDraftUrl)
+await savedDraftPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === 'Saved scratch draft')
+await savedEditor.fill('')
+await savedDraftPage.waitForFunction(key => !JSON.parse(localStorage.getItem(key) ?? 'null')?.text, scratchKey)
+check('an intentional edit can still empty a saved draft after restore', true)
 await savedDraftContext.close()
 
 

@@ -5911,17 +5911,20 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function promptEdited(event) {
     composerRecall?.reset()
-    rememberPrompt()
+    rememberPrompt(true)
     if (!event?.isComposing) updateComposerFiles()
   }
 
-  function rememberPrompt() {
+  function rememberPrompt(edited = false) {
     const box = promptRef.current
     if (!box) return
     composerText.set(box.value)
     if (editingFollowUp()) return
     if (!box.value) sharedPromptNotice.set('')
     const previous = composerDraft()
+    // Autofocus can report a caret or selection before the saved text is restored.
+    // Only an editor input can clear the saved value through this path.
+    if (!box.value && previous?.text && edited !== true) return
     if (!box.value && !previous?.files?.length) {
       if (previous?.text) composerDraft.set(null)
       return
