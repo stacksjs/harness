@@ -145,7 +145,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
       const focused = screen.ownerDocument.activeElement
       pane.selectionDeferred = Boolean(selection(screen) || (screen.contains(focused) && focused?.matches('[data-terminal-link]')))
       if (pane.selectionDeferred) return
-      screen.innerHTML = toHtml(pane.model.snapshot(), true)
+      screen.innerHTML = toHtml(pane.model.snapshot(true), true)
       if (pane.following || pane.model.onAltScreen) viewport.scrollTop = viewport.scrollHeight
     })
   }

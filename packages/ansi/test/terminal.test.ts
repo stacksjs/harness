@@ -64,6 +64,56 @@ it('recognizes printed web addresses across ANSI spans and leaves nearby punctua
   expect(html).toContain('&amp;two=2</span></a>).')
 })
 
+it('gives every soft-wrapped segment the complete target and one keyboard stop', () => {
+  const options = { cols: 18, rows: 2, scrollback: 10, scrollbackBytes: 4096 }
+  const url = 'https://example.test/releases/1.2/download'
+  const first = new Terminal(options)
+  first.write('Open ' + url + ' now\r\n')
+  const checkpoint = JSON.parse(JSON.stringify(first.checkpoint()))
+  const restored = Terminal.fromCheckpoint(checkpoint, options)
+  const saved = new Terminal(options)
+  expect(saved.restoreHistory(restored.saveHistory())).toBe(true)
+  for (const terminal of [first, restored, saved]) {
+    const html = toHtml(terminal.snapshot(true), true)
+    expect(html.match(/<a data-terminal-link/g)).toHaveLength(1)
+    expect(html).toContain(`href="${url}" aria-label="${url}"`)
+    expect(html.match(/<a[^>]*>([^<]*)<\/a>/u)?.[1]).toContain('\n')
+    expect(toHtml(terminal.snapshot())).not.toContain('<a ')
+  }
+})
+
+it('requires a complete soft wrap and keeps explicit line feeds separate', () => {
+  const url = 'https://example.test'
+  const hard = term(url.length, 3)
+  hard.write(url + '\r\n/separate-line')
+  expect(toHtml(hard.snapshot(true), true)).not.toContain('href="' + url + '/separate-line"')
+
+  const soft = term(url.length, 3)
+  soft.write(url)
+  expect(toHtml(soft.snapshot(true), true)).not.toContain('<a ')
+  soft.write('/complete')
+  expect(toHtml(soft.snapshot(true), true)).toContain('href="' + url + '/complete"')
+
+  const space = term(url.length, 3)
+  space.write(url + ' ')
+  expect(toHtml(space.snapshot(true), true)).toContain('href="' + url + '/"')
+})
+
+it('retains links after expansion and rejects clipped wraps across resize and restore', () => {
+  const options = { cols: 20, rows: 4, scrollback: 10 }
+  const url = 'https://example.test/more/longer-url'
+  const t = new Terminal(options)
+  t.write(url + ' ')
+  t.resize(44, 4)
+  expect(toHtml(t.snapshot(true), true)).toContain('href="' + url + '"')
+  t.resize(12, 4)
+  t.resize(44, 4)
+  expect(toHtml(t.snapshot(true), true)).not.toContain('<a ')
+  const restored = new Terminal(options)
+  expect(restored.restoreHistory(t.saveHistory())).toBe(true)
+  expect(toHtml(restored.snapshot(true), true)).not.toContain('<a ')
+})
+
 it('loads old main-screen rows without reviving the previous shell’s modes', () => {
   const options = { cols: 24, rows: 3, scrollback: 10, scrollbackBytes: 2048 }
   const old = new Terminal(options)

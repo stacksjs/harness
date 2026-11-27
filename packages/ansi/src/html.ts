@@ -8,7 +8,7 @@
  * to decide.
  */
 
-import type { Cell, Style } from './terminal'
+import type { Cell, Style, TerminalRow } from './terminal'
 import { terminalUrlRanges, terminalWebUrl } from './links'
 
 const ESCAPES: Record<string, string> = {
@@ -93,32 +93,68 @@ function openSpan(style: Style): string {
  * the container is expected to be `white-space: pre` and monospace, which is
  * what keeps a grid a grid.
  */
-export function toHtml(rows: Cell[][], links = false): string {
+export function toHtml(rows: TerminalRow[], links = false): string {
   const lines: string[] = []
-  for (const row of rows) {
-    const text = links && row.some(cell => cell.ch === ':') ? row.map(cell => cell.ch).join('') : ''
-    // The grid can wrap a URL at its right edge. Without a terminator on this
-    // row, there is no complete inferred target. Explicit links carry theirs.
-    const ranges = text ? terminalUrlRanges(text).filter(range => range.end < text.length) : []
+  const explicitUrls = links ? new Map<string, string | null>() : null
+  let start = 0
+  let end = 0
+  let logical: TerminalRow[] | null = null
+  let ranges: ReturnType<typeof terminalUrlRanges> = []
+  let activeLink: string | null = null
+  let textOffset = 0
+  let rangeIndex = 0
+
+  function explicitTarget(cell: Cell): string | null {
+    const raw = cell.style.link
+    if (!raw || !explicitUrls) return null
+    if (!explicitUrls.has(raw)) explicitUrls.set(raw, terminalWebUrl(raw))
+    return explicitUrls.get(raw) ?? null
+  }
+
+  function inferredTarget(): string | null {
+    while (ranges[rangeIndex] && ranges[rangeIndex]!.end <= textOffset) rangeIndex++
+    const range = ranges[rangeIndex]
+    return range && range.start <= textOffset ? range.url : null
+  }
+
+  for (const [index, physicalRow] of rows.entries()) {
+    if (index === end) {
+      start = index
+      end = start + 1
+      while (links && rows[end]?.wrapFrom !== undefined) end++
+      const multiline = end > start + 1
+      logical = multiline && physicalRow.wrapFrom === undefined ? logicalRows(rows, start, end) : null
+      let text = ''
+      if (logical?.some(line => line.some(cell => cell.ch === ':')))
+        text = logical.map(line => line.map(cell => cell.ch).join('')).join('')
+      else if (links && !multiline && physicalRow.wrapFrom === undefined && physicalRow.some(cell => cell.ch === ':'))
+        text = physicalRow.map(cell => cell.ch).join('')
+      // A full last row can still receive more text in the next output chunk.
+      ranges = text ? terminalUrlRanges(text).filter(range => range.end < text.length) : []
+      rangeIndex = 0
+      textOffset = 0
+    }
+    const row = logical?.[index - start] ?? physicalRow
     let line = ''
+    let run = ''
     let open = ''
     let key = ''
     let style: Style | undefined
-    let explicitLink: string | null = null
-    let activeLink: string | null = null
-    let textOffset = 0
-    let rangeIndex = 0
+    let explicit: string | null = null
     for (const cell of row) {
       const styleChanged = style !== cell.style
-      if (links && styleChanged) explicitLink = cell.style.link ? terminalWebUrl(cell.style.link) : null
-      while (ranges[rangeIndex] && ranges[rangeIndex]!.end <= textOffset) rangeIndex++
-      const range = ranges[rangeIndex]
-      const link = explicitLink ?? (range && range.start <= textOffset ? range.url : null)
+      if (styleChanged) explicit = explicitTarget(cell)
+      const link = explicit ?? (ranges.length ? inferredTarget() : null)
       const linkChanged = link !== activeLink
       if (linkChanged) {
+        line += escapeHtml(run)
+        run = ''
         if (open) line += '</span>'
         if (activeLink) line += '</a>'
-        if (link) line += `<a data-terminal-link href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">`
+        if (link) {
+          const label = !explicit && end > start + 1 ? ` aria-label="${escapeHtml(link)}"` : ''
+          line += `<a data-terminal-link href="${escapeHtml(link)}"${label} target="_blank" rel="noopener noreferrer">`
+        }
         activeLink = link
         open = ''
         key = ''
@@ -127,20 +163,40 @@ export function toHtml(rows: Cell[][], links = false): string {
         style = cell.style
         const cellKey = styleKey(style)
         if (cellKey !== key) {
+          line += escapeHtml(run)
+          run = ''
           if (open) line += '</span>'
           open = openSpan(style)
           line += open
           key = cellKey
         }
       }
-      line += escapeHtml(cell.ch)
-      textOffset += cell.ch.length
+      run += cell.ch
+      if (ranges.length) textOffset += cell.ch.length
     }
+    line += escapeHtml(run)
     if (open) line += '</span>'
-    if (activeLink) line += '</a>'
+    const continuation = index + 1 < end ? rows[index + 1]?.[0] : undefined
+    if (activeLink && (!continuation || (explicitTarget(continuation) ?? inferredTarget()) !== activeLink)) {
+      line += '</a>'
+      activeLink = null
+    }
     lines.push(line.replace(/ +$/, ''))
   }
   return lines.join('\n')
+}
+
+/** Remove only padding added after wrapping, keeping the original cell offsets. */
+function logicalRows(rows: TerminalRow[], start: number, end: number): TerminalRow[] | null {
+  const logical: TerminalRow[] = []
+  for (let index = start; index < end; index++) {
+    const row = rows[index]!
+    const width = index + 1 < end ? rows[index + 1]!.wrapFrom! : row.length
+    if (width > row.length || width < 0) return null
+    if (width < row.length && row.slice(width).some(cell => cell.ch !== ' ' || cell.style.bg !== null || cell.style.inverse || cell.style.link)) return null
+    logical.push(width === row.length ? row : row.slice(0, width))
+  }
+  return logical
 }
 
 /**

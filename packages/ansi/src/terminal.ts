@@ -37,6 +37,11 @@ export interface Cell {
   style: Style
 }
 
+export interface TerminalRow extends Array<Cell> {
+  /** Width of the preceding row at automatic wrap, or -1 if it was clipped. */
+  wrapFrom?: number
+}
+
 export const DEFAULT_STYLE: Style = Object.freeze({
   fg: null,
   bg: null,
@@ -50,11 +55,11 @@ export const DEFAULT_STYLE: Style = Object.freeze({
 
 const BLANK: Cell = Object.freeze({ ch: ' ', style: DEFAULT_STYLE })
 
-function blankRow(cols: number): Cell[] {
+function blankRow(cols: number): TerminalRow {
   return Array<Cell>(cols).fill(BLANK)
 }
 
-type PackedRow = Array<[text: string, style: Style | null]>
+type PackedRow = Array<[text: string, style: (Style & { wrapFrom?: number }) | null]>
 
 function packRow(row: Cell[]): PackedRow {
   const result: PackedRow = []
@@ -67,8 +72,22 @@ function packRow(row: Cell[]): PackedRow {
   return result
 }
 
-function unpackRow(row: PackedRow): Cell[] {
-  return row.flatMap(([text, style]) => [...text].map(ch => ch === ' ' && !style ? BLANK : { ch, style: style ?? DEFAULT_STYLE }))
+function unpackRow(row: PackedRow, wrapFrom?: number): TerminalRow {
+  const cells: TerminalRow = row.flatMap(([text, style]) => [...text].map(ch => ch === ' ' && !style ? BLANK : { ch, style: style ?? DEFAULT_STYLE }))
+  if (wrapFrom) cells.wrapFrom = wrapFrom
+  return cells
+}
+
+function packedWraps(rows: TerminalRow[]): number[] | undefined {
+  if (rows.some(row => row.wrapFrom !== undefined)) return rows.map(row => row.wrapFrom ?? 0)
+}
+
+function packHistoryRow(row: TerminalRow): string {
+  const cells = packRow(row)
+  // Keep the original run tuple shape so older hosts can read the text.
+  const first = cells[0]
+  if (first && row.wrapFrom !== undefined) first[1] = { ...(first[1] ?? DEFAULT_STYLE), wrapFrom: row.wrapFrom }
+  return JSON.stringify(cells)
 }
 
 function validHistoryColor(value: unknown): boolean {
@@ -84,6 +103,8 @@ function validHistoryStyle(value: unknown): boolean {
   return validHistoryColor(style.fg) && validHistoryColor(style.bg)
     && ['bold', 'dim', 'italic', 'underline', 'inverse', 'strike'].every(key => typeof style[key] === 'boolean')
     && (style.link === undefined || (typeof style.link === 'string' && terminalWebUrl(style.link) === style.link))
+    && (style.wrapFrom === undefined || style.wrapFrom === -1
+      || (typeof style.wrapFrom === 'number' && Number.isInteger(style.wrapFrom) && style.wrapFrom >= 2 && style.wrapFrom <= 500))
 }
 
 function validHistoryRow(value: unknown): value is PackedRow {
@@ -96,6 +117,13 @@ function validHistoryRow(value: unknown): value is PackedRow {
     if (columns > 500) return false
   }
   return true
+}
+
+function unpackHistoryRow(row: PackedRow): TerminalRow {
+  const first = row[0]
+  if (first?.[1]?.wrapFrom === undefined) return unpackRow(row)
+  const { wrapFrom, ...style } = first[1]
+  return unpackRow([[first[0], style], ...row.slice(1)], wrapFrom)
 }
 
 const ParseState = {
@@ -137,8 +165,8 @@ export class Terminal {
   private scrollbackRowBytes: number[] = []
   private readonly convertEol: boolean
 
-  private grid: Cell[][]
-  scrollback: Cell[][] = []
+  private grid: TerminalRow[]
+  scrollback: TerminalRow[] = []
   private x = 0
   private y = 0
   private style: Style = DEFAULT_STYLE
@@ -160,7 +188,7 @@ export class Terminal {
   private lastExitStatus: number | null = null
 
   /** The main buffer, parked while the alternate screen is active. */
-  private savedMain: { grid: Cell[][], x: number, y: number } | null = null
+  private savedMain: { grid: TerminalRow[], x: number, y: number } | null = null
   private savedCursor: { x: number, y: number } | null = null
 
   constructor(options: TerminalOptions = {}) {
@@ -193,8 +221,8 @@ export class Terminal {
     return this.savedMain !== null
   }
 
-  private rememberRow(row: Cell[]): void {
-    const bytes = Number.isFinite(this.scrollbackByteLimit) ? new TextEncoder().encode(JSON.stringify(packRow(row))).length + 1 : 0
+  private rememberRow(row: TerminalRow): void {
+    const bytes = Number.isFinite(this.scrollbackByteLimit) ? new TextEncoder().encode(packHistoryRow(row)).length + 1 : 0
     this.scrollback.push(row)
     this.scrollbackRowBytes.push(bytes)
     this.scrollbackBytes += bytes
@@ -206,10 +234,16 @@ export class Terminal {
 
   /** Capture the buffers and parser position so split escape sequences can finish after a reconnect. */
   checkpoint() {
+    const gridWraps = packedWraps(this.grid)
+    const historyWraps = packedWraps(this.scrollback)
+    const mainWraps = this.savedMain ? packedWraps(this.savedMain.grid) : undefined
     return {
       cols: this.cols, rows: this.rows, grid: this.grid.map(packRow), history: this.scrollback.map(packRow),
       x: this.x, y: this.y, cursor: this.savedCursor, style: this.style, wrap: this.pendingWrap,
       main: this.savedMain && { ...this.savedMain, grid: this.savedMain.grid.map(packRow) },
+      ...(gridWraps && { gridWraps }),
+      ...(historyWraps && { historyWraps }),
+      ...(mainWraps && { mainWraps }),
       parser: this.state, csi: this.csiParams, csiPrivate: this.csiPrivate, osc: this.oscData, oscEscape: this.oscEscape,
       ...(this.oscOverflow && { oscOverflow: true }),
       bracketedPaste: this.bracketedPaste, shellPhase: this.shellPhase, lastExitStatus: this.lastExitStatus,
@@ -218,14 +252,18 @@ export class Terminal {
 
   static fromCheckpoint(checkpoint: TerminalCheckpoint, options: TerminalOptions = {}): Terminal {
     const terminal = new Terminal({ ...options, cols: checkpoint.cols, rows: checkpoint.rows })
-    terminal.grid = checkpoint.grid.map(unpackRow)
-    for (const row of checkpoint.history) terminal.rememberRow(unpackRow(row))
+    terminal.grid = checkpoint.grid.map((row, index) => unpackRow(row, checkpoint.gridWraps?.[index]))
+    for (const [index, row] of checkpoint.history.entries())
+      terminal.rememberRow(unpackRow(row, checkpoint.historyWraps?.[index]))
     terminal.x = checkpoint.x
     terminal.y = checkpoint.y
     terminal.savedCursor = checkpoint.cursor
     terminal.style = checkpoint.style
     terminal.pendingWrap = checkpoint.wrap
-    terminal.savedMain = checkpoint.main && { ...checkpoint.main, grid: checkpoint.main.grid.map(unpackRow) }
+    terminal.savedMain = checkpoint.main && {
+      ...checkpoint.main,
+      grid: checkpoint.main.grid.map((row, index) => unpackRow(row, checkpoint.mainWraps?.[index])),
+    }
     terminal.state = checkpoint.parser
     terminal.csiParams = checkpoint.csi
     terminal.csiPrivate = checkpoint.csiPrivate
@@ -242,14 +280,15 @@ export class Terminal {
   saveHistory(): string {
     const screen = this.savedMain?.grid ?? this.grid
     const cursorLine = this.savedMain?.y ?? this.y
-    const lastLine = Math.max(cursorLine - 1, screen.findLastIndex(row => row.some(cell => cell.ch !== ' ' || cell.style !== DEFAULT_STYLE)))
+    const lastLine = Math.max(cursorLine - 1, screen.findLastIndex(row => row.wrapFrom !== undefined
+      || row.some(cell => cell.ch !== ' ' || cell.style !== DEFAULT_STYLE)))
     const rows: string[] = []
     const encoder = new TextEncoder()
     let bytes = 2 // JSON array brackets
     for (let index = this.scrollback.length + lastLine; index >= 0 && rows.length < this.scrollbackLimit; index--) {
       const row = index >= this.scrollback.length ? screen[index - this.scrollback.length] : this.scrollback[index]
       if (!row) continue
-      const packed = JSON.stringify(packRow(row))
+      const packed = packHistoryRow(row)
       // The scrollback budget already measured these immutable rows, including a delimiter.
       const rowBytes = this.scrollbackRowBytes[index] || encoder.encode(packed).length + 1
       bytes += rowBytes - (rows.length ? 0 : 1)
@@ -266,7 +305,7 @@ export class Terminal {
     try { rows = JSON.parse(saved) }
     catch { return false }
     if (!Array.isArray(rows) || rows.length > this.scrollbackLimit || !rows.every(validHistoryRow)) return false
-    for (const row of rows) this.rememberRow(unpackRow(row))
+    for (const row of rows) this.rememberRow(unpackHistoryRow(row))
     return rows.length > 0
   }
 
@@ -283,16 +322,21 @@ export class Terminal {
     const nextRows = Math.max(1, Math.floor(rows))
     if (nextCols === this._cols && nextRows === this._rows) return
 
-    const fit = (grid: Cell[][]): Cell[][] => grid.map((row) => {
-      if (row.length > nextCols) return row.slice(0, nextCols)
-      if (row.length < nextCols) return [...row, ...blankRow(nextCols - row.length)]
-      return row
+    const fit = (grid: TerminalRow[]): TerminalRow[] => grid.map((row) => {
+      if (row.length === nextCols) return row
+      const fitted: TerminalRow = row.slice(0, nextCols)
+      if (fitted.length < nextCols) fitted.push(...blankRow(nextCols - fitted.length))
+      if (row.wrapFrom !== undefined) {
+        const clipped = row.wrapFrom > nextCols || row.slice(nextCols).some(cell => cell.ch !== ' ')
+        fitted.wrapFrom = clipped ? -1 : row.wrapFrom
+      }
+      return fitted
     })
 
     this.grid = fit(this.grid)
     if (this.savedMain) this.savedMain.grid = fit(this.savedMain.grid)
 
-    const fitRows = (grid: Cell[][], intoScrollback: boolean): { grid: Cell[][], removed: number } => {
+    const fitRows = (grid: TerminalRow[], intoScrollback: boolean): { grid: TerminalRow[], removed: number } => {
       let removed = 0
       while (grid.length > nextRows) {
         const top = grid.shift()
@@ -458,25 +502,24 @@ export class Terminal {
     if (this.pendingWrap) {
       this.pendingWrap = false
       this.x = 0
-      this.lineFeed()
+      this.lineFeed(this.cols)
     }
     this.grid[this.y]![this.x] = { ch, style: this.style }
     if (this.x === this.cols - 1) this.pendingWrap = true
     else this.x += 1
   }
 
-  private lineFeed(): void {
-    if (this.y < this.rows - 1) {
-      this.y += 1
-      return
+  private lineFeed(wrapFrom?: number): void {
+    if (this.y < this.rows - 1) this.y += 1
+    else {
+      const scrolled = this.grid.shift()!
+      this.grid.push(blankRow(this.cols))
+      // The alternate screen's offscreen rows are repaint debris.
+      if (!this.onAltScreen) this.rememberRow(scrolled)
     }
-    const scrolled = this.grid.shift()!
-    this.grid.push(blankRow(this.cols))
-    // The alternate screen is a full-screen app's canvas; what scrolls off it
-    // is repaint debris, not history.
-    if (!this.onAltScreen) {
-      this.rememberRow(scrolled)
-    }
+    const row = this.grid[this.y]!
+    if (wrapFrom === undefined) delete row.wrapFrom
+    else row.wrapFrom = wrapFrom
   }
 
   private csi(final: string): void {
@@ -561,6 +604,7 @@ export class Terminal {
     const row = this.grid[this.y]!
     const [from, to] = mode === 0 ? [this.x, this.cols] : mode === 1 ? [0, this.x + 1] : [0, this.cols]
     for (let col = from; col < to; col++) row[col] = { ch: ' ', style: DEFAULT_STYLE }
+    if (from === 0 && to === this.cols) delete row.wrapFrom
   }
 
   private enterAlt(): void {
@@ -636,15 +680,16 @@ export class Terminal {
   }
 
   /** The viewport rows, top to bottom. Live references — do not mutate. */
-  viewport(): Cell[][] {
+  viewport(): TerminalRow[] {
     return this.grid
   }
 
   /** Scrollback + viewport, trailing blank rows dropped. */
-  snapshot(): Cell[][] {
+  snapshot(keepWrapBoundary = false): TerminalRow[] {
     const all = this.onAltScreen ? this.grid : [...this.scrollback, ...this.grid]
     let end = all.length
-    while (end > 0 && all[end - 1]!.every(cell => cell.ch === ' ')) end -= 1
+    while (end > 0 && (!keepWrapBoundary || all[end - 1]!.wrapFrom === undefined)
+      && all[end - 1]!.every(cell => cell.ch === ' ')) end -= 1
     return all.slice(0, end)
   }
 
