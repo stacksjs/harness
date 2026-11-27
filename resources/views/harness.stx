@@ -5058,6 +5058,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (!response.ok) throw new Error(data.error || 'Could not prepare the pull request.')
       if (input) {
         showRepositoryPullRequestResult(data, repositoryPullRequestKey)
+        if (data.linked && repositoryPullRequestContinuation()) repositoryCommitFeedback.set(null)
         repositoryPullRequestBusy.set(false)
         closeRepositoryPullRequest()
         diffClose.current?.focus()

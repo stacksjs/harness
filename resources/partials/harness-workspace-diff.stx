@@ -86,7 +86,7 @@
           :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head || Boolean(diffGitStatus()?.conflicted) || !(diffGitStatus()?.staged || diffGitStatus()?.unstaged || diffGitStatus()?.untracked)"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event, '1')" class="min-h-10 font-medium underline underline-offset-2">Commit &amp; push</button>
         <button type="button" aria-haspopup="dialog"
-          :hidden="!diffGitStatus()?.branch || !diffGitStatus()?.head || Boolean(diffGitStatus()?.conflicted) || !(diffGitStatus()?.staged || diffGitStatus()?.unstaged || diffGitStatus()?.untracked)"
+          :hidden="diffGitStatus()?.pendingPullRequest || !diffGitStatus()?.branch || !diffGitStatus()?.head || Boolean(diffGitStatus()?.conflicted) || !(diffGitStatus()?.staged || diffGitStatus()?.unstaged || diffGitStatus()?.untracked)"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositoryCommit('working', $event, 'pr')" class="min-h-10 font-medium underline underline-offset-2">Commit, push &amp; PR</button>
         <button type="button" aria-haspopup="dialog" :hidden="!diffGitStatus()?.upstream || !diffGitStatus()?.branch"
           :disabled="uiBusy() || Boolean(threadNavigation().archivedAt)" @click="openRepositorySync('pull', $event)" class="min-h-10 font-medium underline underline-offset-2">Pull</button>
