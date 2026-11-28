@@ -73,6 +73,7 @@ import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMar
 import type { PullRequestLabelDraft, PullRequestLabelEditor, PullRequestLifecycleDraft, PullRequestReplyDraft, PullRequestReviewerDraft, PullRequestReviewerEditor } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
+import { respondWorkflows, workflowRoutes } from './workflows/http'
 import type { TerminalScope } from './workspace-terminals'
 
 export interface ServeOptions {
@@ -82,6 +83,8 @@ export interface ServeOptions {
   /** Host-owned storage for projectless sessions. */
   scratchDirectory?: string
   chatGptCredentialDirectory?: string
+  /** TypeScript definitions supplied by the host operator. */
+  workflowDirectory?: string
   /** Injectable so tests bind a fake driver instead of spawning a real agent. */
   resolveDriver?: (kind: DriverKind) => Driver | null
   /**
@@ -1957,6 +1960,11 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
   }
 
+  const workflowLocation = options.workflowDirectory ?? process.env.HARNESS_WORKFLOWS
+  const workflows = workflowLocation
+    ? await (await import('./workflows/runner')).WorkflowRunner.open(workflowLocation, databasePath, () => engine.current)
+    : null
+
   // The second parameter is the route-path string union; this server routes in
   // `fetch`, so it has none.
   const server = Bun.serve<SocketData, never>({
@@ -2288,6 +2296,15 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (request.method !== 'GET') return new Response(null, { status: 405 })
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
         return promptLinkProjects(engine.current, url.searchParams, request.signal)
+      }
+
+      if (workflowRoutes.has(url.pathname)) {
+        const site = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403 })
+        const profile = Number(url.searchParams.get('profile'))
+        return respondWorkflows(workflows, engine.current.profiles.has(profile) ? profile : null, request, url)
+          .catch(() => Response.json({ error: 'workflow-storage-unavailable' }, { status: 503 }))
       }
 
       if (['/issues', '/issues/threads', '/issues/metadata', '/issues/comments', '/issues/text', '/issues/reactions', '/issues/templates', '/issues/create'].includes(url.pathname)) {
@@ -2713,6 +2730,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       projectScripts.close()
       projectSetup.close()
       projectClones.close()
+      workflows?.stop()
       store.close()
       throw error
     }
@@ -2725,6 +2743,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
   scheduleThreadMaintenance()
   runPendingSettlements()
   projectClones.recover()
+  workflows?.wake()
   return {
     server,
     engine,
@@ -2749,6 +2768,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       projectScripts.close()
       projectSetup.close()
       projectClones.close()
+      workflows?.stop()
       store.close()
     },
   }

@@ -160,6 +160,14 @@ async function bindAdapter(repository: IssueRepository, signal: AbortSignal): Pr
   }
 }
 
+export async function issueCreationScope(state: HarnessState, query: URLSearchParams, signal: AbortSignal) {
+  const target = await destination(state, query, signal)
+  if (!target) return null
+  const adapter = await bindAdapter(target.repository, signal)
+  const authority = await adapter.readAuthority()
+  return authority && target.trusted() && authority.issuesEnabled ? scopeFor(target.repository, authority) : null
+}
+
 export async function issueTemplates(state: HarnessState, query: URLSearchParams, signal: AbortSignal) {
   const target = await destination(state, query, signal)
   if (!target) return null

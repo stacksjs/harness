@@ -37,4 +37,5 @@ export default {
   'mcp': 'Mcp',
   'devices': 'Devices',
   'worktrees': 'Worktrees',
+  'workflows': 'Workflows',
 } satisfies CommandRegistry

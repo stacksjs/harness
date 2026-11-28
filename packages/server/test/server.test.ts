@@ -741,6 +741,186 @@ describe('GitLab issue creation', () => {
   }, 40_000)
 })
 
+describe('manual workflows', () => {
+  it.skipIf(process.platform === 'win32')('resumes the original issue write across restart and account or version changes', async () => {
+    const initialDefinitions = join(dir, 'definitions')
+    const changedDefinitions = join(dir, 'changed-definitions')
+    const restoredDefinitions = join(dir, 'restored-definitions')
+    for (const folder of [initialDefinitions, changedDefinitions, restoredDefinitions]) mkdirSync(folder)
+    let definitions = initialDefinitions
+    const activity = join(dir, 'prepare.log')
+    const version1 = `{
+      name: 'report', version: 1,
+      async run(input, { step, title }) {
+        title(input.title)
+        const pending = await step('Prepare', () => {
+          appendFileSync(${JSON.stringify(activity)}, 'prepared\\n')
+          return { title: input.title, body: input.body }
+        })
+        const issue = await step('File issue', ({ issues }) =>
+          issues.create({ project: input.project, ...pending, labels: ['bug'], assignees: ['reviewer'] }))
+        return { key: issue.key }
+      },
+    }`
+    const source = (definition: string, second?: string) => "import { appendFileSync } from 'node:fs'\nexport default [" + definition + (second ? ',' + second : '') + ']\n'
+    writeFileSync(join(initialDefinitions, 'report.ts'), source(version1))
+    writeFileSync(join(initialDefinitions, 'broken.ts'), 'export default { missing: true }')
+    writeFileSync(join(changedDefinitions, 'report.ts'), source(version1.replace('File issue', 'Different step')))
+    writeFileSync(join(restoredDefinitions, 'report.ts'), source(version1, "{ name: 'report', version: 2, run: () => ({ version: 2 }) }"))
+    const project = join(dir, 'workflow-project')
+    mkdirSync(project)
+    const repository = 'fixture/workflows'
+    for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repository + '.git']])
+      expect(Bun.spawnSync(['git', ...args], { cwd: project }).success).toBe(true)
+    const cli = fixtureGitHubCli(dir, { [repository]: { bare: join(project, '.git') } })
+    let state = JSON.parse(readFileSync(cli.state, 'utf8'))
+    state.issueCreate = { push: true, writes: [], dropReply: true }
+    const save = () => writeFileSync(cli.state, JSON.stringify(state))
+    const load = () => { state = JSON.parse(readFileSync(cli.state, 'utf8')) }
+    save()
+    const priorPath = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + priorPath
+    try {
+      const profile = derivedId('workflow-profile')
+      const otherProfile = derivedId('separate-workflow-profile')
+      const workspace = derivedId('workflow-project')
+      const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+        harness.engine.dispatch({ id, at: 1, command })
+      await dispatch('workflow-profile', { type: 'profile.create', name: 'Workflow fixture' })
+      await dispatch('separate-workflow-profile', { type: 'profile.create', name: 'Separate profile' })
+      await dispatch('workflow-project', { type: 'workspace.add', path: realpathSync(project), profileId: profile })
+      await dispatch('workflow-trust', { type: 'workspace.trust', workspaceId: workspace, trusted: true })
+      const origin = 'http://127.0.0.1:' + port
+      const endpoint = (path = '', extra: Record<string, string> = {}) => origin + '/workflows' + path + '?' + new URLSearchParams({
+        profile: String(profile), ...extra,
+      })
+      const post = (path: string, body: unknown, site = 'same-origin') => fetch(endpoint(path), {
+        method: 'POST', headers: { 'content-type': 'application/json', origin, 'sec-fetch-site': site }, body: JSON.stringify(body),
+      })
+      expect(await (await fetch(endpoint())).json()).toEqual({ error: 'workflows-disabled' })
+      const restart = async () => {
+        harness.stop()
+        harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), workflowDirectory: definitions })
+      }
+      await restart()
+      expect(await (await fetch(endpoint())).json()).toMatchObject({
+        workflows: [{ name: 'report', version: 1, triggers: [] }], runs: [], problems: [{ file: 'broken.ts' }],
+      })
+      const input = { workflow: 'report', key: 'issue-2026-11-28', payload: { project: 'workflow-project', title: 'Workflow issue', body: 'File **one** issue.' } }
+      expect((await post('/start', input, 'cross-site')).status).toBe(403)
+      expect((await post('/start', { ...input, key: '' })).status).toBe(400)
+      const responses = await Promise.all([post('/start', input), post('/start', input)])
+      expect(responses.map(response => response.status).sort()).toEqual([200, 202])
+      const created = await Promise.all(responses.map(response => response.json()))
+      const id = created[0].run.runId
+      expect(created[1].run.runId).toBe(id)
+      expect((await fetch(endpoint('/run', { id, profile: String(otherProfile) }))).status).toBe(404)
+      const wait = async (status: string) => {
+        const deadline = Date.now() + 12_000
+        while (Date.now() < deadline) {
+          const response = await fetch(endpoint('/run', { id }))
+          expect(response.status).toBe(200)
+          const detail = await response.json()
+          if (detail.run.status === status) return detail
+          await Bun.sleep(50)
+        }
+        throw new Error('Workflow did not reach ' + status)
+      }
+      const pending = await wait('paused')
+      expect(pending.run.detail).toContain('yet to confirm')
+      expect(pending.steps).toMatchObject([{ name: 'Prepare', status: 'completed', attempts: 1 }, { name: 'File issue', status: 'failed', attempts: 1 }])
+      load()
+      expect(state.issueCreate.writes).toHaveLength(1)
+      definitions = changedDefinitions
+      await restart()
+      expect((await post('/resume', { id })).status).toBe(409)
+
+      definitions = restoredDefinitions
+      await restart()
+      expect(await (await fetch(endpoint())).json()).toMatchObject({ workflows: [{ name: 'report', version: 2 }] })
+      const replay = await post('/start', { ...input, payload: { title: 'Another input' } })
+      expect(replay.status).toBe(200)
+      expect(await replay.json()).toMatchObject({ replayed: true, run: { runId: id, version: 1 } })
+      state.issueCreate.viewerId = 87
+      save()
+      expect((await post('/resume', { id })).status).toBe(200)
+      expect((await wait('paused')).run.detail).toContain('account changed')
+      load()
+      expect(state.issueCreate.writes).toHaveLength(1)
+      state.issueCreate.viewerId = 17
+      save()
+      expect((await post('/resume', { id })).status).toBe(200)
+      const detail = await wait('completed')
+      const createdIssue = { key: '101', displayKey: '#101', url: 'https://github.com/' + repository + '/issues/101' }
+      expect(detail).toMatchObject({
+        run: { title: 'Workflow issue', result: { key: '101' } },
+        steps: [{ name: 'Prepare', status: 'completed', attempts: 1 }, { name: 'File issue', status: 'completed', attempts: 3, result: createdIssue }],
+        references: [{ step: 'File issue', ...createdIssue }],
+      })
+      expect(readFileSync(activity, 'utf8')).toBe('prepared\n')
+      load()
+      expect(state.issueCreate.writes).toHaveLength(1)
+      expect((await post('/cancel', { id })).status).toBe(409)
+    }
+    finally { process.env.PATH = priorPath }
+  }, 40_000)
+
+  it('recovers a running step after a host restart and cancels an active run', async () => {
+    const file = join(dir, 'sleep.ts')
+    const gate = join(dir, 'allow-finish')
+    const activity = join(dir, 'workflow.log')
+    writeFileSync(file, `
+      import { appendFileSync, existsSync } from 'node:fs'
+      export default { name: 'hold', version: 1, async run(input, { step }) {
+        await step('Record', () => { appendFileSync(${JSON.stringify(activity)}, input + '\\n'); return null })
+        return step('Wait', async ({ signal }) => {
+          while (!existsSync(${JSON.stringify(gate)})) {
+            signal.throwIfAborted()
+            await Bun.sleep(10)
+          }
+          return { input }
+        })
+      }}
+    `)
+    await harness.engine.dispatch({ id: 'hold-profile', at: 1, command: { type: 'profile.create', name: 'Hold profile' } })
+    const profile = derivedId('hold-profile')
+    const restart = async () => {
+      harness.stop()
+      harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), workflowDirectory: file })
+    }
+    await restart()
+    const endpoint = (path: string, query: Record<string, string> = {}) =>
+      'http://127.0.0.1:' + port + '/workflows' + path + '?' + new URLSearchParams({ profile: String(profile), ...query })
+    const post = (path: string, body: object) => fetch(endpoint(path), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const start = async (key: string) => (await (await post('/start', { workflow: 'hold', key, payload: key })).json()).run.runId as string
+    const wait = async (id: string, accept: (value: { run: { status: string }, steps: { status: string, attempts: number }[] }) => boolean) => {
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline) {
+        const value = await (await fetch(endpoint('/run', { id }))).json()
+        if (accept(value)) return value
+        await Bun.sleep(25)
+      }
+      throw new Error('Workflow did not checkpoint in time')
+    }
+    const id = await start('survives-restart')
+    await wait(id, detail => detail.steps[1]?.status === 'running')
+    await restart()
+    await wait(id, detail => detail.steps[1]?.attempts === 2)
+    const cancelled = await start('cancelled')
+    await wait(cancelled, detail => detail.steps[1]?.status === 'running')
+    expect((await post('/cancel', { id: cancelled })).status).toBe(200)
+    writeFileSync(gate, '')
+    const complete = await wait(id, detail => detail.run.status === 'completed')
+    expect(complete.run.result).toEqual({ input: 'survives-restart' })
+    const terminal = await wait(cancelled, detail => detail.run.status === 'cancelled')
+    expect(terminal.steps[1].status).toBe('failed')
+    expect((await post('/resume', { id: cancelled })).status).toBe(409)
+    expect(readFileSync(activity, 'utf8')).toBe('survives-restart\ncancelled\n')
+  }, 15_000)
+})
+
 describe('repository cloning', () => {
   const cloneId = 'web_clone_1'
   const cloneUrl = (suffix = '') => `http://127.0.0.1:${port}/projects/clone${suffix}`
