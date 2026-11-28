@@ -2094,7 +2094,7 @@ describe('a session can have a checkout of its own', () => {
     const client = await Client.connect(`ws://127.0.0.1:${port}/ws`)
     const { sessionId } = await bootstrapIsolated(client, workspace)
     client.send({ t: 'dispatch', envelope: { id: 'c_turn', at: 5, command: { type: 'session.turn.start', sessionId, text: 'edit' } } })
-    await client.waitFor('turn.completed')
+    expect(await client.waitFor('turn.completed', 10_000)).toBeTruthy()
 
     const session = harness.engine.current.sessions.get(sessionId)!
     expect(session.branch).toBe(`harness/session-${sessionId}`)
