@@ -25,7 +25,7 @@ const flag = key => args[args.indexOf(key) + 1]
 const url = new URL(args.at(-1))
 const endpoint = forgejo.base + '/api/v1/repos/' + forgejo.repository
 const method = flag('--method')
-if (!['GET', 'POST', 'PATCH'].includes(method) || flag('--login') !== forgejo.selected || flag('--repo') !== forgejo.repository) reply(401, {})
+if (!['GET', 'POST', 'PATCH', 'PUT'].includes(method) || flag('--login') !== forgejo.selected || flag('--repo') !== forgejo.repository) reply(401, {})
 if (forgejo.unavailable) reply(503, {})
 const viewer = { id: forgejo.viewerId ?? 17, login: forgejo.viewer }
 if (method === 'GET' && url.origin + url.pathname === forgejo.base + '/api/v1/user') reply(200, viewer)
@@ -41,6 +41,30 @@ if (!url.href.startsWith(endpoint + '/')) reply(404, {})
 const path = (url.origin + url.pathname).slice(endpoint.length)
 const page = Math.max(1, Number(url.searchParams.get('page')) || 1)
 const find = url.searchParams
+function finishTriage(issue, kind, values) {
+  forgejo.triageWrites ??= []
+  forgejo.triageWrites.push([issue.number, viewer.id, kind, values])
+  if (forgejo.dropTriageReply) {
+    delete forgejo.dropTriageReply
+    forgejo.failIssueRead = true
+    writeFileSync(statePath, JSON.stringify(state))
+    reply(502, {})
+  }
+  writeFileSync(statePath, JSON.stringify(state))
+  reply(200, issue[kind])
+}
+if (method === 'PUT') {
+  const match = /^\\/issues\\/(\\d+)\\/labels$/.exec(path)
+  const issue = match && forgejo.issues.find(row => row.number === Number(match[1]))
+  if (!issue || !args.includes('@-')) reply(404, {})
+  if (forgejo.archived || !forgejo.push) reply(403, {})
+  const input = await new Response(Bun.stdin.stream()).json()
+  if (forgejo.refuseTriage || Object.keys(input).length !== 1 || !Array.isArray(input.labels)) reply(422, {})
+  const labels = input.labels.map(id => forgejo.labels.find(label => label.id === id))
+  if (labels.some(label => !label)) reply(422, {})
+  issue.labels = labels
+  finishTriage(issue, 'labels', input.labels)
+}
 if (method === 'PATCH') {
   const match = /^\\/issues\\/(\\d+)$/.exec(path)
   const issue = match && forgejo.issues.find(row => row.number === Number(match[1]))
@@ -50,6 +74,14 @@ if (method === 'PATCH') {
   const keys = Object.keys(input)
   if (keys.length !== 1) reply(422, {})
   const field = keys[0]
+  if (field === 'assignees') {
+    if (!forgejo.push) reply(403, {})
+    if (forgejo.refuseTriage || !Array.isArray(input.assignees)) reply(422, {})
+    const people = input.assignees.map(login => forgejo.assignees.find(user => user.login === login))
+    if (people.some(user => !user)) reply(422, {})
+    issue.assignees = people
+    finishTriage(issue, 'assignees', input.assignees)
+  }
   if (field === 'title' || field === 'body') {
     if (forgejo.refuseText || typeof input[field] !== 'string' || (field === 'title' && !input.title.trim())) reply(422, {})
     issue[field] = input[field]

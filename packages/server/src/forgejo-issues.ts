@@ -108,7 +108,26 @@ function forgejoIssueEndpoint(repository: ForgejoIssueRepository, number: number
   return repoPath(repository) + '/issues/' + number
 }
 
-export async function readForgejoIssueAuthority(repository: ForgejoIssueRepository, number: number, signal: AbortSignal, issue?: RawIssue) {
+type ForgejoTriageKind = 'labels' | 'assignees'
+
+function appliedForgejoChoices(issue: RawIssue, kind: ForgejoTriageKind) {
+  if (issue[kind] == null) return []
+  if (kind === 'labels') return forgejoLabels(issue.labels)?.map(label =>
+    ({ key: String(label.id), name: label.name, description: label.description.slice(0, 160) })) ?? null
+  if (!Array.isArray(issue.assignees)) return null
+  const people = new Map<string, { key: string, name: string, description: string }>()
+  for (const user of issue.assignees) {
+    const id = numericId(user?.id)
+    const name = username(user)
+    if (!id || !name || people.has(String(id))) return null
+    const key = String(id)
+    people.set(key, { key, name, description: typeof user.full_name === 'string' ? user.full_name.slice(0, 160) : '' })
+  }
+  return [...people.values()]
+}
+
+export async function readForgejoIssueAuthority(repository: ForgejoIssueRepository, number: number, signal: AbortSignal,
+  issue?: RawIssue, triage?: ForgejoTriageKind) {
   const endpoint = forgejoIssueEndpoint(repository, number)
   const [raw, repoReply, userReply] = await Promise.all([
     issue ?? forgejoTeaRequest(repository, endpoint, signal).then(reply => reply.body as RawIssue | null),
@@ -134,6 +153,8 @@ export async function readForgejoIssueAuthority(repository: ForgejoIssueReposito
     ? { title: raw.title, body: raw.body ?? '' } : null
   return { commentScope: scope('forgejo-issue-comment'), commentBlocked, viewer, endpoint,
     scope: scope('forgejo-issue-text'), canEditText: canEdit, text,
+    triageScope: scope('forgejo-issue-triage'), canTriage: repo.archived === false && canPush,
+    applied: triage ? appliedForgejoChoices(raw, triage) : null, multipleAssignees: true,
     status: openClosedIssueStatusPlan(raw.state, canEdit), statusScope: scope('forgejo-issue-status') }
 }
 
@@ -165,10 +186,10 @@ export async function forgejoIssueCommentWriter(repository: ForgejoIssueReposito
   }
 }
 
-export async function patchForgejoIssue(repository: ForgejoIssueRepository, number: number,
-  body: { state: 'open' | 'closed' } | { title: string } | { body: string }, signal: AbortSignal) {
+async function writeForgejoIssue(repository: ForgejoIssueRepository, endpoint: string, method: 'PATCH' | 'PUT', body: object, signal: AbortSignal) {
   try {
-    await forgejoTeaRequest(repository, forgejoIssueEndpoint(repository, number), signal, { method: 'PATCH', body })
+    await forgejoTeaRequest(repository, endpoint, signal, { method, body })
+    return 'acknowledged' as const
   }
   catch (error) {
     if (error instanceof RepositoryPullRequestError) {
@@ -177,6 +198,20 @@ export async function patchForgejoIssue(repository: ForgejoIssueRepository, numb
     }
   }
   return null
+}
+
+export async function patchForgejoIssue(repository: ForgejoIssueRepository, number: number,
+  body: { state: 'open' | 'closed' } | { title: string } | { body: string }, signal: AbortSignal) {
+  const result = await writeForgejoIssue(repository, forgejoIssueEndpoint(repository, number), 'PATCH', body, signal)
+  return result === 'acknowledged' ? null : result
+}
+
+export function writeForgejoTriage(repository: ForgejoIssueRepository, number: number, kind: ForgejoTriageKind,
+  target: { key: string, name: string }[], signal: AbortSignal) {
+  const endpoint = forgejoIssueEndpoint(repository, number)
+  return kind === 'labels'
+    ? writeForgejoIssue(repository, endpoint + '/labels', 'PUT', { labels: target.map(row => Number(row.key)) }, signal)
+    : writeForgejoIssue(repository, endpoint, 'PATCH', { assignees: target.map(row => row.name) }, signal)
 }
 
 // Forgejo also puts prose comments on the timeline. The dedicated comments
@@ -313,13 +348,14 @@ export async function readForgejoIssue(repository: ForgejoIssueRepository, numbe
 }
 
 export async function searchForgejoIssueChoices(repository: ForgejoIssueRepository, kind: 'labels' | 'assignees', search: string, signal: AbortSignal) {
-  const options = new Map<string, { value: string, description: string, color?: string }>()
+  const options = new Map<string, { value: string, key: string | null, description: string, color?: string }>()
   const query = search.toLowerCase()
   for (let page = 1; page <= requestLimit; page++) {
     const result = await forgejoTeaRequest(repository, repoPath(repository) + '/' + kind + '?limit=50&page=' + page, signal)
     if (!Array.isArray(result.body)) throw new RepositoryPullRequestError('Forgejo returned unreadable filter choices.')
-    const rows = kind === 'labels' ? (forgejoLabels(result.body) ?? []).map(label => ({ value: label.name, description: label.description, color: label.color }))
-      : result.body.map(user => ({ value: username(user), description: typeof user?.full_name === 'string' ? user.full_name.slice(0, 160) : '' }))
+    const rows = kind === 'labels' ? (forgejoLabels(result.body) ?? []).map(label => ({ value: label.name, key: String(label.id), description: label.description, color: label.color }))
+      : result.body.map(user => ({ value: username(user), key: numericId(user?.id) ? String(user.id) : null,
+        description: typeof user?.full_name === 'string' ? user.full_name.slice(0, 160) : '' }))
     for (const row of rows) {
       if (row.value && (row.value.toLowerCase().includes(query) || row.description.toLowerCase().includes(query))) options.set(row.value.toLowerCase(), row)
     }

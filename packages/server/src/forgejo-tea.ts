@@ -61,7 +61,7 @@ export function forgejoTeaTarget(value: string, logins: TeaLogin[]): TeaIssueTar
   return chosen ? { host: chosen.host, name: chosen.name, apiName: chosen.apiName, login: chosen.login, base: chosen.base } : null
 }
 
-export async function forgejoTeaRequest(target: TeaIssueTarget & { path: string }, endpoint: string, signal: AbortSignal, request?: { method: 'POST' | 'PATCH', body: object }) {
+export async function forgejoTeaRequest(target: TeaIssueTarget & { path: string }, endpoint: string, signal: AbortSignal, request?: { method: 'POST' | 'PATCH' | 'PUT', body: object }) {
   const tea = Bun.which('tea', { PATH: process.env.PATH })
   if (!tea) throw new RepositoryPullRequestError('Install the Gitea CLI on this host to read Forgejo issues.')
   const child = Bun.spawn([tea, 'api', '--include', '--login', target.login, '--repo', target.apiName,

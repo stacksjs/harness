@@ -1398,7 +1398,7 @@ try {
   const forgejoIssue = {
     id: 300, is_locked: false, ...row(forgejoRepository, 73, forgejoTitle, '2026-11-02T00:00:00Z', '2026-11-27T16:00:00Z'),
     html_url: forgejoUrl, body: 'Keep **Forgejo drafts** available for @fixture-user.', user: { id: 17, login: 'fixture-user' },
-    assignees: [{ login: 'fixture-user', full_name: 'Fixture review team' }], labels: [{ id: 7, name: 'offline', color: '#5577aa' }], comments: 1,
+    assignees: [{ id: 17, login: 'fixture-user', full_name: 'Fixture review team' }], labels: [{ id: 7, name: 'offline', color: '#5577aa' }], comments: 1,
   }
   const pullCitation = (number: number, repository: string, base = forgejoBase) => ({
     number, html_url: base + '/' + repository + '/pulls/' + number, repository: { full_name: repository }, pull_request: {},
@@ -1417,8 +1417,8 @@ try {
         title: 'A Forgejo pull request', pull_request: { merged: false } },
         { ...forgejoIssue, number: 77, html_url: forgejoUrl.replace('forgejo.fixture.invalid', 'foreign.fixture.invalid').replace(/73$/u, '77'),
           title: 'An issue on the wrong forge' }],
-      labels: [{ id: 9, name: 'Forgejo triage', color: '#5577aa', description: 'Review stale issue drafts' }],
-      assignees: forgejoIssue.assignees,
+      labels: [...forgejoIssue.labels, { id: 9, name: 'Forgejo triage', color: '#5577aa', description: 'Review stale issue drafts' }],
+      assignees: [...forgejoIssue.assignees, { id: 29, login: 'mobile.review', full_name: 'Mobile reviewer' }],
       comments: [{ id: 702, body: 'Review the **saved draft**.', user: { login: 'fixture-user' }, created_at: '2026-11-27T15:00:00Z' }],
       timeline: [
         { id: 699, type: 'label', label: { name: 'offline' }, body: '1', user: { login: 'maintainer' }, created_at: '2026-11-27T14:00:00Z' },
@@ -1777,8 +1777,83 @@ try {
   await page.getByText('Verified Forgejo description', { exact: true }).waitFor()
   assert.equal((await sendForgejo(replayForgejoEdit)).status, 303)
   assert.deepEqual(readForge().forgejo.textWrites, [[73, 17, 'title', editedForgejoTitle], [73, 18, 'body', editedForgejoBody]])
+  const forgejoMetadata = page.locator('#issue-metadata')
+  const forgejoTriage = forgejoMetadata.locator('form[data-issue-metadata-editor]')
+  const forgejoChangeLabels = forgejoMetadata.getByRole('link', { name: 'Change labels', exact: true })
+  const forgejoChangeAssignees = forgejoMetadata.getByRole('link', { name: 'Change assignees', exact: true })
+  const findForgejoTriage = forgejoTriage.getByRole('button', { name: 'Search Forgejo', exact: true })
+  const saveForgejoLabels = forgejoTriage.getByRole('button', { name: 'Save labels', exact: true })
+  const saveForgejoAssignees = forgejoTriage.getByRole('button', { name: 'Save assignees', exact: true })
+  alterForge(current => { delete current.forgejo.viewerId; current.forgejo.push = false })
+  await page.goto(forgejoDetail)
+  assert.equal(await forgejoChangeLabels.count(), 0)
+  assert.equal(await forgejoChangeAssignees.count(), 0)
+  alterForge(current => { current.forgejo.push = true; current.forgejo.viewerId = 18 })
+  await page.reload()
+  await forgejoChangeLabels.click()
+  const offlineLabel = forgejoTriage.getByRole('checkbox', { name: 'offline', exact: true })
+  const triageLabelChoice = forgejoTriage.getByRole('checkbox', { name: /^Forgejo triage/ })
+  assert.ok(await offlineLabel.isChecked())
+  await offlineLabel.uncheck()
+  await triageLabelChoice.check()
+  await forgejoTriage.getByRole('searchbox', { name: 'Search labels', exact: true }).fill('offline')
+  await findForgejoTriage.click()
+  assert.ok(await triageLabelChoice.isChecked())
+  assert.ok(!(await offlineLabel.isChecked()))
+  const labelPayload = await forgejoTriage.evaluate((form: HTMLFormElement) => ({
+    url: form.action, body: new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)])).toString(),
+  }))
+  alterForge(current => { current.forgejo.push = false })
+  assert.equal((await sendForgejo(labelPayload)).status, 403)
+  alterForge(current => {
+    current.forgejo.push = true
+    current.forgejo.issues[0].labels.push({ id: 10, name: 'Concurrent label', color: '#5577aa' })
+  })
+  assert.equal((await sendForgejo(labelPayload)).status, 409)
+  alterForge(current => { current.forgejo.issues[0].labels.pop(); current.forgejo.dropTriageReply = true })
+  for (const [width, height] of viewports) {
+    await page.setViewportSize({ width, height })
+    await saveForgejoLabels.scrollIntoViewIfNeeded()
+    const bounds = await saveForgejoLabels.boundingBox()
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width)
+    await capture('forgejo-edit-labels-' + width + 'x' + height)
+  }
+  const sentForgejoLabels = page.waitForRequest(request => request.method() === 'POST'
+    && new URL(request.url()).pathname === '/issues/metadata')
+  await saveForgejoLabels.click()
+  const labelRequest = await sentForgejoLabels
+  const replayLabels = { url: labelRequest.url(), body: labelRequest.postData() ?? '' }
+  const checkForgejoTriage = forgejoMetadata.getByRole('button', { name: 'Check Forgejo', exact: true })
+  await checkForgejoTriage.waitFor()
+  const triagePort = host.server.port
+  host.stop()
+  host = await startHost(triagePort)
+  await checkForgejoTriage.click()
+  await forgejoMetadata.getByText('Forgejo triage', { exact: true }).waitFor()
+  assert.equal((await sendForgejo(replayLabels)).status, 303)
+  await forgejoChangeAssignees.click()
+  await forgejoTriage.getByRole('checkbox', { name: /^mobile.review/ }).check()
+  await saveForgejoAssignees.click()
+  await forgejoMetadata.getByText('mobile.review', { exact: true }).waitFor()
+  assert.deepEqual(readForge().forgejo.triageWrites, [[73, 18, 'labels', [9]], [73, 18, 'assignees', ['fixture-user', 'mobile.review']]])
+  alterForge(current => {
+    delete current.forgejo.issues[1].labels
+    delete current.forgejo.issues[1].assignees
+  })
+  const emptyIssue = new URL(forgejoDetail)
+  emptyIssue.searchParams.set('issue', '74')
+  await page.goto(emptyIssue.href)
+  await forgejoChangeLabels.click()
+  await triageLabelChoice.check()
+  await saveForgejoLabels.click()
+  await forgejoMetadata.getByText('Forgejo triage', { exact: true }).waitFor()
+  await forgejoChangeAssignees.click()
+  await forgejoTriage.getByRole('checkbox', { name: /^mobile.review/ }).check()
+  await saveForgejoAssignees.click()
+  await forgejoMetadata.getByText('mobile.review', { exact: true }).waitFor()
+  assert.deepEqual(readForge().forgejo.triageWrites.slice(2), [[74, 18, 'labels', [9]], [74, 18, 'assignees', ['mobile.review']]])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links, timeline events, comments and status recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links, timeline events, comments, status, text and triage recovery')
 }
 catch (error) {
   console.error(error)
