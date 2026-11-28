@@ -27,12 +27,15 @@ if (command === 'auth' && endpoint === 'credential-helper') {
 if (command !== 'api' || flags[0] !== '--hostname' || flags[1] !== gitlab.host || !flags.includes('--include'))
   respond(404, {})
 const pinned = process.env.GITLAB_TOKEN === credential && process.env.GITLAB_HOST === gitlab.host
-if ((process.env.GITLAB_TOKEN && (!pinned || endpoint !== 'graphql')) || process.env.GITLAB_ACCESS_TOKEN || process.env.OAUTH_TOKEN)
-  respond(412, {})
 const address = new URL(endpoint, 'https://fixture.invalid/')
 const path = decodeURIComponent(address.pathname)
 const project = '/projects/' + gitlab.repository
 const root = project + '/issues'
+if ((process.env.GITLAB_TOKEN && (!pinned || (endpoint !== 'graphql' && !path.endsWith('/award_emoji'))))
+  || process.env.GITLAB_ACCESS_TOKEN || process.env.OAUTH_TOKEN)
+  respond(412, {})
+const awards = subject => gitlab.awards?.[subject] ?? []
+const ownNote = id => gitlab.notes.find(item => item.id === id)
 if (path === '/graphql') {
   if (!flags.includes('--method') || !flags.includes('POST')) respond(400, {})
   const { query, variables } = await new Response(Bun.stdin.stream()).json()
@@ -51,8 +54,46 @@ if (path === '/graphql') {
     assignees: connect(allMembers.filter(member => gitlab.issue.assignees?.some(assignee => assignee.username === member.username))),
     userPermissions: { updateIssue: gitlab.canEditText === true, createNote: gitlab.canComment === true && !gitlab.locked,
       adminIssue: gitlab.canTriage === true, reopenIssue: gitlab.canEditText === true && !gitlab.denyReopen } })
-  const note = item => ({ id: 'gid://gitlab/Note/' + item.id, body: item.body, noteableId: 2000, noteableType: 'Issue',
-    system: item.system === true, internal: item.internal === true, author: { id: 'gid://gitlab/User/' + item.author.id } })
+  const note = item => ({ id: 'gid://gitlab/Note/' + item.id, body: item.body, noteableId: item.noteableId ?? 2000, noteableType: 'Issue',
+    system: item.system === true, internal: item.internal === true, author: { id: 'gid://gitlab/User/' + item.author.id },
+    userPermissions: { awardEmoji: item.reactionAllowed !== false && !item.system && !item.internal },
+    awardEmoji: { nodes: awards(item.id).slice(0, 50).map(({ name, user }) => ({ name, user: { id: 'gid://gitlab/User/' + user.id } })),
+      pageInfo: { hasNextPage: awards(item.id).length > 50 } } })
+  if (query.includes('query HarnessGitLabReactionNotes')) {
+    if (!pinned) respond(400, {})
+    const entries = Object.entries(variables).map(([key, value]) => {
+      const id = Number(value.split('/').at(-1))
+      const item = ownNote(id) ?? (id === 901 ? { id, noteableId: 9999, author: { id: 17 }, body: 'Different issue' } : null)
+      return [key, item ? note(item) : null]
+    })
+    respond(200, { data: { currentUser, ...Object.fromEntries(entries) } })
+  }
+  if (query.includes('mutation HarnessGitLabIssueReaction')) {
+    if (!pinned || gitlab.archived || gitlab.locked || gitlab.denyReaction) respond(403, {})
+    const add = query.includes('awardEmojiAdd')
+    const operation = add ? 'awardEmojiAdd' : 'awardEmojiRemove'
+    const { awardableId, name } = variables.input
+    const issueSubject = awardableId === issue().id
+    const item = ownNote(Number(awardableId.split('/').at(-1)))
+    if (!issueSubject && (!item || item.system || item.internal || item.reactionAllowed === false || note(item).id !== awardableId)) respond(403, {})
+    if (!['thumbsup', 'thumbsdown', 'laughing', 'tada', 'confused', 'heart', 'rocket', 'eyes'].includes(name)) respond(400, {})
+    if (gitlab.refuseReaction) respond(200, { data: { [operation]: { errors: ['Fixture refused the award'] } } })
+    const subject = issueSubject ? 'issue' : item.id
+    const remaining = awards(subject).filter(award => award.name !== name || award.user.id !== viewer)
+    const award = { name, user: { id: viewer } }
+    gitlab.awards ??= {}
+    gitlab.awards[subject] = add ? [...remaining, award] : remaining
+    gitlab.reactionWrites ??= []
+    gitlab.reactionWrites.push([subject, name, add, viewer])
+    if (gitlab.dropReactionReply) {
+      delete gitlab.dropReactionReply
+      gitlab.failAwardRead = subject
+      writeFileSync(statePath, JSON.stringify(state))
+      respond(502, {})
+    }
+    writeFileSync(statePath, JSON.stringify(state))
+    respond(200, { data: { [operation]: { awardEmoji: award, errors: [] } } })
+  }
   if (query.includes('query HarnessGitLabIssueText')) {
     if (gitlab.noLicensedField && query.includes('licensedFeatureAvailability'))
       respond(200, { errors: [{ extensions: { code: 'undefinedField', typeName: 'Project', fieldName: 'licensedFeatureAvailability' } }] })
@@ -203,6 +244,21 @@ if (path === project + '/labels' || path === project + '/members/all') {
   respond(200, matches.slice(0, size), matches.length > size ? '2' : '')
 }
 if (path === '/user') respond(200, { username: 'fixture-reviewer' })
+const awardPath = path.slice(root.length + 1).split('/')
+if (path.startsWith(root + '/') && path.endsWith('/award_emoji')) {
+  if (!pinned || Number(awardPath[0]) !== gitlab.issue.iid || (awardPath.length !== 2 && awardPath.length !== 4)) respond(404, {})
+  const subject = awardPath[1] === 'notes' ? Number(awardPath[2]) : 'issue'
+  if (typeof subject === 'number' && !ownNote(subject)) respond(404, {})
+  if (gitlab.failAwardRead === subject) {
+    delete gitlab.failAwardRead
+    writeFileSync(statePath, JSON.stringify(state))
+    respond(503, {})
+  }
+  const page = Number(address.searchParams.get('page'))
+  const size = gitlab.awardPageSize ?? Number(address.searchParams.get('per_page'))
+  const entries = awards(subject)
+  respond(200, entries.slice((page - 1) * size, page * size), page * size < entries.length ? String(page + 1) : '')
+}
 if (path === root) {
   if (gitlab.listUnavailable) respond(401, {})
   const query = address.searchParams

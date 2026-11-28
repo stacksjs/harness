@@ -2,28 +2,23 @@ import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
-import { githubIssueReference } from '@harness/contract'
+import { issueReferenceForSelection } from './issue-repositories'
+import { issueReactionEmoji, issueReactionId, reactionBar } from './issue-reactions'
+import type { IssueReactionBar, IssueReactionContent, ReactionSubject } from './issue-reactions'
+import { submitGitLabIssueReaction } from './gitlab-issue-reactions'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
 import { issueWriteScope } from './issue-metadata'
 import { repositoryGitHubCredential, repositoryGitHubRequest, RepositoryPullRequestError } from './repository-pull-request'
 
-const emoji = [
-  ['THUMBS_UP', '👍', 'Thumbs up'], ['THUMBS_DOWN', '👎', 'Thumbs down'], ['LAUGH', '😄', 'Laugh'],
-  ['HOORAY', '🎉', 'Hooray'], ['CONFUSED', '😕', 'Confused'], ['HEART', '❤️', 'Heart'],
-  ['ROCKET', '🚀', 'Rocket'], ['EYES', '👀', 'Eyes'],
-] as const
-const nodeId = /^[A-Za-z0-9_+\/=:.-]{1,256}$/u
 const digest = /^[a-f0-9]{64}$/u
 const intentPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
 const dateFormatter = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 
-type RawSubject = {
+type RawSubject = ReactionSubject & {
   __typename?: string, id?: string, fullDatabaseId?: string, url?: string, body?: string, createdAt?: string,
-  issue?: { id?: string }, author?: { login?: string }, viewerCanReact?: boolean,
-  reactionGroups?: { content?: string, viewerHasReacted?: boolean, reactors?: { totalCount?: number } }[],
+  issue?: { id?: string }, author?: { login?: string },
 }
 
-export type IssueReactionBar = NonNullable<ReturnType<typeof reactionBar>>
 export type IssueActivityItem = {
   kind: 'comment' | 'event', id: string | number, dateLabel: string, author: string, body?: string,
   url?: string, label?: string, linkLabel?: string, reactions?: IssueReactionBar | null,
@@ -49,18 +44,6 @@ const eventTypes = {
 
 export function issueActivityCursor(value: string | null | undefined) {
   return value && /^[A-Za-z0-9_+/=:-]{1,1024}$/u.test(value) ? value : ''
-}
-
-function reactionBar(subject: RawSubject, scope: string, allowed: boolean, comment = 0) {
-  if (!subject.id || !nodeId.test(subject.id) || !Array.isArray(subject.reactionGroups)) return null
-  return { subject: subject.id, comment, scope, intent: crypto.randomUUID(), allowed: allowed && subject.viewerCanReact === true,
-    items: emoji.map(([content, glyph, label]) => {
-      const group = subject.reactionGroups!.find(item => item?.content === content)
-      const active = group?.viewerHasReacted === true
-      const count = Number.isSafeInteger(group?.reactors?.totalCount) ? Math.max(0, group!.reactors!.totalCount!) : 0
-      return { content, glyph, count, active, desired: active ? 'remove' : 'add', label,
-        actionLabel: (active ? 'Remove ' : 'Add ') + label + ' reaction' }
-    }) }
 }
 
 function reacted(subject: RawSubject | null | undefined, content: string) {
@@ -172,13 +155,15 @@ const messages = { updated: 'Reaction updated on GitHub.', changed: 'The issue, 
 export async function submitIssueReaction(state: HarnessState, query: URLSearchParams, values: URLSearchParams, signal: AbortSignal,
   receipts: PullRequestReplyReceipts) {
   const profile = Number(query.get('profile'))
-  const reference = githubIssueReference({ tracker: 'github', repository: query.get('selected'), number: Number(query.get('issue')) })
+  const reference = issueReferenceForSelection(query.get('selected'), Number(query.get('issue')))
   const subject = values.get('subject') ?? ''
   const scope = values.get('scope') ?? ''
   const intent = values.get('intent') ?? ''
   const [kind, content, extra] = (values.get('reaction') ?? '').split(':')
-  if (!reference || !state.profiles.has(profile) || !nodeId.test(subject) || !digest.test(scope) || !intentPattern.test(intent)
-    || extra !== undefined || !content || (kind !== 'add' && kind !== 'remove') || !emoji.some(([value]) => value === content)) return null
+  if (!reference || !state.profiles.has(profile) || !issueReactionId.test(subject) || !digest.test(scope) || !intentPattern.test(intent)
+    || extra !== undefined || !content || (kind !== 'add' && kind !== 'remove') || !issueReactionEmoji.some(([value]) => value === content)) return null
+  if (reference.tracker === 'gitlab')
+    return submitGitLabIssueReaction(state, profile, reference, { subject, scope, intent, content: content as IssueReactionContent, desired: kind === 'add' }, signal, receipts)
   let comment = 0
   let attempted = false
   const finish = (result: keyof typeof messages) => ({ result, message: messages[result], comment })

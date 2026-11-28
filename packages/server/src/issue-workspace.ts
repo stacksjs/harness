@@ -7,6 +7,8 @@ import type { IssueActivityItem } from './issue-activity'
 import type { IssueCommentSubmission } from './issue-comment'
 import type { IssueTextSubmission } from './issue-text'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
+import type { IssueReactionForm } from './issue-reactions'
+import { readGitLabIssueReactions } from './gitlab-issue-reactions'
 import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssueText } from './gitlab-issues'
 import { issueReferenceForSelection, mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
@@ -188,7 +190,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadata?: { kind: IssueMetadataKind, message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }
     comment?: IssueCommentSubmission
     text?: IssueTextSubmission
-    reaction?: { message: string, comment: number }
+    reaction?: { message: string, comment: number, draft?: IssueReactionForm | null }
   } = {}) {
   const { metadata: metadataSubmission, comment: commentSubmission, text: textSubmission } = writes
   const profiles = [...state.profiles.values()].map(({ id, name }) => ({ id, name }))
@@ -249,7 +251,12 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     return '/issues?' + next
   }
   const detail = selection && number ? (selection.tracker === 'gitlab'
-    ? readGitLabIssue(selection, number, requestedComments, signal)
+    ? readGitLabIssue(selection, number, requestedComments, signal).then(async (issue) => {
+        const reactions = await readGitLabIssueReactions(selection, number, issue.activity, signal).catch(() => null)
+        if (!reactions) return issue
+        return { ...issue, reactions: reactions.issue,
+          activity: issue.activity.map(item => ({ ...item, reactions: reactions.comments.get(Number(item.id)) })) }
+      })
     : issueDetail(selection, number, requestedComments, activityBefore, activityAfter, signal))
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error, selection.tracker) })) : null
   const editMetadata = issueMetadataKind(query.get('editMetadata'))
@@ -438,6 +445,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     reactionAction: metadataHref.replace('/issues?', '/issues/reactions?'),
     reactionMessage: writes.reaction?.message ?? '',
     reactionComment: writes.reaction?.comment ?? 0,
+    reactionDraft: writes.reaction?.draft ?? null,
     activityRows,
     issueReactions: selected?.reactions ?? null,
     olderActivityHref: selected?.olderActivity ? href({ ...selectedScope, activityBefore: selected.olderActivity }) + '#issue-comments' : '',

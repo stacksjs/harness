@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { Database } from 'bun:sqlite'
 
-import type { Browser } from 'playwright-core'
+import type { Browser, Locator } from 'playwright-core'
 import { chromium, webkit } from 'playwright-core'
 import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/server'
@@ -104,6 +104,14 @@ const startHost = (port = 0) => serve({ port, databasePath, resolveDriver: kind 
 }) })
 let host = await startHost()
 let browser: Browser | undefined
+function readReactionRequest(form: Locator, reaction: string) {
+  return form.evaluate((element, reaction) => {
+    const values = new URLSearchParams(Array.from(new FormData(element as HTMLFormElement), ([key, value]) => [key, String(value)]))
+    values.set('reaction', reaction)
+    return { url: (element as HTMLFormElement).action, body: values.toString() }
+  }, reaction)
+}
+
 try {
   browser = await browserKind.launch()
   for (const [repo, path] of Object.entries(projects))
@@ -751,11 +759,6 @@ try {
   await issuePage.goto(detailUrl)
   const issueReactions = issuePage.getByRole('form', { name: 'Issue reactions', exact: true })
   const commentReactions = issuePage.getByRole('form', { name: 'Comment 21 reactions', exact: true })
-  const readReactionRequest = (form: ReturnType<typeof issuePage.getByRole>, reaction: string) => form.evaluate((element, reaction) => {
-    const values = new URLSearchParams(Array.from(new FormData(element as HTMLFormElement), ([key, value]) => [key, String(value)]))
-    values.set('reaction', reaction)
-    return { url: (element as HTMLFormElement).action, body: values.toString() }
-  }, reaction)
   const addIssueReaction = issueReactions.getByRole('button', { name: 'Add Thumbs up reaction, 1', exact: true })
   const intent = await readReactionRequest(issueReactions, 'add:THUMBS_UP')
   const react = (request: typeof intent, origin = base) => fetch(request.url, { method: 'POST', body: request.body, redirect: 'manual',
@@ -1303,13 +1306,89 @@ try {
     ])
     assert.ok(chip && control && chip.height < control.height && control.height >= 44, 'the label stays compact beside the phone touch target')
     await capture('gitlab-edit-saved-360x800')
+
+    alterForge(current => {
+      current.gitlab.awardPageSize = 1
+      current.gitlab.awards = { issue: [{ name: 'thumbsup', user: { id: 99 } }, { name: 'thumbsup', user: { id: 98 } }] }
+    })
+    await page.reload()
+    const issueAwards = page.getByRole('form', { name: 'Issue reactions', exact: true })
+    const addGitLabThumb = issueAwards.getByRole('button', { name: 'Add Thumbs up reaction, 2', exact: true })
+    await addGitLabThumb.waitFor()
+    const gitLabThumb = await readReactionRequest(issueAwards, 'add:THUMBS_UP')
+    const sendAward = (request: typeof gitLabThumb, origin = new URL(request.url).origin) => fetch(request.url, {
+      method: 'POST', body: request.body, redirect: 'manual',
+      headers: { origin, 'content-type': 'application/x-www-form-urlencoded' },
+    })
+    assert.equal((await sendAward(gitLabThumb, 'https://outside.invalid')).status, 403)
+    alterForge(current => { current.gitlab.viewer = 18 })
+    assert.equal((await sendAward(gitLabThumb)).status, 409)
+    alterForge(current => { delete current.gitlab.viewer; current.gitlab.locked = true })
+    assert.equal((await sendAward(gitLabThumb)).status, 403)
+    alterForge(current => { delete current.gitlab.locked })
+    await addGitLabThumb.click()
+    const removeGitLabThumb = issueAwards.getByRole('button', { name: 'Remove Thumbs up reaction, 3', exact: true })
+    await removeGitLabThumb.waitFor()
+    assert.equal(await removeGitLabThumb.getAttribute('aria-pressed'), 'true')
+    await removeGitLabThumb.click()
+    await addGitLabThumb.waitFor()
+    assert.equal((await sendAward(gitLabThumb)).status, 303)
+    assert.deepEqual(readForge().gitlab.awards.issue, [{ name: 'thumbsup', user: { id: 99 } }, { name: 'thumbsup', user: { id: 98 } }])
+
+    const latestNote = readForge().gitlab.notes.at(-1).id
+    const noteAwards = page.getByRole('form', { name: 'Comment ' + latestNote + ' reactions', exact: true })
+    const notePicker = noteAwards.getByText('Add reaction', { exact: true })
+    const gitLabHeart = noteAwards.getByRole('button', { name: 'Add Heart reaction', exact: true })
+    await notePicker.click()
+    await gitLabHeart.press('Escape')
+    await gitLabHeart.waitFor({ state: 'hidden' })
+    assert.equal(await notePicker.evaluate(node => node === node.ownerDocument.activeElement), true)
+    await notePicker.click()
+    const heartWrite = await readReactionRequest(noteAwards, 'add:HEART')
+    for (const badId of [901, 11]) {
+      const body = new URLSearchParams(heartWrite.body)
+      body.set('subject', 'gid://gitlab/Note/' + badId)
+      assert.equal((await sendAward({ ...heartWrite, body: body.toString() })).status, 409)
+    }
+    alterForge(current => { current.gitlab.notes.at(-1).reactionAllowed = false })
+    assert.equal((await sendAward(heartWrite)).status, 403)
+    alterForge(current => { delete current.gitlab.notes.at(-1).reactionAllowed; current.gitlab.dropReactionReply = true })
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height })
+      await gitLabHeart.scrollIntoViewIfNeeded()
+      assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+      await capture('gitlab-note-reaction-' + width + 'x' + height)
+    }
+    await gitLabHeart.click()
+    const confirmAward = page.getByRole('form', { name: 'Check GitLab reaction', exact: true })
+    const checkAward = confirmAward.getByRole('button', { name: 'Check GitLab', exact: true })
+    await checkAward.waitFor()
+    await checkAward.scrollIntoViewIfNeeded()
+    await capture('gitlab-reaction-recovery-360x800')
+    const gitLabReactionPort = host.server.port
+    host.stop()
+    host = await startHost(gitLabReactionPort)
+    await checkAward.click()
+    const removeGitLabHeart = noteAwards.getByRole('button', { name: 'Remove Heart reaction, 1', exact: true })
+    await removeGitLabHeart.waitFor()
+    assert.equal(new URL(page.url()).hash, '#issue-comment-' + latestNote)
+    assert.equal((await sendAward(heartWrite)).status, 303)
+    const removedHeart = page.waitForResponse(response => new URL(response.url()).pathname === '/issues/reactions' && response.request().method() === 'POST')
+    await removeGitLabHeart.click()
+    assert.equal((await removedHeart).status(), 303)
+    await notePicker.waitFor()
+    await removeGitLabHeart.waitFor({ state: 'hidden' })
+    assert.deepEqual(readForge().gitlab.reactionWrites, [
+      ['issue', 'thumbsup', true, 17], ['issue', 'thumbsup', false, 17],
+      [latestNote, 'heart', true, 17], [latestNote, 'heart', false, 17],
+    ])
   }
   finally {
     if (previousGitLabToken === undefined) delete process.env.GITLAB_TOKEN
     else process.env.GITLAB_TOKEN = previousGitLabToken
   }
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, GitLab draft persistence, GitLab text editing, comment recovery, status changes and triage')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions')
 }
 catch (error) {
   console.error(error)

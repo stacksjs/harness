@@ -61,7 +61,7 @@ function gitLabEnvironment(repository: GitLabIssueRepository, credential?: strin
   return env
 }
 
-type IssueCredential = { type: 'pat', token: string } | { type: 'oauth2', token: string, endpoint: URL }
+export type IssueCredential = { type: 'pat', token: string } | { type: 'oauth2', token: string, endpoint: URL }
 
 export async function gitLabIssueCredential(repository: GitLabIssueRepository, signal: AbortSignal): Promise<IssueCredential> {
   const glab = gitLabCli()
@@ -91,15 +91,15 @@ export async function gitLabIssueCredential(repository: GitLabIssueRepository, s
 }
 
 async function api(repository: GitLabIssueRepository, endpoint: string, signal: AbortSignal,
-  request?: { body: object, credential?: string },
+  request?: { body?: object, credential?: string },
 ) {
   const glab = gitLabCli()
   if (!glab) throw new RepositoryPullRequestError('Install the GitLab CLI on this host to read issues.')
   const child = Bun.spawn([glab, 'api', endpoint, '--hostname', repository.host, '--include',
-    ...(request ? ['--method', 'POST', '--input', '-', '--header', 'Content-Type: application/json'] : []),
+    ...(request?.body ? ['--method', 'POST', '--input', '-', '--header', 'Content-Type: application/json'] : []),
   ], {
     cwd: repository.path, env: gitLabEnvironment(repository, request?.credential),
-    stdin: request ? new Blob([JSON.stringify(request.body)]) : 'ignore',
+    stdin: request?.body ? new Blob([JSON.stringify(request.body)]) : 'ignore',
     stdout: 'pipe', stderr: 'ignore', signal, timeout: 15_000,
   })
   const [output, exit] = await Promise.all([new Response(child.stdout).text(), child.exited])
@@ -157,22 +157,41 @@ function missingGitLabField(errors: GitLabGraphQLError[] | undefined, fieldName:
     extensions?.code === 'undefinedField' && extensions.fieldName === fieldName && extensions.typeName === typeName)
 }
 
-async function gitLabGraphQL(repository: GitLabIssueRepository, query: string, variables: object, signal: AbortSignal, credential?: IssueCredential) {
+export async function gitLabGraphQL(repository: GitLabIssueRepository, query: string, variables: object, signal: AbortSignal, credential?: IssueCredential) {
   if (credential?.type !== 'oauth2')
     return (await api(repository, 'graphql', signal, { body: { query, variables }, credential: credential?.token })).body
 
   // Overriding the token in glab's environment changes it to PAT authentication.
   // Preserve the resolved OAuth account by sending its access token as a Bearer credential.
-  const response = await fetch(credential.endpoint, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
-    headers: { 'Authorization': 'Bearer ' + credential.token, 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ query, variables }),
+  return gitLabBearer(credential.endpoint, credential.token, signal, { query, variables }).then(response => response.json())
+}
+
+async function gitLabBearer(url: URL, token: string, signal: AbortSignal, body?: object) {
+  const response = await fetch(url, {
+    method: body ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+    headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json', ...(body && { 'Content-Type': 'application/json' }) },
+    ...(body && { body: JSON.stringify(body) }),
   })
   if (!response.ok) {
     await response.body?.cancel()
     throw new RepositoryPullRequestError('GitLab could not complete this request.', response.status)
   }
-  return response.json()
+  return response
+}
+
+export async function readGitLabAwards(repository: GitLabIssueRepository, number: number, comment: number, page: number,
+  signal: AbortSignal, credential: IssueCredential,
+) {
+  const endpoint = projectPath(repository) + '/issues/' + number + (comment ? '/notes/' + comment : '')
+    + '/award_emoji?' + new URLSearchParams({ per_page: '100', page: String(page) })
+  if (credential.type === 'pat') return api(repository, endpoint, signal, { credential: credential.token })
+  const url = new URL(credential.endpoint)
+  url.pathname = url.pathname.replace(/\/graphql$/u, '/v4/') + endpoint.split('?')[0]
+  url.search = endpoint.slice(endpoint.indexOf('?'))
+  const response = await gitLabBearer(url, credential.token, signal)
+  const next = response.headers.get('x-next-page')
+  const link = response.headers.get('link')
+  return { body: await response.json() as unknown, more: next !== null ? Boolean(next) : link ? /;\s*rel="next"/u.test(link) : undefined }
 }
 
 export async function readGitLabIssueText(repository: GitLabIssueRepository, number: number, signal: AbortSignal, credential?: IssueCredential,
@@ -223,6 +242,8 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
   const status = gitLabIssueStatusPlan(issue.state, canEditText && (issue.state !== 'closed' || issue.userPermissions?.reopenIssue === true))
   return { scope: scope('issue-text'), commentScope: scope('issue-comment'), commentBlocked, viewer,
     statusScope: scope('issue-status'), status, issueId: issue.id, canEditText,
+    reactionScope: scope('issue-reaction'), canReact: project.archived === false
+      && (issue.discussionLocked === false || issue.userPermissions?.createNote === true),
     triageScope: scope('issue-triage'), projectId: project.id, canTriage, applied: applied && !applied.more ? applied.choices : null,
     multipleAssignees: project.multipleAssignees?.available ?? null,
     text: { title: issue.title, body: issue.description ?? '' } }

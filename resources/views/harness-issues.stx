@@ -82,6 +82,7 @@ export const activityRows = $props.activityRows
 export const issueReactions = $props.issueReactions
 export const reactionMessage = $props.reactionMessage
 export const reactionComment = $props.reactionComment
+export const reactionDraft = $props.reactionDraft
 export const reactionAction = $props.reactionAction
 export const olderActivityHref = $props.olderActivityHref
 export const newerActivityHref = $props.newerActivityHref
@@ -480,7 +481,7 @@ function closeIssueFilters(event) {
               <div data-issue-markdown="description" class="transcript-markdown">@if(!selected.description)No description.@endif</div>
             @endif
             @if(reactionMessage && !reactionComment)
-              <p role="status" data-issue-metadata-message>{{ reactionMessage }}</p>
+              @include('../partials/harness-issue-reaction-result')
             @endif
             @if(issueReactions)
               @include('../partials/harness-issue-reactions', { bar: issueReactions, barLabel: 'Issue reactions' })
@@ -540,7 +541,7 @@ function closeIssueFilters(event) {
               </nav>
             @endif
             @if(reactionMessage && reactionComment)
-              <p role="status" data-issue-metadata-message>{{ reactionMessage }}</p>
+              @include('../partials/harness-issue-reaction-result')
             @endif
             @if(selected.activityDegraded)
               <p role="status">GitHub could only load comments. Refresh for issue events.</p>
