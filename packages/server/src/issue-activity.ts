@@ -160,8 +160,9 @@ export async function readIssueActivity(repository: GitHubWorkspaceRepository, n
   }
   return { items: [...items.values()], reactions: reactionBar(read.issue, read.scope, read.allowed),
     total: Number.isSafeInteger(read.issue.comments?.totalCount) ? read.issue.comments!.totalCount! : 0,
-    older: timeline?.pageInfo?.hasPreviousPage ? issueActivityCursor(timeline.pageInfo.startCursor) : '',
-    newer: timeline?.pageInfo?.hasNextPage ? issueActivityCursor(timeline.pageInfo.endCursor) : '' }
+    // GitHub only guarantees the page-info flag in the direction it queried.
+    older: timeline?.pageInfo?.hasPreviousPage || window.after ? issueActivityCursor(timeline?.pageInfo?.startCursor) : '',
+    newer: timeline?.pageInfo?.hasNextPage || window.before ? issueActivityCursor(timeline?.pageInfo?.endCursor) : '' }
 }
 
 const messages = { updated: 'Reaction updated on GitHub.', changed: 'The issue, comment, or GitHub account changed.',

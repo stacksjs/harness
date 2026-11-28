@@ -359,7 +359,7 @@ if (url.pathname === '/graphql' && method === 'POST') {
       const end = variables.after ? Math.min(start + variables.first, nodes.length) : variables.before ? Number(variables.before) : nodes.length
       repository.issue.comments = { totalCount: comments.length }
       if (!variables.legacy) repository.issue.timelineItems = { nodes: nodes.slice(start, end),
-        pageInfo: { startCursor: String(start), endCursor: String(end - 1), hasPreviousPage: start > 0, hasNextPage: end < nodes.length } }
+        pageInfo: { startCursor: String(start), endCursor: String(end - 1), hasPreviousPage: !variables.after && start > 0, hasNextPage: Boolean(variables.after) && end < nodes.length } }
       reply(200, { data: { viewer: currentViewer, repository, nodes: variables.legacy ? variables.ids.map(find) : undefined } })
     }
     if (query.includes('HarnessIssueReactionTarget')) {
