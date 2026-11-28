@@ -294,6 +294,33 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
                 </a>
               </template>
             </div>
+            <section :if="workflowView().detail?.questions.length" data-workflow-questions aria-label="Questions">
+              <template :for="question in (workflowView().detail?.questions || [])" :key="question.name">
+                <form action="{{ action }}" method="post" data-workflow-question :aria-label="question.request.title">
+                  <input type="hidden" name="action" value="answer">
+                  <input type="hidden" name="id" :value="question.runId">
+                  <input type="hidden" name="wait" :value="question.name">
+                  <input type="hidden" name="key" :value="question.key">
+                  <h3 :text="question.request.title"></h3>
+                  <p :if="question.text" :text="question.text" data-workflow-question-text></p>
+                  <pre :if="question.data" :text="question.data" tabindex="0" aria-label="Question details"></pre>
+                  <p :if="question.expires" data-workflow-deadline>
+                    Answer by <time :datetime="question.deadline" :text="question.expires"></time>
+                  </p>
+                  <div data-workflow-question-choices>
+                    <template :for="choice in question.choices" :key="choice.label">
+                      <button type="submit" name="choice" :value="choice.label" data-workflow-button :data-workflow-primary="choice.first ? '' : null" :text="choice.label"></button>
+                    </template>
+                  </div>
+                  <details>
+                    <summary>Add a reason</summary>
+                    <label>
+                      Reason <textarea name="reason" maxlength="2000" rows="2"></textarea>
+                    </label>
+                  </details>
+                </form>
+              </template>
+            </section>
             <h3>Steps</h3>
             <p :if="!workflowView().detail?.steps.length" data-workflow-step-empty>Waiting for the first step.</p>
             <ol data-workflow-steps>
@@ -447,7 +474,7 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
 [data-workflow-status] { flex-shrink: 0; color: var(--flow-muted); font-size: 12px; font-weight: 650; }
 [data-workflow-status][data-status=running] { color: var(--flow-accent); }
 [data-workflow-status][data-status=completed] { color: var(--flow-green); }
-[data-workflow-status][data-status=paused], [data-workflow-status][data-status=failed] { color: var(--flow-amber); }
+[data-workflow-status][data-status=waiting], [data-workflow-status][data-status=paused], [data-workflow-status][data-status=failed] { color: var(--flow-amber); }
 [data-workflow-list-empty], [data-workflow-detail-empty], [data-workflow-step-empty] { color: var(--flow-muted); margin: 18px; }
 [data-workflow-detail] { min-height: 0; min-width: 0; overflow: auto; background: var(--flow-pane); }
 [data-workflow-feed], [data-workflow-single] { max-width: 780px; padding: 22px 26px; margin-inline: auto; }
@@ -478,10 +505,19 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
 [data-workflow-step-card] summary [data-workflow-status] { margin-inline-start: 9px; }
 [data-workflow-step-body] { padding: 0 10px 9px; color: var(--flow-muted); }
 [data-workflow-feed] pre { overflow: auto; max-height: 20rem; margin-block: 7px 0; padding: 9px; background: var(--flow-bg); color: var(--flow-ink); }
+[data-workflow-questions] { display: grid; gap: 8px; margin-block: 14px; }
+[data-workflow-question] { display: grid; gap: 8px; border: 1px solid var(--flow-border); border-inline-start: 3px solid var(--flow-amber); border-radius: 7px; padding: 10px 12px; min-width: 0; }
+[data-workflow-question] h3, [data-workflow-question] p { margin: 0; overflow-wrap: anywhere; }
+[data-workflow-question-text] { white-space: pre-wrap; }
+[data-workflow-question] summary { display: inline-flex; align-items: center; min-height: 30px; color: var(--flow-accent); cursor: pointer; padding-block: 4px; }
+[data-workflow-question] label { display: grid; gap: 4px; margin-top: 4px; }
+[data-workflow-deadline] { color: var(--flow-muted); }
+[data-workflow-question-choices] { display: flex; flex-wrap: wrap; gap: 6px; }
+[data-workflow-question-choices] button { white-space: normal; overflow-wrap: anywhere; min-width: 44px; max-width: 100%; }
 [data-workflow-start-form] { display: grid; gap: 7px; max-width: 37rem; }
 [data-workflow-start-form] label { margin-top: 8px; font-weight: 650; }
 [data-workflow-start-form] small, [data-workflow-single] p { color: var(--flow-muted); }
-[data-workflow-start-form] :is(select, input, textarea), [data-workflow-filter-form] select {
+[data-workflow-question] textarea, [data-workflow-start-form] :is(select, input, textarea), [data-workflow-filter-form] select {
   width: 100%;
   padding: 6px 8px;
   min-height: 34px;
@@ -528,6 +564,7 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
   [data-workflows-back] span { width: 20px; height: 20px; }
   [data-workflow-button], [data-workflow-tab], [data-workflow-reference] { min-height: 44px; }
   [data-workflow-button][aria-label] { min-width: 44px; }
+  [data-workflow-question] summary { min-height: 44px; }
   [data-workflow-step-card] summary { min-height: 44px; padding-block: 11px; }
   [data-workflow-columns] { grid-template-columns: minmax(0, 1fr); }
   [data-workflow-columns][data-show-detail=false] [data-workflow-detail],
@@ -536,6 +573,6 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
   [data-workflow-mobile-back] { display: inline-flex; min-height: 44px; margin-inline-start: 12px; }
   [data-workflow-feed], [data-workflow-single] { padding: 14px 12px; }
   [data-workflow-run-header] { flex-direction: column; }
-  [data-workflow-start-form] :is(select, input, textarea), [data-workflow-filter-form] select { min-height: 44px; font-size: 16px; }
+  [data-workflow-question] textarea, [data-workflow-start-form] :is(select, input, textarea), [data-workflow-filter-form] select { min-height: 44px; font-size: 16px; }
 }
 </style>

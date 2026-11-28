@@ -3,14 +3,14 @@ import type { WorkflowRunner } from './runner'
 import { issueRepositoryKey, parseForgejoIssueUrl, parseIssueUrl } from '@harness/contract'
 import { readRepositoryBody } from '../repository-commit'
 import { workflowName } from './definitions'
-import { workflowRunId } from './http'
+import { workflowRunId } from './signals'
 
 const statuses = [
-  { key: 'needs-you', label: 'Needs you', status: 'paused', empty: 'Nothing waits on you.' },
-  { key: 'running', label: 'Running', status: 'running', empty: 'Nothing is running.' },
-  { key: 'all', label: 'All', status: '', empty: 'No runs yet.' },
+  { key: 'needs-you', label: 'Needs you', empty: 'Nothing waits on you.' },
+  { key: 'running', label: 'Running', empty: 'Nothing is running.' },
+  { key: 'all', label: 'All', empty: 'No runs yet.' },
 ]
-const words: Record<string, string> = { running: 'Running', paused: 'Paused', completed: 'Completed', cancelled: 'Cancelled', failed: 'Failed' }
+const words: Record<string, string> = { running: 'Running', waiting: 'Waiting', paused: 'Paused', completed: 'Completed', cancelled: 'Cancelled', failed: 'Failed' }
 const trackerStates = {
   waiting: 'Waiting for the host', polling: 'Checking', ready: 'Watching', unavailable: 'Check project and account access',
   'account-changed': 'Restore the original account or repository', backlog: 'More items than this poll can read',
@@ -71,16 +71,20 @@ export function workflowWorkspace(runner: WorkflowRunner, state: HarnessState, p
   const available = [...new Set([...snapshot.workflows.map(definition => definition.name), ...snapshot.runs.map(item => item.workflow)])].sort()
   const matching = workflow ? snapshot.runs.filter(item => item.workflow === workflow) : snapshot.runs
   const referenced = run ? runner.show(profile, run) : null
-  const priority = matching.find(item => item.status === 'paused') ?? matching.find(item => item.status === 'running')
+  const questionRuns = new Set(runner.questions(profile).map(question => question.runId))
+  const bucket = (run: typeof matching[number]) => questionRuns.has(run.runId) || run.status === 'paused' ? 'needs-you'
+    : run.status === 'running' || run.status === 'waiting' ? 'running' : 'all'
+  const priority = matching.find(item => bucket(item) === 'needs-you') ?? matching.find(item => bucket(item) === 'running')
   const inferred = referenced?.run ?? priority
-  const chosen = statuses.find(item => item.key === filter) ?? statuses.find(item => item.status === inferred?.status) ?? statuses[2]!
-  const rows = chosen.status ? matching.filter(item => item.status === chosen.status) : matching
+  const chosen = statuses.find(item => item.key === filter) ?? statuses.find(item => inferred && item.key === bucket(inferred)) ?? statuses[2]!
+  const rows = chosen.key === 'all' ? matching : matching.filter(item => bucket(item) === chosen.key)
   const detail = requested ? referenced : rows[0] ? runner.show(profile, rows[0].runId) : null
   const listHref = workflowHref(profile, fields)
   const mode = query.get('page') === 'definitions' ? 'definitions' : query.get('page') === 'start' ? 'start' : 'runs'
   const notice = query.get('notice')
   const messages: Record<string, string> = {
-    resumed: 'Run resumed.', cancelled: 'Run cancelled.', reused: 'This start key already has a run.',
+    resumed: 'Run resumed.', answered: 'Answer recorded.',
+    'answer-unavailable': 'This question changed or closed. Check the current run before answering again.', cancelled: 'Run cancelled.', reused: 'This start key already has a run.',
     conflict: 'The run changed or its original definition is unavailable. Refresh and check its status.',
     missing: 'This run is unavailable in the selected profile.',
   }
@@ -115,21 +119,30 @@ export function workflowWorkspace(runner: WorkflowRunner, state: HarnessState, p
     workflowChoices: available,
     tabs: statuses.map(item => ({
       key: item.key, label: item.label, current: chosen.key === item.key,
-      count: item.status ? matching.filter(run => run.status === item.status).length : matching.length,
+      count: item.key === 'all' ? matching.length : matching.filter(run => bucket(run) === item.key).length,
       href: workflowHref(profile, { ...fields, filter: item.key }),
     })),
     emptyText: chosen.empty,
     rows: rows.map(row => ({
       key: row.runId, title: row.title, workflow: row.workflow,
-      status: row.status, word: words[row.status], updatedAt: row.updatedAt, updated: date.format(new Date(row.updatedAt)),
+      status: row.status, word: questionRuns.has(row.runId) ? 'Needs you' : words[row.status], updatedAt: row.updatedAt, updated: date.format(new Date(row.updatedAt)),
       current: detail?.run.runId === row.runId, href: workflowHref(profile, { ...fields, filter: chosen.key, run: row.runId }),
     })),
     detail: detail && {
-      ...detail.run, word: words[detail.run.status], started: date.format(new Date(detail.run.startedAt)),
+      ...detail.run, word: detail.questions.length ? 'Needs you' : words[detail.run.status], started: date.format(new Date(detail.run.startedAt)),
       scheduled: detail.run.schedule ? date.format(new Date(detail.run.schedule.scheduledAt)) : '',
       result: preview(detail.run.result), references, trackerSource, canResume: detail.run.status === 'paused',
-      canCancel: detail.run.status === 'paused' || detail.run.status === 'running',
-      steps: detail.steps.map(step => ({ ...step, word: words[step.status], result: preview(step.result),
+      canCancel: ['paused', 'running', 'waiting'].includes(detail.run.status),
+      questions: detail.questions.map(question => ({
+        ...question,
+        key: 'answer:' + question.runId + ':' + question.name,
+        choices: question.request.choices.map((choice, index) => ({ label: choice, first: index === 0 })),
+        text: typeof question.request.data === 'string' ? question.request.data : '',
+        data: typeof question.request.data !== 'string' ? preview(question.request.data) : '',
+        expires: question.deadline ? date.format(new Date(question.deadline)) : '',
+      })),
+      steps: detail.steps.map(step => ({ ...step, word: step.kind !== 'step' && step.status === 'running' ? 'Waiting' : words[step.status],
+        result: preview(step.result),
         references: references.filter(reference => reference.step === step.name),
       })),
     },
@@ -169,6 +182,14 @@ export async function workflowForm(runner: WorkflowRunner, profile: number, requ
     return { draft: { ...draft, message: started.error === 'missing' ? 'Choose a registered workflow.' : 'Choose a valid workflow and enter a start key.' } }
   }
   const id = form.get('id') ?? ''
+  if (action === 'answer' && workflowRunId.test(id)) {
+    const reason = form.get('reason')?.trim()
+    const choice = form.get('choice')
+    const result = runner.signal(profile, { runId: id, wait: form.get('wait'), key: form.get('key'),
+      value: { choice, ...(reason && { reason }) },
+    }, true)
+    return redirect({ run: id, notice: 'error' in result ? 'answer-unavailable' : 'answered' })
+  }
   if ((action !== 'resume' && action !== 'cancel') || !workflowRunId.test(id)) return { response: new Response(null, { status: 400 }) }
   const result = action === 'resume' ? runner.resume(profile, id) : runner.cancel(profile, id)
   return redirect({ run: id, notice: 'error' in result ? result.error ?? 'conflict' : action === 'resume' ? 'resumed' : 'cancelled' })

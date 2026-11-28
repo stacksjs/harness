@@ -82,7 +82,21 @@ writeFileSync(definition, `
       return step('Record source', () => ({ source: issue.displayKey, state: issue.state }))
     },
   }
-  export default [review, delayed, scheduled, webhook, tracker]
+  const question = {
+    name: 'draft-decision', version: 1,
+    async run(input, { title, step, ask }) {
+      title('Approve the draft update')
+      await step('Prepare draft', () => ({ ready: true }))
+      const answer = await ask('draft-review', {
+        title: 'Apply the prepared draft changes?',
+        choices: ['Apply changes', 'Keep draft'],
+        data: 'The draft and review notes are ready. Choose whether to apply the update.',
+        timeoutMs: 3_600_000,
+      })
+      return step('Record decision', () => answer)
+    },
+  }
+  export default [review, delayed, scheduled, webhook, tracker, question]
 `)
 {
   using db = new Database(databasePath)
@@ -301,6 +315,40 @@ try {
   await trackerList.getByText('New issue', { exact: true }).waitFor()
   await noOverflow()
   await capture('tracker-definitions')
+
+  fixtureTime += 1000
+  const questionRun = await start('draft-decision', 'draft-answer', 'Review prompt')
+  await wait(questionRun, 'waiting')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(base + '/workflows?' + query({ view: 'workspace', run: questionRun }))
+  const question = page.getByRole('form', { name: 'Apply the prepared draft changes?' })
+  await question.getByRole('heading', { name: 'Apply the prepared draft changes?' }).waitFor()
+  const approve = question.getByRole('button', { name: 'Apply changes', exact: true })
+  await question.getByRole('button', { name: 'Keep draft', exact: true }).waitFor()
+  await page.getByRole('link', { name: /^Needs you\s*1$/ }).waitFor({ state: 'attached' })
+  assert.equal(await question.locator('time').getAttribute('datetime'), '2026-11-28T13:01:07.000Z')
+  for (const [width, height] of dimensions) {
+    await page.setViewportSize({ width, height })
+    await noOverflow()
+    if (width < 720) assert.ok((await approve.boundingBox())!.height >= 44)
+    await capture('question')
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+  await question.getByText('Add a reason', { exact: true }).click()
+  const reason = question.getByRole('textbox', { name: 'Reason', exact: true })
+  await reason.fill('The draft matches the review notes.')
+  const extra = await start('check-drafts', 'check-reason-draft', 'Verify existing data')
+  await wait(extra, 'completed')
+  await page.getByRole('link', { name: 'Refresh runs', exact: true }).click()
+  assert.equal(await reason.inputValue(), 'The draft matches the review notes.')
+  await capture('question-reason')
+  await approve.press('Enter')
+  await page.getByRole('status').filter({ hasText: 'Answer recorded.' }).waitFor()
+  await page.locator('[data-workflow-run-meta]').getByText('Completed', { exact: true }).waitFor()
+  await page.getByLabel('Workflow result').filter({ hasText: 'The draft matches the review notes.' }).waitFor()
+  assert.equal(new URL(page.url()).searchParams.get('run'), questionRun)
+  assert.equal(await question.count(), 0)
+  await capture('question-answered')
 
   const writes = JSON.parse(readFileSync(cli.state, 'utf8')).issueCreate.writes
   assert.equal(writes.length, 1)
