@@ -26,12 +26,24 @@ export const newerCommentsHref = $props.newerCommentsHref
 export const savedViewScope = $props.savedViewScope
 export const savedViewDetail = $props.savedViewDetail
 export const listSelectionFields = $props.listSelectionFields
+export const hasIncludedRepositories = $props.hasIncludedRepositories
+export const filterCount = $props.filterCount
+export const repositoryFilters = $props.repositoryFilters
+export const labelOptions = $props.labelOptions
+export const assigneeOptions = $props.assigneeOptions
+export const findLabel = $props.findLabel
+export const labelFound = $props.labelFound
+export const lookupLimited = $props.lookupLimited
+export const findAssignee = $props.findAssignee
+export const assigneeChoices = $props.assigneeChoices
 export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name: 'Closed' }, { value: 'all', name: 'All states' }]
 </script>
 <script client>
 import { initialSavedViews, issueViews, savedViewsMenu } from '../client/saved-views'
 
 const issueScope = @json(savedViewScope)
+const issueFilters = useRef('issueFilters')
+const issueFilterTrigger = useRef('issueFilterTrigger')
 const savedViewTitle = 'issue view'
 const savedViewMenuRef = useRef('savedViewMenuRef')
 const savedViewTrigger = useRef('savedViewTrigger')
@@ -48,12 +60,34 @@ const listViews = savedViewsMenu({
     dialog: savedViewDialog.current, nameInput: savedViewNameInput.current }),
   publish: value => savedViewState.set(value),
   nextTick,
+  closeSibling: () => { if (issueFilters.current) issueFilters.current.open = false },
 })
 
 onMount(listViews.mount)
 useEventListener('storage', listViews.storageChanged)
 useEventListener('pageshow', listViews.refresh)
-useEventListener('pointerdown', listViews.dismissOutside)
+useEventListener('pointerdown', event => {
+  listViews.dismissOutside(event)
+  const filters = issueFilters.current
+  if (filters?.open && !filters.contains(event.target)) filters.open = false
+})
+
+function submitIssueLookup(event, action) {
+  if (event.key !== 'Enter' || event.isComposing) return
+  const form = event.target.form
+  const submitter = form?.elements.namedItem(action)
+  if (!submitter) return
+  event.preventDefault()
+  form.requestSubmit(submitter)
+}
+
+function closeIssueFilters(event) {
+  if (event.key !== 'Escape' || !issueFilters.current?.open || event.defaultPrevented || event.isComposing) return
+  event.preventDefault()
+  event.stopPropagation()
+  issueFilters.current.open = false
+  issueFilterTrigger.current?.focus()
+}
 </script>
 <main data-harness-shell data-issue-workspace class="text-neutral-900 dark:text-neutral-100">
   <header data-issue-header>
@@ -68,47 +102,125 @@ useEventListener('pointerdown', listViews.dismissOutside)
         @foreach(listSelectionFields as field)
           <input type="hidden" name="{{ field[0] }}" value="{{ field[1] }}">
         @endforeach
-        <label data-issue-search>
-          <span>Search issues</span>
-          <input type="search" name="q" maxlength="160" value="{{ scope.search }}" placeholder="Search titles and descriptions" enterkeyhint="search">
-        </label>
-        <div data-issue-filter-fields>
-          <label>
-            <span id="issue-filter-profile">Profile</span>
-            <select name="profile" aria-labelledby="issue-filter-profile">
-              @if(!profiles.length)<option value="0">No profiles</option>@endif
-              @foreach(profiles as item)
-                <option value="{{ item.id }}" @if(item.id === profile)selected@endif>{{ item.name }}</option>
-              @endforeach
-            </select>
-          </label>
-          <label>
-            <span id="issue-filter-repository">Repository</span>
-            <select name="repository" aria-labelledby="issue-filter-repository">
-              <option value="">All repositories</option>
-              @foreach(repositories as item)
-                <option value="{{ item }}" @if(item === repository)selected@endif>{{ item }}</option>
-              @endforeach
-            </select>
-          </label>
-          <label>
-            <span id="issue-filter-state">Status</span>
-            <select name="state" aria-labelledby="issue-filter-state">
-              @foreach(states as item)
-                <option value="{{ item.value }}" @if(item.value === scope.state)selected@endif>{{ item.name }}</option>
-              @endforeach
-            </select>
-          </label>
-          <label>
-            <span id="issue-filter-sort">Order</span>
-            <select name="sort" aria-labelledby="issue-filter-sort">
-              <option value="updated" @if(scope.sort === 'updated')selected@endif>Recently updated</option>
+        <div data-issue-search>
+          <label for="issue-search" class="sr-only">Search issues</label>
+          <span class="i-hugeicons-search-01" aria-hidden="true"></span>
+          <input id="issue-search" type="search" name="q" maxlength="160" value="{{ scope.search }}" placeholder="Search issues" enterkeyhint="search">
+          <button type="submit" data-issue-button aria-label="Search">
+            <span class="inline-block size-4 i-hugeicons-arrow-right-01" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div data-issue-filter-toolbar>
+          <label data-issue-sort>
+            <span id="issue-order-label" class="sr-only">Order</span>
+            <select name="sort" aria-labelledby="issue-order-label" @change="$event.target.form?.requestSubmit()">
+              <option value="updated" @if(scope.sort === 'updated')selected@endif>Updated</option>
               <option value="created" @if(scope.sort === 'created')selected@endif>Newest</option>
             </select>
           </label>
-        </div>
-        <div data-issue-filter-toolbar>
-          <button type="submit" data-issue-button>Apply filters</button>
+          <details data-issue-filter-menu ref="issueFilters" @if(findLabel || findAssignee)open@endif @keydown="closeIssueFilters">
+            <summary data-issue-button ref="issueFilterTrigger" @click="listViews.closeMenu(false)">
+              <span class="inline-block size-4 i-hugeicons-filter" aria-hidden="true"></span>
+              Filters
+              @if(filterCount)<span data-pr-filter-count>{{ filterCount }}</span>@endif
+            </summary>
+            <div data-issue-filter-fields>
+              <label>
+                <span id="issue-filter-profile">Profile</span>
+                <select name="profile" aria-labelledby="issue-filter-profile">
+                  @if(!profiles.length)<option value="0">No profiles</option>@endif
+                  @foreach(profiles as item)
+                    <option value="{{ item.id }}" @if(item.id === profile)selected@endif>{{ item.name }}</option>
+                  @endforeach
+                </select>
+              </label>
+              <label>
+                <span id="issue-filter-repository">Repository</span>
+                <select name="repository" aria-labelledby="issue-filter-repository">
+                  <option value="">All repositories</option>
+                  @foreach(repositories as item)
+                    <option value="{{ item }}" @if(item === repository)selected@endif>{{ item }}</option>
+                  @endforeach
+                </select>
+              </label>
+              <label>
+                <span id="issue-filter-state">Status</span>
+                <select name="state" aria-labelledby="issue-filter-state">
+                  @foreach(states as item)
+                    <option value="{{ item.value }}" @if(item.value === scope.state)selected@endif>{{ item.name }}</option>
+                  @endforeach
+                </select>
+              </label>
+              <label>
+                <span id="issue-filter-involvement">Involvement</span>
+                <select name="involvement" aria-labelledby="issue-filter-involvement">
+                  <option value="">Everyone</option>
+                  <option value="assigned" @if(scope.involvement === 'assigned')selected@endif>Assigned to me</option>
+                  <option value="authored" @if(scope.involvement === 'authored')selected@endif>Opened by me</option>
+                  <option value="mentioned" @if(scope.involvement === 'mentioned')selected@endif>Mentioning me</option>
+                </select>
+              </label>
+              <fieldset>
+                <legend>Assignee</legend>
+                <input type="hidden" name="shownAssignee" value="{{ scope.assignee }}">
+                <div data-issue-label-search>
+                  <label for="issue-assignee" class="sr-only">GitHub username</label>
+                  <input id="issue-assignee" list="issue-assignees" name="assignee" maxlength="106" value="{{ scope.assignee }}"
+                    placeholder="Anyone" autocomplete="off" autocapitalize="none" spellcheck="false"
+                    @keydown="submitIssueLookup($event, 'findAssignees')">
+                  <button type="submit" data-issue-button name="findAssignees" value="1">Find people</button>
+                </div>
+                @if(findAssignee)
+                  @if(!assigneeChoices.length)<p role="status" data-issue-filter-feedback>No matching people.</p>@endif
+                  @if(lookupLimited)<p role="status" data-issue-filter-feedback>Some people are unavailable.</p>@endif
+                  <div data-issue-filter-choices aria-label="Issue assignee choices">
+                    @foreach(assigneeChoices as person)
+                      <button type="submit" data-issue-button name="pickAssignee" value="{{ person.value }}">
+                        {{ person.value }}@if(person.description) <span>{{ person.description }}</span>@endif
+                      </button>
+                    @endforeach
+                  </div>
+                @endif
+                <datalist id="issue-assignees">
+                  <option value="@me">Me</option>
+                  @foreach(assigneeOptions as name)<option value="{{ name }}"></option>@endforeach
+                </datalist>
+              </fieldset>
+              <fieldset>
+                <legend>Labels</legend>
+                <div data-issue-label-search>
+                  <label for="issue-label-search" class="sr-only">Find labels</label>
+                  <input id="issue-label-search" type="search" name="findLabel" value="{{ findLabel }}" maxlength="100" placeholder="Find labels"
+                    @keydown="submitIssueLookup($event, 'findLabels')">
+                  <button type="submit" data-issue-button name="findLabels" value="1">Find labels</button>
+                </div>
+                @if(findLabel)
+                  <p role="status" data-issue-filter-feedback>
+                    @if(labelFound){{ labelFound }} found@else No matching labels. @endif
+                    @if(lookupLimited)Some label results are unavailable.@endif
+                  </p>
+                @endif
+                @if(labelOptions.length)
+                  <div data-issue-filter-choices aria-label="Issue label choices">
+                    @foreach(labelOptions as item)
+                      <label><input type="checkbox" name="label" value="{{ item.name }}" @if(item.checked)checked@endif>{{ item.name }}</label>
+                    @endforeach
+                  </div>
+                @endif
+              </fieldset>
+              @if(repositoryFilters.length > 1)
+                <fieldset>
+                  <legend>Hide repositories</legend>
+                  <div data-issue-filter-choices>
+                    @foreach(repositoryFilters as item)
+                      <label><input type="checkbox" name="hideRepository" value="{{ item.name }}" @if(item.hidden)checked@endif>{{ item.name }}</label>
+                    @endforeach
+                  </div>
+                </fieldset>
+              @endif
+              <div data-issue-filter-actions><button type="submit" data-issue-button>Apply filters</button></div>
+            </div>
+          </details>
           @include('../partials/harness-saved-views', { savedViewSurface: 'issue', savedViewLabel: 'Saved issue views' })
         </div>
       </form>
@@ -124,6 +236,8 @@ useEventListener('pointerdown', listViews.dismissOutside)
       @endif
       @if(!repositories.length)
         <p data-issue-empty>Trust a project with a GitHub remote to browse its issues.</p>
+      @elseif(!hasIncludedRepositories)
+        <p data-issue-empty>Change Filters to show at least one repository.</p>
       @elseif(rows.length)
         <ul data-issue-rows aria-label="Issue results">
           @foreach(rows as row)

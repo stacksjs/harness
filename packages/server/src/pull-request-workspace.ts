@@ -13,7 +13,7 @@ import { deleteWorkspacePullRequestBranch } from './pull-request-delete-branch'
 import { findPullRequestThread } from './pull-request-links'
 import { availableLifecycleActions, behindBase, branchUpdateMethods, deletableSourceBranch, isMergeAction, lifecycleAction, lifecycleActions, lifecycleRevision, lifecycleTargetReached, mergeMethod, mergeMethods, readPullRequestLifecycle, takesMergeMethod, writePullRequestLifecycle } from './pull-request-lifecycle'
 import { readPullRequestListDetails } from './pull-request-list-details'
-import { pullRequestFilterQualifiers, readFilterLookup, readFilterViewer, readPullRequestFilterChoices, readPullRequestListSearch, writePullRequestFilters } from './pull-request-list-filters'
+import { pullRequestFilterQualifiers, readFilterLookup, readFilterViewer, readRepositoryFilterChoices, readPullRequestListSearch, writePullRequestFilters } from './pull-request-list-filters'
 import { applyPullRequestLabelChanges, parseLabelSelection, pullRequestLabels, readPullRequestLabelEditor } from './pull-request-labels'
 import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker, matchesInlineReview, readInlineReview } from './pull-request-review'
 import { mergePullRequestReviewers, pullRequestReviewDecision, pullRequestReviewParticipation, readPullRequestReviewOutcomes } from './pull-request-review-outcomes'
@@ -416,7 +416,7 @@ async function readPullRequestWorkspace(state: HarnessState, query: URLSearchPar
   let cappedSearch = false
   let detailsUnavailable = false
   let partitionsUnavailable = false
-  const filterChoices = !listOnly && lookup ? readPullRequestFilterChoices(list, lookup, signal)
+  const filterChoices = !listOnly && lookup ? readRepositoryFilterChoices(list, lookup, signal)
     .catch(() => ({ ...lookup, options: [], more: false, failed: list.length })) : Promise.resolve(null)
   const detail = !listOnly && selection && selectionRepo ? (async () => {
     const editingLabels = tab === 'summary' && query.get('labels') === 'edit'

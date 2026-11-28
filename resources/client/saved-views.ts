@@ -21,7 +21,7 @@ export const issueViews: SavedViewsKind = {
   path: '/issues',
   storageKey: 'harness.issue-views.v1',
   activeKey: 'harness.issue-views.active.v1',
-  scopeKeys: ['profile', 'state', 'sort', 'q', 'repository'],
+  scopeKeys: ['profile', 'state', 'sort', 'q', 'repository', 'involvement', 'assignee', 'label', 'hideRepository'],
 }
 
 export const SAVED_VIEW_NAME_LIMIT = 80
@@ -30,8 +30,8 @@ function listScope(value: string, kind: SavedViewsKind) {
   const source = new URLSearchParams(value)
   const scope = new URLSearchParams()
   for (const key of kind.scopeKeys) {
-    if (key === 'label') {
-      for (const label of source.getAll(key)) scope.append(key, label)
+    if (key === 'label' || key === 'hideRepository') {
+      for (const value of source.getAll(key)) scope.append(key, value)
     }
     else {
       const entry = source.get(key)
@@ -43,13 +43,16 @@ function listScope(value: string, kind: SavedViewsKind) {
 
 function matchingScope(value: string, kind: SavedViewsKind) {
   const scope = listScope(value, kind)
-  const labels = scope.getAll('label').map(label => label.toLowerCase()).sort()
-  scope.delete('label')
-  for (const name of ['repository', 'author']) {
+  const collections = ['label', 'hideRepository'].map((key) => {
+    const values = scope.getAll(key).map(value => value.toLowerCase()).sort()
+    scope.delete(key)
+    return values
+  })
+  for (const name of ['repository', 'author', 'assignee']) {
     const entry = scope.get(name)
     if (entry) scope.set(name, entry.toLowerCase())
   }
-  return JSON.stringify([scope.toString(), labels])
+  return JSON.stringify([scope.toString(), collections])
 }
 
 function nameError(name: string, views: readonly SavedView[], editingId: string): string {

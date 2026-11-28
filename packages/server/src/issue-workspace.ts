@@ -4,6 +4,7 @@ import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
 import { newThreadLink, parsePullRequest } from './prompt-links'
+import { readFilterViewer, readRepositoryFilterChoices } from './pull-request-list-filters'
 import { pullRequestLabels } from './pull-request-labels'
 import { RepositoryPullRequestError, repositoryGitHubRequest } from './repository-pull-request'
 import { renderPullRequestCommentMarkdown } from './transcript-markdown'
@@ -11,12 +12,16 @@ import { threadTitle } from './thread-search'
 
 const pageSize = 20
 const searchLimit = 1000
+const involvementQualifiers = { assigned: 'assignee', authored: 'author', mentioned: 'mentions' } as const
 const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 
 interface IssueScope {
   state: 'open' | 'closed' | 'all'
   sort: 'updated' | 'created'
   search: string
+  involvement: keyof typeof involvementQualifiers | ''
+  assignee: string
+  labels: string[]
   page: number
 }
 
@@ -58,7 +63,9 @@ function issueRow(value: unknown, repository: string) {
   const updated = date(issue.updated_at)
   return {
     repository, number, url, state: issue.state, title: issue.title.slice(0, 512), created, updated,
-    author: login(issue.user?.login), labels: (pullRequestLabels(issue.labels) ?? []).slice(0, 30),
+    author: login(issue.user?.login),
+    assignees: Array.isArray(issue.assignees) ? issue.assignees.map(assignee => login(assignee?.login)).filter(Boolean).slice(0, 20) : [],
+    labels: (pullRequestLabels(issue.labels) ?? []).slice(0, 30),
   }
 }
 
@@ -68,15 +75,26 @@ function issueError(error: unknown): string {
 
 async function repositoryIssues(repository: GitHubWorkspaceRepository, scope: IssueScope, signal: AbortSignal) {
   const end = Math.min(searchLimit, scope.page * pageSize + 1)
-  const size = Math.min(end, 100)
   const issues = new Map<number, NonNullable<ReturnType<typeof issueRow>>>()
   let partial = false
-  for (let page = 1; (page - 1) * size < end; page++) {
+  const viewer = scope.involvement || scope.assignee === '@me' ? await readFilterViewer(repository.path, signal) : ''
+  const assignee = scope.assignee === '@me' ? viewer : scope.assignee
+  const qualifiers = [
+    'is:issue', 'repo:' + repository.name, scope.state === 'all' ? '' : 'is:' + scope.state,
+    scope.involvement ? involvementQualifiers[scope.involvement] + ':' + viewer : '',
+    assignee && !(scope.involvement === 'assigned' && assignee.toLowerCase() === viewer.toLowerCase()) ? 'assignee:' + assignee : '',
+    ...scope.labels.map(label => 'label:' + JSON.stringify(label)),
+    scope.search ? 'in:title,body "' + scope.search + '"' : '',
+  ].filter(Boolean).join(' ')
+  const requiredAssignees = [assignee, scope.involvement === 'assigned' ? viewer : ''].filter(Boolean).map(name => name.toLowerCase())
+  // Repeated assignee qualifiers can return either person. Read larger pages
+  // when verifying the intersection against the returned assignments.
+  const size = new Set(requiredAssignees).size > 1 ? 100 : Math.min(end, 100)
+  for (let page = 1; issues.size < end && page * size <= searchLimit; page++) {
     signal.throwIfAborted()
     const query = new URLSearchParams({
       sort: scope.sort, order: 'desc', per_page: String(size), page: String(page),
-      q: ['is:issue', 'repo:' + repository.name, scope.state === 'all' ? '' : 'is:' + scope.state,
-        scope.search ? 'in:title,body "' + scope.search + '"' : ''].filter(Boolean).join(' '),
+      q: qualifiers,
     })
     const reply = await repositoryGitHubRequest(repository.path, 'search/issues?' + query, undefined, signal)
     const result = reply.body as { items?: unknown[], incomplete_results?: boolean, total_count?: number } | null
@@ -85,7 +103,9 @@ async function repositoryIssues(repository: GitHubWorkspaceRepository, scope: Is
     partial ||= Boolean(result.incomplete_results || (result.total_count ?? 0) > searchLimit)
     for (const item of result.items.slice(0, size)) {
       const row = issueRow(item, repository.name)
-      if (row && (scope.state === 'all' || row.state === scope.state)) issues.set(row.number, row)
+      if (row && (scope.state === 'all' || row.state === scope.state)
+        && requiredAssignees.every(name => row.assignees.some(assignee => assignee.toLowerCase() === name)))
+        issues.set(row.number, row)
     }
     if (!reply.hasNextPage) break
   }
@@ -116,7 +136,6 @@ async function issueDetail(repository: GitHubWorkspaceRepository, number: number
   return {
     ...issue, dateLabel: issue.created ? dates.format(issue.created) : '',
     description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
-    assignees: Array.isArray(raw.assignees) ? raw.assignees.map(assignee => login(assignee?.login)).filter(Boolean).slice(0, 20) : [],
     comments, commentsAvailable, moreComments: Boolean(commentsAvailable && commentReply.hasNextPage),
   }
 }
@@ -153,15 +172,33 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const number = preserveSelection ? positiveInteger(query.get('issue')) : 0
   const commentPage = Math.min(positiveInteger(query.get('comments')) || 1, 100)
   const filter = query.get('state')
+  const involvement = query.get('involvement')
+  const findAssignee = query.has('findAssignees') ? (query.get('assignee') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim() : ''
+  const assignee = (query.get('pickAssignee') ?? (findAssignee ? query.get('shownAssignee') : query.get('assignee')) ?? '').trim().toLowerCase()
+  const labels = new Map<string, string>()
+  for (const value of query.getAll('label').slice(0, 100)) {
+    const label = value.trim()
+    if (label && label.length <= 100 && !/\p{Cc}/u.test(label) && !labels.has(label.toLowerCase()))
+      labels.set(label.toLowerCase(), label)
+    if (labels.size === 10) break
+  }
+  const hidden = new Set(query.getAll('hideRepository').slice(0, 100).map(name => name.toLowerCase()).filter(name => repositories.has(name)))
   const scope: IssueScope = {
     state: filter === 'closed' || filter === 'all' ? filter : 'open',
     sort: query.get('sort') === 'created' ? 'created' : 'updated',
     search: (query.get('q') || '').slice(0, 160).replace(/["\\\p{Cc}]/gu, ' ').trim(),
+    involvement: involvement === 'assigned' || involvement === 'authored' || involvement === 'mentioned' ? involvement : '',
+    assignee: assignee === '@me' ? assignee : login(assignee.replace(/^@/u, '')),
+    labels: [...labels.values()],
     page: Math.min(positiveInteger(query.get('page')) || 1, searchLimit / pageSize),
   }
   const params = new URLSearchParams({ profile: String(profile), state: scope.state, sort: scope.sort })
   if (repository) params.set('repository', repository.name)
   if (scope.search) params.set('q', scope.search)
+  if (scope.involvement) params.set('involvement', scope.involvement)
+  if (scope.assignee) params.set('assignee', scope.assignee)
+  for (const value of scope.labels) params.append('label', value)
+  for (const name of [...hidden].sort()) params.append('hideRepository', name)
   const savedViewScope = params.toString()
   if (scope.page > 1) params.set('page', String(scope.page))
   const href = (overrides: Record<string, string | number> = {}) => {
@@ -171,7 +208,10 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   }
   const detail = selection && number ? issueDetail(selection, number, commentPage, signal)
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error) })) : null
-  const targets = repository ? [repository] : [...repositories.values()]
+  const targets = (repository ? [repository] : [...repositories.values()]).filter(repo => !hidden.has(repo.name.toLowerCase()))
+  const findLabel = (query.get('findLabel') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
+  const lookup = findAssignee ? readRepositoryFilterChoices(targets, { kind: 'assignees', search: findAssignee }, signal)
+    : query.has('findLabels') && findLabel ? readRepositoryFilterChoices(targets, { kind: 'labels', search: findLabel }, signal) : null
   const rows: Array<NonNullable<ReturnType<typeof issueRow>>> = []
   const failures: { repository: string, reason: string }[] = []
   let partial = false
@@ -188,7 +228,16 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     })
   }
   const { selected, error } = await detail ?? { selected: null, error: selectionName || number ? 'This issue is outside the selected profile.' : '' }
+  const choices = await lookup
+  const labelChoices = choices?.kind === 'labels' ? choices : null
+  const people = choices?.kind === 'assignees' ? choices : null
   signal.throwIfAborted()
+  const labelOptions = new Map(labels)
+  for (const value of [...(labelChoices?.options.map(option => option.value) ?? []), ...rows.flatMap(row => row.labels.map(label => label.name))]) {
+    const key = value.toLowerCase()
+    if (!labelOptions.has(key)) labelOptions.set(key, value)
+    if (labelOptions.size >= 50) break
+  }
   const selectedScope: Record<string, string | number> = selected ? { selected: selected.repository, issue: selected.number } : {}
   const savedViewDetail = new URLSearchParams()
   if (selected) {
@@ -233,6 +282,14 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   return {
     profiles, profile, repositories: [...repositories.values()].map(item => item.name).sort(),
     repository: repository?.name || '', scope, failures, partial, error, selected, draftHref,
+    hasIncludedRepositories: targets.length > 0,
+    filterCount: Number(Boolean(repository)) + Number(scope.state !== 'open') + Number(Boolean(scope.involvement))
+      + Number(Boolean(scope.assignee)) + scope.labels.length + Number(hidden.size > 0),
+    repositoryFilters: [...repositories].map(([key, repo]) => ({ name: repo.name, hidden: hidden.has(key) })),
+    labelOptions: [...labelOptions].map(([key, name]) => ({ name, checked: labels.has(key) })),
+    assigneeOptions: [...new Set(rows.flatMap(row => row.assignees))].sort().slice(0, 30),
+    findLabel: labelChoices ? findLabel : '', labelFound: labelChoices?.options.length || 0,
+    findAssignee, assigneeChoices: people?.options ?? [], lookupLimited: Boolean(choices?.failed || choices?.more),
     savedViewScope, savedViewDetail: savedViewDetail.toString(),
     listSelectionFields: selected ? [...savedViewDetail, ['selectionProfile', String(profile)]] : [],
     linkedThreads, threadChoices, pullRequests: [...pullRequests.values()],

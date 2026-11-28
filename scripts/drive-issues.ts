@@ -41,7 +41,7 @@ fixture.issues = {
     ...row('fixture/notebook', 24, longTitle, '2026-10-01T00:00:00Z', '2026-11-27T12:00:00Z'),
     body: 'The draft should reopen with its **attachments** and selected project.\n\nCheck behavior after the network reconnects.',
     labels: [{ id: 1, name: 'bug', color: 'ff0000' }, { id: 2, name: 'offline', color: '112233' }],
-    assignees: [{ login: 'fixture-reviewer' }],
+    assignees: [{ login: 'fixture-reviewer' }, { login: 'fixture-user' }],
     comments: Array.from({ length: 21 }, (_, index) => ({
       id: index + 1, issue_url: 'https://api.github.com/repos/fixture/notebook/issues/24', user: { login: 'fixture-reviewer' },
       created_at: '2026-11-27T12:30:00Z', body: 'Fixture comment **' + (index + 1) + '**.',
@@ -50,6 +50,8 @@ fixture.issues = {
     'Notebook issue ' + (index + 25), new Date(Date.UTC(2026, 10, index + 1)).toISOString()))],
   'fixture/atlas': [row('fixture/atlas', 51, 'Newest fixture issue', '2026-11-26T12:00:00Z')],
 }
+fixture.filterAssignees = [{ login: 'fixture-reviewer', name: 'Review Team' }]
+fixture.labelCatalog = [{ id: 42, name: 'Needs triage', color: '8794a1', description: 'Fixture label for new reports' }]
 writeFileSync(cli.state, JSON.stringify(fixture))
 
 const databasePath = join(dir, 'fixture.sqlite')
@@ -96,17 +98,47 @@ try {
   await page.locator('[data-navigation-issues]').click()
   const issue = page.getByRole('link', { name: new RegExp(longTitle) })
   assert.match((await page.locator('[data-issue-row]').first().textContent()) ?? '', /Restore offline drafts/)
+  const filters = page.locator('[data-issue-filter-menu] > summary')
+  assert.ok(await page.getByLabel('Search issues').evaluate(input => Number.parseFloat(getComputedStyle(input).paddingInlineStart) >= 30))
+  assert.ok(await page.getByLabel('Order').evaluate(select => Number.parseFloat(getComputedStyle(select).paddingInlineEnd) >= 26))
   for (const [width, height] of viewports) {
     await page.setViewportSize({ width, height })
     assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
     await capture('list-' + width + 'x' + height)
+    await filters.click()
+    const bounds = await page.locator('[data-issue-filter-fields]').boundingBox()
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= height)
+    await capture('filters-' + width + 'x' + height)
+    await page.keyboard.press('Escape')
+    assert.ok(await filters.evaluate(element => element === element.ownerDocument.activeElement))
   }
   await page.getByLabel('Order').selectOption('created')
-  await page.getByRole('button', { name: 'Apply filters' }).click()
+  await page.waitForURL(url => url.searchParams.get('sort') === 'created')
   assert.match((await page.locator('[data-issue-row]').first().textContent()) ?? '', /Newest fixture issue/)
-  await page.getByLabel('Repository').selectOption('fixture/notebook')
   await page.getByLabel('Search issues').fill('offline')
   await page.getByLabel('Search issues').press('Enter')
+  await page.waitForURL(url => url.searchParams.get('q') === 'offline')
+  await issue.waitFor()
+  await filters.click()
+  await page.getByLabel('Repository').selectOption('fixture/notebook')
+  await page.getByLabel('Involvement', { exact: true }).selectOption('assigned')
+  await page.getByLabel('GitHub username', { exact: true }).fill('Review Team')
+  await page.getByLabel('GitHub username', { exact: true }).press('Enter')
+  await page.getByRole('button', { name: /fixture-reviewer/ }).click()
+  await page.waitForURL(url => url.searchParams.get('pickAssignee') === 'fixture-reviewer')
+  await issue.waitFor()
+  await filters.click()
+  assert.equal(await page.getByLabel('GitHub username', { exact: true }).inputValue(), 'fixture-reviewer')
+  await page.getByRole('checkbox', { name: 'bug', exact: true }).check()
+  await page.getByRole('checkbox', { name: 'offline', exact: true }).check()
+  await page.getByRole('checkbox', { name: 'fixture/atlas', exact: true }).check()
+  await page.getByRole('searchbox', { name: 'Find labels', exact: true }).fill('triage')
+  await page.getByRole('searchbox', { name: 'Find labels', exact: true }).press('Enter')
+  const foundLabel = page.getByRole('checkbox', { name: 'Needs triage', exact: true })
+  await foundLabel.scrollIntoViewIfNeeded()
+  await capture('label-search-360x800')
+  await page.getByRole('button', { name: 'Apply filters' }).click()
+  await issue.waitFor()
   assert.equal(await page.locator('[data-issue-row]').count(), 1)
   const views = page.getByLabel('Saved issue views')
   const saveCurrent = page.getByRole('button', { name: 'Save current view…', exact: true })
@@ -164,7 +196,7 @@ try {
   const detailUrl = page.url()
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.getByLabel('Order').selectOption('updated')
-  await page.getByRole('button', { name: 'Apply filters' }).click()
+  await page.waitForURL(url => url.searchParams.get('sort') === 'updated')
   await page.getByRole('heading', { name: longTitle }).waitFor()
   await views.getByText('Modified', { exact: true }).waitFor()
   const withPage = new URL(page.url())
@@ -178,8 +210,14 @@ try {
   assert.equal(restored.get('q'), 'offline')
   assert.equal(restored.get('sort'), 'created')
   assert.equal(restored.has('page'), false)
+  assert.equal(restored.get('involvement'), 'assigned')
+  assert.equal(restored.get('assignee'), 'fixture-reviewer')
+  assert.deepEqual(restored.getAll('label').sort(), ['bug', 'offline'])
+  assert.deepEqual(restored.getAll('hideRepository'), ['fixture/atlas'])
+  assert.equal(restored.has('findLabel'), false)
   await views.getByText('Modified', { exact: true }).waitFor({ state: 'hidden' })
 
+  await filters.click()
   await page.getByLabel('Status', { exact: true }).selectOption('all')
   await page.getByRole('button', { name: 'Apply filters' }).click()
   await views.getByText('Modified', { exact: true }).waitFor()
@@ -263,7 +301,7 @@ try {
   await issuePage.reload()
   await issuePage.getByRole('link', { name: 'Existing offline thread', exact: true }).waitFor()
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, saved views, draft and send, issue and PR links, and live link and unlink')
+  console.log('PASS', label, 'six sizes, filters and lookup, saved views, draft and send, and issue and PR links')
 }
 catch (error) {
   console.error(error)

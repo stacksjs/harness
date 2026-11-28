@@ -116,22 +116,29 @@ type LookupRepository = { path: string, name: string }
 type FilterChoice = { value: string, description: string, color?: string }
 type ChoicePage = { options: FilterChoice[], more: boolean }
 
-async function searchRepositoryAuthors({ path, name }: LookupRepository, search: string, signal: AbortSignal, credential: string): Promise<ChoicePage> {
+type FilterLookup = { kind: 'authors' | 'assignees' | 'labels', search: string }
+
+async function searchRepositoryUsers({ path, name }: LookupRepository, search: string, signal: AbortSignal, credential: string,
+  kind: 'authors' | 'assignees'): Promise<ChoicePage> {
   const [owner, repository] = name.split('/')
+  const field = kind === 'authors' ? 'mentionableUsers' : 'assignableUsers'
+  const operation = kind === 'authors' ? 'HarnessSearchPullRequestAuthors' : 'HarnessSearchIssueAssignees'
   const result = await repositoryGitHubRequest(path, 'graphql', {
-    query: `query HarnessSearchPullRequestAuthors($owner: String!, $name: String!, $search: String!) {
+    query: `query ${operation}($owner: String!, $name: String!, $search: String!) {
       repository(owner: $owner, name: $name) {
         nameWithOwner
-        mentionableUsers(first: 50, query: $search) { nodes { login name } pageInfo { hasNextPage } }
+        ${field}(first: 50, query: $search) { nodes { login name } pageInfo { hasNextPage } }
       }
     }`, variables: { owner, name: repository, search },
   }, signal, credential)
-  const response = result.body as { errors?: unknown[], data?: { repository?: { nameWithOwner?: string,
-    mentionableUsers?: { nodes?: ({ login?: string, name?: string } | null)[], pageInfo?: { hasNextPage?: boolean } } } } } | null
+  type Users = { nodes?: ({ login?: string, name?: string } | null)[], pageInfo?: { hasNextPage?: boolean } }
+  const response = result.body as { errors?: unknown[], data?: { repository?: {
+    nameWithOwner?: string, mentionableUsers?: Users, assignableUsers?: Users,
+  } } } | null
   const repo = response?.data?.repository
-  const users = repo?.mentionableUsers
+  const users = repo?.[field]
   if (result.status !== 200 || response?.errors?.length || repo?.nameWithOwner?.toLowerCase() !== name.toLowerCase() || !Array.isArray(users?.nodes))
-    throw new RepositoryPullRequestError('GitHub could not search this repository for authors.')
+    throw new RepositoryPullRequestError('GitHub could not search this repository for people.')
   return {
     options: users.nodes.flatMap(user => user?.login && loginPattern.test(user.login)
       ? [{ value: user.login, description: typeof user.name === 'string' ? user.name.slice(0, 160) : '' }] : []),
@@ -139,7 +146,7 @@ async function searchRepositoryAuthors({ path, name }: LookupRepository, search:
   }
 }
 
-export async function readPullRequestFilterChoices(repositories: LookupRepository[], lookup: NonNullable<ReturnType<typeof readFilterLookup>>, signal: AbortSignal) {
+export async function readRepositoryFilterChoices(repositories: LookupRepository[], lookup: FilterLookup, signal: AbortSignal) {
   const options = new Map<string, FilterChoice>()
   let more = false
   let failed = 0
@@ -150,7 +157,7 @@ export async function readPullRequestFilterChoices(repositories: LookupRepositor
     signal.throwIfAborted()
     const batch = repositories.slice(index, index + 4)
     const pages = await Promise.allSettled(batch.map(async (repo): Promise<ChoicePage> => {
-      if (kind === 'authors') return searchRepositoryAuthors(repo, search, signal, credential)
+      if (kind !== 'labels') return searchRepositoryUsers(repo, search, signal, credential, kind)
       const result = await searchRepositoryLabels({ path: repo.path, repository: repo.name, credential, signal }, search)
       if (!result) throw new RepositoryPullRequestError('GitHub could not search this repository for labels.')
       return { options: result.labels.map(label => ({ value: label.name, color: label.color, description: label.description })), more: result.more }

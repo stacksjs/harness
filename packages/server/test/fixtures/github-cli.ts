@@ -332,12 +332,15 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const nodes = labels.slice(0, 100).map(label => ({ id: label.node_id ?? String(label.id), name: label.name, color: label.color, description: label.description }))
     reply(200, { data: { repository: { nameWithOwner: name, labels: { nodes, pageInfo: { hasNextPage: labels.length > 100 } } } } })
   }
-  if (query.includes('query HarnessSearchPullRequestAuthors')) {
+  if (query.includes('query HarnessSearchPullRequestAuthors') || query.includes('query HarnessSearchIssueAssignees')) {
     const name = variables.owner + '/' + variables.name
-    if (!state.repositories[name] || state.filterAuthorFailure === name) reply(503, { message: 'Private author search diagnostics' })
+    if (!state.repositories[name] || state.filterAuthorFailure === name) reply(503, { message: 'Private people search diagnostics' })
     const needle = variables.search.toLowerCase()
-    const nodes = (state.filterAuthors ?? []).filter(user => (user.login + ' ' + user.name).toLowerCase().includes(needle))
-    reply(200, { data: { repository: { nameWithOwner: name, mentionableUsers: { nodes: nodes.slice(0, 50),
+    const assignees = query.includes('query HarnessSearchIssueAssignees')
+    const users = assignees ? state.filterAssignees : state.filterAuthors
+    const field = assignees ? 'assignableUsers' : 'mentionableUsers'
+    const nodes = (users ?? []).filter(user => (user.login + ' ' + user.name).toLowerCase().includes(needle))
+    reply(200, { data: { repository: { nameWithOwner: name, [field]: { nodes: nodes.slice(0, 50),
       pageInfo: { hasNextPage: nodes.length > 50 } } } } })
   }
   if (query.includes('query HarnessReviewerIdentities')) {
@@ -447,10 +450,19 @@ if (url.pathname === '/search/issues') {
   if (keyword.startsWith('is:issue ')) {
     if (state.issueFailure === selected) reply(503, { message: 'Private fixture issue diagnostics' })
     const phrase = /in:title,body "([^"]+)"/.exec(keyword)?.[1]?.toLowerCase() ?? ''
-    const filter = /(?:^| )is:(open|closed)(?: |$)/.exec(keyword)?.[1]
+    const terms = keyword.replace(/in:title,body "[^"]+"/, '')
+    const filter = /(?:^| )is:(open|closed)(?: |$)/.exec(terms)?.[1]
+    const author = /(?:^| )author:([^ ]+)/.exec(terms)?.[1]?.toLowerCase()
+    const mention = /(?:^| )mentions:([^ ]+)/.exec(terms)?.[1]?.toLowerCase()
+    const assignees = [...terms.matchAll(/(?:^| )assignee:([^ ]+)/g)].map(match => match[1].toLowerCase())
+    const labels = [...terms.matchAll(/(?:^| )label:("(?:[^"\\\\]|\\\\.)+")/g)].map(match => JSON.parse(match[1]).toLowerCase())
     const field = url.searchParams.get('sort') === 'created' ? 'created_at' : 'updated_at'
     const matching = (state.issues?.[selected] ?? []).filter(issue =>
-      (!filter || issue.state === filter) && (issue.title + ' ' + (issue.body ?? '')).toLowerCase().includes(phrase))
+      (!filter || issue.state === filter) && (issue.title + ' ' + (issue.body ?? '')).toLowerCase().includes(phrase)
+      && (!author || issue.user?.login.toLowerCase() === author)
+      && (!mention || (issue.mentions ?? []).includes(mention))
+      && (!assignees.length || assignees.some(name => issue.assignees?.some(user => user.login.toLowerCase() === name)))
+      && labels.every(name => issue.labels?.some(label => label.name.toLowerCase() === name)))
       .sort((a, b) => (b[field] ?? '').localeCompare(a[field] ?? ''))
     const size = Number(url.searchParams.get('per_page') || 20)
     const page = Number(url.searchParams.get('page') || 1)

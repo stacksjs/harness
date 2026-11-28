@@ -178,7 +178,9 @@ describe('GitHub issue workspace', () => {
     const fixture = JSON.parse(readFileSync(cli.state, 'utf8'))
     fixture.issues = {
       [names[0]!]: [{ ...notebook, body: 'Read the **offline behavior**. <img src=x onerror=alert(1)>',
-        assignees: [{ login: 'fixture-assignee' }], labels: [{ id: 1, name: 'bug', color: 'ff0000' }], comments },
+        assignees: [{ login: 'fixture-assignee' }, { login: 'fixture-user' }],
+        labels: [{ id: 1, name: 'bug', color: 'ff0000' }, { id: 2, name: 'needs "repro"', color: '112233' }],
+        mentions: ['fixture-user'], comments },
       ...Array.from({ length: 23 }, (_, index) => modelIssue(names[0]!, index + 25, 'Notebook issue ' + (index + 25),
         new Date(Date.UTC(2026, 10, index + 1)).toISOString())),
       { ...modelIssue(names[0]!, 2, 'Closed fixture issue', '2026-11-27T10:30:00Z'), state: 'closed' }],
@@ -219,6 +221,19 @@ describe('GitHub issue workspace', () => {
       const closed = await (await fetch(address + '&state=closed')).text()
       expect(closed).toContain('Closed fixture issue')
       expect(closed).not.toContain(notebook.title)
+
+      const refinements = new URLSearchParams({ involvement: 'mentioned', assignee: '@fixture-assignee', hideRepository: 'fixture/atlas' })
+      for (const label of ['BUG', 'needs "repro"', 'bug']) refinements.append('label', label)
+      const mentioning = await (await fetch(address + '&' + refinements)).text()
+      expect(mentioning).toContain(notebook.title)
+      expect(mentioning).not.toContain(atlas.title)
+      expect(mentioning).not.toContain(privateIssue.title)
+      expect(mentioning).not.toContain('Notebook issue 25')
+      const assigned = await (await fetch(address + '&involvement=assigned&assignee=someone-else')).text()
+      expect(assigned).not.toContain(notebook.title)
+      const authored = await (await fetch(address + '&involvement=authored&hideRepository=fixture/notebook')).text()
+      expect(authored).toContain(atlas.title)
+      expect(authored).not.toContain(notebook.title)
 
       const picked = address + '&selected=fixture%2Fnotebook&issue=24'
       const issue = await (await fetch(picked)).text()
