@@ -327,7 +327,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   }
   const metadataFields = selected ? Object.fromEntries(savedViewDetail) : {}
   const metadataHref = selected ? href(metadataFields) : ''
-  const editableText = gitLabText?.canEditText ? { ...gitLabText.text, scope: gitLabText.scope } : metadata?.editableText
+  const editableText = hostedAuthority?.canEditText && hostedAuthority.text
+    ? { ...hostedAuthority.text, scope: hostedAuthority.scope } : metadata?.editableText
   const textForge = issueForge[selection?.tracker ?? 'github']
   const textDraft = textSubmission?.draft
     ?? (editText && editableText ? createIssueTextDraft(editText, editableText.scope, editableText[editText]) : null)
@@ -442,7 +443,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadataLabelsHref: selected ? href({ ...metadataFields, editMetadata: 'labels' }) : '',
     metadataAssigneesHref: selected ? href({ ...metadataFields, editMetadata: 'assignees' }) : '',
     metadataAction: metadataHref.replace('/issues?', '/issues/metadata?'),
-    canEditText: Boolean(selected && (metadata?.canEditText || gitLabText?.canEditText)),
+    canEditText: Boolean(selected && editableText),
     textForge,
     textDraft, textPreview, textPending, textConflict, textLocked,
     textLimit: textDraft ? issueTextLimits[textDraft.field] : 0,

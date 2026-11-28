@@ -2,6 +2,7 @@ import type { HarnessState } from '@harness/engine'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { issueRepositoryKey } from '@harness/contract'
+import { patchForgejoIssue, readForgejoIssueAuthority } from './forgejo-issues'
 import { gitLabIssueCredential, readGitLabIssueText, writeGitLabIssueText } from './gitlab-issues'
 import { issueReferenceForSelection, trustedIssueRepositories } from './issue-repositories'
 import { issueWriteScope, readIssueMetadataAuthority } from './issue-metadata'
@@ -51,13 +52,13 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
   const intent = values.get('intent') ?? ''
   const raw = values.get('text')
   const operation = values.get('operation') ?? 'save'
-  if (!reference || reference.tracker === 'forgejo' || !state.profiles.has(profile) || !field || !digestPattern.test(scope) || !digestPattern.test(before)
+  if (!reference || !state.profiles.has(profile) || !field || !digestPattern.test(scope) || !digestPattern.test(before)
     || !tokenPattern.test(intent) || raw === null || !['save', 'preview', 'write', 'rebase'].includes(operation)
     || (field === 'title' && (operation === 'preview' || operation === 'write'))) return null
   const text = raw.replace(/\r\n?/gu, '\n')
   const value = field === 'title' ? text.trim() : text
   const draft = { field, scope, before, intent, text }
-  const forge = reference.tracker === 'gitlab' ? 'GitLab' : 'GitHub'
+  const forge = { github: 'GitHub', gitlab: 'GitLab', forgejo: 'Forgejo' }[reference.tracker]
   const finish = (result: Result, current?: string, nextDraft = draft) =>
     ({ result, field, draft: nextDraft, current, currentVersion: current === undefined ? '' : hash(current), message: messages[result].replaceAll('GitHub', forge) })
   if (text.length > issueTextLimits[field] || text.includes('\0') || (field === 'title' && (!value || /\n/u.test(value))))
@@ -69,17 +70,43 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
   if (operation === 'save') writing.add(key)
   try {
     const repository = (await trustedIssueRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey)
-    if (!repository || repository.tracker === 'forgejo') return finish('changed')
+    if (!repository || repository.tracker !== reference.tracker) return finish('changed')
     const trusted = () => {
       const workspace = state.workspaces.get(repository.workspace.id)
       return Boolean(workspace?.trusted && !workspace.scratch && workspace.profileId === profile && workspace.path === repository.workspace.path)
     }
     const gitLab = repository.tracker === 'gitlab' ? { repository, credential: await gitLabIssueCredential(repository, signal) } : null
-    const credential = gitLab ? undefined : await repositoryGitHubCredential(repository.path, signal)
+    const credential = repository.tracker === 'github' ? await repositoryGitHubCredential(repository.path, signal) : undefined
     const read = async () => {
-      if (gitLab) return readGitLabIssueText(gitLab.repository, reference.number, signal, gitLab.credential)
+      if (gitLab) {
+        const authority = await readGitLabIssueText(gitLab.repository, reference.number, signal, gitLab.credential)
+        return authority && { ...authority, write: (value: string) =>
+          writeGitLabIssueText(gitLab.repository, reference.number, authority.issueId, field, value, signal, gitLab.credential) }
+      }
+      if (repository.tracker === 'forgejo') {
+        const authority = await readForgejoIssueAuthority(repository, reference.number, signal)
+        // The Forgejo receipt is confirmed against the field read through the same account.
+        return authority && { ...authority, write: async (value: string) =>
+          await patchForgejoIssue(repository, reference.number, field === 'title' ? { title: value } : { body: value }, signal) ?? 'pending' as const }
+      }
       const authority = await readIssueMetadataAuthority({ repository, number: reference.number, credential, signal, includeText: true })
-      return authority && { ...authority, scope: issueWriteScope(repository, authority, 'issue-text') }
+      if (!authority) return null
+      const write = async (value: string) => {
+        const reply = await repositoryGitHubRequest(repository.path, 'graphql', {
+          query: `mutation HarnessUpdateIssueText($input: UpdateIssueInput!) {
+            updateIssue(input: $input) { issue { id ${field} } }
+          }`, variables: { input: { id: authority.issueId, [field]: value, clientMutationId: intent } },
+        }, signal, credential).catch((error: unknown) =>
+          error instanceof RepositoryPullRequestError && error.status ? { status: error.status, body: null } : null)
+        const payload = reply?.body as { data?: { updateIssue?: { issue?: { id?: string, title?: string, body?: string } } }, errors?: { type?: string }[] } | null
+        const applied = payload?.data?.updateIssue?.issue
+        if (applied?.id === authority.issueId && applied[field] === value) return 'updated' as const
+        const denied = reply?.status === 401 || reply?.status === 403 || payload?.errors?.some(error => error.type === 'FORBIDDEN')
+        if (denied) return 'denied' as const
+        if (reply?.status === 422 || payload?.errors?.some(error => error.type === 'UNPROCESSABLE')) return 'refused' as const
+        return 'pending' as const
+      }
+      return { ...authority, scope: issueWriteScope(repository, authority, 'issue-text'), write }
     }
     const authority = await read()
     if (!authority?.text) return finish('unavailable')
@@ -105,24 +132,7 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
     const claim = receipts.claim(intent, fingerprint, trusted())
     if (claim !== 'claimed') return finish(claim === 'confirmed' ? 'updated' : claim === 'pending' ? 'pending' : 'changed')
     attempted = true
-    const updateGitHub = async () => {
-      const reply = await repositoryGitHubRequest(repository.path, 'graphql', {
-        query: `mutation HarnessUpdateIssueText($input: UpdateIssueInput!) {
-          updateIssue(input: $input) { issue { id ${field} } }
-        }`, variables: { input: { id: authority.issueId, [field]: value, clientMutationId: intent } },
-      }, signal, credential).catch((error: unknown) =>
-        error instanceof RepositoryPullRequestError && error.status ? { status: error.status, body: null } : null)
-      const payload = reply?.body as { data?: { updateIssue?: { issue?: { id?: string, title?: string, body?: string } } }, errors?: { type?: string }[] } | null
-      const applied = payload?.data?.updateIssue?.issue
-      if (applied?.id === authority.issueId && applied[field] === value) return 'updated' as const
-      const denied = reply?.status === 401 || reply?.status === 403 || payload?.errors?.some(error => error.type === 'FORBIDDEN')
-      if (denied) return 'denied' as const
-      if (reply?.status === 422 || payload?.errors?.some(error => error.type === 'UNPROCESSABLE')) return 'refused' as const
-      return 'pending' as const
-    }
-    const outcome = gitLab
-      ? await writeGitLabIssueText(gitLab.repository, reference.number, authority.issueId, field, value, signal, gitLab.credential)
-      : await updateGitHub()
+    const outcome = await authority.write(value)
     if (outcome === 'updated') {
       receipts.confirm(intent, fingerprint)
       return finish('updated')

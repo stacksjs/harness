@@ -4,7 +4,7 @@ import type { GitLabTriageChoice, GitLabTriageKind } from './gitlab-issues'
 import type { GitLabIssueRepository } from './issue-repositories'
 import type { IssueStatusPlan, RawIssueStatus, RawPlanningStatuses } from './issue-status'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
-import { readForgejoIssueAuthority, writeForgejoIssueStatus } from './forgejo-issues'
+import { readForgejoIssueAuthority, patchForgejoIssue } from './forgejo-issues'
 import { createHash } from 'node:crypto'
 import { issueRepositoryKey } from '@harness/contract'
 import { gitLabIssueCredential, gitLabTriageKey, readGitLabIssueText, searchGitLabTriage, writeGitLabIssueStatus, writeGitLabTriage } from './gitlab-issues'
@@ -467,7 +467,7 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
         return finish(await saveIssueStatus(authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
           const after = await read()
           return after?.statusScope === authority.statusScope ? after.status : null
-        }, choice => writeForgejoIssueStatus(repository, reference.number, choice.state, signal)))
+        }, choice => patchForgejoIssue(repository, reference.number, { state: choice.state }, signal)))
       }
       if (repository.tracker === 'gitlab') {
         const credential = await gitLabIssueCredential(repository, signal)

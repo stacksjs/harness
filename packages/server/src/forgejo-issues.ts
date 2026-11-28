@@ -130,7 +130,10 @@ export async function readForgejoIssueAuthority(repository: ForgejoIssueReposito
   const commentBlocked = repo.archived === true ? 'This Forgejo repository is archived.'
     : raw.is_locked === true && !canPush ? 'This Forgejo issue is locked.'
       : typeof repo.archived !== 'boolean' || typeof raw.is_locked !== 'boolean' ? 'Forgejo could not check commenting access.' : ''
+  const text = typeof raw.title === 'string' && (raw.body == null || typeof raw.body === 'string')
+    ? { title: raw.title, body: raw.body ?? '' } : null
   return { commentScope: scope('forgejo-issue-comment'), commentBlocked, viewer, endpoint,
+    scope: scope('forgejo-issue-text'), canEditText: canEdit, text,
     status: openClosedIssueStatusPlan(raw.state, canEdit), statusScope: scope('forgejo-issue-status') }
 }
 
@@ -162,9 +165,10 @@ export async function forgejoIssueCommentWriter(repository: ForgejoIssueReposito
   }
 }
 
-export async function writeForgejoIssueStatus(repository: ForgejoIssueRepository, number: number, state: 'open' | 'closed', signal: AbortSignal) {
+export async function patchForgejoIssue(repository: ForgejoIssueRepository, number: number,
+  body: { state: 'open' | 'closed' } | { title: string } | { body: string }, signal: AbortSignal) {
   try {
-    await forgejoTeaRequest(repository, forgejoIssueEndpoint(repository, number), signal, { method: 'PATCH', body: { state } })
+    await forgejoTeaRequest(repository, forgejoIssueEndpoint(repository, number), signal, { method: 'PATCH', body })
   }
   catch (error) {
     if (error instanceof RepositoryPullRequestError) {

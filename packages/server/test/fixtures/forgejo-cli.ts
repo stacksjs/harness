@@ -46,9 +46,25 @@ if (method === 'PATCH') {
   const issue = match && forgejo.issues.find(row => row.number === Number(match[1]))
   if (!issue || !args.includes('@-')) reply(404, {})
   if (forgejo.archived || (issue.user?.id !== viewer.id && !forgejo.push)) reply(403, {})
-  if (forgejo.refuseStatus) reply(422, {})
   const input = await new Response(Bun.stdin.stream()).json()
-  if (!['open', 'closed'].includes(input.state) || Object.keys(input).length !== 1) reply(422, {})
+  const keys = Object.keys(input)
+  if (keys.length !== 1) reply(422, {})
+  const field = keys[0]
+  if (field === 'title' || field === 'body') {
+    if (forgejo.refuseText || typeof input[field] !== 'string' || (field === 'title' && !input.title.trim())) reply(422, {})
+    issue[field] = input[field]
+    forgejo.textWrites ??= []
+    forgejo.textWrites.push([issue.number, viewer.id, field, input[field]])
+    if (forgejo.dropTextReply) {
+      delete forgejo.dropTextReply
+      forgejo.failIssueRead = true
+      writeFileSync(statePath, JSON.stringify(state))
+      reply(502, {})
+    }
+    writeFileSync(statePath, JSON.stringify(state))
+    reply(200, issue)
+  }
+  if (forgejo.refuseStatus || !['open', 'closed'].includes(input.state)) reply(422, {})
   issue.state = input.state
   forgejo.statusWrites ??= []
   forgejo.statusWrites.push([issue.number, viewer.id, input.state])
