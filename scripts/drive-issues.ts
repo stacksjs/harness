@@ -1297,6 +1297,12 @@ try {
     await gitLabMetadata.getByText('Issue updated on GitLab.', { exact: true }).waitFor()
     assert.deepEqual(readForge().gitlab.issue.assignees.map((person: { username: string }) => person.username).sort(), ['fixture-reviewer', 'mobile.review'])
     assert.equal(readForge().gitlab.triageWrites.length, 3)
+    const [chip, control] = await Promise.all([
+      gitLabMetadata.locator('[data-issue-label]').boundingBox(),
+      changeLabels.boundingBox(),
+    ])
+    assert.ok(chip && control && chip.height < control.height && control.height >= 44, 'the label stays compact beside the phone touch target')
+    await capture('gitlab-edit-saved-360x800')
   }
   finally {
     if (previousGitLabToken === undefined) delete process.env.GITLAB_TOKEN

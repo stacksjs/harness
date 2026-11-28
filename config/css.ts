@@ -675,8 +675,9 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-primary] { background: var(--workspace-accent); color: var(--workspace-bg); border-color: transparent; }
 [data-issue-primary]:hover { background: color-mix(in srgb, var(--workspace-accent) 89%, var(--workspace-bg)); }
 [data-issue-metadata] { display: grid; gap: 8px; padding-block: 10px; border-block: 1px solid var(--workspace-line); }
-[data-issue-metadata] > div { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 6px; align-items: start; }
-[data-issue-metadata] dd { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+[data-issue-metadata] > div { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 6px; align-items: baseline; }
+[data-issue-metadata] dd { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+[data-issue-metadata] dd > span { min-width: 0; overflow-wrap: anywhere; }
 [data-issue-label] { background: var(--workspace-hover); border-radius: 5px; padding-inline: 6px; }
 [data-issue-markdown] { margin-block: 12px; font-size: 14px; line-height: 1.55; }
 [data-issue-markdown] a { color: var(--workspace-accent); }
