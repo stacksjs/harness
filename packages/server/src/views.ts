@@ -57,6 +57,7 @@ export interface ViewProps {
   /** Whether this server accepts paired devices, which gates the pairing UI. */
   remoteEnabled: boolean
   canLaunchWorkspaceEditor: boolean
+  workflowsEnabled: boolean
   settingsSection: SettingsSection | null
   settingsSections: typeof settingsSections
   /**
@@ -136,6 +137,7 @@ export function viewProps(state: HarnessState, options: {
   codecUrl?: string
   remoteEnabled?: boolean
   canLaunchWorkspaceEditor?: boolean
+  workflowsEnabled?: boolean
   settingsSection?: SettingsSection
 }): ViewProps {
   const profiles = [...state.profiles.values()].map((profile) => {
@@ -207,6 +209,7 @@ export function viewProps(state: HarnessState, options: {
     })),
     remoteEnabled: options.remoteEnabled === true,
     canLaunchWorkspaceEditor: options.canLaunchWorkspaceEditor === true,
+    workflowsEnabled: options.workflowsEnabled === true,
     settingsSection: options.settingsSection ?? null,
     settingsSections,
     hostSettings: { ...state.settings },

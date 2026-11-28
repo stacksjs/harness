@@ -1,0 +1,492 @@
+<script server>
+export const mode = $props.mode
+export const profile = $props.profile
+export const profiles = $props.profiles
+export const workflowChoices = $props.workflowChoices
+export const workflow = $props.workflow
+export const definitions = $props.definitions
+export const problems = $props.problems
+export const workspaceHref = $props.workspaceHref
+export const listHref = $props.listHref
+export const definitionsHref = $props.definitionsHref
+export const startHref = $props.startHref
+export const pollHref = $props.pollHref
+export const action = $props.action
+export const startDraft = $props.draft
+export const pageMessage = $props.message
+export const initialView = {
+  rows: $props.rows, tabs: $props.tabs, detail: $props.detail,
+  pending: $props.pending, emptyText: $props.emptyText,
+  showDetail: $props.showDetail, missingRun: $props.missingRun,
+}
+export const refreshHref = $props.showDetail && $props.detail
+  ? listHref + '&run=' + $props.detail.runId
+  : listHref
+</script>
+
+<script client>
+const workflowView = state(@json(initialView))
+const workflowRefreshPending = state(false)
+const workflowConnection = state('')
+const cancelRunDialog = useRef('cancelRunDialog')
+const workflowRoot = useRef('workflowRoot')
+const workflowPollAddress = @json(pollHref)
+const workflowCanPoll = @json(mode === 'runs')
+
+async function readWorkflowView() {
+  if (workflowRefreshPending()) return
+  workflowRefreshPending.set(true)
+  try {
+    const response = await fetch(workflowPollAddress, { cache: 'no-store', signal: AbortSignal.timeout(7000) })
+    if (!response.ok) throw new Error('Could not refresh workflow runs.')
+    const data = await response.json()
+    const current = workflowView()
+    const next = {
+      rows: data.rows, tabs: data.tabs, detail: data.detail, pending: data.pending, emptyText: data.emptyText,
+      showDetail: data.showDetail, missingRun: data.missingRun,
+    }
+    if (JSON.stringify(next) !== JSON.stringify(current)) workflowView.set(next)
+    workflowConnection.set('')
+  }
+  catch {
+    workflowConnection.set('Could not refresh run status. Your last loaded view is still here.')
+  }
+  finally { workflowRefreshPending.set(false) }
+}
+
+async function tickWorkflowView() {
+  if (!workflowRoot.current?.isConnected) return
+  await readWorkflowView()
+  if (workflowRoot.current?.isConnected) useTimeout(tickWorkflowView, workflowView().pending ? 1500 : 5000)
+}
+
+function refreshWorkflowView(event) {
+  event.preventDefault()
+  void readWorkflowView()
+}
+
+function openCancelRun(event) {
+  event.currentTarget.focus()
+  cancelRunDialog.current?.showModal()
+}
+function closeCancelRun() { cancelRunDialog.current?.close() }
+
+if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 : 5000)
+</script>
+
+<main data-harness-shell data-workflows-workspace ref="workflowRoot" class="text-neutral-900 dark:text-neutral-100">
+  <header data-workflows-header>
+    <a href="{{ workspaceHref }}" data-workflows-back>
+      <span class="inline-block size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>Workspace
+    </a>
+    <h1>Workflows</h1>
+    <div data-workflows-toolbar class="flex gap-2 items-center">
+      @if(mode === 'runs')
+        <a href="{{ refreshHref }}" data-workflow-button @click="refreshWorkflowView" aria-label="Refresh runs" title="Refresh runs" :aria-busy="workflowRefreshPending()">
+          <span class="inline-block size-4 i-hugeicons-refresh" aria-hidden="true"></span>
+        </a>
+      @endif
+      @if(mode === 'definitions')
+        <a href="{{ listHref }}" data-workflow-button>Runs</a>
+      @else
+        <a href="{{ definitionsHref }}" data-workflow-button>Definitions</a>
+      @endif
+      @if(mode !== 'start' && definitions.length)
+        <a href="{{ startHref }}" data-workflow-button data-workflow-primary>Start run</a>
+      @endif
+    </div>
+  </header>
+
+  @if(pageMessage)
+    <p data-workflow-notice role="status">{{ pageMessage }}</p>
+  @endif
+  @if(mode === 'runs')
+    <p :if="workflowConnection()" :text="workflowConnection()" data-workflow-notice role="status"></p>
+  @endif
+
+  @if(mode === 'definitions')
+    <section data-workflow-single aria-labelledby="workflow-definitions-heading">
+      <div class="mb-5">
+        <h2 id="workflow-definitions-heading">Definitions</h2>
+        <p>Workflows loaded from the host.</p>
+      </div>
+      @if(definitions.length)
+        <ul data-workflow-definitions>
+          @foreach(definitions as definition)
+            <li class="flex flex-wrap gap-2 items-center justify-between">
+              <span class="font-semibold">{{ definition.name }}</span>
+              <span class="text-sm">Version {{ definition.version }}</span>
+            </li>
+          @endforeach
+        </ul>
+      @else
+        <p>No definitions loaded. Set <code>HARNESS_WORKFLOWS</code> on the host and restart it.</p>
+      @endif
+      @if(problems.length)
+        <h3>Definition problems</h3>
+        <ul data-workflow-problems>
+          @foreach(problems as problem)
+            <li><strong>{{ problem.file }}</strong><p>{{ problem.message }}</p></li>
+          @endforeach
+        </ul>
+      @endif
+    </section>
+  @elseif(mode === 'start')
+    <section data-workflow-single aria-labelledby="workflow-start-heading">
+      <h2 id="workflow-start-heading">Start a run</h2>
+      @if(definitions.length)
+        <form action="{{ action }}" method="post" data-workflow-start-form>
+          <input type="hidden" name="action" value="start">
+          @if(startDraft.message)
+            <p role="alert" data-workflow-error>{{ startDraft.message }}</p>
+          @endif
+          <label for="workflow-name">Workflow</label>
+          <select id="workflow-name" name="workflow" required>
+            @foreach(definitions as definition)
+              <option value="{{ definition.name }}" @if(startDraft.workflow === definition.name) selected @endif>{{ definition.name }}</option>
+            @endforeach
+          </select>
+          <label for="workflow-key">Start key</label>
+          <input id="workflow-key" name="key" value="{{ startDraft.key }}" maxlength="200" required aria-describedby="workflow-key-hint">
+          <small id="workflow-key-hint">Reuse a key to reopen its existing run.</small>
+          <label for="workflow-payload">Input (JSON)</label>
+          <textarea id="workflow-payload" name="payload" rows="6" spellcheck="false">{{ startDraft.payload }}</textarea>
+          <div class="flex flex-wrap gap-2 mt-4">
+            <button type="submit" data-workflow-button data-workflow-primary>Start run</button>
+            <a href="{{ listHref }}" data-workflow-button>Back to runs</a>
+          </div>
+        </form>
+      @else
+        <p>Load a workflow definition on the host to start a run.</p>
+      @endif
+    </section>
+  @else
+    @if(problems.length)
+      <p data-workflow-notice role="status">A workflow definition needs attention. <a href="{{ definitionsHref }}">View definitions</a></p>
+    @endif
+    <div data-workflow-columns data-show-detail="{{ initialView.showDetail }}" :data-show-detail="workflowView().showDetail ? 'true' : 'false'">
+      <section data-workflow-list aria-label="Workflow runs">
+        <div data-workflow-filters>
+          <nav aria-label="Run status" data-workflow-tabs>
+            <template :for="tab in workflowView().tabs" :key="tab.key">
+              <a :href="tab.href" :aria-current="tab.current ? 'page' : null" data-workflow-tab>
+                <span :text="tab.label"></span><span data-workflow-count :text="tab.count"></span>
+              </a>
+            </template>
+          </nav>
+          @if(profiles.length > 1 || workflowChoices.length > 1)
+            <form action="/workflows" method="get" data-workflow-filter-form>
+              <input type="hidden" name="view" value="workspace">
+              <input type="hidden" name="filter" :value="workflowView().tabs.find(tab => tab.current)?.key || 'all'">
+              @if(profiles.length > 1)
+                <label for="workflow-profile">Profile</label>
+                <select id="workflow-profile" name="profile" @change="$event.currentTarget.form?.requestSubmit()">
+                  @foreach(profiles as option)
+                    <option value="{{ option.id }}" @if(option.id === profile) selected @endif>{{ option.name }}</option>
+                  @endforeach
+                </select>
+              @else
+                <input type="hidden" name="profile" value="{{ profile }}">
+              @endif
+              @if(workflowChoices.length > 1)
+                <label for="workflow-filter">Workflow</label>
+                <select id="workflow-filter" name="workflow" @change="$event.currentTarget.form?.requestSubmit()">
+                  <option value="">All workflows</option>
+                  @foreach(workflowChoices as choice)
+                    <option value="{{ choice }}" @if(choice === workflow) selected @endif>{{ choice }}</option>
+                  @endforeach
+                </select>
+              @endif
+              <noscript><button type="submit" data-workflow-button>Apply filters</button></noscript>
+            </form>
+          @endif
+        </div>
+        <p :if="!workflowView().rows.length" :text="workflowView().emptyText" data-workflow-list-empty></p>
+        <ul data-workflow-rows>
+          <template :for="row in workflowView().rows" :key="row.key">
+            <li>
+              <a :href="row.href" :aria-current="row.current ? 'page' : null" data-workflow-row>
+                <span data-workflow-row-top>
+                  <span :text="row.workflow"></span>
+                  <span data-workflow-status :data-status="row.status" :text="row.word"></span>
+                </span>
+                <strong :text="row.title"></strong>
+                <time :datetime="row.updatedAt" :text="row.updated"></time>
+              </a>
+            </li>
+          </template>
+        </ul>
+      </section>
+
+      <section data-workflow-detail aria-label="Run detail">
+        <a href="{{ listHref }}" data-workflow-mobile-back>
+          <span class="inline-block size-4 i-hugeicons-arrow-left-01" aria-hidden="true"></span>Back to runs
+        </a>
+        <template :if="workflowView().detail">
+          <article data-workflow-feed>
+            <div data-workflow-run-header>
+              <div class="min-w-0">
+                <p data-workflow-name :text="workflowView().detail?.workflow"></p>
+                <h2 :text="workflowView().detail?.title" data-workflow-run-title></h2>
+                <div data-workflow-run-meta>
+                  <span data-workflow-status :data-status="workflowView().detail?.status" :text="workflowView().detail?.word"></span>
+                  <time :datetime="workflowView().detail?.startedAt" :text="workflowView().detail?.started"></time>
+                </div>
+              </div>
+              <div data-workflow-run-actions>
+                <form :if="workflowView().detail?.canResume" action="{{ action }}" method="post">
+                  <input type="hidden" name="action" value="resume">
+                  <input type="hidden" name="id" :value="workflowView().detail?.runId">
+                  <button type="submit" data-workflow-button data-workflow-primary>Resume</button>
+                </form>
+                <button :if="workflowView().detail?.canCancel" type="button" data-workflow-button @click="openCancelRun">Cancel run</button>
+              </div>
+            </div>
+            <p :if="workflowView().detail?.detail" :text="workflowView().detail?.detail" role="status" data-workflow-run-message></p>
+            <div :if="workflowView().detail?.references.length" data-workflow-references aria-label="Issues">
+              <template :for="reference in (workflowView().detail?.references || [])" :key="reference.step + reference.url">
+                <a :href="reference.issueHref" data-workflow-reference>
+                  <span class="inline-block size-4 i-hugeicons-task-01" aria-hidden="true"></span>
+                  <span :text="'Issue ' + reference.displayKey"></span>
+                </a>
+              </template>
+            </div>
+            <h3>Steps</h3>
+            <p :if="!workflowView().detail?.steps.length" data-workflow-step-empty>Waiting for the first step.</p>
+            <ol data-workflow-steps>
+              <template :for="entry in (workflowView().detail?.steps || [])" :key="entry.name">
+                <li data-workflow-step>
+                  <span aria-hidden="true" data-workflow-step-dot :data-status="entry.status"></span>
+                  <details data-workflow-step-card>
+                    <summary>
+                      <span :text="entry.name"></span>
+                      <span data-workflow-status :data-status="entry.status" :text="entry.word"></span>
+                    </summary>
+                    <div data-workflow-step-body>
+                      <p :text="entry.attempts + (entry.attempts === 1 ? ' attempt' : ' attempts')"></p>
+                      <p :if="entry.detail" :text="entry.detail"></p>
+                      <div :if="entry.references.length" data-workflow-references aria-label="Step issues">
+                        <template :for="reference in entry.references" :key="reference.url">
+                          <a :href="reference.issueHref" data-workflow-reference>
+                            <span class="inline-block size-4 i-hugeicons-task-01" aria-hidden="true"></span>
+                            <span :text="'Issue ' + reference.displayKey"></span>
+                          </a>
+                        </template>
+                      </div>
+                      <pre :if="entry.result" :text="entry.result" tabindex="0" aria-label="Saved step result"></pre>
+                    </div>
+                  </details>
+                </li>
+              </template>
+            </ol>
+            <section :if="workflowView().detail?.result" data-workflow-output>
+              <h3>Result</h3>
+              <pre :text="workflowView().detail?.result" tabindex="0" aria-label="Workflow result"></pre>
+            </section>
+          </article>
+        </template>
+        <p :if="!workflowView().detail && workflowView().missingRun" data-workflow-detail-empty>This run is unavailable in the selected profile.</p>
+        <p :if="!workflowView().detail && !workflowView().missingRun" data-workflow-detail-empty>Select a run to see its steps.</p>
+      </section>
+    </div>
+    <dialog ref="cancelRunDialog" data-workflow-dialog aria-labelledby="workflow-cancel-heading">
+      <h2 id="workflow-cancel-heading">Cancel this run?</h2>
+      <p>Completed steps stay in its history. A cancelled run cannot be resumed.</p>
+      <form action="{{ action }}" method="post" class="flex flex-wrap gap-2 mt-5">
+        <input type="hidden" name="action" value="cancel">
+        <input type="hidden" name="id" :value="workflowView().detail?.runId">
+        <button type="button" data-workflow-button autofocus @click="closeCancelRun">Keep running</button>
+        <button type="submit" data-workflow-button data-workflow-destructive>Cancel run</button>
+      </form>
+    </dialog>
+  @endif
+</main>
+
+<style>
+[data-workflows-workspace] {
+  --flow-bg: #f8fafc;
+  --flow-pane: #fff;
+  --flow-hover: #f0f4f9;
+  --flow-selected: #e5edf9;
+  --flow-ink: #182234;
+  --flow-muted: #526074;
+  --flow-border: #d9e1ea;
+  --flow-accent: #284f8c;
+  --flow-accent-bg: #deeafd;
+  --flow-green: #166044;
+  --flow-amber: #815016;
+  --flow-red: #8e2929;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--flow-bg);
+  color: var(--flow-ink);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+}
+.dark [data-workflows-workspace] {
+  --flow-bg: #121418;
+  --flow-pane: #191c22;
+  --flow-hover: #21262f;
+  --flow-selected: #263247;
+  --flow-ink: #eff3fa;
+  --flow-muted: #b0bbcd;
+  --flow-border: #323946;
+  --flow-accent: #b1caf9;
+  --flow-accent-bg: #243858;
+  --flow-green: #91dcbb;
+  --flow-amber: #f4ce8a;
+  --flow-red: #f0a9a9;
+}
+[data-workflows-header] {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 48px;
+  padding: 5px 16px;
+  border-bottom: 1px solid var(--flow-border);
+}
+[data-workflows-header] h1 { font-size: 14px; font-weight: 680; margin: 0; }
+[data-workflows-toolbar] { margin-inline-start: auto; }
+[data-workflows-back], [data-workflow-mobile-back] { display: inline-flex; align-items: center; gap: 5px; color: var(--flow-accent); text-decoration: none; }
+[data-workflow-button], [data-workflow-tab] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid var(--flow-border);
+  border-radius: 7px;
+  padding: 5px 10px;
+  background: var(--flow-pane);
+  color: var(--flow-ink);
+  text-decoration: none;
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+[data-workflows-workspace] :is(a, button, input, select, textarea, summary, pre):focus-visible {
+  outline: 2px solid var(--flow-accent);
+  outline-offset: 2px;
+}
+[data-workflow-button]:hover, [data-workflow-tab]:hover { background: var(--flow-hover); }
+[data-workflow-button][data-workflow-primary] { color: var(--flow-accent); background: var(--flow-accent-bg); border-color: var(--flow-accent); }
+[data-workflow-button][data-workflow-destructive] { color: var(--flow-red); }
+[data-workflow-notice] { margin: 0; padding: 7px 16px; color: var(--flow-muted); border-bottom: 1px solid var(--flow-border); }
+[data-workflow-notice] a { color: var(--flow-accent); text-decoration: underline; }
+[data-workflow-columns] { display: grid; grid-template-columns: minmax(275px, 23rem) minmax(0, 1fr); flex: 1; min-height: 0; }
+[data-workflow-list] { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-inline-end: 1px solid var(--flow-border); }
+[data-workflow-filters] { padding: 10px 10px 6px; }
+[data-workflow-tabs] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+[data-workflow-tab] { background: transparent; padding-inline: 4px; }
+[data-workflow-tab][aria-current=page] { background: var(--flow-accent-bg); color: var(--flow-accent); }
+[data-workflow-count] { color: var(--flow-muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+[data-workflow-filter-form] { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 8px; align-items: center; margin-block-start: 8px; }
+[data-workflow-filter-form] label { color: var(--flow-muted); }
+[data-workflow-rows] { list-style: none; margin: 0; padding: 3px 8px 12px; overflow: auto; }
+[data-workflow-row] {
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+  margin-bottom: 2px;
+  border-radius: 7px;
+  color: var(--flow-ink);
+  text-decoration: none;
+}
+[data-workflow-row]:hover { background: var(--flow-hover); }
+[data-workflow-row][aria-current=page] { background: var(--flow-selected); }
+[data-workflow-row-top], [data-workflow-run-meta] { display: flex; gap: 8px; align-items: center; min-width: 0; }
+[data-workflow-row-top] > :first-child { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-workflow-row] strong { min-width: 0; line-height: 1.35; overflow-wrap: anywhere; font-size: 14px; font-weight: 650; }
+[data-workflow-row-top], [data-workflow-row] time, [data-workflow-run-meta] time, [data-workflow-name] { color: var(--flow-muted); font-size: 12px; }
+[data-workflow-status] { flex-shrink: 0; color: var(--flow-muted); font-size: 12px; font-weight: 650; }
+[data-workflow-status][data-status=running] { color: var(--flow-accent); }
+[data-workflow-status][data-status=completed] { color: var(--flow-green); }
+[data-workflow-status][data-status=paused], [data-workflow-status][data-status=failed] { color: var(--flow-amber); }
+[data-workflow-list-empty], [data-workflow-detail-empty], [data-workflow-step-empty] { color: var(--flow-muted); margin: 18px; }
+[data-workflow-detail] { min-height: 0; min-width: 0; overflow: auto; background: var(--flow-pane); }
+[data-workflow-feed], [data-workflow-single] { max-width: 780px; padding: 22px 26px; margin-inline: auto; }
+[data-workflow-single] { width: 100%; overflow: auto; }
+[data-workflow-run-header] { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+[data-workflow-run-actions] { display: flex; flex-wrap: wrap; gap: 6px; }
+[data-workflow-name] { margin: 0 0 4px; overflow-wrap: anywhere; }
+[data-workflow-run-header] h2, [data-workflow-single] h2, [data-workflow-dialog] h2 {
+  margin: 0 0 8px;
+  font-size: clamp(19px, 1.7vw, 25px);
+  line-height: 1.2;
+  font-weight: 690;
+  overflow-wrap: anywhere;
+}
+[data-workflow-run-message] { padding: 8px 10px; background: var(--flow-hover); border-radius: 7px; }
+[data-workflow-references] { display: flex; flex-wrap: wrap; gap: 5px; margin-block: 14px 8px; }
+[data-workflow-reference] { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--flow-border); border-radius: 7px; color: var(--flow-accent); text-decoration: none; }
+[data-workflow-reference]:hover { background: var(--flow-hover); }
+[data-workflow-feed] h3, [data-workflow-single] h3 { margin: 20px 0 8px; font-size: 14px; font-weight: 670; }
+[data-workflow-steps] { list-style: none; padding: 0; margin: 0; }
+[data-workflow-step] { display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 7px; padding-bottom: 7px; align-items: start; }
+[data-workflow-step-dot] { width: 7px; height: 7px; border-radius: 50%; margin-top: 16px; background: var(--flow-border); }
+[data-workflow-step-dot][data-status=running] { background: var(--flow-accent); }
+[data-workflow-step-dot][data-status=completed] { background: var(--flow-green); }
+[data-workflow-step-dot][data-status=failed] { background: var(--flow-amber); }
+[data-workflow-step-card], [data-workflow-feed] pre { border: 1px solid var(--flow-border); border-radius: 7px; }
+[data-workflow-step-card] summary { cursor: pointer; padding: 8px 10px; overflow-wrap: anywhere; }
+[data-workflow-step-card] summary [data-workflow-status] { margin-inline-start: 9px; }
+[data-workflow-step-body] { padding: 0 10px 9px; color: var(--flow-muted); }
+[data-workflow-feed] pre { overflow: auto; max-height: 20rem; margin-block: 7px 0; padding: 9px; background: var(--flow-bg); color: var(--flow-ink); }
+[data-workflow-start-form] { display: grid; gap: 7px; max-width: 37rem; }
+[data-workflow-start-form] label { margin-top: 8px; font-weight: 650; }
+[data-workflow-start-form] small, [data-workflow-single] p { color: var(--flow-muted); }
+[data-workflow-start-form] :is(select, input, textarea), [data-workflow-filter-form] select {
+  width: 100%;
+  padding: 6px 8px;
+  min-height: 34px;
+  background: var(--flow-pane);
+  color: var(--flow-ink);
+  border: 1px solid var(--flow-border);
+  border-radius: 7px;
+  font: inherit;
+}
+[data-workflow-start-form] select, [data-workflow-filter-form] select {
+  appearance: none;
+  padding-inline-end: 24px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--flow-muted) 50%),
+    linear-gradient(135deg, var(--flow-muted) 50%, transparent 50%);
+  background-size: 5px 5px;
+  background-position: right 14px center, right 9px center;
+  background-repeat: no-repeat;
+}
+[data-workflow-start-form] textarea { font-family: ui-monospace, monospace; resize: vertical; }
+[data-workflow-start-form] [data-workflow-error] { color: var(--flow-red); }
+[data-workflow-definitions], [data-workflow-problems] { list-style: none; margin: 0; padding: 0; }
+[data-workflow-definitions] li, [data-workflow-problems] li { padding: 10px 0; border-bottom: 1px solid var(--flow-border); }
+[data-workflow-dialog] {
+  max-width: min(27rem, calc(100vw - 24px));
+  padding: 18px;
+  background: var(--flow-pane);
+  color: var(--flow-ink);
+  border: 1px solid var(--flow-border);
+  border-radius: 10px;
+}
+[data-workflow-dialog]::backdrop { background: #121722a6; }
+[data-workflow-mobile-back] { display: none; }
+
+@media (max-width: 720px) {
+  [data-workflows-header] { gap: 5px; padding: 5px 6px; }
+  [data-workflows-toolbar] { gap: 4px; }
+  [data-workflows-back] { font-size: 0; min-width: 44px; min-height: 44px; justify-content: center; }
+  [data-workflows-back] span { width: 20px; height: 20px; }
+  [data-workflow-button], [data-workflow-tab], [data-workflow-reference] { min-height: 44px; }
+  [data-workflow-button][aria-label] { min-width: 44px; }
+  [data-workflow-step-card] summary { min-height: 44px; padding-block: 11px; }
+  [data-workflow-columns] { grid-template-columns: minmax(0, 1fr); }
+  [data-workflow-columns][data-show-detail=false] [data-workflow-detail],
+  [data-workflow-columns][data-show-detail=true] [data-workflow-list] { display: none; }
+  [data-workflow-list] { border-inline-end: 0; }
+  [data-workflow-mobile-back] { display: inline-flex; min-height: 44px; margin-inline-start: 12px; }
+  [data-workflow-feed], [data-workflow-single] { padding: 14px 12px; }
+  [data-workflow-run-header] { flex-direction: column; }
+  [data-workflow-start-form] :is(select, input, textarea), [data-workflow-filter-form] select { min-height: 44px; font-size: 16px; }
+}
+</style>

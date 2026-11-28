@@ -130,6 +130,7 @@ export const projectSettingsName = activeWorkspace?.name || ''
 export const projectWorkspaceId = activeWorkspace?.id || 0
 export const canExpandDiffContext = Boolean(activeWorkspace?.trusted && !activeScratchSession)
 export const projectCloneAllowed = Boolean($props.canLaunchWorkspaceEditor)
+export const workflowManagementAllowed = Boolean($props.workflowsEnabled)
 export const workspaceEditorAllowed = Boolean(canExpandDiffContext && $props.canLaunchWorkspaceEditor)
 export const previewDiscoveryAllowed = Boolean(activeSession && $props.canLaunchWorkspaceEditor)
 export const canCompose = !missingThread && Boolean(activeSession || draftProject?.trusted || draftWithoutProject)
@@ -216,6 +217,11 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           <a data-navigation-issues href="/issues?profile={{ activeProfile }}" :href="'/issues?profile=' + visibleProfile()" class="harness-nav-search">
             <span class="inline-block size-4 i-hugeicons-task-01" aria-hidden="true"></span>Issues
           </a>
+          @if(workflowManagementAllowed)
+            <a data-navigation-workflows href="/workflows?view=workspace&amp;profile={{ activeProfile }}" :href="'/workflows?view=workspace&profile=' + visibleProfile()" class="harness-nav-search">
+              <span class="inline-block size-4 i-hugeicons-workflow-square-01" aria-hidden="true"></span>Workflows
+            </a>
+          @endif
         @endif
       @endif
     </div>

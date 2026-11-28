@@ -73,6 +73,7 @@ import { loadWorkspaceReviewComments, pullRequestWorkspace, renderPullRequestMar
 import type { PullRequestLabelDraft, PullRequestLabelEditor, PullRequestLifecycleDraft, PullRequestReplyDraft, PullRequestReviewerDraft, PullRequestReviewerEditor } from './pull-request-workspace'
 import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
+import { workflowForm, workflowWorkspace } from './workflows/workspace'
 import { respondWorkflows, workflowRoutes } from './workflows/http'
 import type { TerminalScope } from './workspace-terminals'
 
@@ -2303,6 +2304,32 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
           || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403 })
         const profile = Number(url.searchParams.get('profile'))
+        const workspaceView = url.pathname === '/workflows/view' || url.pathname === '/workflows/action'
+          || (url.pathname === '/workflows' && (url.searchParams.get('view') === 'workspace'
+            || request.headers.get('accept')?.includes('text/html')))
+        if (workspaceView && workflows) {
+          const selectedProfile = !url.searchParams.has('profile') ? engine.current.profiles.keys().next().value : profile
+          if (selectedProfile === undefined || !engine.current.profiles.has(selectedProfile)) return new Response('Profile unavailable.', { status: 404 })
+          const query = new URLSearchParams(url.search)
+          const headers = { 'cache-control': 'private, no-store', 'x-frame-options': 'DENY',
+            'content-security-policy': "frame-ancestors 'none'", 'vary': 'Accept' }
+          const serveView = async () => {
+            if (url.pathname === '/workflows/action') {
+              const result = await workflowForm(workflows, selectedProfile, request, query)
+              if (result.response) return result.response
+              query.set('page', 'start')
+              const view = workflowWorkspace(workflows, engine.current, selectedProfile, query, result.draft)
+              const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-workflows.stx'), view)
+              return new Response(html, { status: 422, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } })
+            }
+            if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
+            const view = workflowWorkspace(workflows, engine.current, selectedProfile, query)
+            if (url.pathname === '/workflows/view') return Response.json(view, { headers })
+            const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-workflows.stx'), view)
+            return new Response(html, { status: view.missingRun ? 404 : 200, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } })
+          }
+          return serveView().catch(() => new Response('Could not load workflows.', { status: 503, headers }))
+        }
         return respondWorkflows(workflows, engine.current.profiles.has(profile) ? profile : null, request, url)
           .catch(() => Response.json({ error: 'workflow-storage-unavailable' }, { status: 503 }))
       }
@@ -2605,6 +2632,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           codecUrl,
           remoteEnabled: access !== null,
           canLaunchWorkspaceEditor,
+          workflowsEnabled: canLaunchWorkspaceEditor && workflows !== null,
         }
         // The rendered inputs include socket origin and editor permissions.
         // Extra query parameters and different spellings of the same inputs
