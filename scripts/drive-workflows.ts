@@ -24,6 +24,7 @@ const databasePath = join(directory, 'fixture.sqlite')
 const project = join(directory, 'workbench')
 const gate = join(directory, 'allow-review')
 const definition = join(directory, 'review.ts')
+const profile = String(derivedId('workflow-ui-profile'))
 mkdirSync(project)
 for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repository]]) {
   const command = Bun.spawnSync(['git', ...args], { cwd: project })
@@ -54,7 +55,18 @@ writeFileSync(definition, `
       signal.throwIfAborted()
     })
   }}
-  export default [review, delayed]
+  const scheduled = {
+    name: 'check-drafts', version: 1,
+    schedules: [
+      { id: 'draft-check', profile: ${profile}, everyMs: 60000 },
+      { id: 'weekday-check', profile: ${profile}, timeOfDay: '09:30', weekdays: [1, 2, 3, 4, 5], enabled: false },
+    ],
+    async run(tick, { title, step }) {
+      title('Check draft integrity')
+      return step('Inspect draft', () => tick)
+    },
+  }
+  export default [review, delayed, scheduled]
 `)
 {
   using db = new Database(databasePath)
@@ -68,7 +80,6 @@ const base = 'http://127.0.0.1:' + host.server.port
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
 try {
   const dispatch = (id: string, command: Parameters<typeof host.engine.dispatch>[0]['command']) => host.engine.dispatch({ id, at: 1, command })
-  const profile = String(derivedId('workflow-ui-profile'))
   await dispatch('workflow-ui-profile', { type: 'profile.create', name: 'Fixture workspace' })
   await dispatch('workflow-ui-other', { type: 'profile.create', name: 'Other workspace' })
   await dispatch('workflow-ui-project', { type: 'workspace.add', profileId: Number(profile), path: project })
@@ -169,7 +180,17 @@ try {
   await page.getByRole('link', { name: 'Definitions', exact: true }).click()
   await page.getByRole('heading', { name: 'Definitions', exact: true }).waitFor()
   await page.getByText('review-changes', { exact: true }).waitFor()
-  await capture('definitions')
+  const schedules = page.getByRole('list', { name: 'Schedules' })
+  await schedules.getByText('Every 1 minute', { exact: true }).waitFor()
+  await schedules.getByText(/Mon, Tue, Wed, Thu, Fri at 09:30/u).waitFor()
+  await schedules.getByText('Disabled', { exact: true }).waitFor()
+  assert.equal(await schedules.locator('time').getAttribute('datetime'), '2026-11-28T12:01:00.000Z')
+  for (const [width, height] of dimensions) {
+    await page.setViewportSize({ width, height })
+    await noOverflow()
+    await capture('definitions')
+  }
+  await page.setViewportSize({ width: 1280, height: 800 })
   await page.getByRole('link', { name: 'Start run', exact: true }).click()
   await page.getByLabel('Workflow', { exact: true }).selectOption('review-changes')
   await page.getByLabel('Start key').fill('review-a')
@@ -191,6 +212,26 @@ try {
   await page.getByRole('link', { name: /^All/ }).click()
   await page.getByText('No runs yet.', { exact: true }).waitFor()
   await capture('empty-profile')
+  await page.getByRole('link', { name: 'Definitions', exact: true }).click()
+  assert.equal(await page.getByRole('list', { name: 'Schedules' }).count(), 0)
+  fixtureTime = fixtureClock + 65_000
+  const deadline = performance.now() + 8000
+  let scheduledId
+  while (!scheduledId && performance.now() < deadline) {
+    const data = await fetch(base + '/workflows?' + query()).then(response => response.json())
+    scheduledId = data.runs.find(run => run.schedule?.id === 'draft-check' && run.status === 'completed')?.runId
+    if (!scheduledId) await Bun.sleep(100)
+  }
+  assert.ok(scheduledId, 'Scheduled workflow completed')
+  await page.goto(base + '/workflows?' + query({ view: 'workspace', run: scheduledId }))
+  await page.getByRole('heading', { name: 'Check draft integrity', exact: true }).waitFor()
+  await page.locator('[data-workflow-scheduled]').getByText('draft-check', { exact: true }).waitFor()
+  assert.equal(await page.locator('[data-workflow-scheduled] time').getAttribute('datetime'), '2026-11-28T12:01:00.000Z')
+  for (const [width, height] of dimensions) {
+    await page.setViewportSize({ width, height })
+    await noOverflow()
+    if (width === 1440 || width === 390) await capture('scheduled')
+  }
 
   const writes = JSON.parse(readFileSync(cli.state, 'utf8')).issueCreate.writes
   assert.equal(writes.length, 1)

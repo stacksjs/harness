@@ -113,9 +113,28 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
       @if(definitions.length)
         <ul data-workflow-definitions>
           @foreach(definitions as definition)
-            <li class="flex flex-wrap gap-2 items-center justify-between">
-              <span class="font-semibold">{{ definition.name }}</span>
-              <span class="text-sm">Version {{ definition.version }}</span>
+            <li>
+              <div class="flex flex-wrap gap-2 items-center justify-between">
+                <span class="font-semibold">{{ definition.name }}</span>
+                <span class="text-sm">Version {{ definition.version }}</span>
+              </div>
+              @if(definition.triggers.length)
+                <ul data-workflow-schedules aria-label="Schedules">
+                  @foreach(definition.triggers as trigger)
+                    <li>
+                      <strong>{{ trigger.id }}</strong>
+                      <span>{{ trigger.cadence }}</span>
+                      @if(!trigger.enabled)
+                        <span>Disabled</span>
+                      @elseif(trigger.nextAt)
+                        <span>Next run <time datetime="{{ trigger.nextAt }}">{{ trigger.next }}</time></span>
+                      @else
+                        <span>Waiting for the host</span>
+                      @endif
+                    </li>
+                  @endforeach
+                </ul>
+              @endif
             </li>
           @endforeach
         </ul>
@@ -232,6 +251,10 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
                   <span data-workflow-status :data-status="workflowView().detail?.status" :text="workflowView().detail?.word"></span>
                   <time :datetime="workflowView().detail?.startedAt" :text="workflowView().detail?.started"></time>
                 </div>
+                <p data-workflow-scheduled :if="workflowView().detail?.schedule">
+                  Schedule <strong :text="workflowView().detail?.schedule?.id"></strong>
+                  <span>Due <time :datetime="workflowView().detail?.schedule?.scheduledAt" :text="workflowView().detail?.scheduled"></time></span>
+                </p>
               </div>
               <div data-workflow-run-actions>
                 <form :if="workflowView().detail?.canResume" action="{{ action }}" method="post">
@@ -460,7 +483,12 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
 [data-workflow-start-form] textarea { font-family: ui-monospace, monospace; resize: vertical; }
 [data-workflow-start-form] [data-workflow-error] { color: var(--flow-red); }
 [data-workflow-definitions], [data-workflow-problems] { list-style: none; margin: 0; padding: 0; }
-[data-workflow-definitions] li, [data-workflow-problems] li { padding: 10px 0; border-bottom: 1px solid var(--flow-border); }
+[data-workflow-definitions] > li, [data-workflow-problems] > li { padding: 10px 0; border-bottom: 1px solid var(--flow-border); }
+[data-workflow-schedules] { list-style: none; margin-top: 8px; padding: 0; }
+[data-workflow-schedules] > li { display: flex; flex-wrap: wrap; column-gap: 12px; row-gap: 2px; padding: 3px 0; }
+[data-workflow-schedules] strong, [data-workflow-scheduled] strong { color: var(--flow-ink); overflow-wrap: anywhere; }
+[data-workflow-schedules], [data-workflow-scheduled] { color: var(--flow-muted); font-size: 13px; }
+[data-workflow-scheduled] { display: flex; gap: 5px 8px; flex-wrap: wrap; margin: 5px 0 0; }
 [data-workflow-dialog] {
   max-width: min(27rem, calc(100vw - 24px));
   padding: 18px;

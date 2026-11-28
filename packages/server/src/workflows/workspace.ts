@@ -12,6 +12,13 @@ const statuses = [
 ]
 const words: Record<string, string> = { running: 'Running', paused: 'Paused', completed: 'Completed', cancelled: 'Cancelled', failed: 'Failed' }
 const date = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' })
+const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const intervalUnits = [[86_400_000, 'day'], [3_600_000, 'hour'], [60_000, 'minute'], [1000, 'second']] as const
+
+function workflowInterval(milliseconds: number) {
+  const [duration, unit] = intervalUnits.find(([duration]) => milliseconds % duration === 0) ?? intervalUnits[3]
+  return 'Every ' + new Intl.NumberFormat('en', { style: 'unit', unit, unitDisplay: 'long' }).format(milliseconds / duration)
+}
 
 type StartDraft = { workflow: string, key: string, payload: string, message?: string }
 
@@ -80,7 +87,17 @@ export function workflowWorkspace(runner: WorkflowRunner, state: HarnessState, p
   return {
     mode, profile, workflow, showDetail: requested, missingRun: requested && !detail,
     profiles: [...state.profiles.values()].map(item => ({ id: item.id, name: item.name })),
-    definitions: snapshot.workflows, problems: snapshot.problems,
+    definitions: snapshot.workflows.map(definition => ({
+      ...definition,
+      triggers: definition.triggers.map(trigger => ({
+        ...trigger,
+        cadence: trigger.everyMs !== undefined ? workflowInterval(trigger.everyMs)
+          : (trigger.weekdays?.length ? trigger.weekdays.map(day => weekdays[day]).join(', ') : 'Daily')
+          + ' at ' + trigger.timeOfDay + ' (' + trigger.timeZone + ')',
+        next: trigger.nextAt ? date.format(new Date(trigger.nextAt)) : '',
+      })),
+    })),
+    problems: snapshot.problems,
     workflowChoices: available,
     tabs: statuses.map(item => ({
       key: item.key, label: item.label, current: chosen.key === item.key,
@@ -95,6 +112,7 @@ export function workflowWorkspace(runner: WorkflowRunner, state: HarnessState, p
     })),
     detail: detail && {
       ...detail.run, word: words[detail.run.status], started: date.format(new Date(detail.run.startedAt)),
+      scheduled: detail.run.schedule ? date.format(new Date(detail.run.schedule.scheduledAt)) : '',
       result: preview(detail.run.result), references, canResume: detail.run.status === 'paused',
       canCancel: detail.run.status === 'paused' || detail.run.status === 'running',
       steps: detail.steps.map(step => ({ ...step, word: words[step.status], result: preview(step.result),
