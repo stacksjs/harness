@@ -1,14 +1,17 @@
+import type { WaitOutcome, WorkflowAnswer, WorkflowJson, WorkflowQuestionOptions } from './signals'
 import type { HarnessState } from '@harness/engine'
 import type { LoadedWorkflow, WorkflowContext, WorkflowIssueInput } from './definitions'
 import type { WorkflowSchedule } from './schedules'
 import type { WorkflowWebhook, WorkflowWebhookRequest } from './webhooks'
 import type { TrackerStatus, WorkflowTrackerItem, WorkflowTrackerTrigger } from './tracker-triggers'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { hashesMatch, hashToken } from '../access'
 import { createIssue, issueCreationScope } from '../issue-create'
 import { trustedIssueProjects } from '../issue-repositories'
 import { PullRequestReplyReceipts } from '../pull-request-reply-receipts'
 import { loadWorkflowDefinitions, workflowName } from './definitions'
 import { scheduleKey } from './schedules'
+import { questionRequest, signalAddress, validWaitTimeout, waitName } from './signals'
 import { presentRun, WorkflowStore } from './store'
 import { openTrackerFeed, readTrackerBatch, trackerKey, trackerRepository, workflowProject } from './tracker-triggers'
 import { webhookDeliveryKey, workflowHookId, workflowHookPrefix } from './webhooks'
@@ -18,7 +21,8 @@ const concurrency = 4
 const trackerInterval = 60_000
 const trackerConcurrency = 4
 const contentsLimit = 450_000
-const stepName = /^[^\p{Cc}]{1,120}$/u
+const suspended = Symbol('workflow wait')
+const stepExecution = new AsyncLocalStorage<string>()
 const message = {
   changed: 'The issue project or account changed. Restore the original connection and resume.',
   denied: 'The issue tracker refused this write for the selected account.',
@@ -51,6 +55,7 @@ function json(value: unknown) {
 export class WorkflowRunner {
   private readonly owner = crypto.randomUUID()
   private readonly active = new Map<string, AbortController>()
+  private readonly waitChecks = new Map<string, () => void>()
   private readonly store: WorkflowStore
   private readonly receipts: PullRequestReplyReceipts
   private readonly trackers: TrackerPoll[]
@@ -144,7 +149,28 @@ export class WorkflowRunner {
 
   show(profile: number, id: string) {
     const row = this.store.run(profile, id)
-    return row ? { run: presentRun(row), steps: this.store.steps(id), references: this.store.references(id) } : null
+    if (!row) return null
+    const questions = this.store.waits.questions(profile, Date.now(), id)
+    return { run: presentRun(row), steps: this.store.steps(id), references: this.store.references(id), questions }
+  }
+
+  questions(profile: number) {
+    return this.store.waits.questions(profile, Date.now())
+  }
+
+  signal(profile: number, input: Record<string, unknown>, openQuestionOnly = false) {
+    const invalid = { error: 'invalid' as const }
+    const address = signalAddress(input)
+    const key = input.key === undefined ? crypto.randomUUID() : input.key
+    if (!address || (openQuestionOnly && !('runId' in address)) || !Object.hasOwn(input, 'value')
+      || typeof key !== 'string' || !key.trim() || key.length > 200 || /\p{Cc}/u.test(key)) return invalid
+    if ('workflow' in address && !this.loaded.definitions.has(address.workflow)) return { error: 'missing' as const }
+    let serialized: string
+    try { serialized = json(input.value) }
+    catch { return invalid }
+    const result = this.store.waits.signal(profile, address, key, serialized, Date.now(), openQuestionOnly)
+    if (!('error' in result)) queueMicrotask(() => this.wake())
+    return result
   }
 
   start(profile: number, value: unknown) {
@@ -185,8 +211,10 @@ export class WorkflowRunner {
     if (this.stopped) return
     try {
       const now = Date.now()
+      this.store.waits.sweep(now)
       for (const [id, controller] of this.active)
         if (!this.store.renew(id, this.owner, now, now + leaseMs)) controller.abort()
+      for (const check of this.waitChecks.values()) check()
       if (this.schedules.length) {
         const { profiles } = this.state()
         for (const { key, definition, schedule } of this.schedules) {
@@ -267,6 +295,62 @@ export class WorkflowRunner {
     }
     const used = new Set<string>()
     const pending = new Set<Promise<unknown>>()
+    const wakes = new Map<string, PromiseWithResolvers<WorkflowJson | undefined>>()
+    const barrier = Promise.withResolvers<typeof suspended>()
+    let activeSteps = 0
+    const observe = <T>(operation: Promise<T>) => {
+      pending.add(operation)
+      void operation.catch(() => {})
+      return operation
+    }
+    const valueOf = (outcome: WaitOutcome) => outcome.expired ? undefined : outcome.value
+    const check = () => {
+      if (signal.aborted || !wakes.size) return
+      try {
+        let delivered = false
+        for (const [name, outcome] of wakes) {
+          const result = this.store.waits.outcome(id, name)
+          if (!result) continue
+          wakes.delete(name)
+          outcome.resolve(valueOf(result))
+          delivered = true
+        }
+        // Let the resumed body enqueue its next activity before considering a park.
+        if (delivered || activeSteps > 0 || !wakes.size) return
+        const status = this.store.waits.park(id, this.owner, [...wakes.keys()], Date.now())
+        if (status === 'parked') barrier.resolve(suspended)
+        else if (status === 'ready') queueMicrotask(check)
+        else controller.abort()
+      }
+      catch (error) { barrier.reject(error) }
+    }
+    signal.addEventListener('abort', () => {
+      for (const outcome of wakes.values()) outcome.reject(signal.reason)
+      wakes.clear()
+    }, { once: true })
+    this.waitChecks.set(id, check)
+    const wait = async (name: string, options: { channel?: string, request?: string, timeoutMs?: number }) => {
+      alive()
+      if (stepExecution.getStore() === id) throw new WorkflowProblem('Call ask or wait from the workflow body, outside code steps.')
+      if (!waitName(name) || used.has(name) || !validWaitTimeout(options.timeoutMs)
+        || (options.channel !== undefined && !waitName(options.channel)))
+        throw new WorkflowProblem('Each wait needs a unique name, a valid channel, and a positive timeout if supplied.')
+      used.add(name)
+      const opened = this.store.waits.open(profile, definition!.name, id, this.owner, name, options, Date.now())
+      if (!opened) throw new WorkflowProblem('This run lost its lease.')
+      if (opened.outcome) return valueOf(opened.outcome)
+      const outcome = Promise.withResolvers<WorkflowJson | undefined>()
+      wakes.set(name, outcome)
+      queueMicrotask(check)
+      return outcome.promise
+    }
+    const ask = async (name: string, options: WorkflowQuestionOptions) => {
+      const question = questionRequest(options)
+      if (!question) throw new WorkflowProblem('Each question needs a title and unique choices.')
+      const request = json(question)
+      if (Buffer.byteLength(request) > 32_000) throw new WorkflowProblem('Question data needs to be under 32 KB.')
+      return await wait(name, { request, timeoutMs: options.timeoutMs }) as WorkflowAnswer | undefined
+    }
     const context: WorkflowContext = {
       signal,
       title: (title) => {
@@ -275,12 +359,16 @@ export class WorkflowRunner {
           throw new WorkflowProblem('Workflow titles need one line and at most 256 characters.')
         this.store.title(id, this.owner, Date.now(), title.trim())
       },
+      ask: <const Choices extends readonly string[]>(name: string, options: WorkflowQuestionOptions & { choices: Choices }) =>
+        observe(ask(name, options)) as Promise<WorkflowAnswer<Choices[number]> | undefined>,
+      wait: (name, options = {}) => observe(wait(name, options)),
       step: <T>(name: string, work: Parameters<WorkflowContext['step']>[1]) => {
-        const operation = this.step(id, profile, name, work, alive, signal, used) as Promise<T>
-        pending.add(operation)
-        // Keep the promise for final settlement even if the workflow did not await it.
-        void operation.catch(() => {})
-        return operation
+        activeSteps++
+        const operation = stepExecution.run(id, () => this.step(id, profile, name, work, alive, signal, used)).finally(() => {
+          activeSteps--
+          queueMicrotask(check)
+        })
+        return observe(operation) as Promise<T>
       },
     }
     try {
@@ -288,8 +376,13 @@ export class WorkflowRunner {
       if (triggeredByTracker) projectId = (input as WorkflowTrackerItem).projectId
       alive()
       if (!definition) throw new WorkflowProblem('The workflow version is unavailable. Restore its definition and resume.')
-      const result = await definition.run(input, context)
-      await Promise.all(pending)
+      const run = async () => {
+        const result = await definition.run(input, context)
+        await Promise.all(pending)
+        return result
+      }
+      const result = await Promise.race([run(), barrier.promise])
+      if (result === suspended) return
       alive()
       this.store.finish(id, this.owner, 'completed', Date.now(), null, json(result))
     }
@@ -302,6 +395,7 @@ export class WorkflowRunner {
     finally {
       controller.abort()
       this.active.delete(id)
+      this.waitChecks.delete(id)
       queueMicrotask(() => this.wake())
     }
   }
@@ -310,7 +404,7 @@ export class WorkflowRunner {
     alive: () => void, signal: AbortSignal, used: Set<string>,
   ) {
     alive()
-    if (typeof name !== 'string' || !name.trim() || !stepName.test(name) || used.has(name))
+    if (!waitName(name) || used.has(name))
       throw new WorkflowProblem('Each step needs a unique name in this run.')
     used.add(name)
     const row = this.store.beginStep(id, this.owner, name, Date.now())

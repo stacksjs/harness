@@ -742,6 +742,152 @@ describe('GitLab issue creation', () => {
   }, 40_000)
 })
 
+describe('durable workflow signals', () => {
+  const profile = derivedId('wait-profile')
+  const other = derivedId('wait-other')
+  const endpoint = (path: string, selected = profile) => 'http://127.0.0.1:' + port + '/workflows/' + path + '?profile=' + selected
+  const post = (path: string, value: object, selected = profile) => fetch(endpoint(path, selected), {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(value),
+  })
+  const questions = async (selected = profile) => (await fetch(endpoint('questions', selected)).then(response => response.json())).questions
+  const details = (id: string) => fetch(endpoint('run') + '&id=' + id).then(response => response.json())
+
+  async function restart(file: string) {
+    harness.stop()
+    harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite'), workflowDirectory: file })
+    port = harness.server.port
+  }
+
+  async function setup(source: string) {
+    const file = join(dir, 'wait.ts')
+    await harness.engine.dispatch({ id: 'wait-profile', at: 1, command: { type: 'profile.create', name: 'Wait fixture' } })
+    await harness.engine.dispatch({ id: 'wait-other', at: 1, command: { type: 'profile.create', name: 'Other wait fixture' } })
+    writeFileSync(file, source)
+    await restart(file)
+    return file
+  }
+
+  async function start(workflow: string, key: string) {
+    const response = await post('start', { workflow, key })
+    expect(response.status).toBe(202)
+    return (await response.json()).run.runId as string
+  }
+
+  async function status(id: string, expected: string) {
+    const deadline = performance.now() + 7000
+    while (performance.now() < deadline) {
+      const result = await details(id)
+      if (result.run?.status === expected) return result
+      await Bun.sleep(25)
+    }
+    throw new Error('Run did not reach ' + expected)
+  }
+
+  it('frees worker slots while questions wait and replays completed steps after restart', async () => {
+    const activity = join(dir, 'steps.log')
+    const file = await setup(`
+      import { appendFileSync } from 'node:fs'
+      export default [
+        { name: 'approval', version: 1, async run(input, { step, ask }) {
+          await step('Prepare', () => { appendFileSync(${JSON.stringify(activity)}, 'prepared\\n'); return 'Review ready' })
+          const answer = await ask('approval', { title: 'Review the changes?', choices: ['Confirm', 'Hold'], data: { count: 2 } })
+          return step('Decide', () => answer)
+        } },
+        { name: 'other', version: 1, run: () => 'Finished' },
+      ]
+    `)
+    const ids = await Promise.all(Array.from({ length: 6 }, (_, index) => start('approval', 'request-' + index)))
+    await Promise.all(ids.map(id => status(id, 'waiting')))
+    const unrelated = await start('other', 'unrelated')
+    expect((await status(unrelated, 'completed')).run.result).toBe('Finished')
+    expect(await questions(other)).toEqual([])
+    expect(await questions()).toHaveLength(6)
+    const id = ids[0]!
+    const before = (await questions()).find(item => item.runId === id)
+    expect(before).toMatchObject({ name: 'approval', request: { title: 'Review the changes?', choices: ['Confirm', 'Hold'], data: { count: 2 } } })
+    await restart(file)
+    expect((await questions()).find(item => item.runId === id)).toEqual(before)
+    expect((await post('signal', { runId: id, wait: 'approval', value: { choice: 'Confirm' } }, other)).status).toBe(404)
+    expect((await post('signal', { runId: id, wait: 'approval', value: { choice: 'Unknown' } })).status).toBe(400)
+    expect((await post('signal', { runId: id, wait: 'approval', value: { choice: 'Hold', reason: 4 } })).status).toBe(400)
+    const signal = { runId: id, wait: 'approval', key: 'reply', value: { choice: 'Confirm', reason: 'Reviewed both.' } }
+    const replies = await Promise.all([post('signal', signal), post('signal', signal)])
+    expect(replies.map(response => response.status)).toEqual([200, 200])
+    expect((await Promise.all(replies.map(response => response.json()))).map(reply => reply.replayed).sort()).toEqual([false, true])
+    const done = await status(id, 'completed')
+    expect(done.run.result).toEqual(signal.value)
+    expect(done.steps.find(step => step.kind === 'ask')).toMatchObject({ name: 'approval', status: 'completed', result: signal.value, attempts: 1 })
+    expect(done.steps.find(step => step.name === 'Prepare').attempts).toBe(1)
+    expect(readFileSync(activity, 'utf8')).toBe('prepared\n'.repeat(6))
+    expect((await post('signal', { ...signal, value: { choice: 'Hold' } })).status).toBe(409)
+    expect((await post('signal', { ...signal, key: 'after-closed' })).status).toBe(202)
+    expect((await post('cancel', { id: ids[1] })).status).toBe(200)
+    expect((await details(ids[1]!)).steps.find(step => step.kind === 'ask').status).toBe('failed')
+    expect(await questions()).toHaveLength(4)
+  }, 20_000)
+
+  it('delivers queued channel signals to one run each and preserves deadlines and parallel work', async () => {
+    let now = Date.parse('2026-11-28T12:00:00Z')
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    try {
+      const file = await setup(`
+        export default [
+          { name: 'intake', version: 1, async run(input, { wait }) {
+            return await wait('input', { channel: 'queue' })
+          } },
+          { name: 'nested-wait', version: 1, run(input, { wait, step }) {
+            return step('Code step', () => wait('nested'))
+          } },
+          { name: 'review', version: 1, async run(input, { ask, wait, step }) {
+            const [answer, signal, work] = await Promise.all([
+              ask('approval', { title: 'Continue?', choices: ['Yes', 'No'], timeoutMs: 60_000 }),
+              wait('secondary'), step('Parallel work', async () => { await Bun.sleep(50); return 10 }),
+            ])
+            return { answer: answer ?? 'expired', signal, work }
+          } },
+        ]
+      `)
+      const nested = await status(await start('nested-wait', 'nested'), 'paused')
+      expect(nested.run.detail).toBe('Call ask or wait from the workflow body, outside code steps.')
+      const first = { workflow: 'intake', channel: 'queue', value: null, key: 'first' }
+      expect(await (await post('signal', first)).json()).toEqual({ status: 'buffered', replayed: false })
+      expect((await post('signal', { ...first, key: 'other', value: 'cross-profile' }, other)).status).toBe(202)
+      const a = await start('intake', 'a')
+      expect((await status(a, 'completed')).run.result).toBeNull()
+      expect(await (await post('signal', first)).json()).toEqual({ status: 'delivered', replayed: true })
+      const b = await start('intake', 'b')
+      await status(b, 'waiting')
+      await restart(file)
+      expect((await post('signal', { ...first, key: 'second', value: 'next' })).status).toBe(200)
+      expect((await status(b, 'completed')).run.result).toBe('next')
+
+      const c = await start('review', 'c')
+      const waiting = await status(c, 'waiting')
+      expect(waiting.steps.find(step => step.name === 'Parallel work')).toMatchObject({ status: 'completed', result: 10, attempts: 1 })
+      expect(waiting.questions[0].deadline).toBe('2026-11-28T12:01:00.000Z')
+      now += 60_000
+      await restart(file)
+      // This delivery is independent of the first wait's timeout.
+      expect((await post('signal', { runId: c, wait: 'secondary', value: { ready: true }, key: 'external' })).status).toBe(200)
+      const done = await status(c, 'completed')
+      expect(done.run.result).toEqual({ answer: 'expired', signal: { ready: true }, work: 10 })
+      expect(done.steps.find(step => step.kind === 'ask')).toMatchObject({ status: 'completed', detail: 'Timed out.' })
+      expect(done.steps.find(step => step.name === 'Parallel work').attempts).toBe(1)
+      expect(await questions()).toEqual([])
+
+      expect((await post('signal', { ...first, key: 'expires', value: 'stale' })).status).toBe(202)
+      now += 7 * 24 * 60 * 60 * 1000
+      const [left, right] = await Promise.all([start('intake', 'left'), start('intake', 'right')])
+      await Promise.all([status(left!, 'waiting'), status(right!, 'waiting')])
+      const concurrent = await Promise.all(['one', 'two'].map(value => post('signal', { ...first, key: value, value })))
+      expect(concurrent.map(response => response.status)).toEqual([200, 200])
+      const delivered = await Promise.all([status(left!, 'completed'), status(right!, 'completed')])
+      expect(delivered.map(item => item.run.result).sort()).toEqual(['one', 'two'])
+    }
+    finally { clock.mockRestore() }
+  }, 22_000)
+})
+
 describe('manual workflows', () => {
   it.skipIf(process.platform === 'win32')('resumes the original issue write across restart and account or version changes', async () => {
     const initialDefinitions = join(dir, 'definitions')

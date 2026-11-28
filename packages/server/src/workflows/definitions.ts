@@ -1,3 +1,4 @@
+import type { WorkflowAnswer, WorkflowJson, WorkflowQuestionOptions, WorkflowWaitOptions } from './signals'
 import type { WorkflowSchedule } from './schedules'
 import type { WorkflowTrackerTrigger } from './tracker-triggers'
 import type { WorkflowWebhook } from './webhooks'
@@ -30,6 +31,8 @@ export interface WorkflowStepContext {
 export interface WorkflowContext {
   signal: AbortSignal
   title: (value: string) => void
+  ask: <const Choices extends readonly string[]>(name: string, options: WorkflowQuestionOptions & { choices: Choices }) => Promise<WorkflowAnswer<Choices[number]> | undefined>
+  wait: (name: string, options?: WorkflowWaitOptions) => Promise<WorkflowJson | undefined>
   step: <T>(name: string, execute: (context: WorkflowStepContext) => T | Promise<T>) => Promise<T>
 }
 

@@ -54,6 +54,28 @@ export default function (cli: CLI) {
   cli.command('harness:workflow:hooks <profile>', 'List secret webhook paths on the local Harness host')
     .option('--port [port]', 'Local Harness port')
     .action((profile: string, options: Options) => call(profile, '/hooks', options))
+  cli.command('harness:workflow:questions <profile>', 'List open questions in a workflow profile')
+    .option('--port [port]', 'Local Harness port')
+    .action((profile: string, options: Options) => call(profile, '/questions', options))
+  cli.command('harness:workflow:signal <profile> <value>', 'Send a JSON value to a run wait or workflow channel')
+    .option('--run [id]', 'Workflow run ID')
+    .option('--wait [name]', 'Wait or question name')
+    .option('--workflow [name]', 'Workflow name for a channel')
+    .option('--channel [name]', 'Workflow channel')
+    .option('--key [key]', 'Stable signal ID for retries')
+    .option('--port [port]', 'Local Harness port')
+    .action((profile: string, raw: string, options: Options & { run?: string, wait?: string, workflow?: string, channel?: string, key?: string }) => {
+      let value: unknown
+      try { value = JSON.parse(raw) }
+      catch {
+        console.error('Supply a valid JSON value.')
+        process.exitCode = 1
+        return
+      }
+      return call(profile, '/signal', options, {}, {
+        runId: options.run, wait: options.wait, workflow: options.workflow, channel: options.channel, key: options.key, value,
+      })
+    })
   cli.command('harness:workflow:show <profile> <run>', 'Show a workflow run and its steps')
     .option('--port [port]', 'Local Harness port')
     .action((profile: string, id: string, options: Options) => call(profile, '/run', options, { id }))

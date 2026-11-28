@@ -4,8 +4,9 @@ import type { WorkflowTrackerItem, WorkflowTrackerTrigger } from './tracker-trig
 import { Database } from 'bun:sqlite'
 import { hashToken, mintToken } from '../access'
 import { nextScheduleAt, shouldFireSchedule } from './schedules'
+import { WorkflowWaitStore } from './wait-store'
 
-export type WorkflowStatus = 'running' | 'paused' | 'completed' | 'cancelled'
+export type WorkflowStatus = 'running' | 'waiting' | 'paused' | 'completed' | 'cancelled'
 
 type RunRow = {
   id: string
@@ -65,6 +66,7 @@ function trackerReference(item: WorkflowTrackerItem) {
 
 export class WorkflowStore {
   private readonly db: Database
+  readonly waits: WorkflowWaitStore
 
   constructor(databasePath: string) {
     this.db = new Database(databasePath)
@@ -103,6 +105,7 @@ export class WorkflowStore {
         PRIMARY KEY (run_id, step, position)
       );
     `)
+    this.waits = new WorkflowWaitStore(this.db, (id, owner, now) => this.owns(id, owner, now))
   }
 
   findStart(profile: number, name: string, key: string) {
@@ -240,12 +243,13 @@ export class WorkflowStore {
   }
 
   steps(id: string) {
-    return this.db.query<StepRow, [string]>(`SELECT name, status, attempts, result, detail, started_at, ended_at
+    const steps = this.db.query<StepRow, [string]>(`SELECT name, status, attempts, result, detail, started_at, ended_at
       FROM harness_workflow_steps WHERE run_id = ? ORDER BY started_at, rowid`).all(id).map(row => ({
       name: row.name, kind: 'step' as const, status: row.status, attempts: row.attempts, detail: row.detail,
       result: row.result === null ? null : JSON.parse(row.result) as unknown,
       startedAt: new Date(row.started_at).toISOString(), endedAt: row.ended_at === null ? null : new Date(row.ended_at).toISOString(),
     }))
+    return [...steps, ...this.waits.history(id)].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   }
 
   eligible(now: number, limit: number) {
@@ -276,7 +280,7 @@ export class WorkflowStore {
     return this.db.transaction(() => {
       const changed = this.db.query(`UPDATE harness_workflow_runs
         SET status = 'cancelled', detail = 'Cancelled by the host user.', updated_at = ?, ended_at = ?, owner = NULL, lease_until = NULL
-        WHERE profile = ? AND id = ? AND status IN ('running', 'paused')`).run(now, now, profile, id).changes
+        WHERE profile = ? AND id = ? AND status IN ('running', 'waiting', 'paused')`).run(now, now, profile, id).changes
       if (changed) this.db.query(`UPDATE harness_workflow_steps
         SET status = 'failed', detail = 'Run cancelled.', ended_at = ? WHERE run_id = ? AND status = 'running'`).run(now, id)
       return this.run(profile, id)
