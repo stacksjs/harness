@@ -6,7 +6,7 @@
  * be wrong is corrected by a later fact. That is what makes replay meaningful.
  */
 
-import type { ApprovalDecision, ApprovalScope, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, ModelFavorite } from './commands'
+import type { ApprovalSelection, CodexTurnOptions, CodexTurnSelection, ConnectorApproval, DriverKind, ModelFavorite, ToolApprovalChoice } from './commands'
 import type { ComposerAttachment } from './composer-attachments'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
@@ -125,8 +125,8 @@ export type EventPayload =
   | { type: 'assistant.delta', turnId: number, text: string }
   | { type: 'tool.call.began', turnId: number, callId: string, toolName: string }
   | { type: 'tool.call.ended', turnId: number, callId: string, ok: boolean }
-  | { type: 'approval.requested', approvalId: number, requestId: string, toolName: string, detail?: string, connector?: ConnectorApproval }
-  | { type: 'approval.resolved', approvalId: number, decision: ApprovalDecision, scope: ApprovalScope }
+  | { type: 'approval.requested', approvalId: number, requestId: string, toolName: string, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }
+  | ({ type: 'approval.resolved', approvalId: number } & ApprovalSelection)
   | { type: 'input.requested', requestId: string, turnId: number, questions: InputQuestion[] }
   | { type: 'input.resolved', requestId: string, turnId: number, outcome: 'answered' | 'declined' | 'interrupted', attachments?: QuestionAttachment[] }
   /** `vcsRef` is the dangling commit holding the snapshot; see server/checkpoint.ts. */

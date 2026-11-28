@@ -17,7 +17,8 @@
  */
 
 import type { ConversationRewindInput, ConversationRewindResult, Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, ProviderModel, StartTurnInput } from './types'
-import type { ApprovalChoice, InputAnswer, ProviderContextUsage, SteeringOutcome } from '@harness/contract'
+import type { ApprovalSelection, InputAnswer, ProviderContextUsage, SteeringOutcome } from '@harness/contract'
+import { codexApproval } from './codex-approval'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { codexEnvironment } from './account-environment'
@@ -228,7 +229,7 @@ class CodexInstance implements ProviderInstance {
   private nextId = 0
   private readonly pending = new Map<number | string, (frame: Frame) => void>()
   /** Approval id → the JSON-RPC request id Codex is blocking on. */
-  private readonly approvals = new Map<string, number | string>()
+  private readonly approvals = new Map<string, { id: number | string, approval: ReturnType<typeof codexApproval> }>()
   private readonly mcpConsents = new Map<string, { id: number | string, consent: NonNullable<ReturnType<typeof prepareMcpConsent>> }>()
   private readonly inputs = new Map<string, number | string>()
   private threadId: string | null = null
@@ -290,6 +291,7 @@ class CodexInstance implements ProviderInstance {
       this.turnId = null
       this.compaction = undefined
       this.inputs.clear()
+      this.approvals.clear()
       this.finishRequests(message)
       this.queue?.finish({ type: 'error', message })
       child.kill()
@@ -449,20 +451,29 @@ class CodexInstance implements ProviderInstance {
       return
     }
 
-    const requestId = String(frame.params?.approvalId ?? frame.params?.itemId ?? frame.id)
-    this.approvals.set(requestId, frame.id!)
-
+    const method = frame.method!
+    const id = frame.id!
+    const requestId = String(id)
+    const approval = codexApproval(method, frame.params)
+    if (!this.queue || this.queue.closed || !approval.choices.length
+      || (this.threadId && frame.params?.threadId && this.threadId !== frame.params.threadId)
+      || (this.turnId && frame.params?.turnId && this.turnId !== frame.params.turnId)) {
+      this.respond(id, approval.cancel)
+      return
+    }
     if (this.config.autoApprove) {
-      this.respond(frame.id!, { decision: 'accept' })
-      this.approvals.delete(requestId)
+      this.respond(id, approval.automatic)
       return
     }
 
-    this.queue?.push({
+    this.approvals.set(requestId, { id, approval })
+    this.queue.push({
       type: 'approval-request',
       requestId,
-      toolName: approvalLabel(frame.method!, frame.params),
+      toolName: method === 'item/permissions/requestApproval' ? 'Additional permissions' : approvalLabel(method, frame.params),
       args: frame.params,
+      detail: approval.detail,
+      choices: approval.choices,
     })
   }
 
@@ -522,6 +533,8 @@ class CodexInstance implements ProviderInstance {
         const requestId = String(frame.params?.requestId)
         if (this.inputs.delete(requestId))
           this.queue?.push({ type: 'input-cancelled', requestId })
+        if (this.approvals.delete(requestId))
+          this.queue?.push({ type: 'approval-cancelled', requestId })
         const consentId = `mcp:${requestId}`
         if (this.mcpConsents.delete(consentId))
           this.queue?.push({ type: 'approval-cancelled', requestId: consentId })
@@ -533,7 +546,9 @@ class CodexInstance implements ProviderInstance {
         return
 
       case 'turn/completed': {
+        if (this.turnId && frame.params?.turn?.id && this.turnId !== frame.params.turn.id) return
         this.inputs.clear()
+        this.approvals.clear()
         this.cancelMcpConsents()
         const error = this.turnError ?? frame.params?.turn?.error?.message
         this.turnError = null
@@ -864,7 +879,7 @@ class CodexInstance implements ProviderInstance {
     await interrupted
   }
 
-  async respondApproval(requestId: string, allow: boolean, _reason?: string, choice?: Pick<ApprovalChoice, 'decision' | 'scope'>): Promise<void> {
+  async respondApproval(requestId: string, allow: boolean, _reason?: string, choice?: ApprovalSelection): Promise<void> {
     const mcp = this.mcpConsents.get(requestId)
     if (mcp) {
       this.mcpConsents.delete(requestId)
@@ -875,13 +890,10 @@ class CodexInstance implements ProviderInstance {
       this.respond(mcp.id, response ?? { action: 'cancel' })
       return
     }
-    const id = this.approvals.get(requestId)
-    // A decision for a request that is already gone — a reconnect replaying, or
-    // a double-click. Dropping it is correct; throwing would surface a fault
-    // the user did not cause.
-    if (id === undefined) return
+    const pending = this.approvals.get(requestId)
+    if (!pending) return
     this.approvals.delete(requestId)
-    this.respond(id, { decision: allow ? 'accept' : 'decline' })
+    this.respond(pending.id, pending.approval.response(choice ?? { decision: allow ? 'allowed' : 'denied', scope: 'once' }))
   }
 
   async respondInput(requestId: string, answers: InputAnswer[] | null): Promise<void> {
@@ -908,7 +920,7 @@ class CodexInstance implements ProviderInstance {
     this.generation++
     // Unblock Codex on anything it is still waiting for, so it can exit rather
     // than sit on a pipe we are about to close.
-    for (const id of this.approvals.values()) this.respond(id, { decision: 'cancel' })
+    for (const { id, approval } of this.approvals.values()) this.respond(id, approval.cancel)
     this.approvals.clear()
     this.cancelMcpConsents()
     this.cancelInputs()

@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, ToolApprovalChoice, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -66,7 +66,7 @@ export interface SessionState {
    * connected when it fired; anyone arriving afterwards saw a session marked
    * `awaiting-approval` with nothing to act on, and the turn waited forever.
    */
-  pendingApprovals: Array<{ approvalId: number, toolName: string, detail?: string, connector?: ConnectorApproval }>
+  pendingApprovals: Array<{ approvalId: number, toolName: string, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }>
   pendingInputs: InputRequestState[]
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
@@ -1033,6 +1033,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         approvalId: p.approvalId,
         toolName: p.toolName,
         ...(p.detail ? { detail: p.detail } : {}),
+        ...(p.choices ? { choices: p.choices } : {}),
         ...(p.connector ? { connector: p.connector } : {}),
       })
       break

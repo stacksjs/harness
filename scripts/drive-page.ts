@@ -84,6 +84,7 @@ let releaseGate: () => void
 const gate = new Promise<void>((r) => { releaseGate = r })
 const markdownGate = Promise.withResolvers<void>()
 const parallelApprovalGate = Promise.withResolvers<void>()
+let parallelReadScope: string | undefined
 const parallelDecisions = new Map<string, boolean>()
 const questionGate = Promise.withResolvers<void>()
 const questionAnswers = new Map<string, unknown>()
@@ -258,7 +259,15 @@ const instance: ProviderInstance = {
       return
     }
     if (input.text === 'exercise parallel approvals') {
-      yield { type: 'approval-request', requestId: 'parallel_read', toolName: 'Read', args: {} }
+      yield {
+        type: 'approval-request', requestId: 'parallel_read', toolName: 'Read', args: { path: 'notes.txt' },
+        choices: [
+          { id: 'allow-once', decision: 'allowed', scope: 'once', label: 'Allow' },
+          { id: 'deny-once', decision: 'denied', scope: 'once', label: 'Deny' },
+          { id: 'allow-notes', decision: 'allowed', scope: 'session', label: 'Allow for this session', detail: 'Read(notes.txt)' },
+          { id: 'cancel', decision: 'cancelled', scope: 'once', label: 'Cancel' },
+        ],
+      }
       yield { type: 'approval-request', requestId: 'parallel_write', toolName: 'Write', args: {} }
       await parallelApprovalGate.promise
       yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
@@ -301,6 +310,7 @@ const instance: ProviderInstance = {
       return
     }
     if (id === 'parallel_read' || id === 'parallel_write') {
+      if (id === 'parallel_read' && choice?.choiceId === 'allow-notes') parallelReadScope = choice.scope
       parallelDecisions.set(id, allow)
       if (parallelDecisions.size === 2) parallelApprovalGate.resolve()
     }
@@ -2438,12 +2448,36 @@ await page.waitForFunction(() => document.querySelector('[data-approval-tool]')?
 await page.reload()
 await approval.waitFor()
 check('reloading restores the oldest outstanding approval', await approvalTool.textContent() === 'Read')
-await approval.getByRole('button', { name: 'Allow', exact: true }).click()
+const toolChoiceMenu = approval.locator('[data-tool-approval-options]')
+const moreToolChoices = toolChoiceMenu.getByLabel('More approval options')
+const allowThisSession = toolChoiceMenu.getByRole('button', { name: 'Allow for this session', exact: true })
+await moreToolChoices.waitFor({ state: 'visible' })
+await moreToolChoices.focus()
+await page.keyboard.press('ArrowDown')
+check('the tool approval disclosure focuses its first offered extra choice', await allowThisSession.evaluate(element => element.ownerDocument.activeElement === element))
+await page.keyboard.press('Escape')
+check('Escape closes tool approval choices and restores focus', await moreToolChoices.evaluate(element => element.ownerDocument.activeElement === element && !element.closest('details')?.open))
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  await moreToolChoices.click()
+  check(`offered tool choices fit at ${width}×${height}`, await allowThisSession.evaluate(element => {
+    const { left, right, top, bottom, height } = element.getBoundingClientRect()
+    const menu = element.closest('[data-tool-approval-option-list]')?.getBoundingClientRect()
+    const card = element.closest('[data-approval]')?.getBoundingClientRect()
+    return left >= 0 && right <= innerWidth && top >= 0 && bottom <= innerHeight && height >= 44
+      && menu && card && menu.bottom <= card.top && element.textContent?.includes('Read(notes.txt)')
+  }))
+  await capture(`tool-approval-options-${width}x${height}`)
+  await moreToolChoices.click()
+}
+await moreToolChoices.click()
+await allowThisSession.click()
+await page.setViewportSize({ width: 1280, height: 800 })
 await page.waitForFunction(() => document.querySelector('[data-approval-tool]')?.textContent === 'Write')
 await approval.getByRole('button', { name: 'Deny', exact: true }).click()
 await approval.waitFor({ state: 'hidden' })
 check('parallel approvals advance in order and reach their matching callbacks',
-  parallelDecisions.get('parallel_read') === true && parallelDecisions.get('parallel_write') === false)
+  parallelDecisions.get('parallel_read') === true && parallelReadScope === 'session' && parallelDecisions.get('parallel_write') === false)
 
 await page.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
 await promptBox.fill('exercise structured questions')

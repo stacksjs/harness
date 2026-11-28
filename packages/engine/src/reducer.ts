@@ -7,7 +7,7 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
-import { acceptedClaudeAccountCompaction, acceptedSettingKeys, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, projectSettingsDelta, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, acceptedSettingKeys, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, offeredToolApproval, projectSettingsDelta, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
 import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, inactivityDeadline, isTurnActive, isolatedRewindScope, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, sharesCheckout, threadShelf, workspaceSettings } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
@@ -1313,7 +1313,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
-      const detail = command.connector ? undefined : approvalDetail(command.args)
+      const detail = command.connector ? undefined : command.detail ?? approvalDetail(command.args)
       return [{
         sessionId: command.sessionId,
         commandId,
@@ -1326,6 +1326,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           requestId: command.requestId,
           toolName: command.toolName,
           ...(detail && detail !== command.toolName ? { detail } : {}),
+          ...(command.choices ? { choices: command.choices } : {}),
           ...(command.connector ? { connector: command.connector } : {}),
         },
       }]
@@ -1418,12 +1419,18 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       }
       const decision = cancelled ? 'cancelled' : command.decision
       const scope = cancelled ? 'once' : command.scope
+      let choiceId: string | undefined
       if (!cancelled) {
         if (request.connector) {
-          if (!request.connector.choices.some(choice => choice.decision === decision && choice.scope === scope))
+          if (command.choiceId !== undefined || !request.connector.choices.some(choice => choice.decision === decision && choice.scope === scope))
             throw new InvalidCommand('This connector did not offer that approval choice.')
         }
-        else if (decision !== 'allowed' && decision !== 'denied') {
+        else if (request.choices) {
+          const offered = offeredToolApproval(request.choices, command)
+          if (!offered) throw new InvalidCommand('This tool did not offer that approval choice.')
+          choiceId = offered.id
+        }
+        else if (scope !== 'once' || command.choiceId !== undefined || (decision !== 'allowed' && decision !== 'denied')) {
           throw new InvalidCommand('Invalid approval decision.')
         }
       }
@@ -1436,6 +1443,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           approvalId: command.approvalId,
           decision,
           scope,
+          ...(choiceId === undefined ? {} : { choiceId }),
         },
       }]
     }

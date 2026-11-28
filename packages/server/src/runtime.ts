@@ -11,8 +11,8 @@
  * and replayable; spawning processes is neither.
  */
 
-import type { ApprovalChoice, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, ConnectorApproval, DriverKind, GitBranchAttempt, HarnessEvent, InputQuestion, InputResponse, RepositoryCheckpoint, SteeringOutcome } from '@harness/contract'
-import type { ChatGptCredentialStore, Driver, ProviderInstance } from '@harness/drivers'
+import type { ApprovalSelection, CombinedWorktreeIntent, CommandEnvelope, ComposerAttachment, DriverKind, GitBranchAttempt, HarnessEvent, InputQuestion, InputResponse, RepositoryCheckpoint, SteeringOutcome } from '@harness/contract'
+import type { ChatGptCredentialStore, Driver, ProviderEvent, ProviderInstance } from '@harness/drivers'
 import type { Engine, HarnessState, SessionState } from '@harness/engine'
 import { existsSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
@@ -466,7 +466,7 @@ export class ProviderRuntime {
 
           case 'approval-request': {
             if (running.interrupted) break
-            await this.dispatchApproval(sessionId, event.requestId, event.toolName, event.args, event.connector,
+            await this.dispatchApproval(sessionId, event,
               approvalId => running.approvals.set(approvalId, event.requestId))
             break
           }
@@ -559,13 +559,10 @@ export class ProviderRuntime {
   /** Make the provider callback reachable before broadcasting the request. */
   private async dispatchApproval(
     sessionId: number,
-    requestId: string,
-    toolName: string,
-    args: unknown,
-    connector: ConnectorApproval | undefined,
+    event: Extract<ProviderEvent, { type: 'approval-request' }>,
     remember: (approvalId: number) => void,
   ): Promise<void> {
-    const envelope = this.envelope({ type: 'thread.approval.request', sessionId, requestId, toolName, args, connector })
+    const envelope = this.envelope({ ...event, type: 'thread.approval.request', sessionId })
     try {
       const result = await this.options.engine.dispatchInternal(envelope)
       const event = result.events.find(e => e.payload.type === 'approval.requested')
@@ -1084,7 +1081,7 @@ export class ProviderRuntime {
   }
 
   /** Route a client's decision back to the provider callback that is blocked. */
-  async respondApproval(sessionId: number, approvalId: number, choice: Pick<ApprovalChoice, 'decision' | 'scope'>): Promise<void> {
+  async respondApproval(sessionId: number, approvalId: number, choice: ApprovalSelection): Promise<void> {
     const running = this.sessions.get(sessionId)
     if (!running) return
     const requestId = running.approvals.get(approvalId)

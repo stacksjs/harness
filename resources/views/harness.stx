@@ -2350,6 +2350,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const approvalDetail = derived(() => pendingApprovals()[0]?.detail || '')
   const connectorApproval = derived(() => pendingApprovals()[0]?.connector)
   const connectorOptions = useRef('connectorOptionsBox')
+  const toolApprovalOptions = useRef('toolApprovalOptionsBox')
+  const offeredToolChoices = derived(() => pendingApprovals()[0]?.choices)
+  const primaryToolApprovalChoices = derived(() => offeredToolChoices()?.filter(choice => choice.scope === 'once' && choice.decision !== 'cancelled') ?? [])
+  const moreToolApprovalChoices = derived(() => offeredToolChoices()?.filter(choice => choice.scope !== 'once' || choice.decision === 'cancelled') ?? [])
   const primaryConnectorChoices = derived(() => connectorApproval()?.choices.filter(choice => choice.decision !== 'cancelled' && choice.scope === 'once') ?? [])
   const moreConnectorChoices = derived(() => connectorApproval()?.choices.filter(choice => choice.decision === 'cancelled' || choice.scope !== 'once') ?? [])
 
@@ -7189,30 +7193,34 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     dispatch({ type: 'session.turn.interrupt', sessionId })
   }
 
-  function closeConnectorOptions(restoreFocus = false) {
-    const details = connectorOptions.current
+  function activeApprovalOptions() {
+    return connectorApproval() ? connectorOptions.current : toolApprovalOptions.current
+  }
+
+  function closeApprovalOptions(restoreFocus = false) {
+    const details = activeApprovalOptions()
     if (!details?.open) return
     details.open = false
     if (restoreFocus) details.querySelector('summary')?.focus()
   }
 
-  function blurConnectorOptions(event) {
-    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) closeConnectorOptions()
+  function blurApprovalOptions(event) {
+    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) closeApprovalOptions()
   }
 
-  function guardConnectorOptions(event) {
+  function guardApprovalOptions(event) {
     if (pendingApprovalId()) event.preventDefault()
   }
 
-  function handleConnectorOptions(event) {
-    const details = connectorOptions.current
+  function handleApprovalOptions(event) {
+    const details = event.currentTarget
     if (event.key === 'Escape' && details?.open) {
       event.preventDefault()
       event.stopPropagation()
-      closeConnectorOptions(true)
+      closeApprovalOptions(true)
       return
     }
-    if (!details || pendingApprovalId() || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    if (pendingApprovalId() || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
     const buttons = [...details.querySelectorAll('button:not(:disabled)')]
     if (!buttons.length) return
     event.preventDefault()
@@ -7224,12 +7232,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   useEventListener('pointerdown', (event) => {
-    if (connectorOptions.current?.open && !connectorOptions.current.contains(event.target)) closeConnectorOptions()
+    const details = activeApprovalOptions()
+    if (details?.open && !details.contains(event.target)) closeApprovalOptions()
   }, { target: document })
 
-  async function respondToApproval(decision, scope = 'once') {
-    const id = approvalId()
-    if (!id || !sessionId || pendingApprovalId()) return
+  async function respondToApproval(event, decision, scope = 'once', choiceId) {
+    const id = Number(event.currentTarget.dataset.approvalId)
+    if (!id || id !== approvalId() || !sessionId || pendingApprovalId()) return
     pendingApprovalId.set(id)
     try {
       await sendCommand({
@@ -7238,6 +7247,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         approvalId: id,
         decision,
         scope,
+        ...(choiceId === undefined ? {} : { choiceId }),
       })
     }
     catch (error) {
@@ -7247,8 +7257,6 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       }
     }
   }
-  function approveTool() { respondToApproval('allowed') }
-  function denyTool() { respondToApproval('denied') }
 
   function waitingSessionState() {
     return pendingApprovals().length ? 'awaiting-approval' : inputRequest() ? 'awaiting-input' : 'running'
@@ -8438,7 +8446,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         }
         batch(() => {
           setSessionState('idle')
-          closeConnectorOptions()
+          closeApprovalOptions()
           pendingApprovals.set([])
           pendingApprovalId.set(0)
           questionForm()?.interrupt()
@@ -8461,7 +8469,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         batch(() => {
           setSessionState('failed')
           sessionError.set(payload.message || 'The agent could not finish this response.')
-          closeConnectorOptions()
+          closeApprovalOptions()
           pendingApprovals.set([])
           pendingApprovalId.set(0)
           questionForm()?.interrupt()
@@ -8473,14 +8481,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           setSessionState('awaiting-approval')
           pendingApprovals.update(requests => requests.some(request => request.approvalId === payload.approvalId)
             ? requests
-            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName, detail: payload.detail, connector: payload.connector }])
+            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName, detail: payload.detail, choices: payload.choices, connector: payload.connector }])
           transcriptAnnouncement.set('An approval needs your attention.')
         })
         paintTranscript(updateTranscriptMarkdown)
       }
       else if (payload.type === 'approval.resolved') {
         if (!pendingApprovals().some(request => request.approvalId === payload.approvalId)) return
-        if (approvalId() === payload.approvalId) closeConnectorOptions()
+        if (approvalId() === payload.approvalId) closeApprovalOptions()
         batch(() => {
           pendingApprovals.update(requests => requests.filter(request => request.approvalId !== payload.approvalId))
           if (pendingApprovalId() === payload.approvalId) pendingApprovalId.set(0)

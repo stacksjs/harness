@@ -1,4 +1,4 @@
-import type { Command, HostSettings, InputAnswer, WorktreeSelection } from '@harness/contract'
+import type { ApprovalSelection, Command, HostSettings, InputAnswer, WorktreeSelection } from '@harness/contract'
 import type { Driver, DriverConfig, ProviderEvent, ProviderInstance, StartTurnInput } from '@harness/drivers'
 import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
@@ -21,6 +21,7 @@ import { serve } from '../src/server'
  */
 function fakeDriver(script: ProviderEvent[], hooks: {
   onInterrupt?: () => void
+  onApproval?: (choice?: ApprovalSelection) => void
   gate?: Promise<void>
 } = {}): { driver: Driver, approvals: Array<{ requestId: string, allow: boolean }> } {
   const approvals: Array<{ requestId: string, allow: boolean }> = []
@@ -35,7 +36,10 @@ function fakeDriver(script: ProviderEvent[], hooks: {
       }
     },
     async interrupt() { hooks.onInterrupt?.() },
-    async respondApproval(requestId, allow) { approvals.push({ requestId, allow }) },
+    async respondApproval(requestId, allow, _reason, choice) {
+      approvals.push({ requestId, allow })
+      hooks.onApproval?.(choice)
+    },
     async stop() {},
   }
 
@@ -3614,10 +3618,15 @@ describe('approvals round-trip through the socket', () => {
 
   it('replays an outstanding approval to replacement clients and accepts one decision', async () => {
     const gate = Promise.withResolvers<void>()
+    const choices = [
+      { id: 'session_read', decision: 'allowed', scope: 'session', label: 'Allow for this session' },
+      { id: 'deny_read', decision: 'denied', scope: 'once', label: 'Deny' },
+    ] as const
+    const delivered: Array<ApprovalSelection | undefined> = []
     const { driver, approvals } = fakeDriver([
-      { type: 'approval-request', requestId: 'req_race', toolName: 'Read', args: { file_path: 'project/<sample>.txt', custom: 'private provider argument' } },
+      { type: 'approval-request', requestId: 'req_race', toolName: 'Read', args: { file_path: 'project/<sample>.txt', custom: 'private provider argument' }, choices: [...choices] },
       { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 },
-    ], { gate: gate.promise })
+    ], { gate: gate.promise, onApproval: choice => delivered.push(choice) })
     harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
     const url = `ws://127.0.0.1:${port}/ws`
     const starter = await Client.connect(url)
@@ -3632,15 +3641,19 @@ describe('approvals round-trip through the socket', () => {
       second.send({ t: 'subscribe', sessionId })
       for (const client of [first, second]) {
         const request = await client.waitFor('approval.requested')
-        expect(request).toMatchObject({ approvalId, detail: 'project/<sample>.txt' })
+        expect(request).toMatchObject({ approvalId, detail: 'project/<sample>.txt', choices })
         expect(JSON.stringify(request)).not.toContain('private provider argument')
       }
       first.send({ t: 'dispatch', envelope: { id: 'c_extra', at: 6, command: { type: 'session.turn.start', sessionId, text: 'extra' } } })
       expect(await first.waitForRejection('c_extra')).toMatchObject({ message: 'a turn is already running' })
 
-      const command = { type: 'session.approval.respond', sessionId, approvalId, scope: 'once' }
-      first.send({ t: 'dispatch', envelope: { id: 'c_allow', at: 7, command: { ...command, decision: 'allowed' } } })
-      second.send({ t: 'dispatch', envelope: { id: 'c_deny', at: 7, command: { ...command, decision: 'denied' } } })
+      const command = { type: 'session.approval.respond', sessionId, approvalId }
+      first.send({ t: 'dispatch', envelope: { id: 'c_forged', at: 7, command: { ...command, decision: 'allowed', scope: 'once', choiceId: 'session_read' } } })
+      expect(await first.waitForRejection('c_forged')).toMatchObject({ message: 'This tool did not offer that approval choice.' })
+      const allow = { decision: 'allowed', scope: 'session', choiceId: 'session_read' }
+      const deny = { decision: 'denied', scope: 'once', choiceId: 'deny_read' }
+      first.send({ t: 'dispatch', envelope: { id: 'c_allow', at: 8, command: { ...command, ...allow } } })
+      second.send({ t: 'dispatch', envelope: { id: 'c_deny', at: 8, command: { ...command, ...deny } } })
       const settled = await first.waitFor('approval.resolved')
       const allowed = settled.decision === 'allowed'
       expect(await (allowed ? second : first).waitForRejection(allowed ? 'c_deny' : 'c_allow'))
@@ -3650,6 +3663,7 @@ describe('approvals round-trip through the socket', () => {
       gate.resolve()
       expect(await first.waitFor('turn.completed')).toBeTruthy()
       expect(await second.waitFor('turn.completed')).toBeTruthy()
+      expect(delivered).toEqual([allowed ? allow : deny])
       expect(approvals).toEqual([{ requestId: 'req_race', allow: allowed }])
       expect(first.payloads('approval.resolved')).toHaveLength(1)
       expect(second.payloads('approval.resolved')).toHaveLength(1)

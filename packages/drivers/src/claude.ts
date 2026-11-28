@@ -14,8 +14,9 @@
  * stops at this boundary on purpose.
  */
 
-import type { AccountInfo, CanUseTool, ElicitationRequest, ElicitationResult, Options, PermissionResult, Query, query as sdkQuery, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import type { ApprovalChoice, InputAnswer } from '@harness/contract'
+import type { AccountInfo, CanUseTool, ElicitationRequest, ElicitationResult, Options, PermissionResult, PermissionUpdate, Query, query as sdkQuery, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ApprovalSelection, InputAnswer, ToolApprovalChoice } from '@harness/contract'
+import { offeredToolApproval } from '@harness/contract'
 import type { ConversationRewindInput, ConversationRewindResult, Driver, DriverConfig, ForkInput, ForkResult, ProbeResult, ProviderEvent, ProviderInstance, StartTurnInput } from './types'
 import { lstat, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -80,6 +81,24 @@ function toMicros(usd: number): number {
   return Math.round(usd * 1_000_000)
 }
 
+const claudeApprovalChoices = [
+  { id: 'allow', decision: 'allowed', scope: 'once', label: 'Allow' },
+  { id: 'deny', decision: 'denied', scope: 'once', label: 'Deny' },
+  { id: 'cancel', decision: 'cancelled', scope: 'once', label: 'Cancel' },
+] satisfies ToolApprovalChoice[]
+
+type AddPermissionRules = Extract<PermissionUpdate, { type: 'addRules' }>
+
+function claudeSessionRules(toolName: string, options: Parameters<CanUseTool>[2]): AddPermissionRules[] {
+  if (('suppressAlwaysAllowRule' in options && options.suppressAlwaysAllowRule === true) || !options.suggestions?.length)
+    return []
+  const additions = options.suggestions.filter(rule => rule.type === 'addRules')
+  if (additions.length !== options.suggestions.length || !additions.every(rule => rule.behavior === 'allow'
+    && rule.rules.length > 0 && rule.rules.every(item => item.toolName === toolName)))
+    return []
+  return additions.map(rule => ({ ...rule, destination: 'session' }))
+}
+
 interface PendingPermission {
   kind: 'approval' | 'input'
   queue: EventQueue
@@ -95,6 +114,7 @@ interface PendingPermission {
    */
   input: Record<string, unknown>
   toolUseID?: string
+  approval?: { choices: ToolApprovalChoice[], sessionRules: PermissionUpdate[] }
 }
 
 export class ClaudeInstance implements ProviderInstance {
@@ -121,25 +141,38 @@ export class ClaudeInstance implements ProviderInstance {
 
     const requestId = `req_${++this.nextRequestId}`
     let event: ProviderEvent
+    let approval: PendingPermission['approval']
     if (asksQuestion) {
       const questions = toolInputQuestions(input.questions, 'claude')
       if (!questions) return { behavior: 'deny', message: 'Could not display these questions.' }
       event = { type: 'input-request', requestId, questions }
     }
     else {
-      event = { type: 'approval-request', requestId, toolName, args: input }
+      const sessionRules = claudeSessionRules(toolName, options)
+      const choices: ToolApprovalChoice[] = [...claudeApprovalChoices]
+      if (sessionRules.length) {
+        const detail = sessionRules.flatMap(update => update.rules.map(rule => rule.ruleContent
+          ? `${rule.toolName}(${rule.ruleContent})`
+          : `All ${rule.toolName} calls`)).join('\n')
+        if (detail.length <= 4096) {
+          choices.push({ id: 'allow-session', decision: 'allowed', scope: 'session', label: 'Allow for this session', detail })
+        }
+      }
+      approval = { sessionRules, choices }
+      event = { type: 'approval-request', requestId, toolName, args: input, choices }
     }
 
     return new Promise<PermissionResult>((resolve) => {
       const onAbort = () => {
         this.pending.get(requestId)?.resolve({ behavior: 'deny', message: 'The request was cancelled.' })
-        if (asksQuestion) queue.push({ type: 'input-cancelled', requestId })
+        queue.push({ type: asksQuestion ? 'input-cancelled' : 'approval-cancelled', requestId })
       }
       this.pending.set(requestId, {
         kind: asksQuestion ? 'input' : 'approval',
         queue,
         input,
         toolUseID: options.toolUseID,
+        approval,
         resolve: (result) => {
           options.signal.removeEventListener('abort', onAbort)
           this.pending.delete(requestId)
@@ -398,20 +431,28 @@ export class ClaudeInstance implements ProviderInstance {
     }
   }
 
-  async respondApproval(requestId: string, allow: boolean, reason?: string, choice?: Pick<ApprovalChoice, 'decision' | 'scope'>): Promise<void> {
+  async respondApproval(requestId: string, allow: boolean, reason?: string, choice?: ApprovalSelection): Promise<void> {
     const mcp = this.mcpConsents.get(requestId)
     if (mcp) {
       mcp.resolve(allow ? mcp.acceptance : { action: choice?.decision === 'cancelled' ? 'cancel' : 'decline' })
       return
     }
     const waiter = this.pending.get(requestId)
-    // An unknown id is a late or duplicate answer — drop it rather than throw.
-    if (waiter?.kind !== 'approval') return
-    waiter.resolve(allow
-      // Unmodified: the user approved *this* call, so the tool runs with the
-      // arguments they were shown, not with anything rewritten in between.
-      ? { behavior: 'allow', updatedInput: waiter.input }
-      : { behavior: 'deny', message: reason ?? 'denied by the user' })
+    if (!waiter?.approval) return
+    const selected = offeredToolApproval(waiter.approval.choices, choice ?? { decision: allow ? 'allowed' : 'denied', scope: 'once' })
+    const scoped = selected?.scope === 'session'
+    const cancelled = selected?.decision === 'cancelled' || !selected
+    waiter.resolve(selected?.decision === 'allowed'
+      ? {
+          behavior: 'allow', updatedInput: waiter.input, toolUseID: waiter.toolUseID,
+          decisionClassification: scoped ? 'user_permanent' : 'user_temporary',
+          ...(scoped ? { updatedPermissions: waiter.approval.sessionRules } : {}),
+        }
+      : {
+          behavior: 'deny', message: reason ?? (cancelled ? 'User cancelled tool execution.' : 'User denied tool execution.'),
+          toolUseID: waiter.toolUseID, decisionClassification: 'user_reject',
+          ...(cancelled ? { interrupt: true } : {}),
+        })
   }
 
   async respondInput(requestId: string, answers: InputAnswer[] | null): Promise<void> {

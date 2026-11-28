@@ -10,7 +10,7 @@
  * `driverKind: 'harness'` beside `'claude'`, with nothing above it changing.
  */
 
-import type { ApprovalChoice, CodexTurnOptions, CodexTurnSelection, ProviderContextUsage, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome } from '@harness/contract'
+import type { ApprovalSelection, CodexTurnOptions, CodexTurnSelection, ProviderContextUsage, ConnectorApproval, DriverKind, InputAnswer, InputQuestion, SteeringOutcome, ToolApprovalChoice } from '@harness/contract'
 
 /**
  * What a driver emits while a turn runs.
@@ -27,7 +27,7 @@ export type ProviderEvent =
   | { type: 'assistant-delta', text: string }
   | { type: 'tool-call-begin', callId: string, toolName: string, args: unknown }
   | { type: 'tool-call-end', callId: string, ok: boolean }
-  | { type: 'approval-request', requestId: string, toolName: string, args: unknown, connector?: ConnectorApproval }
+  | { type: 'approval-request', requestId: string, toolName: string, args: unknown, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }
   | { type: 'approval-cancelled', requestId: string }
   | { type: 'input-request', requestId: string, questions: InputQuestion[] }
   | { type: 'input-cancelled', requestId: string }
@@ -127,7 +127,7 @@ export interface ProviderInstance {
   /** Send a follow-up to the currently streaming provider turn. */
   steer?: (text: string) => Promise<SteeringOutcome>
   /** Answer a pending approval request. */
-  respondApproval: (requestId: string, allow: boolean, reason?: string, choice?: Pick<ApprovalChoice, 'decision' | 'scope'>) => Promise<void>
+  respondApproval: (requestId: string, allow: boolean, reason?: string, choice?: ApprovalSelection) => Promise<void>
   /** Deliver an answer or decline to an agent waiting for input. */
   respondInput?: (requestId: string, answers: InputAnswer[] | null) => Promise<void>
   /** Tear down the process and release resources. */

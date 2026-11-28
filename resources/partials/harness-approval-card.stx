@@ -3,7 +3,7 @@
   data-approval
   @if(!pendingApproval)hidden@endif
   :hidden="!approvalId()"
-  class="shrink-0 p-3 bg-amber-500/10 border border-amber-500/30 rounded-[10px]"
+  class="relative shrink-0 p-3 bg-amber-500/10 border border-amber-500/30 rounded-[10px]"
 >
   <div @if(pendingApproval?.connector)hidden@endif :hidden="Boolean(connectorApproval())">
     <div class="mb-2">
@@ -14,9 +14,39 @@
       tabindex="0" aria-label="Requested action"
       class="overflow-y-auto mb-2 px-2.5 py-2 max-h-32 leading-relaxed text-[12px] whitespace-pre-wrap bg-white/70 dark:bg-black/20 border border-black/10 rounded-md dark:border-white/15 [overflow-wrap:anywhere]"
       :text="approvalDetail()">{{ pendingApproval?.detail || '' }}</pre>
-    <div class="flex flex-wrap gap-2">
-      <button type="button" data-approve @click="approveTool" :disabled="!!pendingApprovalId()" class="px-3 min-h-11 min-w-20 font-medium text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-md disabled:opacity-50">Allow</button>
-      <button type="button" data-deny @click="denyTool" :disabled="!!pendingApprovalId()" class="px-3 min-h-11 min-w-20 font-medium text-[13px] border border-black/15 rounded-md dark:border-white/20 disabled:opacity-50">Deny</button>
+    <div class="flex flex-wrap gap-2" @if(pendingApproval?.choices)hidden@endif :hidden="Boolean(offeredToolChoices())">
+      <button type="button" data-approve :data-approval-id="approvalId()" @click="respondToApproval($event, 'allowed')" :disabled="!!pendingApprovalId()" class="px-3 min-h-11 min-w-20 font-medium text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-md disabled:opacity-50">Allow</button>
+      <button type="button" data-deny :data-approval-id="approvalId()" @click="respondToApproval($event, 'denied')" :disabled="!!pendingApprovalId()" class="px-3 min-h-11 min-w-20 font-medium text-[13px] border border-black/15 rounded-md dark:border-white/20 disabled:opacity-50">Deny</button>
+    </div>
+    <div class="flex flex-wrap gap-2 items-center" @if(!pendingApproval?.choices)hidden@endif :hidden="!offeredToolChoices()">
+      <template :for="choice in primaryToolApprovalChoices()" :key="approvalId() + ':' + choice.id">
+        <button type="button" :data-approval-id="approvalId()" :disabled="!!pendingApprovalId()"
+          @click="respondToApproval($event, choice.decision, choice.scope, choice.id)"
+          class="px-3 min-h-11 min-w-20 font-medium text-[13px] border border-black/15 rounded-md dark:border-white/20 disabled:opacity-50"
+          :class="choice.decision === 'allowed' ? 'bg-neutral-900 text-white dark:bg-white dark:text-neutral-900' : ''"
+          :text="choice.label"></button>
+      </template>
+      <details data-tool-approval-options ref="toolApprovalOptionsBox"
+        @if(!pendingApproval?.choices?.some(choice => choice.scope !== 'once' || choice.decision === 'cancelled'))hidden@endif
+        :hidden="moreToolApprovalChoices().length === 0"
+        @keydown="handleApprovalOptions($event)" @focusout="blurApprovalOptions($event)">
+        <summary aria-label="More approval options" :aria-disabled="!!pendingApprovalId()" @click="guardApprovalOptions($event)"
+          class="flex items-center justify-center size-11 list-none border border-black/15 rounded-md dark:border-white/20 cursor-pointer">
+          <span class="size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
+        </summary>
+        <div data-tool-approval-option-list class="flex absolute bottom-full overflow-y-auto start-0 z-10 flex-col gap-1 mb-2 p-1 max-h-48 max-w-full w-64 bg-white dark:bg-neutral-900 border border-black/15 rounded-lg dark:border-white/20 shadow-md">
+          <template :for="choice in moreToolApprovalChoices()" :key="approvalId() + ':' + choice.id">
+            <button type="button" :data-approval-id="approvalId()" :disabled="!!pendingApprovalId()"
+              @click="respondToApproval($event, choice.decision, choice.scope, choice.id)"
+              class="px-3 min-h-11 text-[13px] text-start focus-visible:bg-neutral-100 hover:bg-neutral-100 dark:focus-visible:bg-white/10 dark:hover:bg-white/10 rounded-md"
+              :aria-label="choice.label" :aria-description="choice.detail || null">
+              <span class="block" :text="choice.label"></span>
+              <code :hidden="!choice.detail" :text="choice.detail || ''"
+                class="block overflow-y-auto max-h-24 text-[11px] text-neutral-600 whitespace-pre-wrap dark:text-neutral-300 [overflow-wrap:anywhere]"></code>
+            </button>
+          </template>
+        </div>
+      </details>
     </div>
   </div>
   @includeWhen(activeSession, '../partials/harness-connector-consent')

@@ -20,7 +20,8 @@
  * CLI's model flag and auth-state reporting.
  */
 
-import type { DriverKind, InputAnswer } from '@harness/contract'
+import type { ApprovalSelection, DriverKind, InputAnswer, ToolApprovalChoice } from '@harness/contract'
+import { offeredToolApproval } from '@harness/contract'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { Driver, DriverConfig, ProbeResult, ProviderEvent, ProviderInstance, ResolvedMcpServer, StartTurnInput } from './types'
 import { spawn } from 'node:child_process'
@@ -207,11 +208,32 @@ export function readableAcpError(error: { message?: string, data?: any } | undef
   return 'the agent reported an error'
 }
 
+const permissionKinds = {
+  allow_once: { decision: 'allowed', scope: 'once', label: 'Allow' },
+  reject_once: { decision: 'denied', scope: 'once', label: 'Deny' },
+  allow_always: { decision: 'allowed', scope: 'always', label: 'Allow always' },
+  reject_always: { decision: 'denied', scope: 'always', label: 'Deny always' },
+} satisfies Record<string, Omit<ToolApprovalChoice, 'id'>>
+
+function acpApprovalChoices(options: unknown): Array<ToolApprovalChoice> {
+  if (!Array.isArray(options)) return []
+  const choices: ToolApprovalChoice[] = []
+  const seen = new Set<string>()
+  for (const option of options) {
+    if (typeof option?.optionId !== 'string' || !option.optionId || typeof option?.kind !== 'string'
+      || !Object.hasOwn(permissionKinds, option.kind) || seen.has(option.optionId)) continue
+    const kind = permissionKinds[option.kind as keyof typeof permissionKinds]
+    const label = typeof option.name === 'string' && option.name.trim() ? option.name.trim().slice(0, 150) : kind.label
+    choices.push({ ...kind, label, id: `acp:${option.optionId}` })
+    seen.add(option.optionId)
+  }
+  if (choices.length) choices.push({ id: 'cancel', decision: 'cancelled', scope: 'once', label: 'Cancel' })
+  return choices
+}
+
 interface PendingPermission {
-  /** The JSON-RPC request id the agent is blocking on. */
   rpcId: number | string
-  /** The options the agent offered, because the answer must name one of them. */
-  options: any[] | undefined
+  choices: ToolApprovalChoice[]
 }
 
 class AcpInstance implements ProviderInstance {
@@ -324,7 +346,13 @@ class AcpInstance implements ProviderInstance {
 
     const toolCall = frame.params?.toolCall
     const options = frame.params?.options
-    const requestId = String(toolCall?.toolCallId ?? frame.id)
+    const requestId = String(frame.id)
+    const choices = acpApprovalChoices(options)
+    if (!this.queue || this.queue.closed || this.replaying || !choices.length
+      || (frame.params?.sessionId !== undefined && frame.params.sessionId !== this.sessionId)) {
+      this.respond(frame.id!, { outcome: { outcome: 'cancelled' } })
+      return
+    }
 
     if (this.config.autoApprove) {
       const optionId = permissionChoice(options, true)
@@ -332,12 +360,13 @@ class AcpInstance implements ProviderInstance {
       return
     }
 
-    this.permissions.set(requestId, { rpcId: frame.id!, options })
-    this.queue?.push({
+    this.permissions.set(requestId, { rpcId: frame.id!, choices })
+    this.queue.push({
       type: 'approval-request',
       requestId,
       toolName: toolNameOf(toolCall),
       args: toolCall?.rawInput ?? toolCall ?? {},
+      choices,
     })
   }
 
@@ -448,16 +477,15 @@ class AcpInstance implements ProviderInstance {
     this.cancelInputs()
   }
 
-  async respondApproval(requestId: string, allow: boolean): Promise<void> {
+  async respondApproval(requestId: string, allow: boolean, _reason?: string, choice?: ApprovalSelection): Promise<void> {
     const permission = this.permissions.get(requestId)
-    // A decision for a request that is already gone — a reconnect replaying, or
-    // a double-click. Dropping it is correct; throwing would surface a fault
-    // the user did not cause.
-    if (permission === undefined) return
+    if (!permission) return
     this.permissions.delete(requestId)
-    const optionId = permissionChoice(permission.options, allow)
+    const selected = offeredToolApproval(permission.choices, choice ?? { decision: allow ? 'allowed' : 'denied', scope: 'once' })
     this.respond(permission.rpcId, {
-      outcome: optionId === null ? { outcome: 'cancelled' } : { outcome: 'selected', optionId },
+      outcome: selected && selected.decision !== 'cancelled'
+        ? { outcome: 'selected', optionId: selected.id.slice('acp:'.length) }
+        : { outcome: 'cancelled' },
     })
   }
 

@@ -1615,11 +1615,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
 
     if (command.type === 'session.approval.respond') {
-      await runtime.respondApproval(
-        command.sessionId,
-        command.approvalId,
-        { decision: command.decision, scope: command.scope },
-      )
+      const resolution = result.events.find(event => event.payload.type === 'approval.resolved')?.payload
+      if (resolution?.type === 'approval.resolved') {
+        const { decision, scope, choiceId } = resolution
+        await runtime.respondApproval(command.sessionId, command.approvalId, {
+          decision, scope, ...(choiceId === undefined ? {} : { choiceId }),
+        })
+      }
       return
     }
 
