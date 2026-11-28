@@ -444,6 +444,19 @@ if (url.pathname === '/graphql' && method === 'POST') {
 if (url.pathname === '/search/issues') {
   const keyword = url.searchParams.get('q') ?? ''
   const selected = /repo:([^ ]+)/.exec(keyword)?.[1]
+  if (keyword.startsWith('is:issue ')) {
+    if (state.issueFailure === selected) reply(503, { message: 'Private fixture issue diagnostics' })
+    const phrase = /in:title,body "([^"]+)"/.exec(keyword)?.[1]?.toLowerCase() ?? ''
+    const filter = /(?:^| )is:(open|closed)(?: |$)/.exec(keyword)?.[1]
+    const field = url.searchParams.get('sort') === 'created' ? 'created_at' : 'updated_at'
+    const matching = (state.issues?.[selected] ?? []).filter(issue =>
+      (!filter || issue.state === filter) && (issue.title + ' ' + (issue.body ?? '')).toLowerCase().includes(phrase))
+      .sort((a, b) => (b[field] ?? '').localeCompare(a[field] ?? ''))
+    const size = Number(url.searchParams.get('per_page') || 20)
+    const page = Number(url.searchParams.get('page') || 1)
+    const link = matching.length > page * size ? 'link: <' + endpoint + '>; rel="next"\\r\\n' : ''
+    reply(200, { items: matching.slice((page - 1) * size, page * size), total_count: matching.length }, link)
+  }
   const phrase = /in:title(?:,body,comments)? "([^"]+)"/.exec(keyword)?.[1]?.toLowerCase() ?? ''
   const withoutText = keyword.replace(/in:title(?:,body,comments)? "[^"]+"/, '')
   const labelsMatcher = /(?:^| )(-?)label:("[^"]+"(?:,"[^"]+")*)/g
@@ -484,6 +497,16 @@ if (url.pathname === '/search/issues') {
     incomplete_results: state.filterListIncomplete === selected }, more)
 }
 if (!repo) reply(404, {})
+if (method === 'GET' && parts[4] === 'issues' && state.issues?.[name] && (!parts[6] || parts[6] === 'comments')) {
+  const issue = state.issues[name].find(issue => issue.number === Number(parts[5]))
+  if (!issue) reply(404, {})
+  if (!parts[6]) reply(200, issue)
+  const comments = issue.comments ?? []
+  const size = Number(url.searchParams.get('per_page') || 20)
+  const page = Number(url.searchParams.get('page') || 1)
+  const link = comments.length > page * size ? 'link: <' + endpoint + '>; rel="next"\\r\\n' : ''
+  reply(200, comments.slice((page - 1) * size, page * size), link)
+}
 if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs') {
   if (!parts[6]) reply(200, { workflow_runs: state.workflowRuns ?? [] })
   const run = state.workflowRuns?.find(run => run.id === Number(parts[6]))

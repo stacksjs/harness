@@ -153,6 +153,117 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
+describe('GitHub issue workspace', () => {
+  it.skipIf(process.platform === 'win32')('combines trusted issue repositories, scopes details, and opens an unsent issue draft', async () => {
+    const names = ['fixture/notebook', 'fixture/atlas', 'fixture/private']
+    const projects = Object.fromEntries(names.map((name) => {
+      const path = join(dir, name.split('/')[1]!)
+      mkdirSync(path)
+      for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + name]])
+        expect(Bun.spawnSync(['git', ...args], { cwd: path }).success).toBe(true)
+      return [name, path]
+    }))
+    const cli = fixtureGitHubCli(dir, Object.fromEntries(names.map(name => [name, { bare: join(projects[name]!, '.git') }])))
+    const modelIssue = (repo: string, number: number, title: string, created: string, updated = created) => ({
+      number, title, state: 'open', created_at: created, updated_at: updated, user: { login: 'fixture-user' },
+      html_url: `https://github.com/${repo}/issues/${number}`,
+    })
+    const notebook = modelIssue(names[0]!, 24, 'Paged offline issue', '2026-10-01T00:00:00Z', '2026-11-27T10:00:00Z')
+    const atlas = modelIssue(names[1]!, 1, 'Newest fixture issue', '2026-11-26T12:00:00Z')
+    const privateIssue = modelIssue(names[2]!, 1, 'Private profile fixture issue', '2026-11-27T12:00:00Z')
+    const comments = Array.from({ length: 21 }, (_, index) => ({
+      id: index + 1, issue_url: 'https://api.github.com/repos/fixture/notebook/issues/24',
+      body: 'Fixture comment **' + (index + 1) + '**.', user: { login: 'fixture-reviewer' }, created_at: '2026-11-26T00:00:00Z',
+    }))
+    const fixture = JSON.parse(readFileSync(cli.state, 'utf8'))
+    fixture.issues = {
+      [names[0]!]: [{ ...notebook, body: 'Read the **offline behavior**. <img src=x onerror=alert(1)>',
+        assignees: [{ login: 'fixture-assignee' }], labels: [{ id: 1, name: 'bug', color: 'ff0000' }], comments },
+      ...Array.from({ length: 23 }, (_, index) => modelIssue(names[0]!, index + 25, 'Notebook issue ' + (index + 25),
+        new Date(Date.UTC(2026, 10, index + 1)).toISOString())),
+      { ...modelIssue(names[0]!, 2, 'Closed fixture issue', '2026-11-27T10:30:00Z'), state: 'closed' }],
+      [names[1]!]: [atlas, { ...privateIssue, html_url: 'https://github.com/fixture/private/issues/2' },
+        { ...modelIssue(names[1]!, 2, 'Pull request pretending to be an issue', '2026-11-27T11:00:00Z'), pull_request: {} }],
+      [names[2]!]: [privateIssue],
+    }
+    writeFileSync(cli.state, JSON.stringify(fixture))
+    const cwd = process.cwd()
+    const path = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+        harness.engine.dispatch({ id, at: 1, command })
+      await dispatch('issues-profile', { type: 'profile.create', name: 'Issue fixture' })
+      await dispatch('other-profile', { type: 'profile.create', name: 'Separate profile' })
+      for (const [index, name] of names.entries()) {
+        await dispatch('issues-project-' + index, { type: 'workspace.add',
+          profileId: derivedId(index === 2 ? 'other-profile' : 'issues-profile'), path: realpathSync(projects[name]!) })
+        await dispatch('issues-trust-' + index, { type: 'workspace.trust', workspaceId: derivedId('issues-project-' + index), trusted: true })
+      }
+      const host = 'http://127.0.0.1:' + port
+      const address = host + '/issues?profile=' + derivedId('issues-profile')
+      const initial = await fetch(address)
+      expect(initial.status).toBe(200)
+      expect(initial.headers.get('cache-control')).toBe('private, no-store')
+      const first = await initial.text()
+      expect(first.indexOf(notebook.title)).toBeLessThan(first.indexOf(atlas.title))
+      expect(first).not.toContain(privateIssue.title)
+      expect(first).not.toContain('Pull request pretending')
+      const newest = await (await fetch(address + '&sort=created')).text()
+      expect(newest.indexOf(atlas.title)).toBeLessThan(newest.indexOf(notebook.title) === -1 ? newest.length : newest.indexOf(notebook.title))
+      const page2 = await (await fetch(address + '&page=2')).text()
+      expect(page2).toContain('Notebook issue 25')
+      expect(page2).not.toContain(atlas.title)
+      expect(page2).not.toContain('Next page')
+      const closed = await (await fetch(address + '&state=closed')).text()
+      expect(closed).toContain('Closed fixture issue')
+      expect(closed).not.toContain(notebook.title)
+
+      const picked = address + '&selected=fixture%2Fnotebook&issue=24'
+      const issue = await (await fetch(picked)).text()
+      expect(issue).toContain('<strong>offline behavior</strong>')
+      expect(issue).toContain('fixture-assignee')
+      expect(issue).toContain('<strong>20</strong>')
+      expect(issue).not.toContain('onerror=alert(1)')
+      expect(issue).not.toContain('<strong>21</strong>')
+      const nextComments = await (await fetch(picked + '&comments=2')).text()
+      expect(nextComments).toContain('<strong>21</strong>')
+      expect(nextComments).not.toContain('<strong>20</strong>')
+      const match = issue.match(/data-issue-primary\s+href="([^"]+)"/u)
+      const draft = new URL(match![1]!.replaceAll('&amp;', '&'), host)
+      expect(draft.pathname).toBe('/new')
+      expect(draft.searchParams.get('repo')).toBe('fixture/notebook')
+      expect(draft.searchParams.get('prompt')).toBe(notebook.html_url)
+      expect(draft.searchParams.get('profile')).toBe(String(derivedId('issues-profile')))
+      const projectLookup = host + '/prompt-link/project?repo=fixture%2Fnotebook&profile='
+      expect(await (await fetch(projectLookup + derivedId('issues-profile'))).json()).toMatchObject({
+        project: { id: derivedId('issues-project-0'), profile: derivedId('issues-profile') },
+      })
+      expect(await (await fetch(projectLookup + derivedId('other-profile'))).json()).toEqual({ project: null })
+      expect((await fetch(draft)).status).toBe(200)
+      expect(harness.engine.current.sessions.size).toBe(0)
+
+      const foreignIssue = await (await fetch(address + '&selected=fixture%2Fprivate&issue=1')).text()
+      expect(foreignIssue).toContain('This issue is outside the selected profile.')
+      expect(foreignIssue).not.toContain(privateIssue.title)
+      fixture.issueFailure = 'fixture/notebook'
+      writeFileSync(cli.state, JSON.stringify(fixture))
+      const partial = await (await fetch(address)).text()
+      expect(partial).toContain(atlas.title)
+      expect(partial).toContain('GitHub could not list issues for this repository.')
+      expect(partial).not.toContain('Private fixture issue diagnostics')
+      expect((await fetch(address, { headers: { origin: 'https://other.invalid' } })).status).toBe(403)
+      expect((await fetch(address, { method: 'POST' })).status).toBe(405)
+    }
+    finally {
+      process.chdir(cwd)
+      if (path === undefined) delete process.env.PATH
+      else process.env.PATH = path
+    }
+  }, 45_000)
+})
+
 describe('repository cloning', () => {
   const cloneId = 'web_clone_1'
   const cloneUrl = (suffix = '') => `http://127.0.0.1:${port}/projects/clone${suffix}`

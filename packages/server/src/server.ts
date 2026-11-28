@@ -26,6 +26,7 @@ import type { WorkspaceReviewTurn } from './diff'
 import { isWorkspaceGitRoot, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
+import { issueWorkspace, renderIssueMarkdown } from './issue-workspace'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
@@ -2267,7 +2268,22 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
       if (url.pathname === '/prompt-link/project') {
         if (request.method !== 'GET') return new Response(null, { status: 405 })
         if (!access && !canUseHostPrivileges(request, url)) return new Response(null, { status: 403 })
-        return promptLinkProjects(engine.current, url.searchParams)
+        return promptLinkProjects(engine.current, url.searchParams, request.signal)
+      }
+
+      if (url.pathname === '/issues') {
+        const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' }
+        const site = request.headers.get('sec-fetch-site')
+        if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
+          || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
+        if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
+        srv.timeout(request, 70)
+        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
+        return issueWorkspace(engine.current, url.searchParams, signal).then(async (view) => {
+          const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-issues.stx'), view)
+          return new Response(renderIssueMarkdown(html, view), { headers })
+        }).catch(() => new Response('Issues could not be loaded. Return to the workspace and try again.', { status: 503, headers }))
       }
 
       if (['/pull-requests', '/pull-requests/results', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels', '/pull-requests/reviewers'].includes(url.pathname)) {
@@ -2437,7 +2453,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           // A fresh composer may autofocus. Its ID belongs to browser
           // storage, so independent drafts share the same rendered page.
           freshDraft: !id && Boolean(parseFreshDraftId(workspaceUrl.searchParams.get('draft'))),
-          pullRequestProfile: sharedDraft ? Number(workspaceUrl.searchParams.get('profile')) || undefined : undefined,
+          promptLinkProfile: sharedDraft ? Number(workspaceUrl.searchParams.get('profile')) || undefined : undefined,
           settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
           codecUrl,

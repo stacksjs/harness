@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { isWorkspaceGitRoot } from './diff'
+import { trustedGitHubRepositories } from './github-workspace-repositories'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { linkedRepository, repositoryFromRemote } from './prompt-links'
 
@@ -57,7 +58,7 @@ export async function findPromptLinkProject(state: HarnessState, repository: str
   return null
 }
 
-export async function promptLinkProjects(state: HarnessState, params: URLSearchParams): Promise<Response> {
+export async function promptLinkProjects(state: HarnessState, params: URLSearchParams, signal: AbortSignal): Promise<Response> {
   const options = { headers: { 'cache-control': 'no-store' } }
   if (params.has('workspace')) {
     const workspace = state.workspaces.get(Number(params.get('workspace')))
@@ -66,6 +67,11 @@ export async function promptLinkProjects(state: HarnessState, params: URLSearchP
   }
   const named = linkedRepository(params.get('repo') ?? '')?.toLowerCase()
   if (!named) return Response.json({ error: 'Invalid GitHub repository.' }, { ...options, status: 400 })
+  if (params.has('profile')) {
+    const profile = Number(params.get('profile'))
+    const match = (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(named)
+    return Response.json({ project: match ? linkedProject(match.workspace) : null }, options)
+  }
   const match = await findPromptLinkProject(state, named)
   return Response.json({ project: match ? linkedProject(match.workspace) : null }, options)
 }

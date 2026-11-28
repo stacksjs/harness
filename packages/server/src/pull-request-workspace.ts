@@ -5,9 +5,9 @@ import type { PullRequestLabel } from './pull-request-labels'
 import type { PendingReviewer } from './pull-request-review-outcomes'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
-import { isWorkspaceGitRoot } from './diff'
-import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
-import { parsePullRequest, repositoryFromRemote } from './prompt-links'
+import type { GitHubWorkspaceRepository as Repository } from './github-workspace-repositories'
+import { trustedGitHubRepositories } from './github-workspace-repositories'
+import { parsePullRequest } from './prompt-links'
 import { placeReviewConversations, readReviewCommentPage, readReviewConversations, readReviewConversationState, reviewComment, reviewCommentCursor, ReviewConversationConflict, reviewConversationAnchor, reviewLineSelection, reviewThreadId, writeReviewConversation, writeReviewReply } from './pull-request-conversations'
 import { deleteWorkspacePullRequestBranch } from './pull-request-delete-branch'
 import { findPullRequestThread } from './pull-request-links'
@@ -19,7 +19,7 @@ import { anchoredReviewComment, fileAnchor, inlineReviewBody, inlineReviewMarker
 import { mergePullRequestReviewers, pullRequestReviewDecision, pullRequestReviewParticipation, readPullRequestReviewOutcomes } from './pull-request-review-outcomes'
 import { applyPullRequestReviewerChanges, parseReviewerSelection, readPullRequestReviewerEditor, reviewerOptions } from './pull-request-reviewers'
 import { revertWorkspacePullRequest } from './pull-request-revert'
-import { readRepositoryBody, repositoryGit } from './repository-commit'
+import { readRepositoryBody } from './repository-commit'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
 import { readRepositoryPullRequestChecks } from './repository-pull-request-checks'
 import { threadTitle } from './thread-search'
@@ -27,7 +27,6 @@ import { renderPullRequestCommentMarkdown } from './transcript-markdown'
 import { FileViewedConflict, readViewedFiles, writeFileViewed } from './pull-request-viewed'
 import { approveWorkspaceWorkflows, parseWorkflowRunSelection, readWorkflowApprovals, workflowApprovalHead, workflowApprovalRevision, workflowRunSelection } from './pull-request-workflow-approvals'
 
-type Repository = { name: string, path: string, workspace: WorkspaceState }
 type Pull = { repository: string, number: number, url: string, title: string, status: 'Open' | 'Draft' | 'Closed' | 'Merged', author: string,
   updated: string, created: string, head: string, headRef: string, baseRef: string, baseSha: string, description: string, labels: PullRequestLabel[],
   requestedReviewers: PendingReviewer[], additions?: number, deletions?: number, changedFiles?: number }
@@ -92,31 +91,6 @@ function readPull(value: unknown, repository: string): Pull | null {
     description: typeof pull.body === 'string' ? pull.body.slice(0, 32_768) : '', labels: pullRequestLabels(pull.labels) ?? [],
     requestedReviewers: requestedReviewers(pull, repository.split('/')[0]!),
     additions: pull.additions, deletions: pull.deletions, changedFiles: pull.changed_files }
-}
-
-async function repositoryNames(path: string) {
-  const result = await repositoryGit(path, ['config', '--local', '--null', '--get-regexp', '^remote\\..*\\.(url|pushurl)$']).catch(() => null)
-  return (result?.stdout ?? '').split('\0').flatMap((entry) => {
-    const split = entry.indexOf('\n')
-    const name = split >= 0 ? repositoryFromRemote(entry.slice(split + 1)) : null
-    return name ? [name] : []
-  })
-}
-
-async function trustedRepositories(workspaces: WorkspaceState[], signal: AbortSignal) {
-  const found = new Map<string, Repository>()
-  for (const workspace of workspaces) {
-    signal.throwIfAborted()
-    const roots = await scanProjectRepositories(workspace.path)
-    const paths = await Promise.all(roots.map(root => resolveProjectRepository(workspace.path, root.key)))
-    if (await isWorkspaceGitRoot(workspace.path)) paths.unshift(workspace.path)
-    for (const path of paths) {
-      if (!path) continue
-      signal.throwIfAborted()
-      for (const name of await repositoryNames(path)) if (!found.has(name.toLowerCase())) found.set(name.toLowerCase(), { name, path, workspace })
-    }
-  }
-  return found
 }
 
 function listQuery(repository: string, state: ListState, search: string, page: number, sort: ListSort, filters: string[], size = LIST_PAGE_SIZE) {
@@ -405,8 +379,7 @@ async function readPullRequestWorkspace(state: HarnessState, query: URLSearchPar
   const profiles = [...state.profiles.values()].map(profile => ({ id: profile.id, name: profile.name }))
   const requestedProfile = integer(query.get('profile'))
   const profile = profiles.some(item => item.id === requestedProfile) ? requestedProfile : profiles[0]?.id || 0
-  const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
-  const repositories = await trustedRepositories(workspaces, signal)
+  const repositories = await trustedGitHubRepositories(state.workspaces.values(), profile, signal)
   const repository = repositories.get((query.get('repository') ?? '').toLowerCase())
   const selectionInProfile = !query.has('selectionProfile') || query.get('selectionProfile') === String(profile)
   const selection = selectionInProfile ? parsePullRequest((query.get('selectedUrl') ?? '').slice(0, 512)) : null
@@ -655,8 +628,7 @@ async function readReviewSubmission(state: HarnessState, query: URLSearchParams,
 }
 
 async function reviewRepository(state: HarnessState, profile: number, repository: string, signal: AbortSignal) {
-  const workspaces = [...state.workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch)
-  return (await trustedRepositories(workspaces, signal)).get(repository.toLowerCase())
+  return (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(repository.toLowerCase())
 }
 
 function reviewerRevision(profile: number, repository: Repository, current: LifecycleSnapshot, intent: string, scope: string) {
