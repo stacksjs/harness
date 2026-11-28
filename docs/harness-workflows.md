@@ -137,13 +137,30 @@ export default {
 
 A question or wait saves its deadline and releases the runner's worker slot. It resumes the original run when the answer arrives or the deadline passes. Code in completed steps is replayed from its saved result. Use `wait('input', { channel: 'intake' })` for a JSON signal with no question. Both methods return `undefined` on timeout. A signal carrying JSON `null` returns `null`.
 
+Add a Draft 2020-12 JSON Schema under `returns` to validate a signal before it can resume a run. Harness saves the schema with the wait and returns the original JSON value to the workflow.
+
+```ts
+const received = await wait('draft-ready', {
+  channel: 'intake',
+  timeoutMs: 3_600_000,
+  returns: {
+    type: 'object',
+    properties: { ready: { type: 'boolean' } },
+    required: ['ready'],
+    additionalProperties: false,
+  },
+})
+```
+
 ```sh
 ./buddy harness:workflow:questions 123
 ./buddy harness:workflow:signal 123 '{"choice":"Apply","reason":"Reviewed"}' --run "$run_id" --wait approval --key review-reply
 ./buddy harness:workflow:signal 123 '{"ready":true}' --workflow review-draft --channel intake --key data-ready
 ```
 
-Send a signal to one run and wait name, or to a workflow channel within the profile. Early signals stay available for seven days. Each channel signal goes to one matching wait. Pass a stable `--key` when retrying a submission so it cannot deliver twice.
+Send a signal to one run and wait name, or to a workflow channel within the profile. A live channel signal targets the oldest open wait on that channel. If the payload fails its schema, the host returns HTTP 400 and keeps the wait open so you can correct and resend the payload.
+
+Early signals stay available for seven days. When a wait opens, it takes the first compatible early signal. It discards incompatible signals addressed directly to it and preserves incompatible channel signals for other runs. Pass a stable `--key` when retrying a submission so it cannot deliver twice.
 
 ## Save step results and file issues
 
