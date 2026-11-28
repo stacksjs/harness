@@ -1,6 +1,6 @@
-# Manual workflows
+# Workflows
 
-Harness can run host-authored TypeScript workflows and save their completed steps in the host database. A manual run belongs to one Harness profile. The same workflow name, profile, and start key always return the original run, including after a version change.
+Harness can run host-authored TypeScript workflows and save their completed steps in the host database. Each run belongs to one Harness profile. The same workflow name, profile, and start key always return the original run, including after a version change.
 
 ## Configure the host
 
@@ -43,9 +43,31 @@ All five commands accept `--port`. The local CLI reads the host token when paire
 
 ## Follow runs in Harness
 
-Open **Workflows** from the local workspace navigation. Use **Needs you**, **Running**, or **All** to choose a run. Open a step to inspect its result and use the issue link to open the issue in Harness. The page refreshes status while keeping the run open. The **Definitions** view lists loaded versions and file problems.
+Open **Workflows** from the local workspace navigation. Use **Needs you**, **Running**, or **All** to choose a run. Open a step to inspect its result and use the issue link to open the issue in Harness. The page refreshes status while keeping the run open. The **Definitions** view lists loaded versions, schedules for the selected profile, and file problems.
 
 Use **Start run** to select a workflow, enter JSON input, and set a start key. Select **Resume** on a paused run or **Cancel run** to open the confirmation dialog.
+
+## Schedule runs
+
+Give a workflow a `schedules` list with an ID and Harness profile ID for each entry. Only schedules from the latest loaded workflow version can start runs. Set `enabled: false` to disable one. Restart the host after edits.
+
+```ts
+export default {
+  name: 'check-drafts',
+  version: 1,
+  schedules: [
+    { id: 'hourly', profile: 123, everyMs: 3_600_000 },
+    { id: 'weekday-review', profile: 123, timeOfDay: '09:00', weekdays: [1, 2, 3, 4, 5] },
+  ],
+  run(input: { scheduledAt: string }) {
+    return { scheduledAt: input.scheduledAt }
+  },
+}
+```
+
+An interval starts one full interval after the schedule first loads, with a minimum of one minute. After downtime, it starts one overdue run and counts the next interval from recovery. A daily schedule uses the host time zone. Omit `weekdays` to run every day, or supply days from 0 (Sunday) to 6 (Saturday). A daily run more than ten minutes overdue is skipped. During daylight-saving changes, a time in a skipped hour moves forward by the gap. A repeated hour uses the first occurrence.
+
+The schedule cursor and new run commit together. After restart, an unchanged schedule keeps its next due time. Changing the cadence, removing the schedule, or re-enabling it starts a new cadence. Scheduled runs receive the original due time in `scheduledAt`. The run page displays that time and the schedule ID.
 
 ## Save step results and file issues
 
@@ -65,4 +87,4 @@ const issue = await step('File issue', ({ issues }) =>
 
 The host supports GitHub, GitLab, and Forgejo through their configured host accounts. On first execution, Harness records the account scope and request intent before posting. If a reply is lost, resuming checks the original intent. A changed account pauses the step until the original connection is available.
 
-A failure pauses the run with its saved steps intact. After a crash, the restarted host takes over once the previous lease expires. Cancellation is terminal. Schedules, webhook triggers, agent steps, questions, and editing workflow definitions in the app are tracked in the parity backlog. [P31](https://github.com/stacksjs/harness/issues/41)
+A failure pauses the run with its saved steps intact. After a crash, the restarted host takes over once the previous lease expires. Cancellation is terminal. Webhook triggers, agent steps, questions, and editing workflow definitions in the app are tracked in the parity backlog. [P31](https://github.com/stacksjs/harness/issues/41)
