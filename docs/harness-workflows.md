@@ -114,6 +114,37 @@ Harness looks for new items about once a minute using the project's GitHub, GitL
 
 The workflow receives the item URL, title, state, creation time, project, and repository. It can review the originating item from the run screen. Harness saves the poll cursor and each accepted run together. Tracker errors preserve the last position. Each poll also checks up to five minutes before the last item, down to the activation time, to catch items that appear late. If the active account or repository changes, restore the original connection or give the new trigger a different ID. Definitions shows the trigger's current status. When more items are available than can be read in ten pages, it shows the backlog and retains the earlier cursor. A queued run checks project trust before it starts.
 
+## Wait for a person or a signal
+
+Use `ask` in the run body to give someone a small set of choices. The run appears under **Needs you**. Open it to choose an answer and optionally include a reason.
+
+```ts
+export default {
+  name: 'review-draft',
+  version: 1,
+  async run(input, { ask, step }) {
+    const preparation = await step('Prepare draft', () => ({ ready: true }))
+    const answer = await ask('approval', {
+      title: 'Apply the draft update?',
+      choices: ['Apply', 'Keep draft'],
+      data: preparation,
+      timeoutMs: 3_600_000,
+    })
+    return { decision: answer?.choice ?? 'Timed out', reason: answer?.reason }
+  },
+}
+```
+
+A question or wait saves its deadline and releases the runner's worker slot. It resumes the original run when the answer arrives or the deadline passes. Code in completed steps is replayed from its saved result. Use `wait('input', { channel: 'intake' })` for a JSON signal with no question. Both methods return `undefined` on timeout. A signal carrying JSON `null` returns `null`.
+
+```sh
+./buddy harness:workflow:questions 123
+./buddy harness:workflow:signal 123 '{"choice":"Apply","reason":"Reviewed"}' --run "$run_id" --wait approval --key review-reply
+./buddy harness:workflow:signal 123 '{"ready":true}' --workflow review-draft --channel intake --key data-ready
+```
+
+Send a signal to one run and wait name, or to a workflow channel within the profile. Early signals stay available for seven days. Each channel signal goes to one matching wait. Pass a stable `--key` when retrying a submission so it cannot deliver twice.
+
 ## Save step results and file issues
 
 Give each step a unique name. Completed steps return their saved JSON results when the body replays. Keep the workflow body focused on coordination and put actions inside steps. Use the step's `signal` in asynchronous code so that cancellation or shutdown can interrupt it.
@@ -132,4 +163,4 @@ const issue = await step('File issue', ({ issues }) =>
 
 The host supports GitHub, GitLab, and Forgejo through their configured host accounts. On first execution, Harness records the account scope and request intent before posting. If a reply is lost, resuming checks the original intent. A changed account pauses the step until the original connection is available.
 
-A failure pauses the run with its saved steps intact. After a crash, the restarted host takes over once the previous lease expires. Cancellation is terminal. Hosted webhook relay, agent steps, questions, and editing workflow definitions in the app are tracked in the parity backlog. [P31](https://github.com/stacksjs/harness/issues/41)
+A failure pauses the run with its saved steps intact. After a crash, the restarted host takes over once the previous lease expires. Cancellation is terminal. Hosted webhook relay, agent steps, native mobile questions, and editing workflow definitions in the app are tracked in the parity backlog. [P31](https://github.com/stacksjs/harness/issues/41)
