@@ -725,7 +725,7 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
   display: grid; gap: 8px; margin-block-start: auto; padding: 10px;
   border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-bg);
 }
-[data-issue-detail]:has([data-issue-metadata-editor]) [data-issue-comment-composer] { position: static; }
+[data-issue-detail]:has([data-issue-metadata-editor], [data-issue-reactions] details[open]) [data-issue-comment-composer] { position: static; }
 [data-issue-comment-composer] textarea {
   display: block; width: 100%; min-width: 0; min-block-size: 48px; max-block-size: 25vh;
   box-sizing: border-box; field-sizing: content; resize: vertical; padding: 7px 8px;

@@ -784,6 +784,7 @@ try {
   assert.equal(await openReactionPicker.evaluate(node => node === node.ownerDocument.activeElement), true)
   await openReactionPicker.click()
   await captureEditor('comment-reaction', heart)
+  await heart.click({ trial: true })
   const heartIntent = await readReactionRequest(commentReactions, 'add:HEART')
   const foreignComment = new URLSearchParams(heartIntent.body)
   foreignComment.set('subject', 'ISSUE_fixture_atlas_51_COMMENT_501')
