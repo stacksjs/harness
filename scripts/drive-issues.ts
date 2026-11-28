@@ -1715,6 +1715,12 @@ try {
   alterForge(current => { delete current.forgejo.viewerId; current.forgejo.issues[0].is_locked = true })
   await page.reload()
   await forgejoEditTitle.click()
+  await page.waitForFunction(() => document.activeElement?.id === 'issue-text-input')
+  await forgejoTitleInput.press('Escape')
+  await forgejoEditTitle.waitFor()
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'issue-title')
+  await forgejoEditTitle.click()
+  await page.waitForFunction(() => document.activeElement?.id === 'issue-text-input')
   await forgejoTitleInput.fill(editedForgejoTitle)
   const forgejoTextRequest = await forgejoTextForm.evaluate((form: HTMLFormElement) => ({
     url: form.action, body: new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)])).toString(),
@@ -1743,6 +1749,7 @@ try {
   alterForge(current => { current.forgejo.viewerId = 18; current.forgejo.issues[0].is_locked = false })
   await page.reload()
   await forgejoEditDescription.click()
+  await page.waitForFunction(() => document.activeElement?.id === 'issue-text-input')
   const editedForgejoBody = '    keep indentation\n\n**Verified Forgejo description**\n'
   await forgejoDescription.fill(editedForgejoBody)
   await forgejoTextForm.getByRole('button', { name: 'Preview', exact: true }).click()

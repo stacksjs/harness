@@ -630,6 +630,7 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-description] { display: grid; gap: 10px; padding-block-start: 14px; }
 [data-issue-description] h3 { font-size: 14px; font-weight: 650; scroll-margin-block-start: 1rem; }
 [data-issue-text-editor] { scroll-margin-block-start: 12px; }
+[data-issue-text-editor] #issue-text-input { scroll-margin-block-start: 3rem; }
 [data-issue-text-editor] :is(input:not([type=hidden]), textarea) {
   inline-size: 100%; min-inline-size: 0; padding: 8px; border: 1px solid var(--workspace-line);
   border-radius: 6px; background: var(--workspace-surface); color: inherit;
