@@ -50,6 +50,7 @@ interface TerminalDockOptions {
   updateStatus: (key: string, status: PaneStatus | null) => void
   openPreview?: (url: string) => void
   workspaceLinks?: boolean
+  workspaceEditor?: boolean
 }
 
 const terminalHistory = { scrollback: 5000, scrollbackBytes: 8 * 1024 * 1024 }
@@ -155,7 +156,7 @@ export function createTerminalDock(options: TerminalDockOptions) {
         .filter(candidate => candidate.getAttribute(targetAttribute) === target && candidate.getAttribute('data-terminal-cwd') === cwd)
       const occurrence = link ? matchingLinks().findIndex(candidate => candidate === link) : -1
       pane.layoutChanged = false
-      screen.innerHTML = toHtml(pane.model.snapshot(true), true, options.workspaceLinks === true)
+      screen.innerHTML = toHtml(pane.model.snapshot(true), true, options.workspaceLinks === true, options.workspaceEditor === true)
       if (pane.following || pane.model.onAltScreen) viewport.scrollTop = viewport.scrollHeight
       if (link) (matchingLinks()[occurrence] ?? viewport).focus()
     })

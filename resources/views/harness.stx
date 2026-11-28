@@ -2520,6 +2520,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     showContextWindow.set(event.currentTarget.checked)
   }
   const wideWorkspace = useMediaQuery('(min-width: 75rem)')
+  const primaryPointerIsFine = useMediaQuery('(pointer: fine)')
   const browserPreviewOpen = state(false)
   const browserPreviewTools = state(null)
   const browserPreviewEmbedded = state(false)
@@ -5729,13 +5730,28 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   let workspaceFilesTerminalHost = null
   let terminalFileRequest = null
 
-  async function workspaceEditorRequest(method, params = {}) {
+  async function workspaceEditorRequest(method, params = {}, signal) {
     const scope = sessionId ? { session: String(sessionId) } : { workspace: String(draftProject.id) }
-    const response = await fetch('/workspace-editor?' + new URLSearchParams({ ...scope, ...params }), { method })
+    const response = await fetch('/workspace-editor?' + new URLSearchParams({ ...scope, ...params }), { method, signal })
     if (response.status === 204) return null
     const result = await response.json()
     if (!response.ok) throw new Error(result.error || 'Could not reach the editor on the Harness host.')
     return result
+  }
+
+  function preferredWorkspaceEditor(choices) {
+    return choices.find(choice => choice.id === preferredEditor())
+      || choices.find(choice => choice.id !== 'file-manager')
+  }
+
+  async function sendToWorkspaceEditor(choice, target, signal) {
+    await workspaceEditorRequest('POST', {
+      editor: choice.id, path: target.path, line: String(target.line), column: String(target.column || 0),
+      ...(target.kind && { kind: target.kind }),
+    }, signal)
+    if (signal?.aborted) return
+    preferredEditor.set(choice.id)
+    editorAnnouncement.set('Sent to ' + choice.label + '.')
   }
 
   async function chooseWorkspaceEditor(event, path = '', line = 0, usePreferred = false, column = 0) {
@@ -5765,8 +5781,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     finally { editorBusy.set(false) }
     await nextTick()
     if (editorTarget() !== target || !dialog.open || !usePreferred) return
-    const preferred = choices.find(choice => choice.id === preferredEditor())
-      || choices.find(choice => choice.id !== 'file-manager')
+    const preferred = preferredWorkspaceEditor(choices)
     if (preferred) await launchWorkspaceEditor(preferred)
   }
 
@@ -5793,9 +5808,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     editorBusy.set(true)
     editorError.set('')
     try {
-      await workspaceEditorRequest('POST', { editor: choice.id, path: target.path, line: String(target.line), column: String(target.column || 0) })
-      preferredEditor.set(choice.id)
-      editorAnnouncement.set('Sent to ' + choice.label + '.')
+      await sendToWorkspaceEditor(choice, target)
       closeWorkspaceEditor()
     }
     catch (error) { editorError.set(error.message || 'Could not open the editor.') }
@@ -7918,7 +7931,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (link) {
       if (link.hasAttribute('data-terminal-file') && event.key === 'Enter' && !event.repeat && !event.isComposing) {
         event.preventDefault()
-        link.click()
+        void openTerminalFile(link, workspaceEditorAllowed && !event.altKey && (event.metaKey || event.ctrlKey))
       }
       return
     }
@@ -7944,13 +7957,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   async function openTerminalLink(event) {
     const link = event.target?.closest?.('[data-terminal-link]')
-    if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    if (!link || event.button !== 0 || event.shiftKey) return
     if (link.hasAttribute('data-terminal-file')) {
+      if (event.detail > 1) return
       event.preventDefault()
-      await openTerminalFile(link)
+      const mouse = event.detail > 0 && event.pointerType !== 'touch' && primaryPointerIsFine()
+      const edit = workspaceEditorAllowed && !event.altKey && (mouse || event.metaKey || event.ctrlKey)
+      await openTerminalFile(link, edit)
       return
     }
-    if (!previewDiscoveryAllowed) return
+    if (!previewDiscoveryAllowed || event.metaKey || event.ctrlKey || event.altKey) return
     terminalFileRequest?.abort()
     const url = terminalController()?.previewAddress(link.href, link.ownerDocument.location.origin)
     if (!url) return
@@ -7960,7 +7976,21 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     openDiscoveredPreview({ url })
   }
 
-  async function openTerminalFile(link) {
+  async function launchTerminalEditor(target, signal, terminalHost) {
+    if (editorBusy() || workspaceEditorDialog.current?.open) return true
+    const result = await workspaceEditorRequest('GET', {}, signal)
+    if (signal.aborted || !termOpen() || !terminalHost.isConnected || editorBusy() || workspaceEditorDialog.current?.open) return true
+    const editor = preferredWorkspaceEditor(result.choices)
+    if (!editor) return false
+    editorBusy.set(true)
+    editorAnnouncement.set('')
+    try { await sendToWorkspaceEditor(editor, target, signal) }
+    finally { editorBusy.set(false) }
+    return true
+  }
+
+  async function openTerminalFile(link, edit) {
+    if (edit && editorBusy()) return
     terminalFileRequest?.abort()
     const request = new AbortController()
     terminalFileRequest = request
@@ -7971,6 +8001,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (!controller || request.signal.aborted) return
       const target = await controller.resolveTerminalTarget(link.dataset.terminalFile, request.signal, link.dataset.terminalCwd)
       if (request.signal.aborted || !termOpen() || !terminalHost?.isConnected) return
+      let editorErrorMessage = ''
+      if (edit) {
+        try { if (await launchTerminalEditor(target, request.signal, terminalHost)) return }
+        catch (error) { editorErrorMessage = error.message || 'Could not open the editor on the Harness host.' }
+        if (request.signal.aborted || !termOpen() || !terminalHost.isConnected) return
+      }
       if (terminalKeyboardOpen()) toggleTerminalKeyboard()
       showWorkspaceFiles(link, terminalHost)
       if (target.kind === 'directory') showWorkspaceFolder(target.path)
@@ -7978,6 +8014,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         void controller.open()
         await openWorkspaceFile(target.path, target.line, target.column)
       }
+      if (editorErrorMessage && !request.signal.aborted) workspaceFileNotice.set(editorErrorMessage)
     }
     catch {
       if (!request.signal.aborted && termOpen()) terminalClipboardNotice.set('Could not open this path in the workspace.')
@@ -8169,6 +8206,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       },
       closed: finishTerminalClose,
       workspaceLinks: hasWorkspaceFiles,
+      workspaceEditor: workspaceEditorAllowed,
       openPreview: url => previewProjectScript(url, true),
       updateStatus(key, status) {
         terminalStates.update((previous) => {

@@ -93,7 +93,7 @@ function openSpan(style: Style): string {
  * the container is expected to be `white-space: pre` and monospace, which is
  * what keeps a grid a grid.
  */
-export function toHtml(rows: TerminalRow[], links = false, files = false): string {
+export function toHtml(rows: TerminalRow[], links = false, files = false, workspaceEditor = false): string {
   const lines: string[] = []
   const explicitUrls = links ? new Map<string, string | null>() : null
   let start = 0
@@ -163,7 +163,8 @@ export function toHtml(rows: TerminalRow[], links = false, files = false): strin
           else {
             const cwd = !explicit && rows[start]?.cwd
             const directory = cwd ? ` data-terminal-cwd="${escapeHtml(cwd)}"` : ''
-            line += `<a role="link" tabindex="0" data-terminal-link data-terminal-file="${escapeHtml(link)}"${directory}${label}>`
+            const shortcut = workspaceEditor ? ' aria-keyshortcuts="Enter Control+Enter Meta+Enter" title="Click to open in the preferred editor. Use Alt-click or Enter to view in Files."' : ''
+            line += `<a role="link" tabindex="0" data-terminal-link data-terminal-file="${escapeHtml(link)}"${directory}${label}${shortcut}>`
           }
         }
         activeLink = link
