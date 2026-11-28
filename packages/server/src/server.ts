@@ -75,6 +75,7 @@ import { TerminalHistoryStore } from './terminal-history'
 import { WorkspaceTerminals } from './workspace-terminals'
 import { workflowForm, workflowWorkspace } from './workflows/workspace'
 import { respondWorkflows, workflowRoutes } from './workflows/http'
+import { respondWorkflowWebhook, workflowHookPrefix } from './workflows/webhooks'
 import type { TerminalScope } from './workspace-terminals'
 
 export interface ServeOptions {
@@ -86,6 +87,8 @@ export interface ServeOptions {
   chatGptCredentialDirectory?: string
   /** TypeScript definitions supplied by the host operator. */
   workflowDirectory?: string
+  /** Disable workflow webhook ingress even when a loaded definition declares a hook. */
+  workflowWebhooks?: boolean
   /** Injectable so tests bind a fake driver instead of spawning a real agent. */
   resolveDriver?: (kind: DriverKind) => Driver | null
   /**
@@ -1961,6 +1964,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
     }
   }
 
+  const allowWorkflowWebhooks = options.workflowWebhooks !== false && process.env.HARNESS_WORKFLOW_WEBHOOKS !== '0'
   const workflowLocation = options.workflowDirectory ?? process.env.HARNESS_WORKFLOWS
   const workflows = workflowLocation
     ? await (await import('./workflows/runner')).WorkflowRunner.open(workflowLocation, databasePath, () => engine.current)
@@ -1974,6 +1978,13 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
 
     fetch(request, srv) {
       const url = new URL(request.url)
+
+      // Delivery carries its own workflow-only credential. Keep its path out of pairing redirects.
+      if (url.pathname.startsWith(workflowHookPrefix)) {
+        const loopback = isLoopbackHost(url.hostname) && isLoopbackHost(srv.requestIP(request)?.address ?? '')
+        return respondWorkflowWebhook(workflows, request, url, allowWorkflowWebhooks, remote || loopback)
+          .catch(() => Response.json({ error: 'internal_error' }, { status: 500, headers: { 'cache-control': 'no-store' } }))
+      }
 
       // Everything below this line assumes the caller is allowed to be here.
       if (access) {
@@ -2330,7 +2341,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           }
           return serveView().catch(() => new Response('Could not load workflows.', { status: 503, headers }))
         }
-        return respondWorkflows(workflows, engine.current.profiles.has(profile) ? profile : null, request, url)
+        return respondWorkflows(workflows, engine.current.profiles.has(profile) ? profile : null, request, url, allowWorkflowWebhooks)
           .catch(() => Response.json({ error: 'workflow-storage-unavailable' }, { status: 503 }))
       }
 

@@ -1,9 +1,11 @@
 import type { WorkflowSchedule } from './schedules'
+import type { WorkflowWebhook } from './webhooks'
 import { createHash } from 'node:crypto'
 import { readdir, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { readSchedules } from './schedules'
+import { readWebhooks } from './webhooks'
 
 export const workflowName = /^(?:[a-z\d][a-z\d._-]{0,79})$/iu
 
@@ -33,10 +35,15 @@ export interface WorkflowDefinition {
   name: string
   version: number
   schedules?: WorkflowSchedule[]
+  webhooks?: WorkflowWebhook[]
   run: (input: unknown, context: WorkflowContext) => unknown
 }
 
-export type LoadedWorkflow = WorkflowDefinition & { revision: string, schedules: WorkflowSchedule[] }
+export type LoadedWorkflow = WorkflowDefinition & {
+  revision: string
+  schedules: WorkflowSchedule[]
+  webhooks: WorkflowWebhook[]
+}
 
 class DefinitionProblem extends Error {}
 
@@ -82,11 +89,13 @@ export async function loadWorkflowDefinitions(location: string) {
           throw new DefinitionProblem('A workflow name and version can only be defined once.')
         seen.add(definition.version)
         byName.set(definition.name, seen)
-        let schedules: WorkflowSchedule[]
-        try { schedules = readSchedules(definition.schedules) }
-        catch (error) { throw new DefinitionProblem((error as Error).message) }
         const revision = createHash('sha256').update(definition.run.toString()).digest('hex')
-        validated.push({ ...definition as WorkflowDefinition, revision, schedules })
+        try {
+          validated.push({ ...definition as WorkflowDefinition, revision, schedules: readSchedules(definition.schedules),
+            webhooks: readWebhooks(definition.webhooks),
+          })
+        }
+        catch (error) { throw new DefinitionProblem((error as Error).message) }
       }
       for (const definition of validated) {
         const versions = definitions.get(definition.name) ?? new Map<number, LoadedWorkflow>()

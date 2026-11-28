@@ -921,6 +921,183 @@ describe('manual workflows', () => {
   }, 15_000)
 })
 
+describe('workflow webhooks', () => {
+  const profile = derivedId('hooks-profile')
+  const other = derivedId('hooks-other')
+  const workflow = 'build.report'
+  const api = (route = '/workflows/hooks', selected = profile) => 'http://127.0.0.1:' + port + route + '?profile=' + selected
+  const owner = () => ({ authorization: 'Bearer ' + harness.access!.localToken })
+  const hooks = async (selected = profile) => {
+    const response = await fetch(api('/workflows/hooks', selected), { headers: owner() })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toContain('no-store')
+    return (await response.json()).hooks as { name: string, path: string, workflow: string }[]
+  }
+  async function start(file: string, workflowWebhooks = true, remote = true) {
+    harness.stop()
+    harness = await serve({ port: 0, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => null,
+      remote, localTokenPath: join(dir, 'host-token'), workflowDirectory: file, workflowWebhooks,
+    })
+    port = harness.server.port
+  }
+  async function seed() {
+    await harness.engine.dispatch({ id: 'hooks-profile', at: 1, command: { type: 'profile.create', name: 'Hook target' } })
+    await harness.engine.dispatch({ id: 'hooks-other', at: 1, command: { type: 'profile.create', name: 'Other hook target' } })
+    const file = join(dir, 'hooks.ts')
+    const update = join(dir, 'hooks-update.ts')
+    const source = (version: number, primary = true) => `export default {
+      name: ${JSON.stringify(workflow)}, version: ${version},
+      webhooks: [
+        ${primary ? "{ name: 'intake', profile: " + profile + " }," : ''}
+        { name: 'other', profile: ${other} },
+        { name: 'custom', profile: ${profile}, key(request) {
+          const query = new URLSearchParams(request.query)
+          if (query.has('error')) throw new Error('private script failure')
+          return query.get('key') ?? undefined
+        } },
+      ],
+      run(input) {
+        return { method: input.method, query: input.query, bodyLength: new TextEncoder().encode(input.body).length,
+          body: input.body.length < 100 ? input.body : undefined, headers: input.headers }
+      },
+    }`
+    writeFileSync(file, source(1))
+    writeFileSync(update, source(2, false))
+    await start(file)
+    return { file, update }
+  }
+
+  const deliver = (path: string, init: RequestInit = { method: 'POST' }) => fetch('http://127.0.0.1:' + port + path, init)
+
+  async function completed(runId: string, selected = profile) {
+    const deadline = performance.now() + 3000
+    while (performance.now() < deadline) {
+      const response = await fetch(api('/workflows/run', selected) + '&id=' + runId, { headers: owner() })
+      expect(response.status).toBe(200)
+      const detail = await response.json()
+      if (detail.run.status === 'completed') return detail.run
+      await Bun.sleep(15)
+    }
+    throw new Error('Webhook-triggered run did not finish')
+  }
+
+  it('authenticates a workflow-only URL, caps input, and deduplicates concurrent and restarted delivery', async () => {
+    const { file, update } = await seed()
+    const published = await hooks()
+    const intake = published.find(hook => hook.name === 'intake')!
+    const custom = published.find(hook => hook.name === 'custom')!
+    expect(published.map(hook => hook.name)).toEqual(['intake', 'custom'])
+    expect((await hooks(other)).map(hook => hook.name)).toEqual(['other'])
+    expect((await fetch(api())).status).toBe(401)
+    const hookToken = intake.path.split('/').at(-1)!
+    expect((await fetch(api('/workflows') + '&token=' + hookToken, { redirect: 'manual' })).status).toBe(401)
+    const pair = await fetch('http://127.0.0.1:' + port + '/pair', { method: 'POST', redirect: 'manual',
+      body: new URLSearchParams({ code: harness.access!.openPairing().code, name: 'Hook fixture device' }),
+    })
+    const cookie = pair.headers.get('set-cookie')?.split(';')[0]
+    expect(cookie).toBeTruthy()
+    expect((await fetch(api(), { headers: { cookie: cookie! } })).status).toBe(403)
+
+    const masked = intake.path.slice(0, -1) + (intake.path.endsWith('A') ? 'B' : 'A')
+    const wrong = await deliver(masked, { method: 'POST', headers: { accept: 'text/html' }, redirect: 'manual' })
+    expect(wrong.status).toBe(404)
+    expect(wrong.headers.get('location')).toBeNull()
+    expect(await wrong.json()).toEqual({ error: 'hook_not_found' })
+    expect((await deliver(intake.path, { method: 'POST', headers: { origin: 'https://other.example', 'sec-fetch-site': 'cross-site' } })).status).toBe(404)
+    const head = await deliver(intake.path, { method: 'HEAD' })
+    expect(head.status).toBe(405)
+    expect(head.headers.get('allow')).toBe('GET, POST, PUT, PATCH')
+    expect((await deliver(intake.path, { method: 'POST', body: 'x'.repeat(1_048_577) })).status).toBe(413)
+    const stream = new ReadableStream({
+      start(controller) {
+        const chunk = new Uint8Array(65_536)
+        for (let i = 0; i < 17; i++) controller.enqueue(chunk)
+        controller.close()
+      },
+    })
+    expect((await deliver(intake.path, { method: 'POST', body: stream })).status).toBe(413)
+
+    const request = () => deliver(intake.path + '?kind=build%20report&kind=done', { method: 'PUT',
+      headers: { 'X-GitHub-Delivery': 'run-with-retry', authorization: 'Bearer synthetic', cookie: 'secret=fixture',
+        'X-Api-Key': 'test-key', 'Content-Type': 'text/plain',
+      },
+      body: 'hello ☀',
+    })
+    const duplicates = await Promise.all([request(), request()])
+    expect(duplicates.map(result => result.status)).toEqual([202, 202])
+    const [{ runId }, replay] = await Promise.all(duplicates.map(result => result.json()))
+    expect(replay).toEqual({ runId })
+    const run = await completed(runId)
+    expect(run).toMatchObject({ workflow, webhook: { name: 'intake' }, result: {
+      method: 'PUT', query: 'kind=build%20report&kind=done', body: 'hello ☀', bodyLength: 9,
+      headers: { 'x-github-delivery': 'run-with-retry', 'content-type': 'text/plain' },
+    } })
+    for (const name of ['authorization', 'cookie', 'x-api-key']) expect(run.result.headers[name]).toBeUndefined()
+    expect((await fetch(api('/workflows/run', other) + '&id=' + runId, { headers: owner() })).status).toBe(404)
+    const workspace = await fetch(api('/workflows') + '&view=workspace', { headers: owner() }).then(result => result.text())
+    expect(workspace).not.toContain(intake.path)
+    expect(workspace).not.toContain(custom.path)
+
+    const boundary = await deliver(intake.path, { method: 'PATCH', body: 'é'.repeat(524_288) })
+    expect(boundary.status).toBe(202)
+    const sized = await completed((await boundary.json()).runId)
+    expect(sized.result.bodyLength).toBe(1_048_576)
+    const customised = await deliver(custom.path + '?key=explicit', { method: 'GET', headers: { 'webhook-id': 'one' } })
+    expect(customised.status).toBe(202)
+    const chosen = await customised.json()
+    expect(await (await deliver(custom.path + '?key=explicit', { method: 'POST', headers: { 'webhook-id': 'two' } })).json()).toEqual(chosen)
+    const invalid = await deliver(custom.path + '?error')
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toEqual({ error: 'invalid_request' })
+    expect((await completed(chosen.runId)).result.method).toBe('GET')
+
+    await start(file)
+    expect(await hooks()).toEqual(published)
+    expect(await (await request()).json()).toEqual({ runId })
+    await start(file, false)
+    const policy = await request()
+    expect(policy.status).toBe(403)
+    expect(await policy.json()).toEqual({ error: 'blocked_by_policy' })
+    expect((await deliver(masked)).status).toBe(404)
+    expect((await fetch(api(), { headers: owner() })).status).toBe(403)
+
+    await start(update)
+    expect(await hooks()).toEqual([custom])
+    expect((await request()).status).toBe(404)
+    const latest = await deliver(custom.path + '?key=version-two')
+    expect((await completed((await latest.json()).runId)).version).toBe(2)
+
+    await start(file, true, false)
+    expect((await deliver(custom.path, { method: 'GET', headers: { host: 'untrusted.example' } })).status).toBe(404)
+    expect((await deliver(custom.path, { method: 'GET' })).status).toBe(202)
+  }, 30_000)
+
+  it('shares the rolling webhook quota with a restarted host and leaves other hooks available', async () => {
+    const { file } = await seed()
+    const [first, second] = await hooks()
+    const time = Date.parse('2026-11-28T12:00:00Z')
+    let now = time
+    const clock = spyOn(Date, 'now').mockImplementation(() => now)
+    const submit = (id: number, path = first!.path) => deliver(path, { method: 'POST', headers: { 'webhook-id': String(id) } })
+    try {
+      const accepted = await Promise.all(Array.from({ length: 60 }, (_, index) => submit(index)))
+      expect(accepted.map(response => response.status)).toEqual(Array.from({ length: 60 }, () => 202))
+      const run = await accepted[0]!.json()
+      await start(file)
+      expect(await (await submit(0)).json()).toEqual(run)
+      const limited = await submit(60)
+      expect(limited.status).toBe(429)
+      expect(limited.headers.get('retry-after')).toBe('60')
+      expect((await submit(60, second!.path)).status).toBe(202)
+      now += 59_999
+      expect((await submit(60)).status).toBe(429)
+      now = time + 60_000
+      expect((await submit(60)).status).toBe(202)
+    }
+    finally { clock.mockRestore() }
+  }, 25_000)
+})
+
 describe('repository cloning', () => {
   const cloneId = 'web_clone_1'
   const cloneUrl = (suffix = '') => `http://127.0.0.1:${port}/projects/clone${suffix}`

@@ -1,19 +1,22 @@
 import type { WorkflowRunner } from './runner'
 import { readRepositoryBody } from '../repository-commit'
 
-export const workflowRoutes = new Set(['/workflows', '/workflows/run', '/workflows/start', '/workflows/resume', '/workflows/cancel', '/workflows/view', '/workflows/action'])
+export const workflowRoutes = new Set(['/workflows', '/workflows/hooks', '/workflows/run', '/workflows/start', '/workflows/resume', '/workflows/cancel', '/workflows/view', '/workflows/action'])
 
 const headers = { 'cache-control': 'private, no-store', 'x-frame-options': 'DENY', 'vary': 'Accept' }
 export const workflowRunId = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u
 
-export async function respondWorkflows(runner: WorkflowRunner | null, profile: number | null, request: Request, url: URL) {
+export async function respondWorkflows(runner: WorkflowRunner | null, profile: number | null, request: Request, url: URL, allowWebhooks = true) {
   const json = (value: unknown, status = 200) => Response.json(value, { status, headers })
   if (!runner) return json({ error: 'workflows-disabled' }, 404)
   if (profile === null) return json({ error: 'missing-profile' }, 404)
-  const read = url.pathname === '/workflows' || url.pathname === '/workflows/run'
+  const read = ['/workflows', '/workflows/run', '/workflows/hooks'].includes(url.pathname)
   const method = read ? 'GET' : 'POST'
   if (request.method !== method)
     return new Response(null, { status: 405, headers: { ...headers, allow: method } })
+  if (url.pathname === '/workflows/hooks') return allowWebhooks
+    ? json({ hooks: runner.listWebhooks(profile) })
+    : json({ error: 'blocked_by_policy' }, 403)
   if (url.pathname === '/workflows') return json(runner.list(profile))
   if (url.pathname === '/workflows/run') {
     const id = url.searchParams.get('id')

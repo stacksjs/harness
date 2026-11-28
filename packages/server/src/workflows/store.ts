@@ -1,6 +1,7 @@
 import type { LoadedWorkflow, WorkflowIssue } from './definitions'
 import type { WorkflowSchedule } from './schedules'
 import { Database } from 'bun:sqlite'
+import { mintToken } from '../access'
 import { nextScheduleAt, shouldFireSchedule } from './schedules'
 
 export type WorkflowStatus = 'running' | 'paused' | 'completed' | 'cancelled'
@@ -37,8 +38,10 @@ type RunDefinition = Pick<LoadedWorkflow, 'name' | 'version' | 'revision'>
 type IssueIntent = { target: string, scope: string, intent: string }
 export function presentRun(row: RunRow) {
   const schedule = /^\nscheduled:([^:]+):/u.exec(row.start_key)
+  const webhook = /^\nwebhook:([^:]+):/u.exec(row.start_key)
   return {
     ...(schedule && { schedule: { id: schedule[1]!, ...(JSON.parse(row.payload) as { scheduledAt: string }) } }),
+    ...(webhook && { webhook: { name: webhook[1]! } }),
     runId: row.id, workflow: row.name, version: row.version, title: row.title, status: row.status, detail: row.detail,
     result: row.result === null ? null : JSON.parse(row.result) as unknown,
     startedAt: new Date(row.started_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(),
@@ -64,6 +67,14 @@ export class WorkflowStore {
       CREATE TABLE IF NOT EXISTS harness_workflow_schedule_cursors (
         key TEXT PRIMARY KEY, name TEXT NOT NULL, due_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS harness_workflow_webhook_tokens (
+        hook_id TEXT PRIMARY KEY, token TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS harness_workflow_webhook_starts (
+        hook_id TEXT NOT NULL, started_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS harness_workflow_webhook_start_time
+        ON harness_workflow_webhook_starts (hook_id, started_at);
       CREATE TABLE IF NOT EXISTS harness_workflow_steps (
         run_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL,
         result TEXT, detail TEXT, started_at INTEGER NOT NULL, ended_at INTEGER,
@@ -98,6 +109,33 @@ export class WorkflowStore {
       if (existing) return { row: existing, replayed: true }
       const id = this.insertRun(profile, definition, key, payload, now)
       return { row: this.run(profile, id)!, replayed: false }
+    }).immediate()
+  }
+
+  webhookToken(hookId: string) {
+    const read = this.db.query<{ token: string }, [string]>('SELECT token FROM harness_workflow_webhook_tokens WHERE hook_id = ?')
+    return this.db.transaction(() => {
+      const existing = read.get(hookId)
+      if (existing) return existing.token
+      const token = mintToken()
+      this.db.query('INSERT INTO harness_workflow_webhook_tokens (hook_id, token) VALUES (?, ?)').run(hookId, token)
+      return token
+    }).immediate()
+  }
+
+  startWebhook(profile: number, definition: RunDefinition, hook: { id: string, name: string }, key: string, payload: string, now: number) {
+    const startKey = '\nwebhook:' + hook.name + ':' + key
+    return this.db.transaction(() => {
+      const existing = this.findStart(profile, definition.name, startKey)
+      if (existing) return { runId: existing.id }
+      this.db.query('DELETE FROM harness_workflow_webhook_starts WHERE hook_id = ? AND started_at <= ?')
+        .run(hook.id, now - 60_000)
+      const usage = this.db.query<{ count: number }, [string]>('SELECT COUNT(*) AS count FROM harness_workflow_webhook_starts WHERE hook_id = ?')
+        .get(hook.id)!
+      if (usage.count >= 60) return { error: 'rate_limited' as const }
+      const runId = this.insertRun(profile, definition, startKey, payload, now)
+      this.db.query('INSERT INTO harness_workflow_webhook_starts (hook_id, started_at) VALUES (?, ?)').run(hook.id, now)
+      return { runId }
     }).immediate()
   }
 

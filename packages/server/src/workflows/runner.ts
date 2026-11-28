@@ -1,13 +1,16 @@
 import type { HarnessState } from '@harness/engine'
 import type { LoadedWorkflow, WorkflowContext, WorkflowIssueInput } from './definitions'
 import type { WorkflowSchedule } from './schedules'
+import type { WorkflowWebhook, WorkflowWebhookRequest } from './webhooks'
 import { basename } from 'node:path'
+import { hashesMatch, hashToken } from '../access'
 import { createIssue, issueCreationScope } from '../issue-create'
 import { trustedIssueProjects } from '../issue-repositories'
 import { PullRequestReplyReceipts } from '../pull-request-reply-receipts'
 import { loadWorkflowDefinitions, workflowName } from './definitions'
 import { scheduleKey } from './schedules'
 import { presentRun, WorkflowStore } from './store'
+import { webhookDeliveryKey, workflowHookId, workflowHookPrefix } from './webhooks'
 
 const leaseMs = 30_000
 const concurrency = 4
@@ -23,6 +26,8 @@ const message = {
   pending: 'The issue tracker has yet to confirm the write. Resume to check the original request.',
 }
 
+type RegisteredHook = { definition: LoadedWorkflow, hook: WorkflowWebhook, token: string, tokenHash: string }
+
 class WorkflowProblem extends Error {}
 
 function json(value: unknown) {
@@ -37,6 +42,7 @@ export class WorkflowRunner {
   private readonly active = new Map<string, AbortController>()
   private readonly store: WorkflowStore
   private readonly receipts: PullRequestReplyReceipts
+  private readonly webhooks = new Map<string, RegisteredHook>()
   private readonly schedules: { key: string, definition: LoadedWorkflow, schedule: WorkflowSchedule }[]
   private readonly zone = Intl.DateTimeFormat().resolvedOptions().timeZone
   private readonly timer: ReturnType<typeof setInterval>
@@ -46,15 +52,19 @@ export class WorkflowRunner {
     private readonly loaded: Awaited<ReturnType<typeof loadWorkflowDefinitions>>,
   ) {
     this.store = new WorkflowStore(databasePath)
-    this.schedules = [...loaded.definitions.values()].flatMap(versions => {
-      const definition = this.latest(versions)
-      return definition.schedules.filter(schedule => schedule.enabled !== false).map(schedule => ({
-        key: scheduleKey(definition.name, schedule, this.zone), definition, schedule,
-      }))
-    })
+    const current = [...loaded.definitions.values()].map(versions => this.latest(versions))
+    this.schedules = current.flatMap(definition => definition.schedules.filter(schedule => schedule.enabled !== false)
+      .map(schedule => ({ key: scheduleKey(definition.name, schedule, this.zone), definition, schedule })))
     // A read error can hide an existing definition. Keep its cursor until a file loads or is removed.
     const loadedNames = loaded.problems.length ? [...loaded.definitions.keys()] : undefined
     this.store.keepSchedules(this.schedules.map(item => item.key), loadedNames)
+    for (const definition of current) {
+      for (const hook of definition.webhooks) {
+        const id = workflowHookId(definition.name, hook)
+        const token = this.store.webhookToken(id)
+        this.webhooks.set(id, { definition, hook, token, tokenHash: hashToken(token) })
+      }
+    }
     this.receipts = new PullRequestReplyReceipts(databasePath)
     this.timer = setInterval(() => this.wake(), 2_000)
     this.timer.unref()
@@ -85,6 +95,29 @@ export class WorkflowRunner {
       }),
       runs: this.store.list(profile).map(presentRun),
       problems: this.loaded.problems,
+    }
+  }
+
+  listWebhooks(profile: number) {
+    return [...this.webhooks].flatMap(([id, { definition, hook, token }]) => hook.profile === profile
+      ? [{ workflow: definition.name, name: hook.name, path: workflowHookPrefix + id + '/' + token }]
+      : [])
+  }
+
+  webhookDelivery(id: string, token: string) {
+    const registered = this.webhooks.get(id)
+    if (this.stopped || !registered || !hashesMatch(registered.tokenHash, hashToken(token))
+      || !this.state().profiles.has(registered.hook.profile)) return null
+    const { definition, hook } = registered
+    return (request: WorkflowWebhookRequest) => {
+      if (this.stopped || !this.state().profiles.has(hook.profile)) return { error: 'hook_not_found' as const }
+      const payload = JSON.stringify(request)
+      let key: string
+      try { key = webhookDeliveryKey(hook, request) }
+      catch { return { error: 'invalid_request' as const } }
+      const result = this.store.startWebhook(hook.profile, definition, { id, name: hook.name }, key, payload, Date.now())
+      if ('runId' in result) queueMicrotask(() => this.wake())
+      return result
     }
   }
 
