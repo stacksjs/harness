@@ -73,6 +73,7 @@ export const textTitle = $props.textTitle
 export const currentText = $props.currentText
 export const currentVersion = $props.currentVersion
 export const textMessage = $props.textMessage
+export const textForge = $props.textForge
 export const textMessageField = $props.textMessageField
 export const textAction = $props.textAction
 export const titleEditHref = $props.titleEditHref

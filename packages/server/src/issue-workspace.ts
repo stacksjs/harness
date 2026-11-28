@@ -7,8 +7,8 @@ import type { IssueActivityItem } from './issue-activity'
 import type { IssueCommentSubmission } from './issue-comment'
 import type { IssueTextSubmission } from './issue-text'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
-import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue } from './gitlab-issues'
-import { mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
+import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssueText } from './gitlab-issues'
+import { issueReferenceForSelection, mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
 import { issueMetadataKind, readIssueMetadata } from './issue-metadata'
 import { createIssueTextDraft, issueTextField, issueTextLimits } from './issue-text'
@@ -167,12 +167,7 @@ async function issueDetail(repository: GitHubWorkspaceRepository, number: number
 export async function issueThreadUpdate(
   state: HarnessState, query: URLSearchParams, form: URLSearchParams, signal: AbortSignal,
 ): Promise<Extract<InternalCommand, { type: 'thread.issue.set' }> | null> {
-  const sourceKey = (query.get('selected') ?? '').toLowerCase()
-  const number = positiveInteger(query.get('issue'))
-  const gitlab = /^gitlab:([^/]+)\/(.+)$/u.exec(sourceKey)
-  const issue = issueReference(gitlab
-    ? { tracker: 'gitlab', host: gitlab[1], repository: gitlab[2], number }
-    : { tracker: 'github', repository: sourceKey, number })
+  const issue = issueReferenceForSelection(query.get('selected'), positiveInteger(query.get('issue')))
   const profile = positiveInteger(query.get('profile'))
   const sessionId = positiveInteger(form.get('thread'))
   const action = form.get('action')
@@ -263,6 +258,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     ? readIssueMetadata({ repository: selection, number, signal, includeText: Boolean(editText && !textSubmission) },
         metadataSubmission ? null : editMetadata)
     : null
+  const gitLabTextRead = selection?.tracker === 'gitlab' && number
+    ? readGitLabIssueText(selection, number, signal).catch(() => null) : null
   const targets = [...includedRepositories].flatMap(([key, repo]) =>
     !hidden.has(key) && (!repository || key === repository.key) ? [repo] : [])
   const findLabel = (query.get('findLabel') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
@@ -288,7 +285,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     })
   }
   const { selected, error } = await detail ?? { selected: null, error: selectionName || number ? 'This issue is outside the selected profile.' : '' }
-  const [choices, metadata] = await Promise.all([lookup, metadataRead])
+  const [choices, metadata, gitLabText] = await Promise.all([lookup, metadataRead, gitLabTextRead])
   const labelChoices = choices?.kind === 'labels' ? choices : null
   const people = choices?.kind === 'assignees' ? choices : null
   signal.throwIfAborted()
@@ -310,7 +307,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   }
   const metadataFields = selected ? Object.fromEntries(savedViewDetail) : {}
   const metadataHref = selected ? href(metadataFields) : ''
-  const editableText = metadata?.editableText
+  const editableText = gitLabText?.canEditText ? { ...gitLabText.text, scope: gitLabText.scope } : metadata?.editableText
+  const textForge = selectionName.toLowerCase().startsWith('gitlab:') ? 'GitLab' : 'GitHub'
   const textDraft = textSubmission?.draft
     ?? (editText && editableText ? createIssueTextDraft(editText, editableText.scope, editableText[editText]) : null)
   const textResult = textSubmission?.result
@@ -421,15 +419,16 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadataLabelsHref: selected ? href({ ...metadataFields, editMetadata: 'labels' }) : '',
     metadataAssigneesHref: selected ? href({ ...metadataFields, editMetadata: 'assignees' }) : '',
     metadataAction: metadataHref.replace('/issues?', '/issues/metadata?'),
-    canEditText: Boolean(selected && metadata?.canEditText),
+    canEditText: Boolean(selected && (metadata?.canEditText || gitLabText?.canEditText)),
+    textForge,
     textDraft, textPreview, textPending, textConflict, textLocked,
     textLimit: textDraft ? issueTextLimits[textDraft.field] : 0,
     textTitle: textDraft?.field === 'title' ? 'Issue title' : 'Description',
     currentText: textSubmission?.current ?? '',
     currentVersion: textSubmission?.currentVersion ?? '',
     textMessageField: issueTextField(query.get('textResult')) ?? editText ?? 'title',
-    textMessage: textSubmission?.message ?? (selected && issueTextField(query.get('textResult')) ? 'Issue text saved on GitHub.'
-      : editText && !textDraft ? 'GitHub could not open this editor.' : ''),
+    textMessage: textSubmission?.message ?? (selected && issueTextField(query.get('textResult')) ? 'Issue text saved on ' + textForge + '.'
+      : editText && !textDraft ? textForge + ' could not open this editor.' : ''),
     textAction: metadataHref.replace('/issues?', '/issues/text?') + '#issue-text-editor',
     titleEditHref: selected ? href({ ...metadataFields, editText: 'title' }) + '#issue-title' : '',
     bodyEditHref: selected ? href({ ...metadataFields, editText: 'body' }) + '#issue-description' : '',

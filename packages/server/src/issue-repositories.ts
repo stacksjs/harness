@@ -1,5 +1,5 @@
 import type { WorkspaceState } from '@harness/engine'
-import { gitLabProject } from '@harness/contract'
+import { gitLabProject, issueReference } from '@harness/contract'
 import { trustedProjectGitRemotes } from './github-workspace-repositories'
 import { repositoryFromRemote } from './prompt-links'
 
@@ -9,6 +9,14 @@ export type GitLabIssueRepository = Target & { tracker: 'gitlab', host: string }
 export type IssueRepository = GitHubIssueRepository | GitLabIssueRepository
 
 type RemoteProject = { host: string, name: string }
+
+export function issueReferenceForSelection(source: string | null, number: number) {
+  const key = source?.toLowerCase() ?? ''
+  const gitlab = /^gitlab:([^/]+)\/(.+)$/u.exec(key)
+  return issueReference(gitlab
+    ? { tracker: 'gitlab', host: gitlab[1], repository: gitlab[2], number }
+    : { tracker: 'github', repository: key, number })
+}
 
 function gitLabRemote(remote: string): RemoteProject | null {
   const scp = /^git@([^/:]+):(.+)$/u.exec(remote)

@@ -1024,13 +1024,90 @@ try {
     await page.getByRole('link', { name: 'View on GitLab' }).waitFor()
     await page.getByRole('heading', { name: 'Linked threads' }).waitFor()
     await page.locator('a[href="/s/' + session.id + '"]').waitFor()
+
+    const editGitLabTitle = page.getByRole('link', { name: 'Edit title', exact: true })
+    const editGitLabBody = page.getByRole('link', { name: 'Edit description', exact: true })
+    const gitLabEditor = page.locator('[data-issue-text-editor]')
+    assert.equal(await editGitLabTitle.count(), 0)
+    const forcedEditor = new URL(page.url())
+    forcedEditor.searchParams.set('editText', 'title')
+    await page.goto(forcedEditor.href)
+    assert.equal(await gitLabEditor.count(), 0)
+    await page.getByText('GitLab could not open this editor.', { exact: true }).waitFor()
+
+    alterForge(current => { current.gitlab.canEditText = true })
+    await page.goto(gitlabSelection.href)
+    await editGitLabTitle.click()
+    const newTitle = 'Review GitLab drafts with attachments after reconnect'
+    await gitLabEditor.getByRole('textbox', { name: 'Issue title', exact: true }).fill(newTitle)
+    const saveGitLabText = gitLabEditor.getByRole('button', { name: 'Save', exact: true })
+    const gitLabSubmission = () => gitLabEditor.evaluate((form: HTMLFormElement) => ({
+      url: form.action, body: new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)])).toString(),
+    }))
+    const postGitLabText = (request: { url: string, body: string }, origin = base) => fetch(request.url, {
+      method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: request.body, redirect: 'manual',
+    })
+    const titleSubmission = await gitLabSubmission()
+    assert.equal((await postGitLabText(titleSubmission, 'https://outside.invalid')).status, 403)
+    alterForge(current => { current.gitlab.viewer = 18 })
+    assert.equal((await postGitLabText(titleSubmission)).status, 409)
+    alterForge(current => { delete current.gitlab.viewer; current.gitlab.archived = true })
+    assert.equal((await postGitLabText(titleSubmission)).status, 403)
+    alterForge(current => { delete current.gitlab.archived; current.gitlab.refuseText = true })
+    await saveGitLabText.click()
+    await gitLabEditor.getByText('GitLab rejected the edit. Review your draft and try again.', { exact: true }).waitFor()
+    assert.equal(await gitLabEditor.getByRole('textbox', { name: 'Issue title', exact: true }).inputValue(), newTitle)
+    assert.equal(readForge().gitlab.textWrites, undefined)
+
+    alterForge(current => { delete current.gitlab.refuseText; current.gitlab.issue.title = 'A change from another GitLab client' })
+    await saveGitLabText.click()
+    await gitLabEditor.getByText('Current on GitLab', { exact: true }).waitFor()
+    await gitLabEditor.getByText('A change from another GitLab client', { exact: true }).waitFor()
+    await gitLabEditor.getByRole('button', { name: 'Keep my draft' }).click()
+    await saveGitLabText.click()
+    await page.getByRole('heading', { name: newTitle }).waitFor()
+    await page.getByText('Issue text saved on GitLab.', { exact: true }).waitFor()
+
+    await editGitLabBody.click()
+    const body = gitLabEditor.getByRole('textbox', { name: 'Description', exact: true })
+    const gitLabDescription = '    indentation stays\n\n**Reviewed GitLab description**\n\n<script>fixture-private-text()</script>'
+    await body.fill(gitLabDescription)
+    await gitLabEditor.getByRole('button', { name: 'Preview', exact: true }).click()
+    const gitLabPreview = gitLabEditor.getByLabel('Markdown preview')
+    await gitLabPreview.getByText('Reviewed GitLab description', { exact: true }).waitFor()
+    assert.equal(await gitLabPreview.getByText('fixture-private-text', { exact: false }).count(), 0)
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height })
+      assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+      await capture('gitlab-text-preview-' + width + 'x' + height)
+    }
+    await gitLabEditor.getByRole('button', { name: 'Write', exact: true }).click()
+    assert.equal(await body.inputValue(), gitLabDescription)
+    const originalWrite = await gitLabSubmission()
+    alterForge(current => { current.gitlab.dropTextReply = true })
+    await saveGitLabText.click()
+    const recoverGitLabText = gitLabEditor.getByRole('button', { name: 'Check GitLab', exact: true })
+    await recoverGitLabText.waitFor()
+    const gitLabTextPort = host.server.port
+    host.stop()
+    host = await startHost(gitLabTextPort)
+    await recoverGitLabText.click()
+    await page.locator('[data-issue-markdown="description"]').getByText('Reviewed GitLab description', { exact: true }).waitFor()
+    assert.equal((await postGitLabText(originalWrite)).status, 303)
+    assert.deepEqual(readForge().gitlab.textWrites, [['title', newTitle, 17], ['description', gitLabDescription, 17]])
+    await editGitLabBody.click()
+    await body.fill('')
+    await saveGitLabText.click()
+    await page.getByText('Issue text saved on GitLab.', { exact: true }).waitFor()
+    assert.equal(readForge().gitlab.issue.description, '')
+    assert.equal(readForge().gitlab.issue.title, newTitle)
   }
   finally {
     if (previousGitLabToken === undefined) delete process.env.GITLAB_TOKEN
     else process.env.GITLAB_TOKEN = previousGitLabToken
   }
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup and GitLab draft persistence')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, GitLab draft persistence and GitLab text editing')
 }
 catch (error) {
   console.error(error)

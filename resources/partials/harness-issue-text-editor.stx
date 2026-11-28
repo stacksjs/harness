@@ -8,7 +8,7 @@
   <input type="hidden" name="intent" value="{{ textDraft.intent }}">
   @if(textConflict)
     <input type="hidden" name="currentVersion" value="{{ currentVersion }}">
-    <strong>Current on GitHub</strong>
+    <strong>Current on {{ textForge }}</strong>
     <pre data-issue-text-current>@if(currentText){{ currentText }}@else Empty@endif</pre>
   @endif
   @if(textConflict)
@@ -31,7 +31,7 @@
   <div data-issue-metadata-editor-actions>
     <a href="{{ metadataHref }}@if(textDraft.field === 'title')#issue-title@else#issue-description@endif" data-issue-button data-issue-text-cancel>Cancel</a>
     @if(textPending)
-      <button type="submit" data-issue-button data-issue-primary>Check GitHub</button>
+      <button type="submit" data-issue-button data-issue-primary>Check {{ textForge }}</button>
     @elseif(textConflict)
       <button type="submit" name="operation" value="rebase" data-issue-button data-issue-primary>Keep my draft</button>
     @elseif(!textLocked)
