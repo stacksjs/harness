@@ -1154,7 +1154,7 @@ describe('dashboard native STX bindings', () => {
 
   test('environment editor uses a guarded API and a two-way STX component', () => {
     const view = readFileSync(
-      resolve('storage/framework/defaults/views/dashboard/environment/index.stx'),
+      resolve('storage/framework/defaults/views/dashboard/settings/environment.stx'),
       'utf8',
     )
     const page = componentSource('Environment/EnvironmentDashboard.stx')
@@ -1162,11 +1162,12 @@ describe('dashboard native STX bindings', () => {
       resolve('storage/framework/defaults/routes/dashboard-api.ts'),
       'utf8',
     )
-    const editor = componentSource('CodeEditor.stx')
+    const editor = componentSource('Settings/SettingsCodeEditor.stx')
 
     expect(view).toContain('<EnvironmentDashboard />')
     expect(view).not.toContain('<script')
     expect(page).toContain("dashboardApi<EnvironmentResponse>(`/api/dashboard/environment?file=${encodeURIComponent(file())}`)")
+    expect(page).toContain('<SettingsCodeEditor')
     expect(page).toContain('v-model:value="envValues"')
     expect(page).toContain("useEventListener('keydown', handlePageKeydown)")
     expect(page).toContain('<Modal')
@@ -1174,46 +1175,39 @@ describe('dashboard native STX bindings', () => {
     expect(page).not.toContain('fetch(')
     expect(page).not.toContain('setTimeout(')
 
-    expect(editor).toContain("const liveValue = useReactiveProp('value', '')")
-    expect(editor).toContain('x-model="liveValue"')
-    expect(editor).toContain("emit('update:value', value)")
+    expect(editor).toContain("useModel('value', { default: '' })")
+    expect(editor).toMatch(/<CodeEditor[^>]*v-model:value="model"/)
     expect(editor).toContain("emit('save')")
+    expect(editor).toContain("emit('format')")
     expect(editor).not.toMatch(/\b(?:document|window)\./)
 
     expect(routes).toContain("guard(route.get('/environment'")
     expect(routes).toContain("guard(route.put('/environment'")
   })
 
-  test('settings editor uses reactive keyed drafts and native models', () => {
+  test('project configuration uses STX controls and the shared dashboard API', () => {
     const view = readFileSync(
       resolve('storage/framework/defaults/views/dashboard/settings/index.stx'),
       'utf8',
     )
     const page = componentSource('Settings/SettingsDashboard.stx')
+    const editor = readFileSync(
+      resolve('storage/framework/defaults/views/dashboard/composables/useProjectConfigEditor.ts'),
+      'utf8',
+    )
 
     expect(view).toContain('<SettingsDashboard />')
     expect(view).not.toContain('<script')
-    expect(page).toContain('const drafts = reactive<')
-    expect(page).toContain('<SearchFilter v-model:searchValue="configQuery"')
+    expect(page).toContain('<SearchFilter v-model:searchValue="fieldQuery"')
     expect(page).toContain('x-model="drafts[field.key]"')
-    expect(page).toContain('x-model.number="drafts[field.key]"')
-    // A yes or no is the shared switch, bound to its draft the same way.
+    expect(page).toMatch(/<input[^>]*type="number"[^>]*x-model="drafts\[field\.key\]"/)
     expect(page).toContain('v-model:checked="drafts[field.key]"')
-    expect(page).not.toContain('type="checkbox"')
-    expect(page).toContain('<div :for="field in fields"')
-    expect(page).toContain("@if(field.type === 'boolean' && field.editable)")
-    expect(page).toContain('@elseif(field.editable)')
-    expect(page).toContain('@endif')
-    expect(page).not.toContain('<template :if="field.type === \'boolean\' && field.editable">')
-    expect(page).toContain('const isDirty = derived(')
-    expect(page).toContain("useEventListener('beforeunload', handleBeforeUnload)")
-    expect(page).toContain('@click="requestSelectFile(file.name)"')
-    expect(page).toContain('<ConfirmDialog')
-    expect(page).toContain('title="Discard unsaved changes?"')
-    expect(page).toContain('|| !isDirty()')
-    expect(page).toContain("dashboardApi<ConfigUpdateResponse>('/api/config/update'")
-    expect(page).not.toMatch(/:value="[^"]+\(\)"[^>]+@(?:input|change)=/)
-    expect(page).not.toContain('setDraft(')
+    expect(page).toContain('<SettingsCodeEditor v-model:value="sourceDraft"')
+    expect(editor).toContain("dashboardApi<ConfigDocument>('/api/config/update'")
+    expect(editor).toContain('!Number.isFinite(field.value)')
+    expect(editor).toContain('revision: loaded.revision')
+    expect(page).toContain('confirmSettingsDiscard(discardTitle, discardDescription')
+    expect(page).not.toMatch(/\b(?:document|window)\./)
     expect(page).not.toContain('fetch(')
   })
 
@@ -1236,7 +1230,7 @@ describe('dashboard native STX bindings', () => {
     expect(view).not.toContain('<script client>')
     expect(component).toContain("dashboardApi<MailSettingsResponse>('/api/dashboard/mail-settings')")
     expect(component).toContain('@submit.prevent="saveSettings"')
-    expect(component).toContain('v-model:value="driver"')
+    expect(component).toMatch(/<SettingsPicker[^>]*:value="driver\(\)"[^>]*@change="driver\.set\(\$event\)"/)
     expect(component).toContain('x-model="clearSmtpPassword"')
     expect(component).not.toMatch(/\b(?:document|window)\./)
     expect(component).not.toContain('fetch(')

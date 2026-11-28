@@ -9,7 +9,7 @@
         "@stacksjs/components": "^0.2.960",
         "@stacksjs/stx": "^0.2.960",
         "bun-plugin-stx": "^0.2.960",
-        "stacks": "^0.75.712"
+        "stacks": "^0.75.716"
       },
       "devDependencies": {
         "better-dx": "^0.2.17",
@@ -79,7 +79,7 @@
       "name": "hello-world-fx",
       "version": "0.70.304",
       "devDependencies": {
-        "stacks": "^0.75.712"
+        "stacks": "^0.75.716"
       }
     }
   },
