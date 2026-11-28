@@ -1,11 +1,12 @@
 import type { HarnessState } from '@harness/engine'
-import type { ForgejoIssueRepository, GitHubIssueRepository } from './issue-repositories'
+import type { ForgejoIssueRepository, IssueRepository } from './issue-repositories'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
-import { issueRepositoryKey, parseForgejoIssueUrl, parseGitHubIssueUrl } from '@harness/contract'
+import { issueRepositoryKey, parseForgejoIssueUrl, parseIssueUrl } from '@harness/contract'
 import { forgejoLabels, forgejoRepoPath, readForgejoRepositoryAuthority } from './forgejo-issues'
 import { forgejoTeaRequest } from './forgejo-tea'
 import { githubIssueTemplates } from './github-issue-templates'
+import { bindGitLabIssueCreation } from './gitlab-issue-creation'
 import { issueReferenceForSelection, trustedIssueProjects } from './issue-repositories'
 import { issueTextLimits } from './issue-text'
 import { repositoryGitHubCredential, repositoryGitHubRequest, RepositoryPullRequestError } from './repository-pull-request'
@@ -17,14 +18,15 @@ const pages = 10
 
 type CreationResult = { key: string, displayKey: string, url: string }
 type RawIssue = { number?: unknown, html_url?: unknown, user?: { id?: unknown }, title?: unknown, body?: unknown, pull_request?: unknown }
-type Repository = ForgejoIssueRepository | GitHubIssueRepository
-type Authority = { repoId: number, viewer: number, archived: unknown, issuesEnabled: boolean, canPush: boolean }
+type GitLabCreatedIssue = { iid?: unknown, web_url?: unknown, author?: { id?: unknown }, title?: unknown, description?: unknown }
+type Authority = { repoId: number, viewer: number, archived: unknown, issuesEnabled: boolean, canCreate?: boolean, canTriage: boolean, multipleAssignees?: boolean }
 type TemplateList = Awaited<ReturnType<typeof githubIssueTemplates>>
-type Adapter = {
+type CreationPayload = { title: string, body: string, labels: string[], assignees: string[] }
+export type IssueCreationAdapter = {
   readAuthority: () => Promise<Authority | null>
   templates: () => Promise<TemplateList>
-  resolveLabels: (names: string[]) => Promise<string[] | number[] | null>
-  submit: (payload: { title: string, body: string, labels: string[] | number[], assignees: string[] }) => Promise<unknown>
+  prepare: (payload: CreationPayload, authority: Authority) => Promise<{ body: object } | { status: 'refused' | 'unknown-label' | 'unknown-assignee' }>
+  submit: (body: object) => Promise<unknown>
   list: (page: number) => Promise<{ body: unknown, more?: boolean }>
 }
 
@@ -38,10 +40,10 @@ async function destination(state: HarnessState, query: URLSearchParams, signal: 
   const ref = issueReferenceForSelection(query.get('repository'), 1)
   const workspace = state.workspaces.get(workspaceId)
   if (!state.profiles.has(profile) || !workspace?.trusted || workspace.scratch || workspace.profileId !== profile
-    || !ref || ref.tracker === 'gitlab') return null
+    || !ref) return null
   const [project] = await trustedIssueProjects([workspace], profile, signal)
   const repository = project?.repositories.get(issueRepositoryKey(ref))
-  if (!repository || repository.tracker === 'gitlab') return null
+  if (!repository) return null
   const trusted = () => {
     const current = state.workspaces.get(workspaceId)
     return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === workspace.path)
@@ -49,8 +51,8 @@ async function destination(state: HarnessState, query: URLSearchParams, signal: 
   return { repository, trusted }
 }
 
-function scopeFor(repository: Repository, authority: Authority) {
-  const connection = repository.tracker === 'forgejo' ? [repository.base, repository.login] : ['github.com']
+function scopeFor(repository: IssueRepository, authority: Authority) {
+  const connection = repository.tracker === 'forgejo' ? [repository.base, repository.login] : [repository.tracker === 'gitlab' ? repository.host : 'github.com']
   return hash([repository.tracker + '-issue-create', ...connection, repository.key, repository.workspace.profileId,
     repository.workspace.id, authority.repoId, authority.viewer])
 }
@@ -112,13 +114,20 @@ function positiveId(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
-async function bindAdapter(repository: Repository, signal: AbortSignal): Promise<Adapter> {
+async function bindAdapter(repository: IssueRepository, signal: AbortSignal): Promise<IssueCreationAdapter> {
+  if (repository.tracker === 'gitlab') return bindGitLabIssueCreation(repository, signal, pageSize)
   if (repository.tracker === 'forgejo') {
     const endpoint = forgejoRepoPath(repository) + '/issues'
     return {
-      readAuthority: () => readForgejoRepositoryAuthority(repository, signal),
+      async readAuthority() {
+        const authority = await readForgejoRepositoryAuthority(repository, signal)
+        return authority && { ...authority, canTriage: authority.canPush }
+      },
       templates: () => forgejoTemplateList(repository, signal),
-      resolveLabels: names => resolveForgejoLabels(repository, names, signal),
+      async prepare(payload) {
+        const labels = await resolveForgejoLabels(repository, payload.labels, signal)
+        return labels ? { body: { ...payload, labels } } : { status: 'unknown-label' }
+      },
       submit: async payload => (await forgejoTeaRequest(repository, endpoint, signal, { method: 'POST', body: payload })).body,
       list: page => forgejoTeaRequest(repository, endpoint + '?state=all&sort=latest&limit=' + pageSize + '&page=' + page, signal),
     }
@@ -139,10 +148,10 @@ async function bindAdapter(repository: Repository, signal: AbortSignal): Promise
       const user = userReply.body as { id?: unknown } | null
       if (!positiveId(repo?.id) || !positiveId(user?.id) || typeof repo.full_name !== 'string'
         || repo.full_name.toLowerCase() !== repository.name.toLowerCase()) return null
-      return { repoId: repo.id, viewer: user.id, archived: repo.archived, issuesEnabled: repo.has_issues === true, canPush: repo.permissions?.push === true }
+      return { repoId: repo.id, viewer: user.id, archived: repo.archived, issuesEnabled: repo.has_issues === true, canTriage: repo.permissions?.push === true }
     },
     templates: () => githubIssueTemplates(repository, credential, signal),
-    resolveLabels: async names => names,
+    prepare: async body => ({ body }),
     submit: async payload => (await request(endpoint, payload)).body,
     async list(page) {
       const reply = await request(endpoint + '?state=all&sort=created&direction=desc&per_page=' + pageSize + '&page=' + page)
@@ -162,13 +171,14 @@ export async function issueTemplates(state: HarnessState, query: URLSearchParams
   const current = await adapter.readAuthority()
   const scope = scopeFor(repository, initial)
   if (!trusted() || !current?.issuesEnabled || scopeFor(repository, current) !== scope) return null
-  return { scope, canCreate: current.archived === false, canTriage: current.archived === false && current.canPush, ...choices }
+  const canCreate = current.archived === false && current.canCreate !== false
+  return { scope, canCreate, canTriage: canCreate && current.canTriage, ...choices }
 }
 
-function validateResult(repository: Repository, value: unknown): CreationResult | null {
+function validateResult(repository: IssueRepository, value: unknown): CreationResult | null {
   const issue = value as { key?: unknown, url?: unknown } | null
   if (typeof issue?.key !== 'string' || typeof issue.url !== 'string') return null
-  const ref = repository.tracker === 'forgejo' ? parseForgejoIssueUrl(issue.url) : parseGitHubIssueUrl(issue.url)
+  const ref = repository.tracker === 'forgejo' ? parseForgejoIssueUrl(issue.url) : parseIssueUrl(issue.url)
   return ref?.tracker === repository.tracker && issueRepositoryKey(ref) === repository.key && issue.key === String(ref.number)
     ? { key: issue.key, displayKey: '#' + issue.key, url: issue.url } : null
 }
@@ -183,7 +193,7 @@ export async function createIssue(state: HarnessState, query: URLSearchParams, v
   const labels = strings(input.labels, 50)
   const assignees = strings(input.assignees, 25)
   if (!labels || !assignees || assignees.some(name => !/^[a-z\d._-]{1,100}$/iu.test(name))) return null
-  const result = (status: 'changed' | 'denied' | 'unavailable' | 'unknown-label' | 'refused' | 'pending') => ({ status })
+  const result = (status: 'changed' | 'denied' | 'unavailable' | 'unknown-label' | 'unknown-assignee' | 'refused' | 'pending') => ({ status })
   let attempted = false
   try {
     const target = await destination(state, query, signal)
@@ -208,7 +218,10 @@ export async function createIssue(state: HarnessState, query: URLSearchParams, v
     }
     attempted = prior === 'pending'
     const marker = '<!-- harness:issue-create:' + hash([scope, intent]) + ' -->'
-    const matches = (raw: RawIssue | null): CreationResult | null => {
+    const matches = (value: unknown): CreationResult | null => {
+      const gitLab = repository.tracker === 'gitlab' ? value as GitLabCreatedIssue | null : null
+      const raw = gitLab ? { number: gitLab.iid, html_url: gitLab.web_url, title: gitLab.title, body: gitLab.description, user: gitLab.author }
+        : value as RawIssue | null
       if (!raw || raw.pull_request || raw.user?.id !== authority.viewer || raw.title !== title
         || typeof raw.body !== 'string' || (raw.body !== marker && !raw.body.startsWith(marker + '\n\n'))) return null
       return validateResult(repository, { key: String(raw.number), url: raw.html_url })
@@ -219,12 +232,13 @@ export async function createIssue(state: HarnessState, query: URLSearchParams, v
       return { status: 'created' as const, issue, replayed }
     }
     if (!prior) {
-      const allowed = (current: Authority) => current.issuesEnabled && current.archived === false && (current.canPush || (!labels.length && !assignees.length))
+      const allowed = (current: Authority) => current.issuesEnabled && current.archived === false && current.canCreate !== false
+        && (current.canTriage || (!labels.length && !assignees.length))
       if (!allowed(authority)) return result('denied')
-      const resolved = await adapter.resolveLabels(labels)
-      if (!resolved) return result('unknown-label')
+      const prepared = await adapter.prepare({ title, body: marker + '\n\n' + body, labels, assignees }, authority)
+      if ('status' in prepared) return result(prepared.status)
       const current = await read()
-      if (!current || !sameAccount(current)) return result('changed')
+      if (!current || !sameAccount(current) || current.multipleAssignees !== authority.multipleAssignees) return result('changed')
       if (!allowed(current)) return result('denied')
       const claim = receipts.claim(intent, fingerprint, trusted())
       if (claim !== 'claimed') {
@@ -233,8 +247,7 @@ export async function createIssue(state: HarnessState, query: URLSearchParams, v
       }
       attempted = true
       try {
-        const reply = await adapter.submit({ title, body: marker + '\n\n' + body, labels: resolved, assignees })
-        const issue = matches(reply as RawIssue | null)
+        const issue = matches(await adapter.submit(prepared.body))
         if (issue) return await accept(issue, false)
       }
       catch (error) {

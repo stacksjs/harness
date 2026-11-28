@@ -80,8 +80,10 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
     const read = async () => {
       if (gitLab) {
         const authority = await readGitLabIssueText(gitLab.repository, reference.number, signal, gitLab.credential)
-        return authority && { ...authority, write: (value: string) =>
-          writeGitLabIssueText(gitLab.repository, reference.number, authority.issueId, field, value, signal, gitLab.credential) }
+        return authority && { ...authority, write: (value: string) => {
+          const saved = field === 'body' && authority.creationMarker ? authority.creationMarker + '\n\n' + value : value
+          return writeGitLabIssueText(gitLab.repository, reference.number, authority.issueId, field, saved, signal, gitLab.credential)
+        } }
       }
       if (repository.tracker === 'forgejo') {
         const authority = await readForgejoIssueAuthority(repository, reference.number, signal)

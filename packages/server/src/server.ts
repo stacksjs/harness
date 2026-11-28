@@ -2334,7 +2334,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             catch { input = null }
             const result = await createIssue(engine.current, url.searchParams, input, signal, reviewReplies)
             if (!result) return Response.json({ status: 'invalid' }, { status: 400, headers: jsonHeaders })
-            const statuses = { changed: 409, denied: 403, unavailable: 503, 'unknown-label': 422, refused: 422, pending: 202 }
+            const statuses = { changed: 409, denied: 403, unavailable: 503, 'unknown-label': 422, 'unknown-assignee': 422, refused: 422, pending: 202 }
             const status = result.status === 'created' ? result.replayed ? 200 : 201 : statuses[result.status]
             return Response.json(result, { status, headers: jsonHeaders })
           }).catch(() => Response.json({ status: 'unavailable' }, { status: 503, headers: jsonHeaders }))

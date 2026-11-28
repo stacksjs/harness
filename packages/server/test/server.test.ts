@@ -17,6 +17,7 @@ import { serve } from '../src/server'
 import { openReserved, plan } from '../src/worktree'
 import { fixtureForgejoCli } from './fixtures/forgejo-cli'
 import { fixtureGitHubCli } from './fixtures/github-cli'
+import { fixtureGitLabCli } from './fixtures/gitlab-cli'
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from './fixtures/git-http'
 
 let dir: string
@@ -600,6 +601,138 @@ describe('Forgejo issue creation', () => {
       expect((await templates()).status).toBe(404)
       expect((await create({ ...sparse, intent: crypto.randomUUID() })).status).toBe(403)
       expect(read().createWrites).toHaveLength(2)
+    }
+    finally {
+      process.chdir(cwd)
+      process.env.PATH = path
+    }
+  }, 40_000)
+})
+
+describe('GitLab issue creation', () => {
+  it.skipIf(process.platform === 'win32')('pins the selected project and recovers one write with numeric assignees and Markdown templates', async () => {
+    const gitlabHost = 'gitlab-create.fixture.invalid:8443'
+    const repository = 'team/triage/notes'
+    const repositoryKey = 'gitlab:' + gitlabHost + '/' + repository
+    const project = join(dir, 'gitlab-issues')
+    const issueUrl = (iid: number) => 'https://' + gitlabHost + '/' + repository + '/-/issues/' + iid
+    mkdirSync(project)
+    for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://' + gitlabHost + '/' + repository + '.git']])
+      expect(Bun.spawnSync(['git', ...args], { cwd: project }).success).toBe(true)
+    const cli = fixtureGitHubCli(dir, {})
+    fixtureGitLabCli(cli.bin)
+    let state = {
+      host: gitlabHost, repository, viewer: 17, archived: false, multipleAssignees: true, canEditText: true,
+      members: [{ id: 34, username: 'fixture-reviewer' }, { id: 35, username: 'fixture-helper' }],
+      issue: { iid: 4, web_url: issueUrl(4), title: 'Old issue', description: '', state: 'opened', labels: [],
+        assignees: [], author: { id: 17, username: 'fixture-reviewer' }, created_at: '2026-11-27T12:00:00Z', updated_at: '2026-11-27T12:00:00Z' },
+      otherIssues: [] as Array<Record<string, unknown>>, labels: [], notes: [], relatedRequests: [],
+      creation: { dropReply: false, pageSize: 1, olderHost: false, canCreate: true, canTriage: true, issuesEnabled: true,
+        apiHost: '', configuredApiHost: '', writes: [] as Array<Record<string, unknown>>, templates: [
+          { key: 'Bug Report', name: ' Bug Report ', content: '  Preserve this indentation.\n' },
+          { key: '../unrelated', name: 'Invalid entry', content: 'ignored' },
+          { key: 'Plain', content: '' },
+        ],
+      },
+    }
+    const save = () => writeFileSync(cli.state, JSON.stringify({ gitlab: state }))
+    const load = () => { state = JSON.parse(readFileSync(cli.state, 'utf8')).gitlab }
+    save()
+    const cwd = process.cwd()
+    const path = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      const profile = derivedId('gitlab-create-profile')
+      const workspaceId = derivedId('gitlab-create-project')
+      const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+        harness.engine.dispatch({ id, at: 1, command })
+      await dispatch('gitlab-create-profile', { type: 'profile.create', name: 'GitLab issue fixture' })
+      await dispatch('gitlab-create-project', { type: 'workspace.add', path: realpathSync(project), profileId: profile })
+      const origin = 'http://127.0.0.1:' + port
+      const query = new URLSearchParams({ profile: String(profile), workspace: String(workspaceId), repository: repositoryKey })
+      const templates = () => fetch(origin + '/issues/templates?' + query)
+      expect((await templates()).status).toBe(404)
+      await dispatch('gitlab-create-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+      state.creation.apiHost = 'gitlab-api.fixture.invalid'
+      save()
+      expect((await templates()).status).toBe(503)
+      state.creation.configuredApiHost = state.creation.apiHost
+      save()
+      const listed = await templates()
+      expect(listed.status).toBe(200)
+      const { scope, ...choices } = await listed.json()
+      expect(choices).toEqual({ canCreate: true, canTriage: true, blankIssuesEnabled: true, templates: [
+        { key: 'Bug Report', name: 'Bug Report', body: '  Preserve this indentation.\n', about: '', title: '', labels: [], assignees: [] },
+        { key: 'Plain', name: 'Plain', body: '', about: '', title: '', labels: [], assignees: [] },
+      ] })
+      state.creation.olderHost = true
+      save()
+      expect(await (await templates()).json()).toMatchObject({ scope, canCreate: true })
+      state.creation.olderHost = false
+      state.creation.canCreate = false
+      save()
+      expect(await (await templates()).json()).toMatchObject({ canCreate: false, canTriage: false })
+      const payload = { intent: crypto.randomUUID(), scope, title: 'Restore GitLab draft', body: 'Steps:\n\n  Open **Notes**.',
+        labels: ['needs triage', 'offline'], assignees: ['fixture-reviewer', '35'] }
+      const send = (value: typeof payload) => fetch(origin + '/issues/create?' + query, {
+        method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify(value),
+      })
+      expect((await send(payload)).status).toBe(403)
+      state.creation.canCreate = true
+      state.creation.canTriage = false
+      save()
+      expect((await send(payload)).status).toBe(403)
+      state.creation.canTriage = true
+      state.viewer = 99
+      save()
+      expect((await send(payload)).status).toBe(409)
+      state.viewer = 17
+      save()
+      const missing = await send({ ...payload, assignees: ['unknown'] })
+      expect(missing.status).toBe(422)
+      expect(await missing.json()).toEqual({ status: 'unknown-assignee' })
+      expect((await send({ ...payload, labels: ['misleading,comma'] })).status).toBe(422)
+      load()
+      expect(state.creation.writes).toHaveLength(0)
+      state.creation.dropReply = true
+      save()
+      const pending = await send(payload)
+      expect(pending.status).toBe(202)
+      expect(await pending.json()).toEqual({ status: 'pending' })
+      load()
+      expect(state.creation.writes).toHaveLength(1)
+      expect(state.creation.writes[0]).toMatchObject({ iid: 101, labels: 'needs triage,offline', assignee_ids: [34, 35], viewer: 17 })
+      expect(String(state.creation.writes[0]?.description).split('\n\n').slice(1).join('\n\n')).toBe(payload.body)
+      state.otherIssues.push({ ...state.otherIssues[0], iid: 102, web_url: issueUrl(102),
+        author: { id: 29, username: 'another-user' }, created_at: '2026-11-28T12:01:00Z' })
+      save()
+      harness.stop()
+      harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+      const recovered = await send(payload)
+      expect(recovered.status).toBe(200)
+      expect(await recovered.json()).toEqual({ status: 'created', issue: { key: '101', displayKey: '#101', url: issueUrl(101) }, replayed: true })
+      load()
+      const created = state.otherIssues.shift()
+      state.issue = { ...state.issue, ...created }
+      save()
+      const detail = await fetch(origin + '/issues?' + new URLSearchParams({
+        profile: String(profile), repository: repositoryKey, selected: repositoryKey, issue: '101', editText: 'body',
+      }))
+      expect(detail.status).toBe(200)
+      const html = await detail.text()
+      expect(html.includes('data-issue-text-editor')).toBe(true)
+      expect(html.includes(payload.body)).toBe(true)
+      expect(html.includes('harness:issue-create:')).toBe(false)
+      state.multipleAssignees = false
+      save()
+      expect((await send({ ...payload, intent: crypto.randomUUID() })).status).toBe(422)
+      const free = await send({ ...payload, intent: crypto.randomUUID(), body: '', assignees: ['fixture-reviewer'] })
+      expect(free.status).toBe(201)
+      load()
+      expect(state.creation.writes).toHaveLength(2)
+      expect(state.creation.writes[1]).toMatchObject({ assignee_id: 34 })
+      expect(state.creation.writes[1]).not.toHaveProperty('assignee_ids')
     }
     finally {
       process.chdir(cwd)

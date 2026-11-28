@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { issueRepositoryKey, parseIssueUrl } from '@harness/contract'
 import type { IssueActivityItem } from './issue-activity'
 import type { GitLabIssueRepository } from './issue-repositories'
+import { issueCreationMarker } from './issue-creation-marker'
 import { openClosedIssueStatusPlan } from './issue-status'
 import { defaultGitLabIssueHost, gitLabCli } from './issue-repositories'
 import { RepositoryPullRequestError } from './repository-pull-request'
@@ -61,6 +62,14 @@ function gitLabEnvironment(repository: GitLabIssueRepository, credential?: strin
   return env
 }
 
+async function configuredGitLabApiHost(glab: string, repository: GitLabIssueRepository, signal: AbortSignal) {
+  const child = Bun.spawn([glab, 'config', 'get', 'api_host', '--host', repository.host], {
+    cwd: repository.path, env: gitLabEnvironment(repository), stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', signal, timeout: 4_000,
+  })
+  const [output, exit] = await Promise.all([new Response(child.stdout).text(), child.exited])
+  return exit === 0 ? output.trim().toLowerCase() : ''
+}
+
 export type IssueCredential = { type: 'pat', token: string } | { type: 'oauth2', token: string, endpoint: URL }
 
 export async function gitLabIssueCredential(repository: GitLabIssueRepository, signal: AbortSignal): Promise<IssueCredential> {
@@ -75,9 +84,10 @@ export async function gitLabIssueCredential(repository: GitLabIssueRepository, s
       const result = JSON.parse(output)
       const instance = new URL(result.instance_url)
       const token = result.token?.token
-      if (result.type === 'success' && instance.protocol === 'https:' && instance.host === repository.host
+      if (result.type === 'success' && instance.protocol === 'https:'
         && !instance.username && !instance.password && !instance.search && !instance.hash
-        && typeof token === 'string' && /^[\x21-\x7e]{1,8192}$/u.test(token)) {
+        && typeof token === 'string' && /^[\x21-\x7e]{1,8192}$/u.test(token)
+        && (instance.host === repository.host || instance.host === await configuredGitLabApiHost(glab, repository, signal))) {
         if (result.token.type === 'pat') return { type: 'pat', token }
         if (result.token.type === 'oauth2') {
           instance.pathname = instance.pathname.replace(/\/$/u, '') + '/api/graphql'
@@ -91,14 +101,16 @@ export async function gitLabIssueCredential(repository: GitLabIssueRepository, s
 }
 
 async function api(repository: GitLabIssueRepository, endpoint: string, signal: AbortSignal,
-  request?: { body?: object, credential?: string },
+  request?: { body?: object, credential?: string, success?: number },
 ) {
   const glab = gitLabCli()
   if (!glab) throw new RepositoryPullRequestError('Install the GitLab CLI on this host to read issues.')
-  const child = Bun.spawn([glab, 'api', endpoint, '--hostname', repository.host, '--include',
+  // The CLI flag rejects ports. Its configured host can include one.
+  const explicitHost = repository.host.includes(':') ? [] : ['--hostname', repository.host]
+  const child = Bun.spawn([glab, 'api', endpoint, ...explicitHost, '--include',
     ...(request?.body ? ['--method', 'POST', '--input', '-', '--header', 'Content-Type: application/json'] : []),
   ], {
-    cwd: repository.path, env: gitLabEnvironment(repository, request?.credential),
+    cwd: repository.path, env: { ...gitLabEnvironment(repository, request?.credential), GITLAB_HOST: repository.host },
     stdin: request?.body ? new Blob([JSON.stringify(request.body)]) : 'ignore',
     stdout: 'pipe', stderr: 'ignore', signal, timeout: 15_000,
   })
@@ -109,7 +121,7 @@ async function api(repository: GitLabIssueRepository, endpoint: string, signal: 
   if (status === 429) throw new RepositoryPullRequestError('GitLab is rate limiting requests. Try again shortly.', status)
   if (status === 401 || status === 403 || (!status && exit !== 0))
     throw new RepositoryPullRequestError('GitLab access is unavailable. Check glab auth status for this host.', status)
-  if (status !== 200 || !split) throw new RepositoryPullRequestError('GitLab could not load this resource.', status)
+  if (status !== (request?.success ?? 200) || !split) throw new RepositoryPullRequestError('GitLab could not load this resource.', status)
   let body: unknown
   try { body = JSON.parse(output.slice(split.index + split[0].length)) }
   catch { throw new RepositoryPullRequestError('GitLab returned an unreadable response.') }
@@ -179,19 +191,31 @@ async function gitLabBearer(url: URL, token: string, signal: AbortSignal, body?:
   return response
 }
 
+export async function gitLabIssueRest(repository: GitLabIssueRepository, endpoint: string, signal: AbortSignal,
+  credential: IssueCredential, body?: object,
+) {
+  const success = body ? 201 : 200
+  if (credential.type === 'pat') return api(repository, endpoint, signal, { credential: credential.token, body, success })
+  const [path, search] = endpoint.split('?')
+  const url = new URL(credential.endpoint)
+  url.pathname = url.pathname.replace(/\/graphql$/u, '/v4/') + path
+  url.search = search ?? ''
+  const response = await gitLabBearer(url, credential.token, signal, body)
+  if (response.status !== success) {
+    await response.body?.cancel()
+    throw new RepositoryPullRequestError('GitLab could not complete this request.', response.status)
+  }
+  const next = response.headers.get('x-next-page')
+  const link = response.headers.get('link')
+  return { body: await response.json() as unknown, more: next !== null ? Boolean(next) : link ? /;\s*rel="next"/u.test(link) : undefined }
+}
+
 export async function readGitLabAwards(repository: GitLabIssueRepository, number: number, comment: number, page: number,
   signal: AbortSignal, credential: IssueCredential,
 ) {
   const endpoint = projectPath(repository) + '/issues/' + number + (comment ? '/notes/' + comment : '')
     + '/award_emoji?' + new URLSearchParams({ per_page: '100', page: String(page) })
-  if (credential.type === 'pat') return api(repository, endpoint, signal, { credential: credential.token })
-  const url = new URL(credential.endpoint)
-  url.pathname = url.pathname.replace(/\/graphql$/u, '/v4/') + endpoint.split('?')[0]
-  url.search = endpoint.slice(endpoint.indexOf('?'))
-  const response = await gitLabBearer(url, credential.token, signal)
-  const next = response.headers.get('x-next-page')
-  const link = response.headers.get('link')
-  return { body: await response.json() as unknown, more: next !== null ? Boolean(next) : link ? /;\s*rel="next"/u.test(link) : undefined }
+  return gitLabIssueRest(repository, endpoint, signal, credential)
 }
 
 export async function readGitLabIssueText(repository: GitLabIssueRepository, number: number, signal: AbortSignal, credential?: IssueCredential,
@@ -240,13 +264,14 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
   const canTriage = canEditText && issue.userPermissions?.adminIssue === true
   const applied = triage ? triageChoices(triage, issue[triage]) : null
   const status = openClosedIssueStatusPlan(issue.state === 'opened' ? 'open' : issue.state, canEditText && (issue.state !== 'closed' || issue.userPermissions?.reopenIssue === true))
-  return { scope: scope('issue-text'), commentScope: scope('issue-comment'), commentBlocked, viewer,
+  const marker = issue.description?.match(issueCreationMarker)?.[0] ?? ''
+  return { scope: scope('issue-text'), creationMarker: marker.trimEnd(), commentScope: scope('issue-comment'), commentBlocked, viewer,
     statusScope: scope('issue-status'), status, issueId: issue.id, canEditText,
     reactionScope: scope('issue-reaction'), canReact: project.archived === false
       && (issue.discussionLocked === false || issue.userPermissions?.createNote === true),
     triageScope: scope('issue-triage'), projectId: project.id, canTriage, applied: applied && !applied.more ? applied.choices : null,
     multipleAssignees: project.multipleAssignees?.available ?? null,
-    text: { title: issue.title, body: issue.description ?? '' } }
+    text: { title: issue.title, body: issue.description?.slice(marker.length) ?? '' } }
 }
 
 export async function searchGitLabTriage(repository: GitLabIssueRepository, kind: GitLabTriageKind, search: string,
@@ -479,7 +504,7 @@ export async function readGitLabIssue(repository: GitLabIssueRepository, number:
     if (reference?.tracker !== 'gitlab' || reference.host !== repository.host) return []
     return [{ href: url, label: typeof request.title === 'string' ? request.title.slice(0, 160) : 'Merge request' }]
   }) : []
-  return { ...row, description: typeof raw.description === 'string' ? raw.description.slice(0, 65_536) : '',
+  return { ...row, description: typeof raw.description === 'string' ? raw.description.replace(issueCreationMarker, '').slice(0, 65_536) : '',
     dateLabel: row.created ? dates.format(row.created) : '', activity: items, reactions: null, commentTotal: typeof raw.user_notes_count === 'number' && Number.isSafeInteger(raw.user_notes_count) ? Math.max(0, raw.user_notes_count) : 0,
     activityAvailable: Array.isArray(notes?.body), activityDegraded: false, olderActivity: '', newerActivity: '',
     commentPage: page, moreComments: Boolean(notes?.more ?? (Array.isArray(notes?.body) && notes.body.length === pageSize)),

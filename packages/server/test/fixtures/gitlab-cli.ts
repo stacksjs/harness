@@ -17,21 +17,29 @@ if (command === 'auth' && endpoint === 'status') {
 }
 function respond(status, value, next = '') {
   process.stdout.write('HTTP/2.0 ' + status + '\\r\\nX-Next-Page: ' + next + '\\r\\n\\r\\n' + JSON.stringify(value))
-  process.exit(status === 200 ? 0 : 1)
+  process.exit(status >= 200 && status < 300 ? 0 : 1)
 }
 if (command === 'auth' && endpoint === 'credential-helper') {
   if (process.env.GITLAB_TOKEN || flags[0] !== '--repo' || flags[1] !== 'https://' + gitlab.host + '/' + gitlab.repository) process.exit(1)
-  console.log(JSON.stringify({ type: 'success', instance_url: 'https://' + gitlab.host, token: { type: 'pat', token: credential } }))
+  console.log(JSON.stringify({ type: 'success', instance_url: 'https://' + (gitlab.creation?.apiHost || gitlab.host), token: { type: 'pat', token: credential } }))
   process.exit(0)
 }
-if (command !== 'api' || flags[0] !== '--hostname' || flags[1] !== gitlab.host || !flags.includes('--include'))
-  respond(404, {})
+if (command === 'config' && endpoint === 'get' && flags.join(' ') === 'api_host --host ' + gitlab.host && gitlab.creation) {
+  console.log(gitlab.creation.configuredApiHost || '')
+  process.exit(0)
+}
+const cliHost = flags[0] === '--hostname' ? flags[1] : process.env.GITLAB_HOST
+if (command !== 'api' || cliHost !== gitlab.host || !flags.includes('--include')
+  || (gitlab.host.includes(':') && flags.includes('--hostname'))) respond(404, {})
 const pinned = process.env.GITLAB_TOKEN === credential && process.env.GITLAB_HOST === gitlab.host
 const address = new URL(endpoint, 'https://fixture.invalid/')
 const path = decodeURIComponent(address.pathname)
 const project = '/projects/' + gitlab.repository
 const root = project + '/issues'
-if ((process.env.GITLAB_TOKEN && (!pinned || (endpoint !== 'graphql' && !path.endsWith('/award_emoji'))))
+const creation = gitlab.creation
+const templatePath = project + '/templates/issues'
+const creationRoute = creation && (path === root || path === '/users' || path === templatePath || path.startsWith(templatePath + '/'))
+if ((process.env.GITLAB_TOKEN && (!pinned || (endpoint !== 'graphql' && !path.endsWith('/award_emoji') && !creationRoute)))
   || process.env.GITLAB_ACCESS_TOKEN || process.env.OAUTH_TOKEN)
   respond(412, {})
 const awards = subject => gitlab.awards?.[subject] ?? []
@@ -40,6 +48,16 @@ if (path === '/graphql') {
   if (!flags.includes('--method') || !flags.includes('POST')) respond(400, {})
   const { query, variables } = await new Response(Bun.stdin.stream()).json()
   const currentUser = { id: 'gid://gitlab/User/' + viewer }
+  if (query.includes('query HarnessGitLabIssueCreation')) {
+    if (!creation || !pinned || variables.path !== gitlab.repository) respond(403, {})
+    if (creation.olderHost && query.includes('licensedFeatureAvailability'))
+      respond(200, { errors: [{ extensions: { code: 'undefinedField', typeName: 'Project', fieldName: 'licensedFeatureAvailability' } }] })
+    respond(200, { data: { currentUser, project: { id: 'gid://gitlab/Project/74', fullPath: gitlab.repository,
+      archived: gitlab.archived === true, issuesEnabled: creation.issuesEnabled !== false,
+      userPermissions: { createIssue: creation.canCreate !== false, adminIssue: creation.canTriage !== false },
+      ...(creation.olderHost ? {} : { multipleAssignees: { available: gitlab.multipleAssignees !== false } }),
+    } } })
+  }
   const connect = nodes => ({ nodes, pageInfo: { hasNextPage: false } })
   const allLabels = [...(gitlab.labels ?? []), { name: 'offline' }, { name: 'Unrelated label' }].flatMap((label, i) =>
     typeof label.name === 'string' ? [{ id: 'gid://gitlab/' + (i === 0 ? 'GroupLabel/' : 'ProjectLabel/') + (700 + i),
@@ -259,8 +277,49 @@ if (path.startsWith(root + '/') && path.endsWith('/award_emoji')) {
   const entries = awards(subject)
   respond(200, entries.slice((page - 1) * size, page * size), page * size < entries.length ? String(page + 1) : '')
 }
+if (creationRoute && path !== root) {
+  if (!pinned) respond(403, {})
+  if (path === '/users') {
+    const username = address.searchParams.get('username')
+    respond(200, gitlab.members.filter(user => user.username === username))
+  }
+  if (path === templatePath) respond(200, creation.templates)
+  const detail = creation.templates.find(entry => entry.key === path.slice(templatePath.length + 1))
+  if (detail) respond(200, { content: detail.content })
+  respond(404, {})
+}
+if (path === root && flags.includes('POST')) {
+  if (!creation || !pinned || creation.canCreate === false || gitlab.archived || creation.issuesEnabled === false) respond(403, {})
+  const input = await new Response(Bun.stdin.stream()).json()
+  if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.labels !== 'string') respond(422, {})
+  const ids = input.assignee_ids ?? (input.assignee_id ? [input.assignee_id] : [])
+  if (!Array.isArray(ids) || (gitlab.multipleAssignees === false && ('assignee_ids' in input || ids.length > 1))) respond(422, {})
+  if (creation.canTriage === false && (input.labels || ids.length)) respond(403, {})
+  const users = ids.map(id => gitlab.members.find(user => user.id === id))
+  if (users.some(user => !user)) respond(422, {})
+  const iid = Math.max(100, gitlab.issue.iid, ...gitlab.otherIssues.map(issue => issue.iid)) + 1
+  const created = { iid, title: input.title, description: input.description, author: { id: viewer, username: 'fixture-reviewer' },
+    state: 'opened', labels: input.labels ? input.labels.split(',') : [], assignees: users, user_notes_count: 0,
+    created_at: '2026-11-28T12:00:00Z', updated_at: '2026-11-28T12:00:00Z',
+    web_url: 'https://' + gitlab.host + '/' + gitlab.repository + '/-/issues/' + iid }
+  gitlab.otherIssues.push(created)
+  creation.writes.push({ ...input, iid, viewer })
+  if (creation.dropReply) {
+    delete creation.dropReply
+    creation.hideList = true
+    writeFileSync(statePath, JSON.stringify(state))
+    respond(502, {})
+  }
+  writeFileSync(statePath, JSON.stringify(state))
+  respond(201, created)
+}
 if (path === root) {
   if (gitlab.listUnavailable) respond(401, {})
+  if (pinned && creation?.hideList) {
+    delete creation.hideList
+    writeFileSync(statePath, JSON.stringify(state))
+    respond(503, {})
+  }
   const query = address.searchParams
   const rows = [gitlab.issue, ...gitlab.otherIssues].filter(issue => (
     (!query.has('state') || issue.state === query.get('state')) &&
@@ -269,7 +328,7 @@ if (path === root) {
     (!query.has('labels') || query.get('labels').split(',').every(label => issue.labels.includes(label))) &&
     (!query.has('search') || issue.title.toLowerCase().includes(query.get('search').toLowerCase()))
   )).sort((left, right) => right[query.get('order_by')].localeCompare(left[query.get('order_by')]))
-  const size = Number(query.get('per_page'))
+  const size = (pinned ? creation?.pageSize : undefined) ?? Number(query.get('per_page'))
   const page = Number(query.get('page'))
   respond(200, rows.slice((page - 1) * size, page * size), rows.length > page * size ? page + 1 : '')
 }
