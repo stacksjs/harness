@@ -105,7 +105,7 @@ let connectorScope: string | undefined
 const script: ProviderEvent[] = [
   { type: 'session-bound', providerSessionId: 'ps-drive' },
   { type: 'assistant-delta', text: 'Thinking… ' },
-  { type: 'approval-request', requestId: 'apr_1', toolName: 'Bash', args: { command: 'ls' } },
+  { type: 'approval-request', requestId: 'apr_1', toolName: 'Bash', args: { command: 'ls <notes.txt', privateFixture: 'hidden provider fixture field' } },
   { type: 'tool-call-begin', callId: 'c1', toolName: 'Bash', args: {} },
   { type: 'tool-call-end', callId: 'c1', ok: true },
   { type: 'assistant-delta', text: 'done.' },
@@ -700,6 +700,26 @@ check('first token hides the dots', dotsHiddenAfterDelta === true)
 check('composer starts a turn and the approval surfaces', true)
 const tool = await page.textContent('[data-approval-tool]')
 check('approval names the tool', (tool ?? '').includes('Bash'))
+const actionPreview = page.locator('[data-approval-detail]')
+await actionPreview.waitFor({ state: 'visible' })
+check('the approval previews only the selected action as text',
+  await actionPreview.textContent() === 'ls <notes.txt' && !(await page.locator('[data-approval]').textContent())?.includes('hidden provider fixture field'))
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180], [390, 844], [360, 800]]) {
+  await page.setViewportSize({ width, height })
+  check(`approval details and actions fit at ${width}×${height}`, await page.evaluate(() => {
+    const buttons = ['[data-approve]', '[data-deny]'].map(selector => document.querySelector(selector)?.getBoundingClientRect())
+    return buttons.every(button => button && button.height >= 44 && button.left >= 0 && button.right <= innerWidth && button.bottom <= innerHeight)
+      && document.documentElement.scrollWidth <= innerWidth
+  }))
+  await capture(`pending-tool-approval-${width}x${height}`)
+}
+await page.reload()
+await actionPreview.waitFor({ state: 'visible' })
+check('reloading a pending approval keeps its action details', await actionPreview.textContent() === 'ls <notes.txt')
+await actionPreview.focus()
+await page.keyboard.press('Tab')
+check('keyboard focus reaches Allow from the action preview', await page.locator('[data-approve]').evaluate(element => document.activeElement === element))
+await page.setViewportSize({ width: 1280, height: 800 })
 
 // 2. Approve: the gated turn resumes, streams, and completes.
 await page.click('[data-approve]')

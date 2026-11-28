@@ -1,3 +1,4 @@
+<p class="sr-only" role="status" :text="approvalId() ? 'Approval needed for ' + approvalTool() : ''"></p>
 <div
   data-approval
   @if(!pendingApproval)hidden@endif
@@ -5,12 +6,17 @@
   class="shrink-0 p-3 bg-amber-500/10 border border-amber-500/30 rounded-[10px]"
 >
   <div @if(pendingApproval?.connector)hidden@endif :hidden="Boolean(connectorApproval())">
-    <div class="mb-2 font-medium text-[12px]">
-      <span data-approval-tool :text="approvalTool()">{{ pendingApproval ? pendingApproval.toolName : '' }}</span> wants to run.
+    <div class="mb-2">
+      <p class="font-semibold text-[13px]">Approval needed</p>
+      <p data-approval-tool :text="approvalTool()" class="break-words text-[13px] text-neutral-700 dark:text-neutral-300">{{ pendingApproval?.toolName || '' }}</p>
     </div>
-    <div class="flex gap-2">
-      <button type="button" data-approve @click="approveTool" :disabled="!!pendingApprovalId()" class="px-3 py-1 text-[12px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-[6px] disabled:opacity-50">Allow</button>
-      <button type="button" data-deny @click="denyTool" :disabled="!!pendingApprovalId()" class="px-3 py-1 text-[12px] border border-black/10 rounded-[6px] dark:border-white/15 disabled:opacity-50">Deny</button>
+    <pre data-approval-detail @if(!pendingApproval?.detail)hidden@endif :hidden="!approvalDetail()"
+      tabindex="0" aria-label="Requested action"
+      class="overflow-y-auto mb-2 px-2.5 py-2 max-h-32 leading-relaxed text-[12px] whitespace-pre-wrap bg-white/70 dark:bg-black/20 border border-black/10 rounded-md dark:border-white/15 [overflow-wrap:anywhere]"
+      :text="approvalDetail()">{{ pendingApproval?.detail || '' }}</pre>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" data-approve @click="approveTool" :disabled="!!pendingApprovalId()" class="px-3 min-h-11 min-w-20 font-medium text-[13px] text-white dark:text-neutral-900 bg-neutral-900 dark:bg-white rounded-md disabled:opacity-50">Allow</button>
+      <button type="button" data-deny @click="denyTool" :disabled="!!pendingApprovalId()" class="px-3 min-h-11 min-w-20 font-medium text-[13px] border border-black/15 rounded-md dark:border-white/20 disabled:opacity-50">Deny</button>
     </div>
   </div>
   @includeWhen(activeSession, '../partials/harness-connector-consent')

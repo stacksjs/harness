@@ -2347,6 +2347,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const pendingApprovalId = state(0)
   const approvalId = derived(() => pendingApprovals()[0]?.approvalId || 0)
   const approvalTool = derived(() => pendingApprovals()[0]?.toolName || '')
+  const approvalDetail = derived(() => pendingApprovals()[0]?.detail || '')
   const connectorApproval = derived(() => pendingApprovals()[0]?.connector)
   const connectorOptions = useRef('connectorOptionsBox')
   const primaryConnectorChoices = derived(() => connectorApproval()?.choices.filter(choice => choice.decision !== 'cancelled' && choice.scope === 'once') ?? [])
@@ -8472,7 +8473,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           setSessionState('awaiting-approval')
           pendingApprovals.update(requests => requests.some(request => request.approvalId === payload.approvalId)
             ? requests
-            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName, connector: payload.connector }])
+            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName, detail: payload.detail, connector: payload.connector }])
           transcriptAnnouncement.set('An approval needs your attention.')
         })
         paintTranscript(updateTranscriptMarkdown)

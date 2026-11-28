@@ -3615,7 +3615,7 @@ describe('approvals round-trip through the socket', () => {
   it('replays an outstanding approval to replacement clients and accepts one decision', async () => {
     const gate = Promise.withResolvers<void>()
     const { driver, approvals } = fakeDriver([
-      { type: 'approval-request', requestId: 'req_race', toolName: 'Read', args: {} },
+      { type: 'approval-request', requestId: 'req_race', toolName: 'Read', args: { file_path: 'project/<sample>.txt', custom: 'private provider argument' } },
       { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 },
     ], { gate: gate.promise })
     harness = await serve({ port, databasePath: join(dir, 'test.sqlite'), resolveDriver: () => driver })
@@ -3631,7 +3631,9 @@ describe('approvals round-trip through the socket', () => {
       first.send({ t: 'subscribe', sessionId })
       second.send({ t: 'subscribe', sessionId })
       for (const client of [first, second]) {
-        expect(await client.waitFor('approval.requested')).toMatchObject({ approvalId })
+        const request = await client.waitFor('approval.requested')
+        expect(request).toMatchObject({ approvalId, detail: 'project/<sample>.txt' })
+        expect(JSON.stringify(request)).not.toContain('private provider argument')
       }
       first.send({ t: 'dispatch', envelope: { id: 'c_extra', at: 6, command: { type: 'session.turn.start', sessionId, text: 'extra' } } })
       expect(await first.waitForRejection('c_extra')).toMatchObject({ message: 'a turn is already running' })

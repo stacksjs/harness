@@ -66,7 +66,7 @@ export interface SessionState {
    * connected when it fired; anyone arriving afterwards saw a session marked
    * `awaiting-approval` with nothing to act on, and the turn waited forever.
    */
-  pendingApprovals: Array<{ approvalId: number, toolName: string, connector?: ConnectorApproval }>
+  pendingApprovals: Array<{ approvalId: number, toolName: string, detail?: string, connector?: ConnectorApproval }>
   pendingInputs: InputRequestState[]
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
@@ -1029,7 +1029,12 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session) break
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'awaiting-approval'
-      session.pendingApprovals.push({ approvalId: p.approvalId, toolName: p.toolName, ...(p.connector ? { connector: p.connector } : {}) })
+      session.pendingApprovals.push({
+        approvalId: p.approvalId,
+        toolName: p.toolName,
+        ...(p.detail ? { detail: p.detail } : {}),
+        ...(p.connector ? { connector: p.connector } : {}),
+      })
       break
     }
 

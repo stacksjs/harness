@@ -295,6 +295,22 @@ function organizeThreadEvents(state: HarnessState, session: SessionState, comman
   }
 }
 
+// Show the action being authorized without recording the provider's full
+// payload. In particular, omit file contents and connector arguments.
+function approvalDetail(args: unknown): string | undefined {
+  if (typeof args !== 'object' || !args) return
+  const { command, file_path, filePath, path } = args as Record<string, unknown>
+  const commandText = Array.isArray(command) && command.length && command.every(part => typeof part === 'string')
+    ? JSON.stringify(command)
+    : command
+  const detail = [commandText, file_path, filePath, path].find(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0,
+  )
+  if (detail && detail.length > 4096)
+    return detail.slice(0, 4096) + '\n[Preview truncated]'
+  return detail
+}
+
 export function reduce(state: HarnessState, command: Command, envelope: CommandEnvelope, attachments?: ComposerAttachment[]): AppendableEvent[] {
   if (command.type === 'thread.composer.submit') {
     if (isClearCommand(command.intent.text) || isCompactCommand(command.intent.text))
@@ -1297,6 +1313,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      const detail = command.connector ? undefined : approvalDetail(command.args)
       return [{
         sessionId: command.sessionId,
         commandId,
@@ -1308,6 +1325,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           approvalId: derivedId(commandId),
           requestId: command.requestId,
           toolName: command.toolName,
+          ...(detail && detail !== command.toolName ? { detail } : {}),
           ...(command.connector ? { connector: command.connector } : {}),
         },
       }]
