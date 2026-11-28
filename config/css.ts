@@ -77,14 +77,6 @@ const syntaxColors = { getCSS: () => `
 .dark .transcript-code code::highlight(harness-syntax-value) { color: #e9b78d; }
 ` }
 
-const approvalLayout = { getCSS: () => `
-[data-approval] {
-  width: min(788px, calc(100% - 24px));
-  margin-inline: auto;
-  margin-block: 4px 8px;
-}
-` }
-
 const RESPONSIVE_SHELL = `
 [data-harness-shell], html:has(> body > [data-pr-workspace]) {
   --workspace-bg: #fafaf9;
@@ -306,6 +298,11 @@ const RESPONSIVE_SHELL = `
 [data-transcript] > :is([data-turn], [data-follow-ups]) { max-width: var(--workspace-content); margin-inline: auto; }
 [data-jump-to-latest] { flex: none; align-self: center; min-height: 32px; margin-block: 4px; }
 [data-jump-to-latest]:hover { background: var(--workspace-hover); }
+[data-approval] details[data-menu-side="below"] > :is([data-tool-approval-option-list], [data-connector-option-list]) {
+  inset-block: 100% auto;
+  margin-block: 8px 0;
+}
+
 @media (pointer: coarse) { [data-jump-to-latest] { min-height: 44px; } }
 [data-user-prompt] { background: var(--workspace-hover); }
 [data-user-prompt]:has(+ [data-prompt-share], + div > [data-prompt-share]) { margin-block-end: 2px; }
@@ -1503,7 +1500,6 @@ export default {
     { getCSS: () => RESPONSIVE_SHELL },
     { getCSS: () => TRANSCRIPT_MARKDOWN },
     syntaxColors,
-    approvalLayout,
     { getCSS: () => TOOL_DOT },
     { getCSS: () => THINKING_DOTS },
     { getCSS: () => TERMINAL_PANEL },

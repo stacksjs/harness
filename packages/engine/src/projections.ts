@@ -6,7 +6,7 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, ToolApprovalChoice, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ApprovalSelection, ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, ToolApprovalChoice, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
 import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
@@ -18,6 +18,15 @@ export interface InputRequestState {
   turnId: number
   questions: InputQuestion[]
   outcome: 'pending' | 'answered' | 'declined' | 'interrupted'
+}
+
+interface ApprovalState {
+  approvalId: number
+  toolName: string
+  detail?: string
+  choices?: ToolApprovalChoice[]
+  connector?: ConnectorApproval
+  outcome?: ApprovalSelection | 'expired'
 }
 
 interface ProviderConversation {
@@ -66,7 +75,7 @@ export interface SessionState {
    * connected when it fired; anyone arriving afterwards saw a session marked
    * `awaiting-approval` with nothing to act on, and the turn waited forever.
    */
-  pendingApprovals: Array<{ approvalId: number, toolName: string, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }>
+  pendingApprovals: ApprovalState[]
   pendingInputs: InputRequestState[]
   /** Whether this session asked for a checkout of its own. */
   isolate: boolean
@@ -170,6 +179,7 @@ export interface TurnState {
   response: string
   /** In the order the agent ran them. */
   toolCalls: ToolCallState[]
+  approvals?: ApprovalState[]
   inputRequests?: InputRequestState[]
   tokensIn: number
   tokensOut: number
@@ -391,7 +401,14 @@ function syncTurnWaitingState(session: SessionState): void {
     : session.pendingInputs.length ? 'awaiting-input' : 'running'
 }
 
+function settleApproval(approval: ApprovalState, outcome: NonNullable<ApprovalState['outcome']>): void {
+  approval.outcome = outcome
+  delete approval.choices
+  delete approval.connector
+}
+
 function clearTurnRequests(session: SessionState): void {
+  for (const request of session.pendingApprovals) settleApproval(request, 'expired')
   session.pendingApprovals = []
   for (const request of session.pendingInputs) request.outcome = 'interrupted'
   session.pendingInputs = []
@@ -1026,16 +1043,21 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
 
     case 'approval.requested': {
       const session = state.sessions.get(event.sessionId)
-      if (!session) break
+      const active = session?.turns.at(-1)
+      if (!session || active?.status !== 'running' || (p.turnId !== undefined && p.turnId !== active.id)) break
+      if (active.approvals?.some(request => request.approvalId === p.approvalId)) break
       if (session.navigation?.snoozedUntil) session.navigation.snoozedUntil = null
       session.state = 'awaiting-approval'
-      session.pendingApprovals.push({
+      const request: ApprovalState = {
         approvalId: p.approvalId,
         toolName: p.toolName,
         ...(p.detail ? { detail: p.detail } : {}),
         ...(p.choices ? { choices: p.choices } : {}),
         ...(p.connector ? { connector: p.connector } : {}),
-      })
+      }
+      active.approvals ??= []
+      active.approvals.push(request)
+      session.pendingApprovals.push(request)
       break
     }
 
@@ -1044,7 +1066,8 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
       if (!session || session.state !== 'awaiting-approval') break
       const index = session.pendingApprovals.findIndex(request => request.approvalId === p.approvalId)
       if (index === -1) break
-      session.pendingApprovals.splice(index, 1)
+      const [request] = session.pendingApprovals.splice(index, 1)
+      settleApproval(request!, { decision: p.decision, scope: p.scope, ...(p.choiceId === undefined ? {} : { choiceId: p.choiceId }) })
       syncTurnWaitingState(session)
       break
     }
@@ -1089,7 +1112,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
     session.lastSeq = Math.max(session.lastSeq, event.seq)
     session.followUps = applyFollowUpEvent(session.followUps, p)
     if (observedAt != null && observedAt > 0 && Number.isFinite(observedAt) && recordsThreadActivity(p)) {
-      const endedTurn = 'turnId' in p && turn(session, p.turnId)
+      const endedTurn = 'turnId' in p && p.turnId !== undefined && turn(session, p.turnId)
       const woke = p.type === 'session.navigation-changed' ? beforeNavigation?.snoozedUntil : undefined
       if ((p.type !== 'session.navigation-changed' || woke != null) && (!endedTurn || !endedTurn.automaticCompaction)) {
         const activityAt = woke != null ? Math.min(observedAt, woke) : observedAt

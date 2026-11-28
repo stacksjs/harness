@@ -466,7 +466,7 @@ export class ProviderRuntime {
 
           case 'approval-request': {
             if (running.interrupted) break
-            await this.dispatchApproval(sessionId, event,
+            await this.dispatchApproval(sessionId, turnId, event,
               approvalId => running.approvals.set(approvalId, event.requestId))
             break
           }
@@ -559,10 +559,11 @@ export class ProviderRuntime {
   /** Make the provider callback reachable before broadcasting the request. */
   private async dispatchApproval(
     sessionId: number,
+    turnId: number,
     event: Extract<ProviderEvent, { type: 'approval-request' }>,
     remember: (approvalId: number) => void,
   ): Promise<void> {
-    const envelope = this.envelope({ ...event, type: 'thread.approval.request', sessionId })
+    const envelope = this.envelope({ ...event, type: 'thread.approval.request', sessionId, turnId })
     try {
       const result = await this.options.engine.dispatchInternal(envelope)
       const event = result.events.find(e => e.payload.type === 'approval.requested')

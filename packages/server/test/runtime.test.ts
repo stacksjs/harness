@@ -3641,7 +3641,10 @@ describe('approvals round-trip through the socket', () => {
       second.send({ t: 'subscribe', sessionId })
       for (const client of [first, second]) {
         const request = await client.waitFor('approval.requested')
-        expect(request).toMatchObject({ approvalId, detail: 'project/<sample>.txt', choices })
+        expect(request).toMatchObject({
+          approvalId, turnId: harness.engine.current.sessions.get(sessionId)?.lastTurnId,
+          detail: 'project/<sample>.txt', choices,
+        })
         expect(JSON.stringify(request)).not.toContain('private provider argument')
       }
       first.send({ t: 'dispatch', envelope: { id: 'c_extra', at: 6, command: { type: 'session.turn.start', sessionId, text: 'extra' } } })

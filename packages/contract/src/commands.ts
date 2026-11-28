@@ -61,6 +61,16 @@ export function offeredToolApproval(choices: readonly ToolApprovalChoice[], sele
   return matches.length === 1 ? matches[0] : undefined
 }
 
+export function approvalOutcomeLabel(outcome: ApprovalSelection | 'expired'): string {
+  if (outcome === 'expired') return 'Request expired'
+  if (outcome.decision === 'cancelled') return 'Cancelled'
+  const decision = outcome.decision === 'allowed' ? 'Allowed' : 'Denied'
+  if (outcome.scope === 'session') return `${decision} for this session`
+  if (outcome.scope === 'workspace') return `${decision} for this workspace`
+  if (outcome.scope === 'always') return `${decision} always`
+  return decision
+}
+
 export interface ConnectorApproval {
   prompt: string
   choices: ApprovalChoice[]
@@ -183,7 +193,7 @@ export type InternalCommand =
   | { type: 'thread.message.assistant.complete', sessionId: number, turnId: number }
   | { type: 'thread.tool.call.begin', sessionId: number, turnId: number, callId: string, toolName: string, args: unknown }
   | { type: 'thread.tool.call.end', sessionId: number, turnId: number, callId: string, ok: boolean }
-  | { type: 'thread.approval.request', sessionId: number, requestId: string, toolName: string, args: unknown, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }
+  | { type: 'thread.approval.request', sessionId: number, turnId?: number, requestId: string, toolName: string, args: unknown, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }
   | { type: 'thread.approval.cancel', sessionId: number, approvalId: number }
   | { type: 'thread.input.request', sessionId: number, turnId: number, questions: InputQuestion[] }
   | { type: 'thread.input.cancel', sessionId: number, requestId: string }

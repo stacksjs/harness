@@ -84,6 +84,7 @@ let releaseGate: () => void
 const gate = new Promise<void>((r) => { releaseGate = r })
 const markdownGate = Promise.withResolvers<void>()
 const parallelApprovalGate = Promise.withResolvers<void>()
+const parallelApprovalStart = Promise.withResolvers<void>()
 let parallelReadScope: string | undefined
 const parallelDecisions = new Map<string, boolean>()
 const questionGate = Promise.withResolvers<void>()
@@ -259,6 +260,8 @@ const instance: ProviderInstance = {
       return
     }
     if (input.text === 'exercise parallel approvals') {
+      yield { type: 'assistant-delta', text: Array.from({ length: 36 }, (_, i) => `Reading the sample files, step ${i + 1}.`).join('\n\n') }
+      await parallelApprovalStart.promise
       yield {
         type: 'approval-request', requestId: 'parallel_read', toolName: 'Read', args: { path: 'notes.txt' },
         choices: [
@@ -708,9 +711,11 @@ await page.waitForFunction(() => document.querySelector('[data-approval]')?.hasA
 const dotsHiddenAfterDelta = await page.evaluate(() => document.querySelector('[data-thinking]')?.hasAttribute('hidden'))
 check('first token hides the dots', dotsHiddenAfterDelta === true)
 check('composer starts a turn and the approval surfaces', true)
-const tool = await page.textContent('[data-approval-tool]')
-check('approval names the tool', (tool ?? '').includes('Bash'))
-const actionPreview = page.locator('[data-approval-detail]')
+const tool = page.locator('[data-approval] [data-approval-tool]')
+check('approval names the tool', await tool.textContent() === 'Bash')
+check('the live approval is in the turn that requested it', await tool.evaluate(element =>
+  element.closest('[data-turn]')?.querySelector('[data-user-prompt]')?.textContent === 'run the drive turn'))
+const actionPreview = page.locator('[data-approval] [data-approval-detail]')
 await actionPreview.waitFor({ state: 'visible' })
 check('the approval previews only the selected action as text',
   await actionPreview.textContent() === 'ls <notes.txt' && !(await page.locator('[data-approval]').textContent())?.includes('hidden provider fixture field'))
@@ -2442,12 +2447,35 @@ await capture('transcript-markdown-desktop')
 
 await promptBox.fill('exercise parallel approvals')
 await page.click('[data-send]')
-const approval = page.locator('[data-approval]')
-const approvalTool = approval.locator('[data-approval-tool]')
-await page.waitForFunction(() => document.querySelector('[data-approval-tool]')?.textContent === 'Read')
+const approvals = page.locator('[data-approval]')
+const approval = approvals.filter({ has: page.locator('[data-approval-tool]', { hasText: /^Read$/ }) })
+const laterApproval = approvals.filter({ has: page.locator('[data-approval-tool]', { hasText: /^Write$/ }) })
+await page.getByText('Reading the sample files, step 36.', { exact: true }).waitFor()
+await page.locator('[data-transcript]').evaluate(element => { element.scrollTop = 0 })
+await page.getByRole('button', { name: 'Jump to latest', exact: true }).waitFor()
+parallelApprovalStart.resolve()
+await laterApproval.waitFor()
+check('an arriving approval preserves the earlier reading position',
+  await page.locator('[data-transcript]').evaluate(element => element.scrollTop < 4))
 await page.reload()
-await approval.waitFor()
-check('reloading restores the oldest outstanding approval', await approvalTool.textContent() === 'Read')
+await laterApproval.waitFor()
+check('reload restores both approvals inside their owning turn', await approvals.count() === 2
+  && await approvals.evaluateAll(elements => elements.every(element =>
+    element.closest('[data-turn]')?.querySelector('[data-user-prompt]')?.textContent === 'exercise parallel approvals')))
+await page.locator('[data-transcript]').evaluate(element => { element.scrollTop = 0 })
+const reviewApproval = page.getByRole('button', { name: 'Review approval', exact: true })
+await reviewApproval.waitFor({ state: 'visible' })
+await reviewApproval.click()
+check('Review approval reveals and focuses the pending action', await approval.locator('[data-approval-detail]').evaluate(element =>
+  element.ownerDocument.activeElement === element && element.getBoundingClientRect().bottom <= innerHeight))
+
+const observer = await browserContext.newPage()
+await observer.goto(page.url())
+await observer.locator('[data-approval]').filter({ has: observer.locator('[data-approval-tool]', { hasText: /^Write$/ }) }).getByRole('button', { name: 'Deny', exact: true }).click()
+await laterApproval.waitFor({ state: 'hidden' })
+check('another client can settle the later approval independently', await approval.isVisible() && await approvals.count() === 1)
+await observer.close()
+
 const toolChoiceMenu = approval.locator('[data-tool-approval-options]')
 const moreToolChoices = toolChoiceMenu.getByLabel('More approval options')
 const allowThisSession = toolChoiceMenu.getByRole('button', { name: 'Allow for this session', exact: true })
@@ -2471,13 +2499,23 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
   await moreToolChoices.click()
 }
 await moreToolChoices.click()
-await allowThisSession.click()
+await allowThisSession.focus()
+await page.keyboard.press('Enter')
 await page.setViewportSize({ width: 1280, height: 800 })
-await page.waitForFunction(() => document.querySelector('[data-approval-tool]')?.textContent === 'Write')
-await approval.getByRole('button', { name: 'Deny', exact: true }).click()
 await approval.waitFor({ state: 'hidden' })
-check('parallel approvals advance in order and reach their matching callbacks',
+await page.waitForFunction(() => document.activeElement?.matches('[data-approval-outcome]'))
+check('settling a focused approval leaves focus on its outcome', true)
+check('parallel approvals reach their matching callbacks with the selected scopes',
   parallelDecisions.get('parallel_read') === true && parallelReadScope === 'session' && parallelDecisions.get('parallel_write') === false)
+const approvalTurn = page.locator('[data-turn]').filter({ has: page.locator('[data-user-prompt]', { hasText: 'exercise parallel approvals' }) })
+const outcomes = approvalTurn.locator('[data-approval-outcome]:visible')
+await outcomes.last().waitFor()
+check('decisions stay in request order after both clients respond',
+  (await outcomes.allTextContents()).map(text => text.replace(/\s+/g, ' ').trim()).join('|') === 'Read Allowed for this session|Write Denied')
+await page.reload()
+await outcomes.last().waitFor()
+check('reloading retains the settled approval outcomes and reviewed action', await outcomes.count() === 2
+  && await approvals.count() === 0 && await approvalTurn.getByText('notes.txt', { exact: true }).isVisible())
 
 await page.locator('[data-session-state][data-state="idle"]').waitFor({ state: 'attached' })
 await promptBox.fill('exercise structured questions')
@@ -2639,6 +2677,11 @@ check('connector prompt and primary approval actions reload with the pending req
   && await connectorCard.getByRole('button', { name: 'Decline', exact: true }).isVisible()
   && !await sessionChoice.isVisible()
   && !await page.locator('[data-approve]').isVisible())
+await transcript.evaluate(element => { element.scrollTop = 0 })
+const reviewConnector = page.getByRole('button', { name: 'Review approval', exact: true })
+await reviewConnector.click()
+check('Review approval focuses the visible connector action', await connectorCard.evaluate(element =>
+  element.contains(element.ownerDocument.activeElement)))
 await page.setViewportSize({ width: 1280, height: 800 })
 await moreApprovalOptions.focus()
 await page.keyboard.press('ArrowDown')
@@ -2650,8 +2693,11 @@ check('Escape closes the scope choices and restores focus',
   && await moreApprovalOptions.evaluate(element => element === element.ownerDocument.activeElement))
 await moreApprovalOptions.click()
 await capture('connector-consent-desktop')
+await moreApprovalOptions.click()
 await page.setViewportSize({ width: 390, height: 844 })
-await transcript.evaluate(element => { element.scrollTop = 0 })
+await connectorCard.scrollIntoViewIfNeeded()
+await moreApprovalOptions.click()
+await sessionChoice.waitFor()
 const connectorBounds = await sessionChoice.boundingBox()
 check('the session consent action fits on a phone',
   Boolean(connectorBounds && connectorBounds.x >= 0 && connectorBounds.y >= 0 && connectorBounds.x + connectorBounds.width <= 390

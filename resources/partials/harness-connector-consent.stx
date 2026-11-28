@@ -1,26 +1,23 @@
-<div data-connector-consent role="region" aria-labelledby="connector-consent-heading"
-  @if(!pendingApproval?.connector)hidden@endif :hidden="!connectorApproval()">
-  <h2 id="connector-consent-heading" class="font-semibold text-[13px]">
-    <span :text="approvalTool()"></span> requests access
-  </h2>
-  <p class="overflow-y-auto mt-1 max-h-28 break-words text-[12px] text-neutral-700 dark:text-neutral-300" :text="connectorApproval()?.prompt"></p>
+<div data-connector-consent role="region" :aria-label="request.toolName + ' requests access'" :hidden="!request.connector">
+  <p class="font-semibold text-[13px]" :text="request.toolName + ' requests access'"></p>
+  <p class="overflow-y-auto mt-1 max-h-28 break-words text-[12px] text-neutral-700 dark:text-neutral-300" :text="request.connector?.prompt"></p>
   <div class="flex flex-wrap gap-2 items-center mt-3">
-    <template :for="choice in primaryConnectorChoices()" :key="choice.decision + ':' + choice.scope">
-      <button type="button" :disabled="!!pendingApprovalId()" :data-approval-id="approvalId()" @click="respondToApproval($event, choice.decision, choice.scope)"
-        class="px-3 min-h-8 text-[12px] border border-black/15 rounded-[6px] dark:border-white/20 disabled:opacity-50"
+    <template :for="choice in approvalChoices(request, false)" :key="choice.decision + ':' + choice.scope">
+      <button type="button" :disabled="approvalBusy(request.approvalId)" :data-approval-id="request.approvalId" @click="respondToApproval($event, choice.decision, choice.scope)"
+        class="px-3 min-h-11 text-[12px] border border-black/15 rounded-[6px] dark:border-white/20 disabled:opacity-50"
         :class="choice.decision === 'allowed' && choice.scope === 'once' ? 'bg-neutral-900 text-white dark:bg-white dark:text-neutral-900' : ''"
         :text="choice.label"></button>
     </template>
-    <details data-connector-options ref="connectorOptionsBox" class="relative" @keydown="handleApprovalOptions($event)" @focusout="blurApprovalOptions($event)">
-      <summary aria-label="More approval options" :aria-disabled="!!pendingApprovalId()"
-        @click="guardApprovalOptions($event)"
-        class="flex items-center justify-center size-8 list-none border border-black/15 rounded-[6px] dark:border-white/20 cursor-pointer">
+    <details data-connector-options :hidden="approvalChoices(request, true).length === 0" @keydown="handleApprovalOptions($event, request.approvalId)" @focusout="blurApprovalOptions($event)" @toggle="revealApprovalOptions($event)">
+      <summary aria-label="More approval options" :aria-disabled="approvalBusy(request.approvalId)"
+        @click="guardApprovalOptions($event, request.approvalId)"
+        class="flex items-center justify-center size-11 list-none border border-black/15 rounded-[6px] dark:border-white/20 cursor-pointer">
         <span class="size-4 i-hugeicons-more-horizontal" aria-hidden="true"></span>
       </summary>
-      <div data-connector-option-list class="flex absolute bottom-full end-0 z-10 flex-col gap-1 mb-2 p-1 max-w-56 min-w-[172px] bg-white dark:bg-neutral-900 border border-black/15 rounded-lg dark:border-white/20 shadow-md">
-        <template :for="choice in moreConnectorChoices()" :key="choice.decision + ':' + choice.scope">
-          <button type="button" :disabled="!!pendingApprovalId()" :data-approval-id="approvalId()" @click="respondToApproval($event, choice.decision, choice.scope)"
-            class="px-3 min-h-8 text-[12px] text-start focus-visible:bg-neutral-100 hover:bg-neutral-100 dark:focus-visible:bg-white/10 dark:hover:bg-white/10 rounded-[5px]"
+      <div data-connector-option-list class="flex absolute bottom-full start-0 z-10 flex-col gap-1 mb-2 p-1 max-w-56 min-w-[172px] bg-white dark:bg-neutral-900 border border-black/15 rounded-lg dark:border-white/20 shadow-md">
+        <template :for="choice in approvalChoices(request, true)" :key="choice.decision + ':' + choice.scope">
+          <button type="button" :disabled="approvalBusy(request.approvalId)" :data-approval-id="request.approvalId" @click="respondToApproval($event, choice.decision, choice.scope)"
+            class="px-3 min-h-11 text-[12px] text-start focus-visible:bg-neutral-100 hover:bg-neutral-100 dark:focus-visible:bg-white/10 dark:hover:bg-white/10 rounded-[5px]"
             :text="choice.label"></button>
         </template>
       </div>

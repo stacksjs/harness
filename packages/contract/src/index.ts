@@ -24,7 +24,7 @@ export type {
   InternalCommand,
   ModelFavorite,
 } from './commands'
-export { codexSelectionLabel, isClearCommand, isClientCommand, isCompactCommand, offeredToolApproval } from './commands'
+export { approvalOutcomeLabel, codexSelectionLabel, isClearCommand, isClientCommand, isCompactCommand, offeredToolApproval } from './commands'
 export type { CheckoutIntent, CombinedWorktreeIntent, ConversationRewindPoint, EventBase, EventPayload, EventType, ForkSource, GitBranchAttempt, HarnessEvent, ProviderContextUsage, PullRequestCheckout, RepositoryCheckpoint, RepositoryPullRequest, WorktreeIntent, WorktreeSelection } from './events'
 export { GLOBAL_SESSION_ID, isGlobalEvent } from './events'
 export type { InputAnswer, InputOption, InputQuestion, InputResponse } from './input'

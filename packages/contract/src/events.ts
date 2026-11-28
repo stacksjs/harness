@@ -125,7 +125,7 @@ export type EventPayload =
   | { type: 'assistant.delta', turnId: number, text: string }
   | { type: 'tool.call.began', turnId: number, callId: string, toolName: string }
   | { type: 'tool.call.ended', turnId: number, callId: string, ok: boolean }
-  | { type: 'approval.requested', approvalId: number, requestId: string, toolName: string, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }
+  | { type: 'approval.requested', approvalId: number, turnId?: number, requestId: string, toolName: string, detail?: string, choices?: ToolApprovalChoice[], connector?: ConnectorApproval }
   | ({ type: 'approval.resolved', approvalId: number } & ApprovalSelection)
   | { type: 'input.requested', requestId: string, turnId: number, questions: InputQuestion[] }
   | { type: 'input.resolved', requestId: string, turnId: number, outcome: 'answered' | 'declined' | 'interrupted', attachments?: QuestionAttachment[] }

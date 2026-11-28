@@ -8,7 +8,7 @@
  */
 
 import type { ClaudeAccountCompaction, HostSettings, ProjectSettings, ThreadNavigation } from '@harness/contract'
-import { codexSelectionLabel } from '@harness/contract'
+import { approvalOutcomeLabel, codexSelectionLabel } from '@harness/contract'
 import type { HarnessState, SessionState } from '@harness/engine'
 import { checkpointReviewRepositories, claudeIdleCompaction, conversationRewindPoint, isForkableResponse, isolatedRewindScope, providerConversation } from '@harness/engine'
 import { existsSync } from 'node:fs'
@@ -278,12 +278,7 @@ export function viewProps(state: HarnessState, options: {
           // the island should not have to reverse-engineer it from the DOM.
           workspaceId: active.workspaceId,
           scratch: state.workspaces.get(active.workspaceId)?.scratch === true,
-          // Rendered server-side so a decision survives the client that raised
-          // it. Previously an approval only reached whichever browser happened
-          // to be connected when it fired, and the turn waited forever if that
-          // one went away.
           followUps: active.followUps,
-          pendingApprovals: active.pendingApprovals,
           pendingInputs: active.pendingInputs,
           // Shown in the header when the session has a checkout of its own, so
           // it is obvious the agent is not editing the workspace directly.
@@ -303,6 +298,9 @@ export function viewProps(state: HarnessState, options: {
             modelChange: turn.modelChanged && turn.codexSelection ? codexSelectionLabel(turn.codexSelection) : undefined,
             steerable: turn.steerable === true,
             steered: turn.steered ?? [],
+            ...(turn.approvals ? { approvals: turn.approvals.map(({ outcome, ...request }) => ({
+              ...request, ...(outcome ? { outcome: approvalOutcomeLabel(outcome) } : {}),
+            })) } : {}),
             inputRequests: (turn.inputRequests ?? []).map(request => ({
               requestId: request.requestId,
               outcome: request.outcome,

@@ -1313,6 +1313,8 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       const session = state.sessions.get(command.sessionId)
       if (!session)
         throw new InvalidCommand(`no such session: ${command.sessionId}`)
+      const activeTurn = session.turns.at(-1)
+      if (activeTurn?.status !== 'running' || (command.turnId !== undefined && command.turnId !== activeTurn.id)) return []
       const detail = command.connector ? undefined : command.detail ?? approvalDetail(command.args)
       return [{
         sessionId: command.sessionId,
@@ -1323,6 +1325,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
           // Derived from the command id, so a replayed provider event cannot
           // mint a second approval row for the same request.
           approvalId: derivedId(commandId),
+          turnId: activeTurn.id,
           requestId: command.requestId,
           toolName: command.toolName,
           ...(detail && detail !== command.toolName ? { detail } : {}),

@@ -125,6 +125,7 @@ describe('a pending approval is part of the session, not the socket', () => {
 
     expect(session.state).toBe('awaiting-approval')
     expect(session.pendingApprovals).toEqual([{ approvalId: 5, toolName: 'Write' }])
+    expect(session.turns[0]?.approvals).toEqual(session.pendingApprovals)
   })
 
   it('clears it once answered', () => {
@@ -146,6 +147,10 @@ describe('a pending approval is part of the session, not the socket', () => {
     )
     expect(session.state).toBe('awaiting-approval')
     expect(session.pendingApprovals).toEqual([{ approvalId: 5, toolName: 'Read' }])
+    expect(session.turns[0]?.approvals).toEqual([
+      { approvalId: 5, toolName: 'Read' },
+      { approvalId: 6, toolName: 'Write', outcome: { decision: 'denied', scope: 'once' } },
+    ])
   })
 
   it('clears it when the turn is interrupted', () => {
@@ -158,6 +163,14 @@ describe('a pending approval is part of the session, not the socket', () => {
     )
 
     expect(session.pendingApprovals).toEqual([])
+    expect(session.turns[0]?.approvals).toEqual([{ approvalId: 5, toolName: 'Bash', outcome: 'expired' }])
+  })
+
+  it('ignores a late approval for another turn', () => {
+    const session = sessionAfter({ type: 'approval.requested', approvalId: 5, requestId: 'late', turnId: 9, toolName: 'Bash' })
+    expect(session.state).toBe('running')
+    expect(session.pendingApprovals).toEqual([])
+    expect(session.turns[0]?.approvals).toBeUndefined()
   })
 
   it('clears it when the turn completes', () => {

@@ -1,0 +1,12 @@
+<div :data-approval-row="approval.approvalId" class="mb-3">
+  <p data-approval-outcome tabindex="-1" :hidden="!approval.outcome"
+    class="flex flex-wrap gap-x-2 items-baseline break-words text-neutral-600 text-xs dark:text-neutral-300">
+    <span class="font-medium" :text="approval.toolName"></span>
+    <span :text="approval.outcome"></span>
+  </p>
+  <code :hidden="!approval.outcome || !approval.detail" :text="approval.detail || ''"
+    class="block mt-1 break-words text-[11px] text-neutral-600 whitespace-pre-wrap dark:text-neutral-300 [overflow-wrap:anywhere]"></code>
+  <template :for="request in approval.outcome ? [] : [approval]" :key="request.approvalId">
+    @include('../partials/harness-approval-card')
+  </template>
+</div>

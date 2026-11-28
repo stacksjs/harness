@@ -37,16 +37,12 @@ export const codecUrl = $props.codecUrl || ''
 // The sequence this render already contains. The socket resumes from here so a
 // load replays only what is missing.
 export const sinceSeq = $props.sinceSeq || 0
-// A decision this session is blocked on, if any. Rendered rather than waited
-// for: the client that raised it may be long gone.
-export const initialApprovals = activeSession?.pendingApprovals || []
 export const initialInputs = activeSession?.pendingInputs || []
 export const initialFollowUps = activeSession?.followUps || { entries: [], held: false }
 export const initialContextUsage = activeSession?.contextUsage || null
 export const initialIdleCompaction = activeSession?.idleCompaction || null
 export const providerProfileId = $props.providerProfileId || 0
 export const initialAccountCompaction = $props.claudeCompactionByAccount || {}
-const pendingApproval = initialApprovals[0]
 
 // One space per profile. Its project rows contain threads that are ready for another message.
 //
@@ -159,6 +155,7 @@ export const initialCompactedTurn = liveTurn?.contextCompacted ? liveTurn.id : 0
 export const initialInterrupted = liveTurn?.status === 'interrupted'
 export const initialSteerable = liveTurn?.steerable === true
 export const initialInputActivity = liveTurn?.inputRequests || []
+export const initialApprovalActivity = liveTurn?.approvals || []
 export const initialRewind = activeSession?.pendingRewind ?? 0
 export const initialRewindNotice = activeSession?.rewindNotice || ''
 export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => turn.checkpointId).map(turn => [turn.id, {
@@ -485,6 +482,19 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           @endforeach
           @if(turn.response)<div class="mb-1 font-medium text-[12px] opacity-50">Agent</div>@endif
           <div class="transcript-markdown" data-response data-ssr-response="{{ turn.id }}"></div>
+          @if(turn.approvals?.length)
+            @foreach(turn.approvals as item)
+              <div class="mb-3">
+                <p data-approval-outcome class="flex flex-wrap gap-x-2 items-baseline break-words text-neutral-600 text-xs dark:text-neutral-300">
+                  <span class="font-medium">{{ item.toolName }}</span>
+                  <span>{{ item.outcome || 'Request expired' }}</span>
+                </p>
+                @if(item.detail)
+                  <code class="block mt-1 break-words text-neutral-600 text-[11px] whitespace-pre-wrap dark:text-neutral-300 [overflow-wrap:anywhere]">{{ item.detail }}</code>
+                @endif
+              </div>
+            @endforeach
+          @endif
           @if(turn.status === 'interrupted')<p data-turn-interrupted class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>@endif
           @if(turn.reviewRepositories.length)
           <template :for="reviewTurn in [{{ turn.id }}]" :key="reviewTurn">
@@ -603,6 +613,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
             <div data-thinking class="thinking-dots" @if(sessionState !== 'running')hidden@endif :hidden="ssrHasResponse() || uiState() !== 'running' || runningTurnId() !== initialResponseTurn || waitingForProjectSetup()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           @endif
           <div class="transcript-markdown" data-response data-live-response data-ssr-response="{{ liveTurn.id }}"></div>
+          @if(liveTurn.approvals?.length)
+            <noscript>
+              @foreach(liveTurn.approvals as item)
+                <p>{{ item.toolName }} · {{ item.outcome || 'Waiting for approval' }}</p>
+              @endforeach
+            </noscript>
+          @endif
+          <template :for="approval in approvalRows({{ liveTurn.id }})" :key="approval.approvalId">
+            @include('../partials/harness-approval-activity')
+          </template>
           <p data-turn-interrupted @if(!initialInterrupted)hidden@endif :hidden="!ssrInterrupted()" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
           <template :for="reviewTurn in [{{ liveTurn.id }}]" :key="reviewTurn">
             @includeWhen(activeSession, '../partials/harness-turn-file-summary')
@@ -695,6 +715,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           {{-- Until the first token: dots, not a label over blank space. --}}
           <div data-thinking class="thinking-dots" :hidden="turn.hasResponse || uiState() !== 'running' || runningTurnId() !== turn.id || waitingForProjectSetup()" aria-label="Waiting for the agent"><span></span><span></span><span></span></div>
           <div class="transcript-markdown" data-response></div>
+          <template :for="approval in approvalRows(turn.id)" :key="approval.approvalId">
+            @include('../partials/harness-approval-activity')
+          </template>
           <p data-turn-interrupted hidden :hidden="!turn.interrupted" class="mt-2 text-neutral-600 text-xs dark:text-neutral-300">Response interrupted</p>
           <button type="button" hidden :data-revert="rewindCheckpoints()[turn.id]?.id"
             :hidden="!rewindCheckpoints()[turn.id] || uiBusy()" :disabled="Boolean(revertingId()) || !sessionOnline()"
@@ -772,7 +795,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     </div>
 
     @if(activeSession)
-      <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="px-3 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full dark:border-white/20">Jump to latest</button>
+      <div class="flex flex-wrap gap-2 justify-center">
+        <button type="button" data-jump-to-latest @click="jumpToLatest" hidden :hidden="followingTranscript()" class="px-3 font-medium text-[12px] bg-white dark:bg-neutral-900 border border-black/15 rounded-full dark:border-white/20">Jump to latest</button>
+        <button type="button" data-review-pending-approval @click="reviewPendingApproval" hidden :hidden="followingTranscript() || !pendingApprovals().length" class="px-3 min-h-11 font-medium text-[12px] bg-amber-500/10 border border-amber-500/40 rounded-full">Review approval</button>
+      </div>
       <p role="status" data-unavailable-message hidden :hidden="!missingTurnLink()">This message is unavailable in the current thread.</p>
       <div data-thread-archived @if(!initialNavigation.archivedAt)hidden@endif :hidden="!threadNavigation().archivedAt" class="mx-auto mb-3 px-3 py-2 flex gap-2 items-center text-sm border border-black/10 rounded-md dark:border-white/15">
         <span>Archived thread</span>
@@ -780,7 +806,6 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       </div>
     @endif
 
-    @includeWhen(activeSession, '../partials/harness-approval-card')
     @includeWhen(activeSession, '../partials/harness-question-card')
 
     @if(activeSession)
@@ -2343,19 +2368,13 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     })
   }
 
-  const pendingApprovals = state(initialApprovals)
-  const pendingApprovalId = state(0)
-  const approvalId = derived(() => pendingApprovals()[0]?.approvalId || 0)
-  const approvalTool = derived(() => pendingApprovals()[0]?.toolName || '')
-  const approvalDetail = derived(() => pendingApprovals()[0]?.detail || '')
-  const connectorApproval = derived(() => pendingApprovals()[0]?.connector)
-  const connectorOptions = useRef('connectorOptionsBox')
-  const toolApprovalOptions = useRef('toolApprovalOptionsBox')
-  const offeredToolChoices = derived(() => pendingApprovals()[0]?.choices)
-  const primaryToolApprovalChoices = derived(() => offeredToolChoices()?.filter(choice => choice.scope === 'once' && choice.decision !== 'cancelled') ?? [])
-  const moreToolApprovalChoices = derived(() => offeredToolChoices()?.filter(choice => choice.scope !== 'once' || choice.decision === 'cancelled') ?? [])
-  const primaryConnectorChoices = derived(() => connectorApproval()?.choices.filter(choice => choice.decision !== 'cancelled' && choice.scope === 'once') ?? [])
-  const moreConnectorChoices = derived(() => connectorApproval()?.choices.filter(choice => choice.decision === 'cancelled' || choice.scope !== 'once') ?? [])
+  const approvalsByTurn = state(initialApprovalActivity.length ? { [initialResponseTurn]: initialApprovalActivity } : {})
+  const approvalSubmissions = state([])
+  let approvalDisclosure
+  let approvalTabExit
+
+  function approvalRows(turnId) { return approvalsByTurn()[turnId] || [] }
+  const pendingApprovals = derived(() => approvalRows(runningTurnId()).filter(request => !request.outcome))
 
   const questionForm = state(null)
   const questionCard = useRef('questionCardBox')
@@ -7193,37 +7212,73 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     dispatch({ type: 'session.turn.interrupt', sessionId })
   }
 
-  function activeApprovalOptions() {
-    return connectorApproval() ? connectorOptions.current : toolApprovalOptions.current
+  function approvalBusy(id) {
+    return !sessionOnline() || approvalSubmissions().includes(id)
   }
 
-  function closeApprovalOptions(restoreFocus = false) {
-    const details = activeApprovalOptions()
+  function approvalChoices(request, extra) {
+    return (request.connector?.choices ?? request.choices ?? []).filter(choice =>
+      (choice.scope !== 'once' || choice.decision === 'cancelled') === extra)
+  }
+
+  function closeApprovalOptions(details = approvalDisclosure, restoreFocus = false) {
     if (!details?.open) return
     details.open = false
+    if (approvalDisclosure === details) approvalDisclosure = undefined
+    if (approvalTabExit === details) approvalTabExit = undefined
     if (restoreFocus) details.querySelector('summary')?.focus()
   }
 
   function blurApprovalOptions(event) {
-    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) closeApprovalOptions()
-  }
-
-  function guardApprovalOptions(event) {
-    if (pendingApprovalId()) event.preventDefault()
-  }
-
-  function handleApprovalOptions(event) {
     const details = event.currentTarget
-    if (event.key === 'Escape' && details?.open) {
+    if (approvalTabExit !== details) return
+    approvalTabExit = undefined
+    if (!details.contains(event.relatedTarget)) closeApprovalOptions(details)
+  }
+
+  function guardApprovalOptions(event, approvalId) {
+    if (approvalBusy(approvalId)) {
       event.preventDefault()
-      event.stopPropagation()
-      closeApprovalOptions(true)
       return
     }
-    if (pendingApprovalId() || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const details = event.currentTarget.parentElement
+    if (approvalDisclosure !== details) closeApprovalOptions()
+    approvalDisclosure = details
+  }
+
+  function revealApprovalOptions(event) {
+    const details = event.currentTarget
+    if (!details.open) return
+    const menu = details.querySelector('[data-tool-approval-option-list], [data-connector-option-list]')
+    const card = details.closest('[data-approval]')
+    const transcript = transcriptRef.current
+    if (!menu || !card || !transcript) return
+    const limits = transcript.getBoundingClientRect()
+    const bounds = card.getBoundingClientRect()
+    const above = bounds.top - limits.top
+    const below = limits.bottom - bounds.bottom
+    details.dataset.menuSide = above < menu.offsetHeight + 8 && below > above ? 'below' : 'above'
+    menu.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }
+
+  function handleApprovalOptions(event, approvalId) {
+    const details = event.currentTarget
+    if (event.key === 'Tab' && details.open) {
+      approvalTabExit = details
+      return
+    }
+    if (event.key === 'Escape' && details.open) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeApprovalOptions(details, true)
+      return
+    }
+    if (approvalBusy(approvalId) || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
     const buttons = [...details.querySelectorAll('button:not(:disabled)')]
     if (!buttons.length) return
     event.preventDefault()
+    if (approvalDisclosure !== details) closeApprovalOptions()
+    approvalDisclosure = details
     details.open = true
     const index = buttons.indexOf(event.target)
     if (event.key === 'Home' || (event.key === 'ArrowDown' && index === -1)) buttons[0].focus()
@@ -7232,14 +7287,39 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   }
 
   useEventListener('pointerdown', (event) => {
-    const details = activeApprovalOptions()
-    if (details?.open && !details.contains(event.target)) closeApprovalOptions()
+    approvalTabExit = undefined
+    if (approvalDisclosure?.open && !approvalDisclosure.contains(event.target)) closeApprovalOptions()
   }, { target: document })
+
+  function approvalRow(id) {
+    return transcriptRef.current?.querySelector(`[data-approval-row="${id}"]`)
+  }
+
+  function reviewPendingApproval() {
+    const id = pendingApprovals()[0]?.approvalId
+    const row = id && approvalRow(id)
+    if (!row) return
+    row.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const controls = [...row.querySelectorAll('[data-approval-detail], button:not(:disabled), summary')]
+    controls.find(control => control.getClientRects().length)?.focus({ preventScroll: true })
+  }
+
+  function updateApprovalRows(turnId, change) {
+    approvalsByTurn.update(rows => ({ ...rows, [turnId]: change(rows[turnId] || []) }))
+  }
+
+  function expireApprovalRows(turnId, label) {
+    if (!approvalRows(turnId).some(request => !request.outcome)) return
+    closeApprovalOptions()
+    approvalSubmissions.set([])
+    updateApprovalRows(turnId, rows => rows.map(request => request.outcome ? request
+      : { approvalId: request.approvalId, toolName: request.toolName, detail: request.detail, outcome: label }))
+  }
 
   async function respondToApproval(event, decision, scope = 'once', choiceId) {
     const id = Number(event.currentTarget.dataset.approvalId)
-    if (!id || id !== approvalId() || !sessionId || pendingApprovalId()) return
-    pendingApprovalId.set(id)
+    if (!sessionId || approvalBusy(id) || !pendingApprovals().some(request => request.approvalId === id)) return
+    approvalSubmissions.update(ids => [...ids, id])
     try {
       await sendCommand({
         type: 'session.approval.respond',
@@ -7251,8 +7331,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       })
     }
     catch (error) {
-      if (pendingApprovalId() === id) {
-        pendingApprovalId.set(0)
+      if (approvalSubmissions().includes(id)) {
+        approvalSubmissions.update(ids => ids.filter(pending => pending !== id))
         stxAlert(error instanceof Error ? error.message : 'Could not submit this approval.')
       }
     }
@@ -8051,7 +8131,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   // plain function wrapper, where `await` only exists behind `async`.
   async function connectLiveSession() {
     const codec = await import(codecUrl)
-    const { applyFollowUpEvent, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions, loadRepositoryStatus } = codec
+    const { applyFollowUpEvent, approvalOutcomeLabel, claudeCompactionReturnAt, codexSelectionLabel, threadDisplayTitle, createFollowUpActions, createSessionSocket, createThreadSidebar, createTerminalDock, updateTranscriptMarkdown, createQuestionForm, paintQuestionFiles, useTranscriptControl, closeTranscriptMenu, createTranscriptHighlighter, watchWorkspaceChanges, loadWorkspaceReviewOptions, loadRepositoryStatus } = codec
     snoozeEditor.set({
       ...codec.createSnoozeEditor({
         initial: settings().snoozePresets ?? [],
@@ -8328,6 +8408,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
           if (threadNavigation().settledAt || threadNavigation().snoozedUntil)
             threadNavigation.update(previous => ({ ...previous, settledAt: null, snoozedUntil: null, settledAutomatically: false }))
           steerableTurn.set(0)
+          expireApprovalRows(runningTurnId(), approvalOutcomeLabel('expired'))
           runningTurnId.set(payload.turnId)
           liveTurns.update(turns => [...turns, {
             id: payload.turnId,
@@ -8446,9 +8527,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         }
         batch(() => {
           setSessionState('idle')
-          closeApprovalOptions()
-          pendingApprovals.set([])
-          pendingApprovalId.set(0)
+          expireApprovalRows(payload.turnId, approvalOutcomeLabel('expired'))
           questionForm()?.interrupt()
         })
         if (payload.type === 'turn.interrupted') {
@@ -8469,31 +8548,41 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         batch(() => {
           setSessionState('failed')
           sessionError.set(payload.message || 'The agent could not finish this response.')
-          closeApprovalOptions()
-          pendingApprovals.set([])
-          pendingApprovalId.set(0)
+          expireApprovalRows(runningTurnId(), approvalOutcomeLabel('expired'))
           questionForm()?.interrupt()
         })
         transcriptAnnouncement.set('')
       }
       else if (payload.type === 'approval.requested') {
+        const turnId = payload.turnId ?? runningTurnId()
+        if (!turnId || turnId !== runningTurnId() || approvalRows(turnId).some(request => request.approvalId === payload.approvalId)) return
         batch(() => {
           setSessionState('awaiting-approval')
-          pendingApprovals.update(requests => requests.some(request => request.approvalId === payload.approvalId)
-            ? requests
-            : [...requests, { approvalId: payload.approvalId, toolName: payload.toolName, detail: payload.detail, choices: payload.choices, connector: payload.connector }])
+          updateApprovalRows(turnId, rows => [...rows, {
+            approvalId: payload.approvalId, toolName: payload.toolName, detail: payload.detail, choices: payload.choices, connector: payload.connector,
+          }])
           transcriptAnnouncement.set('An approval needs your attention.')
         })
         paintTranscript(updateTranscriptMarkdown)
       }
       else if (payload.type === 'approval.resolved') {
-        if (!pendingApprovals().some(request => request.approvalId === payload.approvalId)) return
-        if (approvalId() === payload.approvalId) closeApprovalOptions()
+        const id = payload.approvalId
+        if (!pendingApprovals().some(request => request.approvalId === id)) return
+        const row = approvalRow(id)
+        const active = row?.ownerDocument.activeElement
+        const restoreFocus = row?.contains(active) || (approvalSubmissions().includes(id) && active === row?.ownerDocument.body)
+        if (row?.contains(approvalDisclosure)) closeApprovalOptions()
+        const outcome = approvalOutcomeLabel(payload)
         batch(() => {
-          pendingApprovals.update(requests => requests.filter(request => request.approvalId !== payload.approvalId))
-          if (pendingApprovalId() === payload.approvalId) pendingApprovalId.set(0)
+          updateApprovalRows(runningTurnId(), rows => rows.map(request => request.approvalId === id
+            ? { approvalId: id, toolName: request.toolName, detail: request.detail, outcome }
+            : request))
+          approvalSubmissions.update(ids => ids.filter(item => item !== id))
           setSessionState(waitingSessionState())
+          transcriptAnnouncement.set(outcome + '.')
         })
+        if (restoreFocus) void nextTick(() => approvalRow(id)?.querySelector('[data-approval-outcome]')?.focus({ preventScroll: true }))
+        paintTranscript(updateTranscriptMarkdown)
       }
       else if (payload.type === 'input.requested' || payload.type === 'input.resolved') {
         batch(() => {
