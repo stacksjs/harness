@@ -5992,7 +5992,8 @@ const independentBatchThreads =
 if (!independentBatchThreads) {
   console.error('Model comparison fixture', finishedBatchThreads.map(thread => ({
     model: thread.model, status: thread.turns.at(-1)?.status, turns: thread.turns.length,
-    provider: thread.providerInstanceId, isolated: Boolean(thread.worktreePath), attachments: thread.turns[0]?.attachments?.length,
+    provider: thread.providerInstanceId, isolated: Boolean(thread.worktreePath), reserved: Boolean(thread.worktreeIntent),
+    error: thread.lastError, attachments: thread.turns[0]?.attachments?.length,
   })))
 }
 check('the two models run the same prompt and file in independent checkouts', independentBatchThreads)
