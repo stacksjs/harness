@@ -1,6 +1,17 @@
 <dialog id="harness-thread-actions" ref="threadActionsDialogBox" aria-labelledby="harness-thread-actions-title" @cancel="closeThreadActions" @click.self="closeThreadActions()" @scroll="positionThreadSnooze" class="m-0 p-0 overflow-auto text-neutral-900 bg-white border border-black/15 rounded-lg shadow-xl dark:text-neutral-100 dark:bg-neutral-900 dark:border-white/15">
   <div class="p-1">
     <h2 id="harness-thread-actions-title" class="sr-only">Thread actions</h2>
+    <div data-thread-actions-identity>
+      <div class="min-w-0">
+        <p dir="auto" data-thread-actions-name class="font-semibold" :text="currentThreadTitle()">{{ sessionTitle }}</p>
+        @if(workspaceName)
+          <p dir="auto" class="text-neutral-600 dark:text-neutral-400">{{ workspaceName }}</p>
+        @endif
+      </div>
+      <button type="button" @click="closeThreadActions()" aria-label="Close thread actions" class="harness-icon-button">
+        <span class="inline-block size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+      </button>
+    </div>
     <p role="alert" class="px-2 py-1 text-sm text-red-700 dark:text-red-300" :hidden="!threadActionError()" :text="threadActionError()"></p>
     <button type="button" data-thread-action @click="findFromThreadActions" :aria-keyshortcuts="shortcutKeys('transcript.find')">
       <span class="i-hugeicons-search-list-02" aria-hidden="true"></span>Find in thread

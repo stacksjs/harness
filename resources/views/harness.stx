@@ -278,36 +278,38 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   ></div>
 
   <main data-workspace-layout data-details-open="true" :data-details-open="workspaceDetailsOpen()" :data-diff-open="diffOpen()" :data-files-open="workspaceFilesOpen()" :data-preview-open="browserPreviewOpen()" :inert="!desktopSidebar() && sidebarOpen()" class="flex-1 min-w-0">
-    <header data-workspace-header class="flex relative gap-3 items-center shrink-0 px-4">
+    <header data-workspace-header class="flex relative items-center shrink-0">
       <button type="button" data-sidebar-toggle class="harness-icon-button" ref="sidebarToggleBox" @click="toggleSidebar" aria-label="Open navigation" aria-controls="harness-sidebar" aria-expanded="false" :aria-expanded="sidebarOpen() ? 'true' : 'false'">
         <span class="inline-block size-4 i-hugeicons-sidebar-left" aria-hidden="true"></span>
       </button>
-      <div data-workspace-heading class="min-w-0">
-        @if(workspaceName)
-          <span data-workspace-project class="flex gap-1.5 items-center min-w-0 text-xs text-neutral-600 dark:text-neutral-400" title="{{ workspaceName }}">
-            <span class="inline-block shrink-0 size-4 i-hugeicons-folder-01" data-workspace-folder aria-hidden="true"></span>
-            <span class="truncate">{{ workspaceName }}</span>
-          </span>
-          <span data-workspace-separator class="text-neutral-400" aria-hidden="true">/</span>
-        @endif
+      <div data-workspace-identity class="min-w-0">
+        <div data-workspace-heading class="min-w-0">
+          @if(workspaceName)
+            <span data-workspace-project class="flex gap-1.5 items-center min-w-0 text-xs text-neutral-600 dark:text-neutral-400" title="{{ workspaceName }}">
+              <span class="inline-block shrink-0 size-4 i-hugeicons-folder-01" data-workspace-folder aria-hidden="true"></span>
+              <span dir="auto" class="truncate">{{ workspaceName }}</span>
+            </span>
+            <span data-workspace-separator class="text-neutral-400" aria-hidden="true">/</span>
+          @endif
+          @if(activeSession)
+            <button type="button" data-workspace-title data-thread-actions-trigger ref="threadActionsTriggerBox" @click="openThreadActions" aria-haspopup="dialog" aria-controls="harness-thread-actions" :aria-expanded="threadActionsOpen()" :title="currentThreadTitle()" class="flex gap-1 items-center min-w-0 font-medium text-start text-[13px] rounded-md">
+              <span data-workspace-title-text dir="auto" class="min-w-0" :text="currentThreadTitle()">{{ sessionTitle }}</span>
+              <span class="shrink-0 inline-block size-3 i-hugeicons-arrow-down-01 text-neutral-500" aria-hidden="true"></span>
+            </button>
+          @else
+            <span data-workspace-title dir="auto" class="min-w-0 font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+          @endif
+        </div>
         @if(activeSession)
-          <button type="button" data-workspace-title data-thread-actions-trigger ref="threadActionsTriggerBox" @click="openThreadActions" aria-haspopup="dialog" aria-controls="harness-thread-actions" :aria-expanded="threadActionsOpen()" :title="currentThreadTitle()" class="flex gap-1 items-center min-w-0 font-medium text-start text-[13px] rounded-md">
-            <span class="min-w-0 truncate" :text="currentThreadTitle()">{{ sessionTitle }}</span>
-            <span class="shrink-0 inline-block size-3 i-hugeicons-arrow-down-01 text-neutral-500" aria-hidden="true"></span>
-          </button>
-        @else
-          <span data-workspace-title class="min-w-0 font-medium text-[13px] truncate" title="{{ sessionTitle }}">{{ sessionTitle }}</span>
+        <span
+          data-session-state
+          data-state="{{ sessionState }}"
+          :data-state="uiState()"
+          class="px-2 py-[2px] leading-[14px] text-[11px] whitespace-nowrap rounded-full opacity-70"
+          :text="uiState() === 'awaiting-input' ? 'Question' : uiState() === 'awaiting-approval' ? 'Approval' : uiState()"
+        >{{ sessionState === 'awaiting-input' ? 'Question' : sessionState === 'awaiting-approval' ? 'Approval' : sessionState }}</span>
         @endif
       </div>
-      @if(activeSession)
-      <span
-        data-session-state
-        data-state="{{ sessionState }}"
-        :data-state="uiState()"
-        class="px-2 py-[2px] leading-[14px] text-[11px] whitespace-nowrap rounded-full opacity-70"
-        :text="uiState() === 'awaiting-input' ? 'Question' : uiState() === 'awaiting-approval' ? 'Approval' : uiState()"
-      >{{ sessionState === 'awaiting-input' ? 'Question' : sessionState === 'awaiting-approval' ? 'Approval' : sessionState }}</span>
-      @endif
       {{-- Which agent answers in this session — the composer picker's ground truth. --}}
       @if(sessionDriver)
         <span data-session-driver :text="currentDriver()" class="px-[6px] py-[1px] leading-[15px] text-[11px] border border-black/10 rounded-[5px] dark:border-white/15 opacity-70">{{ sessionDriver }}</span>
@@ -2023,7 +2025,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const anchor = trigger.getBoundingClientRect()
     const viewport = dialog.ownerDocument.documentElement.clientWidth
     const width = dialog.getBoundingClientRect().width
-    dialog.style.setProperty('--thread-menu-top', anchor.bottom + 5 + 'px')
+    const headerBottom = trigger.closest('[data-workspace-header]')?.getBoundingClientRect().bottom ?? anchor.bottom
+    dialog.style.setProperty('--thread-menu-top', Math.max(anchor.bottom, headerBottom) + 5 + 'px')
     dialog.style.setProperty('--thread-menu-left', Math.max(8, Math.min(anchor.left, viewport - width - 8)) + 'px')
     positionThreadSnooze()
   }

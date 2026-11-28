@@ -726,6 +726,17 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [820, 1180
     return buttons.every(button => button && button.height >= 44 && button.left >= 0 && button.right <= innerWidth && button.bottom <= innerHeight)
       && document.documentElement.scrollWidth <= innerWidth
   }))
+  if (width <= 390) {
+    check(`the approval status leaves the full title row available at ${width}×${height}`, await page.evaluate(() => {
+      const titleText = document.querySelector('[data-workspace-title-text]')
+      if (!titleText || getComputedStyle(titleText).whiteSpace !== 'normal') return false
+      const title = document.querySelector('[data-workspace-title]')?.getBoundingClientRect()
+      const status = document.querySelector('[data-session-state]')?.getBoundingClientRect()
+      const project = document.querySelector('[data-workspace-project]')?.getBoundingClientRect()
+      return Boolean(title && status && project && status.width > 0 && status.top >= title.bottom
+        && status.left >= project.right && status.right <= innerWidth)
+    }))
+  }
   await capture(`pending-tool-approval-${width}x${height}`)
 }
 await page.reload()
@@ -893,6 +904,15 @@ const terminalTouchContext = await browser.newContext({ colorScheme, hasTouch: t
 try {
   const touch = await terminalTouchContext.newPage()
   await touch.goto(page.url())
+  const touchTitle = touch.locator('[data-workspace-title]')
+  await touchTitle.tap()
+  const touchThreadActions = touch.getByRole('dialog', { name: 'Thread actions' })
+  await touchThreadActions.locator('[data-thread-actions-name]').waitFor()
+  check('touch opens the full thread name in the action sheet', await touchThreadActions.locator('[data-thread-actions-name]').textContent()
+    === await touchTitle.locator('[data-workspace-title-text]').textContent())
+  await touchThreadActions.getByRole('button', { name: 'Close thread actions' }).tap()
+  await touchThreadActions.waitFor({ state: 'hidden' })
+  check('closing the thread action sheet restores the title focus', await touchTitle.evaluate(title => title === document.activeElement))
   await touch.locator('[data-header-terminal]').tap()
   const screen = touch.locator('[data-terminal-screen]')
   await screen.filter({ hasText: 'Harness test terminal' }).waitFor()
