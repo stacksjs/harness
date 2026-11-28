@@ -996,16 +996,27 @@ try {
     assert.equal(host.engine.current.sessions.size, beforeDraft)
     await page.locator('[data-draft-issue]').getByRole('link', { name: gitlabRepo + '#24' }).waitFor()
     await capture('gitlab-project-draft')
-    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    const threadWorkspace = derivedId('register-gitlab-project')
+    const waitForThreadCatalog = async () => {
+      const response = await page.waitForResponse((candidate) => {
+        const url = new URL(candidate.url())
+        return url.pathname === '/drivers' && url.searchParams.get('workspace') === String(threadWorkspace)
+          && !url.searchParams.has('models') && candidate.ok()
+      })
+      assert.equal(await response.finished(), null)
+    }
+    // Host restarts exercise link replay. Let each mounted thread finish its
+    // unrelated provider probe before cutting the connection or navigating.
+    await Promise.all([waitForThreadCatalog(), page.getByRole('button', { name: 'Send', exact: true }).click()])
     await page.getByText('Fixture issue draft received.').waitFor()
     assert.equal(observedPrompts.at(-1), gitlabUrl)
-    const session = [...host.engine.current.sessions.values()].find(item => item.workspaceId === derivedId('register-gitlab-project'))
+    const session = [...host.engine.current.sessions.values()].find(item => item.workspaceId === threadWorkspace)
     assert.ok(session)
     assert.deepEqual(session.linkedIssues, [expectedLink])
     const port = host.server.port
     host.stop()
     host = await startHost(port)
-    await page.reload()
+    await Promise.all([waitForThreadCatalog(), page.reload()])
     const linked = page.locator('[data-thread-issues]').getByRole('link', { name: gitlabRepo + '#24' })
     await linked.waitFor()
     assert.deepEqual(host.engine.current.sessions.get(session.id)?.linkedIssues, [expectedLink])
