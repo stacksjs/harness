@@ -168,6 +168,10 @@ An isolated stx source comparison on the same synthetic Harness workspace used t
 
 Moving three pull request helpers out of stx's automatic store directory removed a 27,262-byte uncompressed store bundle from the workspace route. Pull request search, saved views, and navigation still load the helpers through explicit review page imports. The focused drive passed in Chromium and WebKit in light and dark, including navigation with JavaScript disabled.
 
+A settled 10,000-line transcript now renders with 369,176 fewer response bytes on the same Bun and published stx versions. The server still renders the final line. The client setup receives a boolean for the presence of earlier turns and omits the settled response text. A server view test checks both surfaces.
+
+Two stx source changes avoid unnecessary tag matching and reuse utility class candidates across pages that link the same bundle. A disposable macOS Harness checkout with Bun 1.3.14 tested three runs against the existing HTTP budget. Uncached render medians were 276.5 to 284.9 ms and 20-session RSS ranged from 460.8 to 509.4 MB. The pinned published package measured 354.8 ms and 550.8 MB in this audit. These runs leave both strict budgets open. [Tag scanning](https://github.com/stacksjs/stx/commit/dfeaa8a7f7b) · [CSS candidates](https://github.com/stacksjs/stx/commit/f4174dc0ce6)
+
 Three paired macOS runs on Bun 1.3.14 and stx 0.2.959 brought the median of uncached workspace render times from 259.0 ms to 188.1 ms against a 150 ms limit. RSS after the change ranged from 364.0 to 477.0 MB. Results varied across pairs, and all three scoped runs exceeded the 350 MB limit. [P34 memory and performance tracking](https://github.com/stacksjs/harness/issues/44)
 
 ## Named provider accounts on the host

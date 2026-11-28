@@ -8254,7 +8254,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         if (diffOpen()) refreshWorkspaceDiff()
       }
       if (payload.type === 'session.isolated') {
-        if (sessionPullRequest && !turns.length && !liveTurns().length && uiState() === 'failed') {
+        if (sessionPullRequest && !initialHasTurns && !liveTurns().length && uiState() === 'failed') {
           setSessionState('idle')
           sessionError.set('')
         }

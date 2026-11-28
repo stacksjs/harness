@@ -1,8 +1,9 @@
 import type { HarnessState, ProfileState, SessionState, TurnState } from '@harness/engine'
 import { describe, expect, it } from 'bun:test'
+import { join } from 'node:path'
 import { emptyState } from '@harness/engine'
 import { searchThreads } from '../src/thread-search'
-import { viewProps } from '../src/views'
+import { renderHarnessView, viewProps } from '../src/views'
 
 /**
  * A turn with every field the projection sets.
@@ -67,6 +68,23 @@ function stateWith(): HarnessState {
   state.sessions.set(200, session({ id: 200, workspaceId: 20, state: 'idle', lastSeq: 1, turns: [] }))
   return state
 }
+
+it('renders a settled transcript without serializing its response into client setup', async () => {
+  const state = stateWith()
+  const response = 'settled-transcript-render-fixture'
+  state.sessions.set(100, session({ state: 'idle', turns: [turn({ status: 'complete', response })] }))
+
+  const previousCwd = process.cwd()
+  try {
+    process.chdir(join(import.meta.dir, '../../..'))
+    const html = await renderHarnessView(viewProps(state, { sessionId: 100, serverUrl: 'ws://localhost/ws' }))
+    expect(html).toContain(response)
+    let setup = ''
+    new HTMLRewriter().on('script', { text(chunk) { setup += chunk.text } }).transform(html!)
+    expect(setup).not.toContain(response)
+  }
+  finally { process.chdir(previousCwd) }
+})
 
 describe('thread search', () => {
   it('ranks titles, projects and branches ahead of message hits within one profile', () => {
