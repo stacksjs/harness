@@ -28,6 +28,8 @@ const searchLimit = 1000
 const involvementQualifiers = { assigned: 'assignee', authored: 'author', mentioned: 'mentions' } as const
 const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 
+export type IssueRelatedRequest = { href: string, label: string, status?: string }
+
 export interface IssueScope {
   state: 'open' | 'closed' | 'all'
   sort: 'updated' | 'created'
@@ -140,7 +142,7 @@ async function issueDetail(repository: GitHubWorkspaceRepository, number: number
 
   const raw = reply.body as GitHubIssue
   const details = { ...issue, dateLabel: issue.created ? dates.format(issue.created) : '',
-    description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '', relatedRequests: [] as { href: string, label: string }[] }
+    description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '', relatedRequests: [] as IssueRelatedRequest[] }
   if (activity) return { ...details, activity: activity.items, reactions: activity.reactions, commentTotal: activity.total,
     activityAvailable: true, activityDegraded: false, olderActivity: activity.older, newerActivity: activity.newer, commentPage: 0, moreComments: false }
   const commentPage = requestedComments === 'latest'
@@ -346,7 +348,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     ...(selection.tracker !== 'github' && { host: selection.host }), repository: selected.repository, number: selected.number })
   const linkedThreads = []
   const threadChoices = []
-  const pullRequests = new Map<string, { href: string, label: string }>()
+  const pullRequests = new Map<string, IssueRelatedRequest>()
   if (reference && selection) {
     const threads = [...state.sessions.values()].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || b.id - a.id)
     for (const thread of threads) {
@@ -414,6 +416,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     savedViewScope, savedViewDetail: savedViewDetail.toString(),
     listSelectionFields: selected ? [...savedViewDetail, ['selectionProfile', String(profile)]] : [],
     linkedThreads, threadChoices, pullRequests: [...pullRequests.values(), ...(selected?.relatedRequests ?? [])],
+    relatedRequestsIncomplete: selected?.tracker === 'forgejo' && selected.relatedRequestsIncomplete,
     canEditMetadata: Boolean(selected && (metadata?.canEdit || gitLabText?.canTriage)),
     metadataEditor: selected && !statusEdit ? metadataEditor : null,
     metadataDraft: selected && !statusEdit ? metadataSubmission?.draft : null,

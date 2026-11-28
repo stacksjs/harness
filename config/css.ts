@@ -712,6 +712,9 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-thread-list] { list-style: none; padding: 0; margin-block: 6px; }
 [data-issue-thread-list] li { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-block-end: 1px solid var(--workspace-line); }
 [data-issue-thread-list] a { color: var(--workspace-accent); padding-block: 10px; overflow-wrap: anywhere; }
+[data-issue-pull-state] {
+  flex: none; font-size: 12px; background: var(--workspace-hover); border-radius: 5px; padding: 2px 6px;
+}
 [data-issue-thread-picker] { display: flex; align-items: end; gap: 8px; margin-block-start: 8px; }
 [data-issue-thread-picker] > div { display: grid; gap: 4px; flex: 1; min-width: 0; font-size: 13px; }
 [data-issue-thread-picker] select {

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
-import { issueRepositoryKey, parseForgejoIssueUrl } from '@harness/contract'
+import { gitLabProject, issueRepositoryKey, parseForgejoIssueUrl } from '@harness/contract'
 import type { IssueActivityItem } from './issue-activity'
 import type { ForgejoIssueRepository } from './issue-repositories'
-import type { IssueScope } from './issue-workspace'
+import type { IssueRelatedRequest, IssueScope } from './issue-workspace'
 import { forgejoTeaRequest } from './forgejo-tea'
 import { openClosedIssueStatusPlan } from './issue-status'
 import { pullRequestLabels } from './pull-request-labels'
@@ -22,8 +22,10 @@ type RawIssue = {
 type RawComment = { id?: unknown, body?: unknown, created_at?: unknown, user?: User, issue_url?: unknown }
 type RawTimelineEntry = {
   id?: unknown, type?: unknown, body?: unknown, user?: User, created_at?: unknown, assignee?: User,
-  removed_assignee?: unknown, new_title?: unknown, label?: { name?: unknown }, ref_issue?: { number?: unknown },
+  removed_assignee?: unknown, new_title?: unknown, label?: { name?: unknown },
+  ref_issue?: { number?: unknown, html_url?: unknown, repository?: { full_name?: unknown }, pull_request?: unknown },
 }
+type CitedPull = { repository: string, number: number, href: string }
 type TimedActivity = IssueActivityItem & { id: number, created: number }
 
 function username(value?: User) {
@@ -200,8 +202,51 @@ function timelineEvent(entry: RawTimelineEntry | null): TimedActivity | null {
   }
 }
 
+function citeForgejoPull(repository: ForgejoIssueRepository, entry: RawTimelineEntry | null): CitedPull | null {
+  const source = entry?.ref_issue
+  const number = numericId(source?.number)
+  if (entry?.type !== 'pull_ref' || !number || !source?.pull_request || typeof source.html_url !== 'string') return null
+  const name = source.repository?.full_name ?? repository.apiName
+  if (typeof name !== 'string' || name.split('/').length !== 2 || !gitLabProject(repository.host, name)) return null
+  const href = repository.base + '/' + name + '/pulls/' + number
+  if (source.html_url.toLowerCase() !== href.toLowerCase()) return null
+  return { repository: name, number, href }
+}
+
+async function readForgejoRelatedPulls(repository: ForgejoIssueRepository, sources: Iterable<CitedPull>, signal: AbortSignal) {
+  const cites = [...sources]
+  const rows: IssueRelatedRequest[] = []
+  let incomplete = false
+  const concurrency = 4
+  for (let start = 0; start < cites.length && !signal.aborted; start += concurrency) {
+    const batch = await Promise.all(cites.slice(start, start + concurrency).map(async (cite) => {
+      const path = cite.repository.split('/').map(encodeURIComponent).join('/')
+      try {
+        const result = (await forgejoTeaRequest(repository, 'repos/' + path + '/pulls/' + cite.number, signal)).body as {
+          number?: unknown, title?: unknown, html_url?: unknown, state?: unknown, merged?: unknown, draft?: unknown,
+        } | null
+        if (result?.number !== cite.number || typeof result.title !== 'string' || typeof result.html_url !== 'string'
+          || result.html_url.toLowerCase() !== cite.href.toLowerCase()
+          || (result.state !== 'open' && result.state !== 'closed') || typeof result.merged !== 'boolean') {
+          incomplete = true
+          return null
+        }
+        const status = result.merged ? 'Merged' : result.state === 'closed' ? 'Closed' : result.draft === true ? 'Draft' : 'Open'
+        return { href: cite.href, label: cite.repository + ' #' + cite.number + ' · ' + result.title.slice(0, 240), status }
+      }
+      catch (error) {
+        incomplete ||= !(error instanceof RepositoryPullRequestError && error.status === 404)
+        return null
+      }
+    }))
+    rows.push(...batch.filter(row => row !== null))
+  }
+  return { rows, incomplete: incomplete || signal.aborted }
+}
+
 async function readForgejoTimeline(repository: ForgejoIssueRepository, endpoint: string, signal: AbortSignal) {
   const events = new Map<number, TimedActivity>()
+  const cited = new Map<string, CitedPull>()
   let available = false
   for (let page = 1; page <= requestLimit; page++) {
     const reply = await forgejoTeaRequest(repository, endpoint + '/timeline?limit=' + sourcePageSize + '&page=' + page, signal).catch(() => null)
@@ -211,10 +256,12 @@ async function readForgejoTimeline(repository: ForgejoIssueRepository, endpoint:
     for (const entry of rows.slice(0, sourcePageSize)) {
       const event = timelineEvent(entry)
       if (event) events.set(event.id, event)
+      const pull = citeForgejoPull(repository, entry)
+      if (event && pull) cited.set(pull.href.toLowerCase(), pull)
     }
-    if (!rows.length || reply.more === false) return { events: [...events.values()], available, partial: false }
+    if (!rows.length || reply.more === false) return { events: [...events.values()], cited, available, partial: false }
   }
-  return { events: [...events.values()], available, partial: true }
+  return { events: [...events.values()], cited, available, partial: true }
 }
 
 function byActivityTime(left: { id: number, created: number }, right: { id: number, created: number }) {
@@ -252,10 +299,12 @@ export async function readForgejoIssue(repository: ForgejoIssueRepository, numbe
   const events = timeline.events.filter(event => (!start || (first && byActivityTime(event, first) >= 0))
     && (!next || byActivityTime(event, next) < 0))
   const activity = [...(comments ?? []).slice(start, end), ...events].sort(byActivityTime)
+  const related = await readForgejoRelatedPulls(repository, timeline.cited.values(), signal)
   return { ...row, description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
     dateLabel: row.created ? dates.format(row.created) : '', activity, reactions: null, commentTotal,
     authority, activityAvailable: Boolean(comments) || timeline.available, activityDegraded: timeline.partial || !comments, olderActivity: '', newerActivity: '',
-    commentPage: page, moreComments: Boolean(comments && comments.length > page * pageSize), relatedRequests: [] as { href: string, label: string }[],
+    commentPage: page, moreComments: Boolean(comments && comments.length > page * pageSize),
+    relatedRequests: related.rows, relatedRequestsIncomplete: related.incomplete,
   }
 }
 

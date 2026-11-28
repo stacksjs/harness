@@ -21,6 +21,7 @@ export const draftHref = $props.draftHref
 export const linkedThreads = $props.linkedThreads
 export const threadChoices = $props.threadChoices
 export const pullRequests = $props.pullRequests
+export const relatedRequestsIncomplete = $props.relatedRequestsIncomplete
 export const issueThreadAction = $props.issueThreadAction
 export const olderCommentsHref = $props.olderCommentsHref
 export const newerCommentsHref = $props.newerCommentsHref
@@ -518,7 +519,7 @@ function closeIssueFilters(event) {
               @include('../partials/harness-issue-reactions', { bar: issueReactions, barLabel: 'Issue reactions' })
             @endif
           </section>
-          @if(linkedThreads.length || threadChoices.length || pullRequests.length)
+          @if(linkedThreads.length || threadChoices.length)
             <section data-issue-relations aria-labelledby="issue-threads">
               <h3 id="issue-threads">Linked threads</h3>
               @if(linkedThreads.length)
@@ -553,13 +554,23 @@ function closeIssueFilters(event) {
                   </form>
                 </details>
               @endif
+            </section>
+          @endif
+          @if(pullRequests.length || relatedRequestsIncomplete)
+            <section data-issue-relations aria-labelledby="issue-pulls-title">
+              <h3 id="issue-pulls-title">@if(selected.tracker === 'gitlab')Related changes@else Linked pull requests@endif</h3>
               @if(pullRequests.length)
-                <h4>@if(selected.tracker === 'gitlab')Related changes@else Pull requests@endif</h4>
-                <ul data-issue-thread-list>
+                <ul data-issue-thread-list aria-labelledby="issue-pulls-title">
                   @foreach(pullRequests as pull)
-                    <li><a href="{{ pull.href }}" @if(selected.tracker === 'gitlab' && pull.href.startsWith('https://'))target="_blank" rel="noreferrer"@endif>{{ pull.label }}</a></li>
+                    <li>
+                      <a href="{{ pull.href }}" @if(pull.href.startsWith('https://'))target="_blank" rel="noreferrer"@endif>{{ pull.label }}</a>
+                      @if(pull.status)<span data-issue-pull-state>{{ pull.status }}</span>@endif
+                    </li>
                   @endforeach
                 </ul>
+              @endif
+              @if(relatedRequestsIncomplete)
+                <p role="status">Some Forgejo pull requests could not load. Refresh to try again.</p>
               @endif
             </section>
           @endif

@@ -31,6 +31,12 @@ const viewer = { id: forgejo.viewerId ?? 17, login: forgejo.viewer }
 if (method === 'GET' && url.origin + url.pathname === forgejo.base + '/api/v1/user') reply(200, viewer)
 if (method === 'GET' && url.origin + url.pathname === endpoint)
   reply(200, { id: 50, full_name: forgejo.repository, archived: forgejo.archived === true, permissions: { push: forgejo.push === true } })
+const pullPath = url.origin + url.pathname
+if (method === 'GET' && pullPath.startsWith(forgejo.base + '/api/v1/repos/') && /\\/pulls\\/\\d+$/.test(pullPath)) {
+  const request = forgejo.pulls?.[pullPath.slice((forgejo.base + '/api/v1/repos/').length)]
+  if (!request) reply(404, {})
+  reply(200, request)
+}
 if (!url.href.startsWith(endpoint + '/')) reply(404, {})
 const path = (url.origin + url.pathname).slice(endpoint.length)
 const page = Math.max(1, Number(url.searchParams.get('page')) || 1)

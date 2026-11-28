@@ -1400,6 +1400,9 @@ try {
     html_url: forgejoUrl, body: 'Keep **Forgejo drafts** available for @fixture-user.', user: { id: 17, login: 'fixture-user' },
     assignees: [{ login: 'fixture-user', full_name: 'Fixture review team' }], labels: [{ id: 7, name: 'offline', color: '#5577aa' }], comments: 1,
   }
+  const pullCitation = (number: number, repository: string, base = forgejoBase) => ({
+    number, html_url: base + '/' + repository + '/pulls/' + number, repository: { full_name: repository }, pull_request: {},
+  })
   const otherForgejoIssue = { ...forgejoIssue, id: 301, number: 74, html_url: forgejoUrl.replace(/73$/u, '74'),
     title: 'Newer Forgejo issue', created_at: '2026-11-27T13:00:00Z', updated_at: '2026-11-27T13:00:00Z', labels: [] }
   alterForge(current => {
@@ -1426,7 +1429,22 @@ try {
         { id: 707, type: 'reopen', user: { login: 'maintainer' }, created_at: '2026-11-27T16:30:00Z' },
         { id: 708, type: 'change_title', new_title: forgejoTitle, user: { login: 'maintainer' }, created_at: '2026-11-27T16:40:00Z' },
         { id: 709, type: 'issue_ref', ref_issue: { number: 74 }, user: { login: 'maintainer' }, created_at: '2026-11-27T16:50:00Z' },
+        { id: 710, type: 'pull_ref', ref_issue: pullCitation(10, forgejoRepository), created_at: '2026-11-27T16:53:00Z' },
+        { id: 711, type: 'pull_ref', ref_issue: pullCitation(10, forgejoRepository), created_at: '2026-11-27T16:54:00Z' },
+        { id: 712, type: 'pull_ref', ref_issue: pullCitation(10, 'fixture/engine'), created_at: '2026-11-27T16:55:00Z' },
+        { id: 713, type: 'pull_ref', ref_issue: pullCitation(11, 'fixture/hidden'), created_at: '2026-11-27T16:56:00Z' },
+        { id: 714, type: 'pull_ref', ref_issue: pullCitation(12, 'fixture/engine', 'https://foreign.fixture.invalid/workbench'), created_at: '2026-11-27T16:57:00Z' },
+        { id: 715, type: 'pull_ref', ref_issue: pullCitation(13, forgejoRepository), created_at: '2026-11-27T16:58:00Z' },
       ],
+      pulls: {
+        [forgejoRepository + '/pulls/10']: { number: 10, title: 'Keep drafts across reconnect', html_url: forgejoBase + '/' + forgejoRepository + '/pulls/10', state: 'open', merged: false, draft: true },
+        'fixture/engine/pulls/10': { number: 10, title: 'Persist the offline command queue across worker restarts',
+          html_url: forgejoBase + '/fixture/engine/pulls/10', state: 'closed', merged: true },
+        'fixture/engine/pulls/12': { number: 12, title: 'Ignore an off-instance citation',
+          html_url: forgejoBase + '/fixture/engine/pulls/12', state: 'open', merged: false },
+        [forgejoRepository + '/pulls/13']: { number: 13, title: 'Ignore a pull with a mismatched response',
+          html_url: forgejoBase + '/' + forgejoRepository + '/pulls/14', state: 'closed', merged: false },
+      },
     }
   })
   await host.engine.dispatch({ id: 'register-forgejo-project', at: now, command: { type: 'workspace.register', path: forgejoPath, trusted: true } })
@@ -1453,7 +1471,20 @@ try {
   assert.deepEqual(await forgejoActivity.locator('[data-issue-event] span:first-of-type, article [data-issue-markdown]').allTextContents().then(rows => rows.map(text => text.trim())), [
     'added label offline', 'assigned reviewer', 'Review the saved draft.', 'closed the issue', 'reopened the issue',
     'renamed the issue to ' + forgejoTitle, 'referenced #74',
+    'referenced #10', 'referenced #10', 'referenced #10', 'referenced #11', 'referenced #12', 'referenced #13',
   ])
+  const citedPulls = page.getByRole('list', { name: 'Linked pull requests', exact: true })
+  const localCitation = citedPulls.getByRole('link', { name: /Keep drafts across reconnect/ })
+  const crossRepositoryCitation = citedPulls.getByRole('link', { name: /Persist the offline command queue/ })
+  assert.equal(await citedPulls.getByRole('link').count(), 2)
+  assert.equal(await localCitation.getAttribute('href'), forgejoBase + '/' + forgejoRepository + '/pulls/10')
+  assert.equal(await crossRepositoryCitation.getAttribute('href'), forgejoBase + '/fixture/engine/pulls/10')
+  assert.equal(await crossRepositoryCitation.getAttribute('target'), '_blank')
+  await citedPulls.getByText('Draft', { exact: true }).waitFor()
+  await citedPulls.getByText('Merged', { exact: true }).waitFor()
+  await page.getByText('Some Forgejo pull requests could not load. Refresh to try again.', { exact: true }).waitFor()
+  assert.equal(await page.getByText('Ignore an off-instance citation', { exact: true }).count(), 0)
+  assert.equal(await page.getByText('Ignore a pull with a mismatched response', { exact: true }).count(), 0)
   assert.equal(await forgejoActivity.getByText('Unfiltered timeline comment', { exact: true }).count(), 0)
   alterForge(current => { current.forgejo.failTimelinePage = 2 })
   await page.reload()
@@ -1472,6 +1503,10 @@ try {
     await page.setViewportSize({ width, height })
     assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
     await capture('forgejo-detail-' + width + 'x' + height)
+    await crossRepositoryCitation.scrollIntoViewIfNeeded()
+    const bounds = await crossRepositoryCitation.boundingBox()
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width)
+    await capture('forgejo-linked-pulls-' + width + 'x' + height)
   }
   const beforeForgejoDraft = host.engine.current.sessions.size
   await capturedHostLink.click()
