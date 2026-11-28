@@ -36,11 +36,10 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
   const intent = values.get('intent') ?? ''
   const scope = values.get('scope') ?? ''
   const draft = (values.get('body') ?? '').replace(/\r\n?/gu, '\n')
-  const text = draft.trim()
   if (!reference || !state.profiles.has(profile) || !tokenPattern.test(intent) || !/^[a-f0-9]{64}$/u.test(scope)) return null
   const finish = (result: keyof typeof messages, id: number | null = null) =>
     ({ result, id, text: draft.slice(0, maxCommentBytes), intent, scope, message: messages[result] })
-  if (!text || Buffer.byteLength(draft) > maxCommentBytes || text.includes('\0')) return finish('invalid')
+  if (!draft.trim() || Buffer.byteLength(draft) > maxCommentBytes || draft.includes('\0')) return finish('invalid')
   let attempted = false
   let confirmed = false
   try {
@@ -55,8 +54,21 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
     if (!authority) return finish('unavailable')
     if (!trusted() || issueCommentScope(repository, authority) !== scope) return finish('changed')
     const { issueId, viewer } = authority
-    const fingerprint = createHash('sha256').update(JSON.stringify([scope, text])).digest('hex')
-    const receipt = receipts.claim(intent, fingerprint, !authority.commentBlocked)
+    const fingerprintOf = (text: string) => createHash('sha256').update(JSON.stringify([scope, text])).digest('hex')
+    let text = draft
+    let fingerprint = fingerprintOf(text)
+    let receipt = receipts.claim(intent, fingerprint, !authority.commentBlocked)
+    // An already claimed comment from the older writer used trimmed text.
+    if (receipt === 'conflict' && draft !== draft.trim()) {
+      const previousText = draft.trim()
+      const previousFingerprint = fingerprintOf(previousText)
+      const previous = receipts.inspect(intent, previousFingerprint)
+      if (previous === 'pending' || previous === 'confirmed') {
+        text = previousText
+        fingerprint = previousFingerprint
+        receipt = previous
+      }
+    }
     if (receipt === 'denied' || receipt === 'conflict') return finish(receipt === 'denied' ? 'denied' : 'changed')
     attempted = true
     confirmed = receipt === 'confirmed'

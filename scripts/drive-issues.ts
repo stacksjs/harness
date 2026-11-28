@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert'
+import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -537,7 +538,7 @@ try {
   const commentBody = commentForm.getByRole('textbox', { name: 'Add a comment', exact: true })
   const postComment = commentForm.getByRole('button', { name: 'Post comment', exact: true })
   const postedComment = commentForm.getByText('Comment posted to GitHub.', { exact: true })
-  const commentText = 'Synthetic **review note** with a line break.\n\n<script>private-fixture-tag()</script>'
+  const commentText = '    preserve-leading-indent\n\nSynthetic **review note** with a line break.\n\n<script>private-fixture-tag()</script>'
   await commentBody.fill(commentText)
   await captureEditor('comment', postComment)
   const commentPost = await commentForm.evaluate(form => ({
@@ -587,6 +588,7 @@ try {
   assert.equal(await commentBody.inputValue(), '')
   const published = issuePage.locator('#issue-comment-22')
   await published.getByText('review note', { exact: true }).waitFor()
+  await published.locator('pre code').getByText('preserve-leading-indent', { exact: true }).waitFor()
   assert.equal(await published.getByText('private-fixture-tag').count(), 0)
   assert.equal(await published.getByText('harness:issue-comment', { exact: false }).count(), 0)
   assert.equal(new URL(issuePage.url()).hash, '#issue-comment-22')
@@ -598,6 +600,29 @@ try {
   assert.ok(duplicate.headers.get('location')?.endsWith('#issue-comment-22'))
   await issuePage.reload()
   await published.getByText('review note', { exact: true }).waitFor()
+  assert.deepEqual(readForge().issueCommentWrites, [[24, 22]])
+  const legacyBody = new URLSearchParams(retryPayload.body)
+  const legacyIntent = crypto.randomUUID()
+  const legacyText = 'Previously trimmed draft'
+  legacyBody.set('intent', legacyIntent)
+  legacyBody.set('body', '    ' + legacyText)
+  const legacyFingerprint = createHash('sha256').update(JSON.stringify([legacyBody.get('scope'), legacyText])).digest('hex')
+  {
+    using db = new Database(databasePath)
+    db.query('INSERT INTO harness_pull_request_reply_receipts (token, fingerprint) VALUES (?, ?)').run(legacyIntent, legacyFingerprint)
+  }
+  alterForge(current => {
+    current.issues['fixture/notebook'][0].comments.push({
+      id: 23, body: '<!-- harness:issue-comment:' + legacyIntent + ' -->\n\n' + legacyText,
+      user: { login: 'fixture-user', node_id: 'VIEWER_fixture-user' }, created_at: '2026-11-27T18:00:00Z',
+      issue_url: 'https://api.github.com/repos/fixture/notebook/issues/24',
+    })
+  })
+  const recoveredLegacy = await fetch(retryPayload.url, {
+    method: 'POST', body: legacyBody, redirect: 'manual', headers: { origin: base },
+  })
+  assert.equal(recoveredLegacy.status, 303)
+  assert.ok(recoveredLegacy.headers.get('location')?.endsWith('#issue-comment-23'))
   assert.deepEqual(readForge().issueCommentWrites, [[24, 22]])
   assert.deepEqual(errors, [])
   console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status and comment writes and recovery')
