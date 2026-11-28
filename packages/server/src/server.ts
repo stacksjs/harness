@@ -26,6 +26,7 @@ import type { WorkspaceReviewTurn } from './diff'
 import { isWorkspaceGitRoot, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
+import { submitIssueComment } from './issue-comment'
 import { updateIssueMetadata } from './issue-metadata'
 import { issueThreadUpdate, issueWorkspace, renderIssueMarkdown } from './issue-workspace'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
@@ -2283,7 +2284,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams, request.signal)
       }
 
-      if (url.pathname === '/issues' || url.pathname === '/issues/threads' || url.pathname === '/issues/metadata') {
+      if (['/issues', '/issues/threads', '/issues/metadata', '/issues/comments'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
@@ -2307,18 +2308,36 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             return new Response(message, { status: 409, headers })
           })
         }
-        if (url.pathname === '/issues/metadata' ? request.method !== 'POST' : request.method !== 'GET')
-          return new Response(null, { status: 405, headers: { ...headers, allow: url.pathname === '/issues/metadata' ? 'POST' : 'GET' } })
+        const method = url.pathname === '/issues' ? 'GET' : 'POST'
+        if (request.method !== method)
+          return new Response(null, { status: 405, headers: { ...headers, allow: method } })
         srv.timeout(request, 70)
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
-        const render = async (submission?: NonNullable<Awaited<ReturnType<typeof updateIssueMetadata>>>) => {
-          const view = await issueWorkspace(engine.current, url.searchParams, signal, submission)
+        const render = async (submission?: NonNullable<Awaited<ReturnType<typeof updateIssueMetadata>>>,
+          comment?: NonNullable<Awaited<ReturnType<typeof submitIssueComment>>>) => {
+          const view = await issueWorkspace(engine.current, url.searchParams, signal, submission, comment)
           const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-issues.stx'), view)
-          const status = !submission || submission.result === 'search' ? 200 : submission.result === 'pending' ? 202
-            : submission.result === 'denied' ? 403 : 409
+          const result = submission?.result ?? comment?.result
+          const status = !result || result === 'search' ? 200 : result === 'pending' ? 202
+            : result === 'denied' ? 403 : result === 'invalid' ? 422 : 409
           return new Response(renderIssueMarkdown(html, view), { status, headers })
         }
         const unavailable = () => new Response('Issues could not be loaded. Return to the workspace and try again.', { status: 503, headers })
+        if (url.pathname === '/issues/comments') {
+          if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
+            return new Response(null, { status: 415, headers })
+          return readRepositoryBody(request, 200_000).then(async (raw) => {
+            const comment = raw === null ? null : await submitIssueComment(engine.current, url.searchParams, new URLSearchParams(raw), signal, reviewReplies)
+            if (!comment) return new Response('Invalid issue comment form.', { status: 400, headers })
+            if (comment.result !== 'posted') return render(undefined, comment)
+            const params = new URLSearchParams(url.searchParams)
+            params.delete('editMetadata')
+            params.set('comments', 'latest')
+            params.set('commentResult', 'posted')
+            const anchor = comment.id ? '#issue-comment-' + comment.id : '#issue-comments'
+            return new Response(null, { status: 303, headers: { ...headers, location: '/issues?' + params + anchor } })
+          }).catch(unavailable)
+        }
         if (url.pathname === '/issues/metadata') {
           if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
             return new Response(null, { status: 415, headers })

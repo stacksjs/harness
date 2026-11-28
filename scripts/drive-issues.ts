@@ -532,8 +532,75 @@ try {
   assert.deepEqual(readForge().issueStateWrites, [
     [24, 'closed', 'not_planned'], [24, 'open', 'reopened'], [24, 'STATUS_ACTIVE'], [24, 'closed', 'duplicate'],
   ])
+  await issuePage.goto(detailUrl)
+  const commentForm = issuePage.getByRole('form', { name: 'Issue comment', exact: true })
+  const commentBody = commentForm.getByRole('textbox', { name: 'Add a comment', exact: true })
+  const postComment = commentForm.getByRole('button', { name: 'Post comment', exact: true })
+  const postedComment = commentForm.getByText('Comment posted to GitHub.', { exact: true })
+  const commentText = 'Synthetic **review note** with a line break.\n\n<script>private-fixture-tag()</script>'
+  await commentBody.fill(commentText)
+  await captureEditor('comment', postComment)
+  const commentPost = await commentForm.evaluate(form => ({
+    url: (form as HTMLFormElement).action,
+    body: new URLSearchParams(Array.from(new FormData(form as HTMLFormElement), ([key, value]) => [key, String(value)])).toString(),
+  }))
+  const replayComment = (origin: string) => fetch(commentPost.url, {
+    method: 'POST', body: commentPost.body, redirect: 'manual',
+    headers: { origin, 'content-type': 'application/x-www-form-urlencoded' },
+  })
+  assert.equal((await replayComment('https://outside.invalid')).status, 403)
+  const oversized = new URLSearchParams(commentPost.body)
+  const multibyteDraft = 'あ'.repeat(7000)
+  oversized.set('body', multibyteDraft)
+  const rejectedSize = await fetch(commentPost.url, {
+    method: 'POST', body: oversized, headers: { origin: base },
+  })
+  assert.equal(rejectedSize.status, 422)
+  assert.ok((await rejectedSize.text()).includes(multibyteDraft))
+
+  alterForge(current => { current.issueLocked = true; current.issuePermission = 'READ' })
+  assert.equal((await replayComment(base)).status, 403)
+  alterForge(current => { delete current.issueLocked; current.actor = 'new-comment-account' })
+  assert.equal((await replayComment(base)).status, 409)
+  alterForge(current => { delete current.actor; current.issueRefuseComment = true })
+  await postComment.click()
+  await commentForm.getByText('GitHub rejected the comment. Review your draft and try again.', { exact: true }).waitFor()
+  assert.equal(await commentBody.inputValue(), commentText)
+  assert.equal(readForge().issueCommentWrites, undefined)
+  alterForge(current => { delete current.issueRefuseComment; current.issueDropComment = true })
+  const retryPayload = await commentForm.evaluate(form => ({
+    url: (form as HTMLFormElement).action,
+    body: new URLSearchParams(Array.from(new FormData(form as HTMLFormElement), ([key, value]) => [key, String(value)])).toString(),
+  }))
+  await commentBody.press('Control+Enter')
+  const checkComment = commentForm.getByRole('button', { name: 'Check GitHub', exact: true })
+  await checkComment.waitFor()
+  assert.equal(await commentBody.inputValue(), commentText)
+  assert.equal(await commentBody.getAttribute('readonly') !== null, true)
+  await captureEditor('comment-recovery', checkComment)
+  const commentPort = host.server.port
+  host.stop()
+  host = await startHost(commentPort)
+  alterForge(current => { delete current.issueHideComment })
+  await checkComment.click()
+  await postedComment.waitFor()
+  assert.equal(await commentBody.inputValue(), '')
+  const published = issuePage.locator('#issue-comment-22')
+  await published.getByText('review note', { exact: true }).waitFor()
+  assert.equal(await published.getByText('private-fixture-tag').count(), 0)
+  assert.equal(await published.getByText('harness:issue-comment', { exact: false }).count(), 0)
+  assert.equal(new URL(issuePage.url()).hash, '#issue-comment-22')
+  const duplicate = await fetch(retryPayload.url, {
+    method: 'POST', body: retryPayload.body, redirect: 'manual',
+    headers: { origin: base, 'content-type': 'application/x-www-form-urlencoded' },
+  })
+  assert.equal(duplicate.status, 303)
+  assert.ok(duplicate.headers.get('location')?.endsWith('#issue-comment-22'))
+  await issuePage.reload()
+  await published.getByText('review note', { exact: true }).waitFor()
+  assert.deepEqual(readForge().issueCommentWrites, [[24, 22]])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata and status edits and recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status and comment writes and recovery')
 }
 catch (error) {
   console.error(error)

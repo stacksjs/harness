@@ -329,7 +329,7 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const repo = variables.owner + '/' + variables.name
     const issue = state.issues?.[repo]?.find(issue => issue.number === variables.number)
     if (state.issueUnsupportedPlanning && query.includes('planningStatuses(first'))
-      reply(200, { errors: [{ extensions: { type: 'undefinedField', fieldName: 'planningStatuses' } }] })
+      reply(200, { errors: [{ extensions: { code: 'undefinedField', fieldName: 'planningStatuses' } }] })
     if (state.assigneeHiddenRead || state.issueStateHiddenRead) {
       delete state.assigneeHiddenRead
       delete state.issueStateHiddenRead
@@ -341,7 +341,7 @@ if (url.pathname === '/graphql' && method === 'POST') {
         viewerPermission: state.issuePermission ?? 'READ', isArchived: Boolean(state.issueArchived),
         ...(state.planningStatuses && { planningStatuses: { nodes: state.planningStatuses, pageInfo: { hasNextPage: false } } }),
         issue: issue && !issue.pull_request ? { id: issueNodeId(repo, issue), number: issue.number,
-          state: issue.state.toUpperCase(), stateReason: issue.state_reason?.toUpperCase() ?? null,
+          locked: Boolean(state.issueLocked), state: issue.state.toUpperCase(), stateReason: issue.state_reason?.toUpperCase() ?? null,
           viewerCanClose: canChangeIssueState, viewerCanReopen: canChangeIssueState,
           viewerCanSetStatus: canChangeIssueState && state.issuePermission === 'TRIAGE',
           status: state.planningStatuses?.find(item => item.id === issue.status_id) ?? null,
@@ -354,6 +354,42 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const users = (state.filterAssignees ?? []).filter(user => (user.login + ' ' + user.name).toLowerCase().includes(needle))
     reply(200, { data: { repository: { nameWithOwner: repo,
       assignableUsers: { nodes: users.slice(0, 50).map(issueActor), pageInfo: { hasNextPage: users.length > 50 } } } } })
+  }
+  if (query.includes('mutation HarnessPostIssueComment') || query.includes('query HarnessFindIssueComment')) {
+    const posting = query.includes('mutation HarnessPostIssueComment')
+    const input = variables.input
+    const target = posting ? input?.subjectId : variables.id
+    const located = Object.entries(state.issues ?? {}).flatMap(([repository, issues]) =>
+      issues.filter(issue => issueNodeId(repository, issue) === target).map(issue => ({ repository, issue })))[0]
+    if (!process.env.GH_TOKEN || !located) reply(404, {})
+    const viewerId = 'VIEWER_' + (state.actor ?? 'fixture-user')
+    const toNode = comment => ({ fullDatabaseId: String(comment.id), body: comment.body, author: { id: comment.user?.node_id }, issue: { id: target } })
+    const comments = located.issue.comments ??= []
+    if (!posting) {
+      if (state.issueHideComment) reply(200, { data: { viewer: { id: viewerId }, node: { id: target, comments: { nodes: [], pageInfo: {} } } } })
+      const end = variables.before ? Number(variables.before) : comments.length
+      const start = Math.max(0, end - 50)
+      reply(200, { data: { viewer: { id: viewerId }, node: { id: target, comments: {
+        nodes: comments.slice(start, end).map(toNode), pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+      } } } })
+    }
+    if (state.issueArchived || (state.issueLocked && state.issuePermission === 'READ'))
+      reply(200, { errors: [{ type: 'FORBIDDEN', message: 'Fixture commenting access denied' }] })
+    if (state.issueRefuseComment) reply(200, { errors: [{ type: 'UNPROCESSABLE', message: 'Private fixture validation' }] })
+    const id = (comments.at(-1)?.id ?? 0) + 1
+    const comment = { id, body: input.body, user: { login: state.actor ?? 'fixture-user', node_id: viewerId },
+      issue_url: 'https://api.github.com/repos/' + located.repository + '/issues/' + located.issue.number,
+      created_at: '2026-11-27T18:00:00Z' }
+    comments.push(comment)
+    state.issueCommentWrites = [...(state.issueCommentWrites ?? []), [located.issue.number, id]]
+    if (state.issueDropComment) {
+      delete state.issueDropComment
+      state.issueHideComment = true
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(200, { data: { addComment: { commentEdge: { node: toNode(comment) } } } })
   }
   if (query.includes('mutation HarnessIssueStatus')) {
     if (!process.env.GH_TOKEN || state.issuePermission !== 'TRIAGE' || !canChangeIssueState) reply(403, {})
@@ -603,7 +639,7 @@ if (method === 'PATCH' && parts[4] === 'issues' && !parts[6]) {
 if (method === 'GET' && parts[4] === 'issues' && state.issues?.[name] && (!parts[6] || parts[6] === 'comments')) {
   const issue = state.issues[name].find(issue => issue.number === Number(parts[5]))
   if (!issue) reply(404, {})
-  if (!parts[6]) reply(200, issue)
+  if (!parts[6]) reply(200, { ...issue, comments: issue.comments?.length ?? 0 })
   const comments = issue.comments ?? []
   const size = Number(url.searchParams.get('per_page') || 20)
   const page = Number(url.searchParams.get('page') || 1)

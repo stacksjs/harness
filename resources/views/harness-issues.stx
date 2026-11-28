@@ -54,6 +54,13 @@ export const metadataHref = $props.metadataHref
 export const metadataLabelsHref = $props.metadataLabelsHref
 export const metadataAssigneesHref = $props.metadataAssigneesHref
 export const metadataAction = $props.metadataAction
+export const commentAction = $props.commentAction
+export const commentText = $props.commentText
+export const commentScope = $props.commentScope
+export const commentIntent = $props.commentIntent
+export const commentPending = $props.commentPending
+export const commentBlocked = $props.commentBlocked
+export const commentMessage = $props.commentMessage
 export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name: 'Closed' }, { value: 'all', name: 'All states' }]
 </script>
 <script client>
@@ -98,6 +105,13 @@ useEventListener('pointerdown', event => {
   if (filters?.open && !filters.contains(event.target)) filters.open = false
 })
 
+function submitIssueCommentShortcut(event) {
+  if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || event.shiftKey
+    || event.altKey || event.isComposing || event.keyCode === 229 || event.repeat || event.target.readOnly
+    || !event.target.value.trim()) return
+  event.preventDefault()
+  event.target.form?.requestSubmit()
+}
 function changeProjectVisibility(event) {
   const id = Number(event.target.value)
   const next = new Set(hiddenProjects())
@@ -440,7 +454,7 @@ function closeIssueFilters(event) {
               <p>No comments on this page.</p>
             @else
               @foreach(selected.comments as comment)
-                <article>
+                <article id="issue-comment-{{ comment.id }}">
                   <header><strong>{{ comment.author || 'GitHub user' }}</strong><span>{{ comment.dateLabel }}</span></header>
                   <div data-issue-markdown="{{ comment.id }}" class="transcript-markdown"></div>
                 </article>
@@ -453,9 +467,11 @@ function closeIssueFilters(event) {
               </nav>
             @endif
           </section>
+          @include('../partials/harness-issue-comment-composer')
         @else
           <h2 id="issue-title">Issue unavailable</h2>
           <p role="status">{{ error }}</p>
+          @if(commentText)@include('../partials/harness-issue-comment-composer')@endif
         @endif
       </section>
     @endif

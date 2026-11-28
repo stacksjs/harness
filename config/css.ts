@@ -537,8 +537,10 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 }
 [data-issue-list] { flex: 1; container: issue-list / inline-size; }
 [data-issue-detail] {
-  flex: 0 0 min(54%, 52rem); background: var(--workspace-surface); border-inline-start: 1px solid var(--workspace-line);
+  flex: 0 0 min(54%, 52rem); display: flex; flex-direction: column;
+  background: var(--workspace-surface); border-inline-start: 1px solid var(--workspace-line);
 }
+[data-issue-detail] > * { flex-shrink: 0; }
 [data-issue-filters] { position: relative; display: grid; gap: 8px; margin-block-end: 16px; }
 [data-issue-search] { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; position: relative; }
 [data-issue-search] > span { position: absolute; inset-inline-start: 10px; inset-block-start: 50%; translate: 0 -50%; inline-size: 1rem; block-size: 1rem; opacity: .75; pointer-events: none; }
@@ -679,9 +681,28 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
   border: 1px solid var(--workspace-line); border-radius: 7px; padding-inline: 8px;
 }
 
+[data-issue-comments] { margin-block-end: 16px; }
 [data-issue-comments] h3 { font-size: 14px; font-weight: 650; }
 [data-issue-comments] article { padding-block: 10px; border-block-end: 1px solid var(--workspace-line); }
 [data-issue-comments] article header { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+[data-issue-comment-composer] {
+  position: sticky; z-index: 1; inset-block-end: env(safe-area-inset-bottom, 0px);
+  display: grid; gap: 8px; margin-block-start: auto; padding: 10px;
+  border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-bg);
+}
+[data-issue-detail]:has([data-issue-metadata-editor]) [data-issue-comment-composer] { position: static; }
+[data-issue-comment-composer] textarea {
+  display: block; width: 100%; min-width: 0; min-block-size: 48px; max-block-size: 25vh;
+  box-sizing: border-box; field-sizing: content; resize: vertical; padding: 7px 8px;
+  color: inherit; background: var(--workspace-surface); border: 1px solid var(--workspace-line); border-radius: 6px;
+}
+[data-issue-comment-composer] textarea:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; }
+[data-issue-comment-composer] button { justify-self: end; }
+[data-issue-comment-composer] p { font-size: 13px; }
+[data-issue-comments] article:target { scroll-margin-block-start: 1rem; }
+@media (max-width: 767px) {
+  [data-issue-comment-composer] textarea { resize: none; font-size: 16px; }
+}
 [data-issue-workspace] :is(a, button, input, select, summary):focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
 @container issue-list (min-width: 660px) {
   [data-issue-filters] { grid-template-columns: minmax(0, 1fr) auto; }

@@ -3,6 +3,7 @@ import type { InternalCommand } from '@harness/contract'
 import { githubIssueReference, sameGitHubIssue } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
+import type { IssueCommentSubmission } from './issue-comment'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
 import { mergeGitHubProjectRepositories, trustedGitHubProjectRepositories, trustedGitHubRepositories } from './github-workspace-repositories'
 import { issueMetadataKind, readIssueMetadata } from './issue-metadata'
@@ -34,6 +35,7 @@ interface GitHubIssue {
   title?: unknown
   state?: unknown
   body?: unknown
+  comments?: unknown
   user?: { login?: unknown }
   assignees?: { login?: unknown }[]
   labels?: unknown
@@ -115,13 +117,15 @@ async function repositoryIssues(repository: GitHubWorkspaceRepository, scope: Is
   return { rows: [...issues.values()], partial }
 }
 
-async function issueDetail(repository: GitHubWorkspaceRepository, number: number, commentPage: number, signal: AbortSignal) {
+async function issueDetail(repository: GitHubWorkspaceRepository, number: number, requestedComments: number | 'latest', signal: AbortSignal) {
   const endpoint = 'repos/' + repository.name + '/issues/' + number
   const reply = await repositoryGitHubRequest(repository.path, endpoint, undefined, signal)
   const issue = reply.status === 200 ? issueRow(reply.body, repository.name) : null
   if (!issue || issue.number !== number) throw new RepositoryPullRequestError('This issue is unavailable to the GitHub account on this host.')
 
   const raw = reply.body as GitHubIssue
+  const commentPage = requestedComments === 'latest'
+    ? Math.max(1, Math.ceil(positiveInteger(raw.comments) / pageSize)) : requestedComments
   const commentReply = await repositoryGitHubRequest(repository.path, endpoint + '/comments?' + new URLSearchParams({
     per_page: String(pageSize), page: String(commentPage),
   }), undefined, signal).catch(() => null)
@@ -139,7 +143,7 @@ async function issueDetail(repository: GitHubWorkspaceRepository, number: number
   return {
     ...issue, dateLabel: issue.created ? dates.format(issue.created) : '',
     description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
-    comments, commentsAvailable, moreComments: Boolean(commentsAvailable && commentReply.hasNextPage),
+    comments, commentPage, commentsAvailable, moreComments: Boolean(commentsAvailable && commentReply.hasNextPage),
   }
 }
 
@@ -163,7 +167,7 @@ export async function issueThreadUpdate(
 }
 
 export async function issueWorkspace(state: HarnessState, query: URLSearchParams, signal: AbortSignal,
-  metadataSubmission?: { kind: IssueMetadataKind, message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }) {
+  metadataSubmission?: { kind: IssueMetadataKind, message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }, commentSubmission?: IssueCommentSubmission) {
   const profiles = [...state.profiles.values()].map(({ id, name }) => ({ id, name }))
   const requestedProfile = positiveInteger(query.get('profile'))
   const profile = profiles.some(item => item.id === requestedProfile) ? requestedProfile : profiles[0]?.id || 0
@@ -180,7 +184,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const selectionName = preserveSelection ? query.get('selected') || '' : ''
   const selection = repositories.get(selectionName.toLowerCase())
   const number = preserveSelection ? positiveInteger(query.get('issue')) : 0
-  const commentPage = Math.min(positiveInteger(query.get('comments')) || 1, 100)
+  const requestedComments = query.get('comments') === 'latest' ? 'latest'
+    : Math.min(positiveInteger(query.get('comments')) || 1, 10_000)
   const filter = query.get('state')
   const involvement = query.get('involvement')
   const findAssignee = query.has('findAssignees') ? (query.get('assignee') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim() : ''
@@ -217,7 +222,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     for (const [key, value] of Object.entries(overrides)) next.set(key, String(value))
     return '/issues?' + next
   }
-  const detail = selection && number ? issueDetail(selection, number, commentPage, signal)
+  const detail = selection && number ? issueDetail(selection, number, requestedComments, signal)
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error) })) : null
   const editMetadata = issueMetadataKind(query.get('editMetadata'))
   const metadataRead = selection && number ? readIssueMetadata({ repository: selection, number, signal }, metadataSubmission ? null : editMetadata) : null
@@ -252,6 +257,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     if (!labelOptions.has(key)) labelOptions.set(key, value)
     if (labelOptions.size >= 50) break
   }
+  const commentPage = selected?.commentPage ?? 1
   const selectedScope: Record<string, string | number> = selected ? { selected: selected.repository, issue: selected.number } : {}
   const savedViewDetail = new URLSearchParams()
   if (selected) {
@@ -343,6 +349,14 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     statusUnavailable: Boolean(selected && editMetadata === 'state' && !metadataSubmission && !metadataEditor),
     statusHref: selected ? href({ ...metadataFields, editMetadata: 'state' }) : '',
     metadataHref,
+    commentAction: metadataHref.replace('/issues?', '/issues/comments?') + '#issue-comment-composer',
+    commentText: commentSubmission?.text ?? '',
+    commentScope: commentSubmission?.result === 'pending' ? commentSubmission.scope : metadata?.commentScope ?? '',
+    commentIntent: commentSubmission?.result === 'pending' ? commentSubmission.intent : crypto.randomUUID(),
+    commentPending: commentSubmission?.result === 'pending',
+    commentBlocked: metadata?.commentBlocked ?? 'GitHub could not check commenting access.',
+    commentMessage: commentSubmission?.message
+      ?? (selected && query.get('commentResult') === 'posted' ? 'Comment posted to GitHub.' : ''),
     metadataLabelsHref: selected ? href({ ...metadataFields, editMetadata: 'labels' }) : '',
     metadataAssigneesHref: selected ? href({ ...metadataFields, editMetadata: 'assignees' }) : '',
     metadataAction: metadataHref.replace('/issues?', '/issues/metadata?'),
@@ -352,7 +366,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     previousHref: scope.page > 1 ? href({ page: scope.page - 1 }) : '',
     nextHref: scope.page < searchLimit / pageSize && rows.length > pageEnd ? href({ page: scope.page + 1 }) : '',
     olderCommentsHref: selected && commentPage > 1 ? href({ ...selectedScope, comments: commentPage - 1 }) : '',
-    newerCommentsHref: selected?.moreComments && commentPage < 100 ? href({ ...selectedScope, comments: commentPage + 1 }) : '',
+    newerCommentsHref: selected?.moreComments && commentPage < 10_000 ? href({ ...selectedScope, comments: commentPage + 1 }) : '',
     rows: rows.sort((a, b) => b[scope.sort] - a[scope.sort]).slice(pageEnd - pageSize, pageEnd).map(row => ({
       ...row, href: href({ selected: row.repository, issue: row.number }),
       dateLabel: row[scope.sort] ? dates.format(row[scope.sort]) : '',

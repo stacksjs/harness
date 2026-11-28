@@ -1,0 +1,19 @@
+<form id="issue-comment-composer" data-issue-comment-composer method="post" action="{{ commentAction }}" aria-label="Issue comment">
+  @if(commentMessage)
+    <p role="status">{{ commentMessage }}</p>
+  @endif
+  @if(commentBlocked && !commentPending)
+    <p id="issue-comment-blocked">{{ commentBlocked }}</p>
+  @endif
+  <input type="hidden" name="scope" value="{{ commentScope }}">
+  <input type="hidden" name="intent" value="{{ commentIntent }}">
+  <label class="sr-only" for="issue-comment-body">Add a comment</label>
+  <textarea id="issue-comment-body" name="body" rows="2" maxlength="16384" required
+    placeholder="Leave a comment" aria-keyshortcuts="Control+Enter Meta+Enter" @keydown="submitIssueCommentShortcut"
+    @if(commentPending || commentBlocked) readonly @endif
+    @if(commentBlocked && !commentPending) aria-describedby="issue-comment-blocked" @endif>{{ commentText }}</textarea>
+  <button type="submit" data-issue-button data-issue-primary
+    @if(commentBlocked && !commentPending) disabled @endif>
+    @if(commentPending)Check GitHub@else Post comment@endif
+  </button>
+</form>
