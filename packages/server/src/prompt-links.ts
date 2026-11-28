@@ -1,5 +1,5 @@
 import type { IssueReference } from '@harness/contract'
-import { issueRepositoryKey, parseIssueUrl } from '@harness/contract'
+import { issueRepositoryKey, parseForgejoIssueUrl, parseIssueUrl } from '@harness/contract'
 
 // Prompt sanitization follows T3 Code's MIT-licensed promptLinks.ts at
 // 431da7f4e55b82b386e68a9f32c543fac2efedf5. See ../../drivers/T3CODE-LICENSE.md.
@@ -76,10 +76,12 @@ export function parseLinkedPrompt(params: URLSearchParams, newThread: boolean): 
   }
   if (!prompt.text) return { error: 'This link has no prompt.' }
   if (!newThread) return { prompt }
-  const issue = params.has('issue') ? parseIssueUrl(params.get('issue')!) : null
+  const rawIssue = params.get('issue')
+  const issue = rawIssue ? params.get('repo')?.toLowerCase().startsWith('forgejo:')
+    ? parseForgejoIssueUrl(rawIssue) : parseIssueUrl(rawIssue) : null
   if (params.has('repo')) {
     const value = params.get('repo')!
-    const repository = issue?.tracker === 'gitlab' && issueRepositoryKey(issue) === value.toLowerCase() ? value.toLowerCase() : linkedRepository(value)
+    const repository = issue && issue.tracker !== 'github' && issueRepositoryKey(issue) === value.toLowerCase() ? value.toLowerCase() : linkedRepository(value)
     if (!repository) return { error: 'This link names an unreadable repository.' }
     prompt.repository = repository
   }

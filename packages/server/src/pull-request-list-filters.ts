@@ -1,5 +1,6 @@
+import { searchForgejoIssueChoices } from './forgejo-issues'
 import { searchGitLabIssueChoices } from './gitlab-issues'
-import type { GitLabIssueRepository } from './issue-repositories'
+import type { ForgejoIssueRepository, GitLabIssueRepository } from './issue-repositories'
 import { searchRepositoryLabels } from './pull-request-labels'
 import { applyPullRequestDraftFilterChange, parsePullRequestQuery } from './pull-request-query'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -115,10 +116,14 @@ export function readFilterLookup(query: URLSearchParams) {
 }
 
 type LookupRepository = { path: string, name: string }
-type FilterRepository = LookupRepository | GitLabIssueRepository
+type FilterRepository = LookupRepository | GitLabIssueRepository | ForgejoIssueRepository
 
 function isGitLabRepository(repository: FilterRepository): repository is GitLabIssueRepository {
   return 'tracker' in repository && repository.tracker === 'gitlab'
+}
+
+function isForgejoRepository(repository: FilterRepository): repository is ForgejoIssueRepository {
+  return 'tracker' in repository && repository.tracker === 'forgejo'
 }
 
 type FilterChoice = { value: string, description: string, color?: string }
@@ -159,12 +164,13 @@ export async function readRepositoryFilterChoices(repositories: FilterRepository
   let more = false
   let failed = 0
   const { kind, search } = lookup
-  const github = repositories.find(repository => !isGitLabRepository(repository))
+  const github = repositories.find(repository => !isGitLabRepository(repository) && !isForgejoRepository(repository))
   const credential = github && await repositoryGitHubCredential(github.path, signal).catch(() => null)
   for (let index = 0; index < repositories.length; index += 4) {
     signal.throwIfAborted()
     const batch = repositories.slice(index, index + 4)
     const pages = await Promise.allSettled(batch.map(async (repo): Promise<ChoicePage> => {
+      if (isForgejoRepository(repo) && kind !== 'authors') return searchForgejoIssueChoices(repo, kind, search, signal)
       if (isGitLabRepository(repo) && kind !== 'authors') return searchGitLabIssueChoices(repo, kind, search, signal)
       if (!credential) throw new RepositoryPullRequestError('GitHub filter choices are unavailable.')
       if (kind !== 'labels') return searchRepositoryUsers(repo, search, signal, credential, kind)

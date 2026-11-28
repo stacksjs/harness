@@ -34,7 +34,14 @@ export interface GitLabIssueReference {
   repository: string
   number: number
 }
-export type IssueReference = GitHubIssueReference | GitLabIssueReference
+export interface ForgejoIssueReference {
+  tracker: 'forgejo'
+  host: string
+  repository: string
+  number: number
+}
+
+export type IssueReference = GitHubIssueReference | GitLabIssueReference | ForgejoIssueReference
 
 export function gitLabProject(host: unknown, repository: unknown) {
   if (typeof host !== 'string' || typeof repository !== 'string' || host.length > 253 || repository.length > 512
@@ -46,11 +53,12 @@ export function gitLabProject(host: unknown, repository: unknown) {
 export function issueReference(value: unknown): IssueReference | null {
   const github = githubIssueReference(value)
   if (github || !value || typeof value !== 'object') return github
-  const candidate = value as Partial<GitLabIssueReference>
+  const candidate = value as Partial<GitLabIssueReference | ForgejoIssueReference>
   const project = gitLabProject(candidate.host, candidate.repository)
-  const number = candidate.number
-  return candidate.tracker === 'gitlab' && project && typeof number === 'number' && Number.isSafeInteger(number) && number > 0
-    ? { tracker: 'gitlab', ...project, number } : null
+  const { tracker, number } = candidate
+  return project && (tracker === 'gitlab' || (tracker === 'forgejo' && project.host !== 'github.com'))
+    && typeof number === 'number' && Number.isSafeInteger(number) && number > 0
+    ? { tracker, ...project, number } : null
 }
 
 export function parseIssueUrl(value: string): IssueReference | null {
@@ -60,12 +68,19 @@ export function parseIssueUrl(value: string): IssueReference | null {
   return match ? issueReference({ tracker: 'gitlab', host: match[1], repository: match[2], number: Number(match[3]) }) : null
 }
 
+export function parseForgejoIssueUrl(value: string): ForgejoIssueReference | null {
+  const match = /^https:\/\/([^/]+)\/(.+)\/issues\/([1-9]\d*)$/iu.exec(value)
+  const issue = match && issueReference({ tracker: 'forgejo', host: match[1], repository: match[2], number: Number(match[3]) })
+  return issue && issue.tracker === 'forgejo' ? issue : null
+}
+
 export function issueRepositoryKey(issue: IssueReference): string {
-  return issue.tracker === 'github' ? issue.repository : 'gitlab:' + issue.host + '/' + issue.repository
+  return issue.tracker === 'github' ? issue.repository : issue.tracker + ':' + issue.host + '/' + issue.repository
 }
 
 export function issueUrl(issue: IssueReference): string {
-  return issue.tracker === 'github' ? githubIssueUrl(issue) : 'https://' + issue.host + '/' + issue.repository + '/-/issues/' + issue.number
+  if (issue.tracker === 'github') return githubIssueUrl(issue)
+  return 'https://' + issue.host + '/' + issue.repository + (issue.tracker === 'gitlab' ? '/-/issues/' : '/issues/') + issue.number
 }
 
 export function sameIssue(left: IssueReference, right: IssueReference): boolean {

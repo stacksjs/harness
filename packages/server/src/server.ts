@@ -284,8 +284,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         if (!issue || !workspace?.trusted || workspace.scratch)
           throw new Error('This issue needs a matching trusted project. Remove the issue link to continue without it.')
         const signal = AbortSignal.timeout(10_000)
-        const repositories = issue.tracker === 'gitlab' ? await trustedIssueRepositories([workspace], workspace.profileId, signal)
-          : await trustedGitHubRepositories([workspace], workspace.profileId, signal)
+        const repositories = issue.tracker === 'github' ? await trustedGitHubRepositories([workspace], workspace.profileId, signal)
+          : await trustedIssueRepositories([workspace], workspace.profileId, signal)
         if (!repositories.has(issueRepositoryKey(issue)))
           throw new Error('This issue belongs to a different repository. Remove the issue link to continue without it.')
         return { ...command, issue }

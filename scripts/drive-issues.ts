@@ -9,6 +9,7 @@ import type { Browser, Locator } from 'playwright-core'
 import { chromium, webkit } from 'playwright-core'
 import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/server'
+import { fixtureForgejoCli } from '../packages/server/test/fixtures/forgejo-cli'
 import { fixtureGitHubCli } from '../packages/server/test/fixtures/github-cli'
 import { fixtureGitLabCli } from '../packages/server/test/fixtures/gitlab-cli'
 
@@ -1387,8 +1388,107 @@ try {
     if (previousGitLabToken === undefined) delete process.env.GITLAB_TOKEN
     else process.env.GITLAB_TOKEN = previousGitLabToken
   }
+  fixtureForgejoCli(cli.bin)
+  const forgejoBase = 'https://forgejo.fixture.invalid/workbench'
+  const forgejoRepository = 'fixture/notes'
+  const forgejoKey = 'forgejo:forgejo.fixture.invalid/workbench/' + forgejoRepository
+  const forgejoUrl = forgejoBase + '/' + forgejoRepository + '/issues/73'
+  const forgejoTitle = 'Verify offline drafts on Forgejo after reconnect'
+  const forgejoPath = localProject('forgejo project', 'git@issue-ssh.fixture.invalid:' + forgejoRepository + '.git')
+  const forgejoIssue = {
+    ...row(forgejoRepository, 73, forgejoTitle, '2026-11-02T00:00:00Z', '2026-11-27T16:00:00Z'),
+    html_url: forgejoUrl, body: 'Keep **Forgejo drafts** available for @fixture-user.',
+    assignees: [{ login: 'fixture-user', full_name: 'Fixture review team' }], labels: [{ id: 7, name: 'offline', color: '#5577aa' }], comments: 1,
+  }
+  const otherForgejoIssue = { ...forgejoIssue, number: 74, html_url: forgejoUrl.replace(/73$/u, '74'),
+    title: 'Newer Forgejo issue', created_at: '2026-11-27T13:00:00Z', updated_at: '2026-11-27T13:00:00Z', labels: [] }
+  alterForge(current => {
+    current.forgejo = {
+      base: forgejoBase, repository: forgejoRepository, viewer: 'fixture-user', selected: 'fixture-default',
+      logins: [
+        { name: 'secondary', url: forgejoBase, ssh_host: 'issue-ssh.fixture.invalid', user: 'secondary', default: 'false' },
+        { name: 'fixture-default', url: forgejoBase + '/', ssh_host: 'issue-ssh.fixture.invalid', user: 'fixture-user', default: 'true' },
+        { name: 'unrelated', url: 'https://foreign.fixture.invalid', user: 'unrelated', default: 'false' },
+      ],
+      issues: [forgejoIssue, otherForgejoIssue, { ...forgejoIssue, number: 76, html_url: forgejoUrl.replace(/73$/u, '76'),
+        title: 'A Forgejo pull request', pull_request: { merged: false } },
+        { ...forgejoIssue, number: 77, html_url: forgejoUrl.replace('forgejo.fixture.invalid', 'foreign.fixture.invalid').replace(/73$/u, '77'),
+          title: 'An issue on the wrong forge' }],
+      labels: [{ id: 9, name: 'Forgejo triage', color: '#5577aa', description: 'Review stale issue drafts' }],
+      assignees: forgejoIssue.assignees,
+      comments: [{ id: 702, body: 'Review the **saved draft**.', user: { login: 'fixture-user' }, created_at: '2026-11-27T15:00:00Z' }],
+    }
+  })
+  await host.engine.dispatch({ id: 'register-forgejo-project', at: now, command: { type: 'workspace.register', path: forgejoPath, trusted: true } })
+  const forge = (query: Record<string, string> = {}) => base + '/issues?' + new URLSearchParams({ profile: restored.get('profile') ?? '1', ...query })
+  const forgejoRow = page.getByRole('link', { name: new RegExp(forgejoTitle) })
+  await page.goto(forge({ q: 'offline' }))
+  await forgejoRow.waitFor()
+  assert.match(await page.locator('[data-issue-row]').first().innerText(), /Forgejo after reconnect/)
+  await page.goto(forge({ repository: forgejoKey }))
+  assert.equal(await page.locator('[data-issue-row]').count(), 2)
+  assert.match(await page.locator('[data-issue-row]').first().innerText(), /Forgejo after reconnect/)
+  await page.getByLabel('Order').selectOption('created')
+  await page.waitForURL(url => url.searchParams.get('sort') === 'created')
+  assert.match(await page.locator('[data-issue-row]').first().innerText(), /Newer Forgejo issue/)
+  await page.goto(forge({ repository: forgejoKey, label: 'offline', involvement: 'mentioned', assignee: '@me' }))
+  await forgejoRow.waitFor()
+  assert.equal(await page.locator('[data-issue-row]').count(), 1)
+  await forgejoRow.click()
+  await page.getByRole('heading', { name: forgejoTitle, exact: true }).waitFor()
+  const openForgejo = page.getByRole('link', { name: 'View on Forgejo', exact: true })
+  assert.equal(await openForgejo.getAttribute('href'), forgejoUrl)
+  assert.equal(await page.getByRole('link', { name: 'Comment on Forgejo', exact: true }).getAttribute('href'), forgejoUrl + '#comment-form')
+  assert.equal(await page.getByRole('button', { name: 'Post comment', exact: true }).count(), 0)
+  await page.getByText('saved draft', { exact: true }).waitFor()
+  const capturedHostLink = page.getByRole('link', { name: 'Open as draft', exact: true })
+  const forgejoDraft = new URL((await capturedHostLink.getAttribute('href')) ?? '', base)
+  assert.equal(forgejoDraft.searchParams.get('repo'), forgejoKey)
+  assert.equal(forgejoDraft.searchParams.get('issue'), forgejoUrl)
+  for (const [width, height] of viewports) {
+    await page.setViewportSize({ width, height })
+    assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+    await capture('forgejo-detail-' + width + 'x' + height)
+  }
+  const beforeForgejoDraft = host.engine.current.sessions.size
+  await capturedHostLink.click()
+  await page.waitForURL(url => url.pathname === '/new')
+  await page.getByRole('button', { name: 'Open project draft', exact: true }).click()
+  await page.locator('[data-draft-issue]').getByRole('link', { name: 'workbench/' + forgejoRepository + '#73', exact: true }).waitFor()
+  assert.equal(Number(new URL(page.url()).searchParams.get('workspace')), derivedId('register-forgejo-project'))
+  assert.equal(host.engine.current.sessions.size, beforeForgejoDraft)
+  await capture('forgejo-project-draft-360x800')
+  alterForge(current => {
+    current.forgejo.issues.push(...Array.from({ length: 22 }, (_, index) => ({
+      ...otherForgejoIssue, number: 80 + index, title: 'Pagination sample ' + index,
+      html_url: forgejoUrl.replace(/73$/u, String(80 + index)), body: '',
+      updated_at: new Date(now - index * 60_000).toISOString(),
+    })))
+  })
+  const forgejoRows = page.locator('[data-issue-row]')
+  await page.goto(forge({ repository: forgejoKey, q: 'Pagination sample' }))
+  assert.equal(await forgejoRows.count(), 20)
+  await page.getByRole('link', { name: 'Next page', exact: true }).click()
+  await page.waitForURL(url => url.searchParams.get('page') === '2')
+  assert.equal(await forgejoRows.count(), 2)
+  await page.goto(forge({ repository: forgejoKey, findLabels: '1', findLabel: 'stale issue' }))
+  await page.getByText('Forgejo triage', { exact: true }).waitFor()
+  const mixedForgejoUrl = forge({ q: 'offline', state: 'all' })
+  const retainedIssue = forgejoRows.filter({ hasText: readForge().issues['fixture/notebook'][0].title })
+  alterForge(current => { current.forgejo.unavailable = true })
+  await page.goto(mixedForgejoUrl)
+  await retainedIssue.waitFor()
+  await page.getByText('Forgejo could not load this resource. Check the configured CLI login.', { exact: false }).first().waitFor()
+  assert.equal(await forgejoRow.count(), 0)
+  alterForge(current => {
+    current.forgejo.unavailable = false
+    current.forgejo.logins[0].default = 'true'
+  })
+  await page.goto(mixedForgejoUrl)
+  await retainedIssue.waitFor()
+  assert.equal(await forgejoRow.count(), 0)
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing and draft links')
 }
 catch (error) {
   console.error(error)

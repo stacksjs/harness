@@ -422,7 +422,7 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
   const reviewed = values.get('revision') ?? ''
   const selected = values.getAll('choice').sort()
   const operation = values.get('operation') ?? 'save'
-  if (!reference || !state.profiles.has(profile) || !kind || !uuid.test(intent) || !/^[a-f0-9]{64}$/u.test(reviewed)
+  if (!reference || reference.tracker === 'forgejo' || !state.profiles.has(profile) || !kind || !uuid.test(intent) || !/^[a-f0-9]{64}$/u.test(reviewed)
     || !scope.startsWith('[') || scope.length > 950_000 || !['save', 'search'].includes(operation)) return null
   const gitLabOptions = reference.tracker === 'gitlab' && kind !== 'state' ? parseGitLabTriage(scope, selected, kind) : null
   const labels = reference.tracker === 'github' && kind === 'labels' ? parseLabelSelection(scope, selected) : null

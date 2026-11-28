@@ -68,8 +68,8 @@ export async function promptLinkProjects(state: HarnessState, params: URLSearchP
     return Response.json({ repository: remote?.repository ?? null }, options)
   }
   const key = params.get('repo') ?? ''
-  const gitlab = /^gitlab:([^/]+)\/(.+)$/iu.exec(key)
-  const issue = gitlab ? issueReference({ tracker: 'gitlab', host: gitlab[1], repository: gitlab[2], number: 1 }) : null
+  const hosted = /^(gitlab|forgejo):([^/]+)\/(.+)$/iu.exec(key)
+  const issue = hosted ? issueReference({ tracker: hosted[1]?.toLowerCase(), host: hosted[2], repository: hosted[3], number: 1 }) : null
   const named = issue ? issueRepositoryKey(issue) : linkedRepository(key)?.toLowerCase()
   if (!named || (issue && !params.has('profile'))) return Response.json({ error: 'Invalid linked repository.' }, { ...options, status: 400 })
   if (params.has('profile')) {

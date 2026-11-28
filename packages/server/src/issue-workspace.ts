@@ -8,8 +8,10 @@ import type { IssueCommentSubmission } from './issue-comment'
 import type { IssueTextSubmission } from './issue-text'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
 import type { IssueReactionForm } from './issue-reactions'
+import { listForgejoIssues, readForgejoIssue } from './forgejo-issues'
 import { readGitLabIssueReactions } from './gitlab-issue-reactions'
 import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssueText } from './gitlab-issues'
+import type { IssueRepository } from './issue-repositories'
 import { issueReferenceForSelection, mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
 import { gitLabStatusEditor, issueMetadataKind, readGitLabTriageEditor, readIssueMetadata } from './issue-metadata'
@@ -26,7 +28,7 @@ const searchLimit = 1000
 const involvementQualifiers = { assigned: 'assignee', authored: 'author', mentioned: 'mentions' } as const
 const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 
-interface IssueScope {
+export interface IssueScope {
   state: 'open' | 'closed' | 'all'
   sort: 'updated' | 'created'
   search: string
@@ -81,8 +83,10 @@ function issueRow(value: unknown, repository: string) {
   }
 }
 
-function issueError(error: unknown, tracker: 'github' | 'gitlab'): string {
-  return error instanceof RepositoryPullRequestError ? error.message : (tracker === 'gitlab' ? 'GitLab' : 'GitHub') + ' did not respond. Try again.'
+const issueForge = { github: 'GitHub', gitlab: 'GitLab', forgejo: 'Forgejo' } as const
+
+function issueError(error: unknown, tracker: IssueRepository['tracker']): string {
+  return error instanceof RepositoryPullRequestError ? error.message : issueForge[tracker] + ' did not respond. Try again.'
 }
 
 async function repositoryIssues(repository: GitHubWorkspaceRepository, scope: IssueScope, signal: AbortSignal) {
@@ -257,7 +261,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
         return { ...issue, reactions: reactions.issue,
           activity: issue.activity.map(item => ({ ...item, reactions: reactions.comments.get(Number(item.id)) })) }
       })
-    : issueDetail(selection, number, requestedComments, activityBefore, activityAfter, signal))
+    : selection.tracker === 'forgejo' ? readForgejoIssue(selection, number, requestedComments, signal)
+      : issueDetail(selection, number, requestedComments, activityBefore, activityAfter, signal))
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error, selection.tracker) })) : null
   const editMetadata = issueMetadataKind(query.get('editMetadata'))
   const editText = issueTextField(query.get('editText'))
@@ -274,13 +279,15 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const findLabel = (query.get('findLabel') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
   const lookup = findAssignee ? readRepositoryFilterChoices(targets, { kind: 'assignees', search: findAssignee }, signal)
     : query.has('findLabels') && findLabel ? readRepositoryFilterChoices(targets, { kind: 'labels', search: findLabel }, signal) : null
-  const rows: (NonNullable<ReturnType<typeof issueRow>> | Awaited<ReturnType<typeof listGitLabIssues>>['rows'][number])[] = []
+  const rows: (NonNullable<ReturnType<typeof issueRow>> | Awaited<ReturnType<typeof listGitLabIssues>>['rows'][number]
+    | Awaited<ReturnType<typeof listForgejoIssues>>['rows'][number])[] = []
   const failures: { repository: string, reason: string }[] = []
   let partial = false
   for (let offset = 0; offset < targets.length; offset += 4) {
     signal.throwIfAborted()
     const batch = targets.slice(offset, offset + 4)
-    const outcomes = await Promise.allSettled(batch.map(target => target.tracker === 'gitlab' ? listGitLabIssues(target, scope, signal) : repositoryIssues(target, scope, signal)))
+    const outcomes = await Promise.allSettled(batch.map(target => target.tracker === 'gitlab' ? listGitLabIssues(target, scope, signal)
+      : target.tracker === 'forgejo' ? listForgejoIssues(target, scope, signal) : repositoryIssues(target, scope, signal)))
     outcomes.forEach((outcome, index) => {
       if (outcome.status === 'fulfilled') {
         rows.push(...outcome.value.rows)
@@ -288,7 +295,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
       }
       else {
         const source = batch[index]!
-        failures.push({ repository: source.tracker === 'gitlab' ? source.host + '/' + source.name : source.name,
+        failures.push({ repository: source.tracker === 'github' ? source.name : source.host + '/' + source.name,
           reason: issueError(outcome.reason, source.tracker) })
       }
     })
@@ -317,7 +324,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const metadataFields = selected ? Object.fromEntries(savedViewDetail) : {}
   const metadataHref = selected ? href(metadataFields) : ''
   const editableText = gitLabText?.canEditText ? { ...gitLabText.text, scope: gitLabText.scope } : metadata?.editableText
-  const textForge = selectionName.toLowerCase().startsWith('gitlab:') ? 'GitLab' : 'GitHub'
+  const textForge = issueForge[selection?.tracker ?? 'github']
   const textDraft = textSubmission?.draft
     ?? (editText && editableText ? createIssueTextDraft(editText, editableText.scope, editableText[editText]) : null)
   const textResult = textSubmission?.result
@@ -334,7 +341,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     : selected && query.get('metadataResult') === 'state' ? 'Issue status updated on ' + textForge + '.' : ''
   const pageEnd = scope.page * pageSize
   const reference = selected && selection && issueReference({ tracker: selection.tracker,
-    ...(selection.tracker === 'gitlab' && { host: selection.host }), repository: selected.repository, number: selected.number })
+    ...(selection.tracker !== 'github' && { host: selection.host }), repository: selected.repository, number: selected.number })
   const linkedThreads = []
   const threadChoices = []
   const pullRequests = new Map<string, { href: string, label: string }>()
@@ -391,13 +398,13 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   return {
     profiles, profile, repositories: [...repositories.keys()].sort(),
     repositoryOptions: [...repositories.values()].map(item => ({ key: item.key,
-      label: item.tracker === 'gitlab' ? item.host + '/' + item.name : item.name })).sort((a, b) => a.label.localeCompare(b.label)),
+      label: item.tracker === 'github' ? item.name : item.host + '/' + item.name })).sort((a, b) => a.label.localeCompare(b.label)),
     repository: repository?.key || '', scope, failures, partial, error, selected, draftHref,
     hasIncludedRepositories: targets.length > 0,
     filterCount: Number(Boolean(repository)) + Number(scope.state !== 'open') + Number(Boolean(scope.involvement))
       + Number(Boolean(scope.assignee)) + scope.labels.length + Number(hidden.size > 0) + Number(hiddenProjects.size > 0),
     projectFilters,
-    repositoryFilters: [...repositories].map(([key, repo]) => ({ key, name: repo.tracker === 'gitlab' ? repo.host + '/' + repo.name : repo.name, hidden: hidden.has(key) })),
+    repositoryFilters: [...repositories].map(([key, repo]) => ({ key, name: repo.tracker === 'github' ? repo.name : repo.host + '/' + repo.name, hidden: hidden.has(key) })),
     labelOptions: [...labelOptions].map(([key, name]) => ({ name, checked: labels.has(key) })),
     assigneeOptions: [...new Set(rows.flatMap(row => row.assignees))].sort().slice(0, 30),
     findLabel: labelChoices ? findLabel : '', labelFound: labelChoices?.options.length || 0,

@@ -160,7 +160,7 @@ export async function submitIssueReaction(state: HarnessState, query: URLSearchP
   const scope = values.get('scope') ?? ''
   const intent = values.get('intent') ?? ''
   const [kind, content, extra] = (values.get('reaction') ?? '').split(':')
-  if (!reference || !state.profiles.has(profile) || !issueReactionId.test(subject) || !digest.test(scope) || !intentPattern.test(intent)
+  if (!reference || reference.tracker === 'forgejo' || !state.profiles.has(profile) || !issueReactionId.test(subject) || !digest.test(scope) || !intentPattern.test(intent)
     || extra !== undefined || !content || (kind !== 'add' && kind !== 'remove') || !issueReactionEmoji.some(([value]) => value === content)) return null
   if (reference.tracker === 'gitlab')
     return submitGitLabIssueReaction(state, profile, reference, { subject, scope, intent, content: content as IssueReactionContent, desired: kind === 'add' }, signal, receipts)

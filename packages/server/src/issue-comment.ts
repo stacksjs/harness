@@ -107,7 +107,7 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
   const intent = values.get('intent') ?? ''
   const scope = values.get('scope') ?? ''
   const draft = (values.get('body') ?? '').replace(/\r\n?/gu, '\n')
-  if (!reference || !state.profiles.has(profile) || !tokenPattern.test(intent) || !/^[a-f0-9]{64}$/u.test(scope)) return null
+  if (!reference || reference.tracker === 'forgejo' || !state.profiles.has(profile) || !tokenPattern.test(intent) || !/^[a-f0-9]{64}$/u.test(scope)) return null
   const forge = reference.tracker === 'gitlab' ? 'GitLab' : 'GitHub'
   const finish = (result: keyof typeof messages, id: number | null = null) =>
     ({ result, id, text: draft.slice(0, maxCommentBytes), intent, scope, message: messages[result].replaceAll('GitHub', forge) })
@@ -116,7 +116,7 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
   let confirmed = false
   try {
     const repository = (await trustedIssueRepositories(state.workspaces.values(), profile, signal)).get(issueRepositoryKey(reference))
-    if (!repository) return finish('changed')
+    if (!repository || repository.tracker === 'forgejo') return finish('changed')
     const trusted = () => {
       const current = state.workspaces.get(repository.workspace.id)
       return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === repository.workspace.path)

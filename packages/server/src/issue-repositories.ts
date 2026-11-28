@@ -1,20 +1,23 @@
 import type { WorkspaceState } from '@harness/engine'
+import type { TeaIssueTarget } from './forgejo-tea'
 import { gitLabProject, issueReference } from '@harness/contract'
+import { forgejoTeaLogins, forgejoTeaTarget } from './forgejo-tea'
 import { trustedProjectGitRemotes } from './github-workspace-repositories'
 import { repositoryFromRemote } from './prompt-links'
 
 type Target = { key: string, name: string, path: string, workspace: WorkspaceState }
 export type GitHubIssueRepository = Target & { tracker: 'github' }
 export type GitLabIssueRepository = Target & { tracker: 'gitlab', host: string }
-export type IssueRepository = GitHubIssueRepository | GitLabIssueRepository
+export type ForgejoIssueRepository = Target & TeaIssueTarget & { tracker: 'forgejo' }
+export type IssueRepository = GitHubIssueRepository | GitLabIssueRepository | ForgejoIssueRepository
 
 type RemoteProject = { host: string, name: string }
 
 export function issueReferenceForSelection(source: string | null, number: number) {
   const key = source?.toLowerCase() ?? ''
-  const gitlab = /^gitlab:([^/]+)\/(.+)$/u.exec(key)
-  return issueReference(gitlab
-    ? { tracker: 'gitlab', host: gitlab[1], repository: gitlab[2], number }
+  const hosted = /^(gitlab|forgejo):([^/]+)\/(.+)$/u.exec(key)
+  return issueReference(hosted
+    ? { tracker: hosted[1], host: hosted[2], repository: hosted[3], number }
     : { tracker: 'github', repository: key, number })
 }
 
@@ -64,13 +67,15 @@ export async function trustedIssueProjects(workspaces: Iterable<WorkspaceState>,
   if (defaultHost) hosts.add(defaultHost)
   const knownRemotes = projects.map(({ workspace, remotes }) => ({
     workspace,
-    remotes: remotes.map(({ path, url }) => ({ path, github: repositoryFromRemote(url), gitlab: gitLabRemote(url) })),
+    remotes: remotes.map(({ path, url }) => ({ path, url, github: repositoryFromRemote(url), gitlab: gitLabRemote(url) })),
   }))
   if (knownRemotes.some(project => project.remotes.some(remote => !remote.github && remote.gitlab && !hosts.has(remote.gitlab.host))))
     for (const host of await authenticatedGitLabHosts(signal)) hosts.add(host)
+  const hasOtherRemote = knownRemotes.some(project => project.remotes.some(remote => !remote.github && (!remote.gitlab || !hosts.has(remote.gitlab.host))))
+  const tea = hasOtherRemote ? await forgejoTeaLogins(signal) : []
   return knownRemotes.map(({ workspace, remotes }) => {
     const repositories = new Map<string, IssueRepository>()
-    for (const { github, gitlab, path } of remotes) {
+    for (const { github, gitlab, path, url } of remotes) {
       if (github) {
         const key = github.toLowerCase()
         if (!repositories.has(key)) repositories.set(key, { tracker: 'github', key, name: github, path, workspace })
@@ -78,6 +83,12 @@ export async function trustedIssueProjects(workspaces: Iterable<WorkspaceState>,
       else if (gitlab && hosts.has(gitlab.host)) {
         const key = 'gitlab:' + gitlab.host + '/' + gitlab.name.toLowerCase()
         if (!repositories.has(key)) repositories.set(key, { tracker: 'gitlab', key, ...gitlab, path, workspace })
+      }
+      else {
+        const forgejo = forgejoTeaTarget(url, tea)
+        if (!forgejo) continue
+        const key = 'forgejo:' + forgejo.host + '/' + forgejo.name.toLowerCase()
+        if (!repositories.has(key)) repositories.set(key, { tracker: 'forgejo', key, ...forgejo, path, workspace })
       }
     }
     return { workspace, repositories }

@@ -51,7 +51,7 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
   const intent = values.get('intent') ?? ''
   const raw = values.get('text')
   const operation = values.get('operation') ?? 'save'
-  if (!reference || !state.profiles.has(profile) || !field || !digestPattern.test(scope) || !digestPattern.test(before)
+  if (!reference || reference.tracker === 'forgejo' || !state.profiles.has(profile) || !field || !digestPattern.test(scope) || !digestPattern.test(before)
     || !tokenPattern.test(intent) || raw === null || !['save', 'preview', 'write', 'rebase'].includes(operation)
     || (field === 'title' && (operation === 'preview' || operation === 'write'))) return null
   const text = raw.replace(/\r\n?/gu, '\n')
@@ -69,7 +69,7 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
   if (operation === 'save') writing.add(key)
   try {
     const repository = (await trustedIssueRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey)
-    if (!repository) return finish('changed')
+    if (!repository || repository.tracker === 'forgejo') return finish('changed')
     const trusted = () => {
       const workspace = state.workspaces.get(repository.workspace.id)
       return Boolean(workspace?.trusted && !workspace.scratch && workspace.profileId === profile && workspace.path === repository.workspace.path)
