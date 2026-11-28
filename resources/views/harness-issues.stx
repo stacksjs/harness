@@ -42,6 +42,7 @@ export const assigneeChoices = $props.assigneeChoices
 export const canEditMetadata = $props.canEditMetadata
 export const issueStatus = $props.issueStatus
 export const canChangeIssueStatus = $props.canChangeIssueStatus
+export const forgejoStatusMenu = $props.forgejoStatusMenu
 export const statusEditor = $props.statusEditor
 export const statusDraft = $props.statusDraft
 export const statusMessage = $props.statusMessage
@@ -102,6 +103,7 @@ const matchingProjects = derived(() => {
 })
 const issueFilters = useRef('issueFilters')
 const issueFilterTrigger = useRef('issueFilterTrigger')
+const issueStatusMenu = useRef('issueStatusMenu')
 const savedViewTitle = 'issue view'
 const savedViewMenuRef = useRef('savedViewMenuRef')
 const savedViewTrigger = useRef('savedViewTrigger')
@@ -131,15 +133,26 @@ useEventListener('pointerdown', event => {
   listViews.dismissOutside(event)
   const filters = issueFilters.current
   if (filters?.open && !filters.contains(event.target)) filters.open = false
+  const status = issueStatusMenu.current
+  if (status?.open && !status.contains(event.target)) status.open = false
 })
 
-function closeIssueReactions(event) {
+function closeIssueDisclosure(event) {
   const details = event.currentTarget
   if (event.key !== 'Escape' || !details?.open || event.defaultPrevented || event.isComposing) return
   event.preventDefault()
   event.stopPropagation()
   details.open = false
   details.querySelector('summary')?.focus()
+}
+
+function issueStatusKeys(event) {
+  if (event.key === 'Escape') return closeIssueDisclosure(event)
+  if ((event.key !== 'ArrowDown' && event.key !== 'ArrowUp') || event.defaultPrevented || event.isComposing) return
+  const menu = event.currentTarget
+  event.preventDefault()
+  menu.open = true
+  menu.querySelector('button')?.focus()
 }
 
 function issueTextShortcut(event) {
@@ -415,7 +428,25 @@ function closeIssueFilters(event) {
               <p role="status" data-issue-metadata-message>{{ textMessage }}</p>
             @endif
             <div data-issue-meta>
-              @if(canChangeIssueStatus && !statusEditor && !statusDraft)
+              @if(forgejoStatusMenu)
+                <details data-issue-status-menu ref="issueStatusMenu" @keydown="issueStatusKeys">
+                  <summary data-issue-status-control data-issue-button aria-label="Change issue status, {{ issueStatus }}">
+                    <span data-issue-state="{{ selected.state }}">{{ issueStatus }}</span>
+                    <span class="inline-block size-4 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+                  </summary>
+                  <form method="post" action="{{ metadataAction }}#issue-status" aria-label="New issue status">
+                    <input type="hidden" name="kind" value="{{ forgejoStatusMenu.kind }}">
+                    <input type="hidden" name="scope" value="{{ forgejoStatusMenu.scope }}">
+                    <input type="hidden" name="revision" value="{{ forgejoStatusMenu.revision }}">
+                    <input type="hidden" name="intent" value="{{ forgejoStatusMenu.intent }}">
+                    @foreach(forgejoStatusMenu.options as option)
+                      <button type="submit" name="choice" value="{{ option.key }}" data-issue-button>
+                        <span data-issue-state="{{ option.key }}">{{ option.name }}</span>
+                      </button>
+                    @endforeach
+                  </form>
+                </details>
+              @elseif(canChangeIssueStatus && !statusEditor && !statusDraft)
                 <a href="{{ statusHref }}#issue-title" data-issue-status-control data-issue-button aria-label="Change issue status, {{ issueStatus }}">
                   <span data-issue-state="{{ selected.state }}">{{ issueStatus }}</span>
                   <span class="inline-block size-4 i-hugeicons-arrow-down-01" aria-hidden="true"></span>

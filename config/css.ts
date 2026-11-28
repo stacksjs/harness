@@ -649,6 +649,17 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-status-control] { min-height: 30px; gap: 5px; padding: 3px 7px; }
 [data-issue-status-control] > [data-issue-state] { min-width: 0; }
 [data-issue-status-control] > :last-child { flex-shrink: 0; }
+[data-issue-meta]:has([data-issue-status-menu][open]) { align-items: start; }
+[data-issue-status-menu] > summary { cursor: pointer; list-style: none; }
+[data-issue-status-menu] > summary::-webkit-details-marker { display: none; }
+[data-issue-status-menu] > form {
+  display: grid; min-inline-size: 7rem; margin-block-start: 4px; padding: 4px; border: 1px solid var(--workspace-line);
+  border-radius: 8px; background: var(--workspace-surface); box-shadow: 0 6px 14px #0003;
+}
+[data-issue-status-menu] > form button { justify-content: start; border-color: transparent; }
+@media (max-width: 767px) {
+  [data-issue-status-menu] [data-issue-button] { min-block-size: 44px; }
+}
 #issue-status:has(> form), #issue-status:has(> p) { margin-block-end: 12px; }
 [data-issue-detail-heading] { display: grid; gap: 7px; margin-block: 12px 18px; }
 [data-issue-detail-heading] h2, [data-issue-detail] > h2 { font-size: clamp(19px, 2vw, 25px); font-weight: 650; line-height: 1.3; }

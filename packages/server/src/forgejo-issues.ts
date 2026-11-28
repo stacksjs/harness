@@ -4,6 +4,7 @@ import type { IssueActivityItem } from './issue-activity'
 import type { ForgejoIssueRepository } from './issue-repositories'
 import type { IssueScope } from './issue-workspace'
 import { forgejoTeaRequest } from './forgejo-tea'
+import { openClosedIssueStatusPlan } from './issue-status'
 import { pullRequestLabels } from './pull-request-labels'
 import { RepositoryPullRequestError } from './repository-pull-request'
 
@@ -100,7 +101,7 @@ function forgejoIssueEndpoint(repository: ForgejoIssueRepository, number: number
   return repoPath(repository) + '/issues/' + number
 }
 
-export async function readForgejoCommentAccess(repository: ForgejoIssueRepository, number: number, signal: AbortSignal, issue?: RawIssue) {
+export async function readForgejoIssueAuthority(repository: ForgejoIssueRepository, number: number, signal: AbortSignal, issue?: RawIssue) {
   const endpoint = forgejoIssueEndpoint(repository, number)
   const [raw, repoReply, userReply] = await Promise.all([
     issue ?? forgejoTeaRequest(repository, endpoint, signal).then(reply => reply.body as RawIssue | null),
@@ -114,27 +115,29 @@ export async function readForgejoCommentAccess(repository: ForgejoIssueRepositor
   const viewer = numericId(user?.id)
   if (!raw || !issueRow(repository, raw) || raw.number !== number || !issueId || !repoId || !viewer
     || typeof repo?.full_name !== 'string' || repo.full_name.toLowerCase() !== repository.apiName.toLowerCase()) return null
-  const scope = createHash('sha256').update(JSON.stringify([
-    'forgejo-issue-comment', repository.base, repository.login, repository.key,
-    repository.workspace.profileId, repository.workspace.id, repoId, issueId, viewer,
-  ])).digest('hex')
-  const blocked = repo.archived === true ? 'This Forgejo repository is archived.'
-    : raw.is_locked === true && !repo.permissions?.push ? 'This Forgejo issue is locked.'
+  const identity = [repository.base, repository.login, repository.key, repository.workspace.profileId,
+    repository.workspace.id, repoId, issueId, viewer]
+  const scope = (operation: string) => createHash('sha256').update(JSON.stringify([operation, ...identity])).digest('hex')
+  const canPush = repo.permissions?.push === true
+  const canEdit = repo.archived === false && (canPush || numericId(raw.user?.id) === viewer)
+  const commentBlocked = repo.archived === true ? 'This Forgejo repository is archived.'
+    : raw.is_locked === true && !canPush ? 'This Forgejo issue is locked.'
       : typeof repo.archived !== 'boolean' || typeof raw.is_locked !== 'boolean' ? 'Forgejo could not check commenting access.' : ''
-  return { scope, blocked, viewer, endpoint }
+  return { commentScope: scope('forgejo-issue-comment'), commentBlocked, viewer, endpoint,
+    status: openClosedIssueStatusPlan(raw.state, canEdit), statusScope: scope('forgejo-issue-status') }
 }
 
 export async function forgejoIssueCommentWriter(repository: ForgejoIssueRepository, number: number, signal: AbortSignal) {
-  const access = await readForgejoCommentAccess(repository, number, signal)
+  const access = await readForgejoIssueAuthority(repository, number, signal)
   if (!access) return null
-  const { scope, blocked, viewer, endpoint } = access
+  const { commentScope: scope, commentBlocked: blocked, viewer, endpoint } = access
   const matches = (comment: RawComment | null, body: string) => comment?.body === body
     && numericId(comment.user?.id) === viewer && belongsToIssue(repository, endpoint, comment) ? numericId(comment.id) : null
-  const current = async () => (await readForgejoCommentAccess(repository, number, signal))?.scope === scope
+  const current = async () => (await readForgejoIssueAuthority(repository, number, signal))?.commentScope === scope
   return {
     scope, blocked,
     async post(body: string) {
-      const reply = await forgejoTeaRequest(repository, endpoint + '/comments', signal, { body }).catch((error: unknown) => {
+      const reply = await forgejoTeaRequest(repository, endpoint + '/comments', signal, { method: 'POST', body: { body } }).catch((error: unknown) => {
         if (error instanceof RepositoryPullRequestError && error.status) return error.status
         return null
       })
@@ -152,6 +155,19 @@ export async function forgejoIssueCommentWriter(repository: ForgejoIssueReposito
   }
 }
 
+export async function writeForgejoIssueStatus(repository: ForgejoIssueRepository, number: number, state: 'open' | 'closed', signal: AbortSignal) {
+  try {
+    await forgejoTeaRequest(repository, forgejoIssueEndpoint(repository, number), signal, { method: 'PATCH', body: { state } })
+  }
+  catch (error) {
+    if (error instanceof RepositoryPullRequestError) {
+      if (error.status === 401 || error.status === 403) return 'denied' as const
+      if (error.status === 400 || error.status === 404 || error.status === 422) return 'refused' as const
+    }
+  }
+  return null
+}
+
 export async function readForgejoIssue(repository: ForgejoIssueRepository, number: number, requestedPage: number | 'latest' | null, signal: AbortSignal, commentFocus = 0) {
   const endpoint = forgejoIssueEndpoint(repository, number)
   const reply = await forgejoTeaRequest(repository, endpoint, signal)
@@ -159,9 +175,9 @@ export async function readForgejoIssue(repository: ForgejoIssueRepository, numbe
   const row = issueRow(repository, raw)
   if (!row || !raw || row.number !== number) throw new RepositoryPullRequestError('Forgejo could not verify this issue.')
   const commentTotal = typeof raw.comments === 'number' && Number.isSafeInteger(raw.comments) ? Math.max(0, raw.comments) : 0
-  const [replyComments, commentAccess] = await Promise.all([
+  const [replyComments, authority] = await Promise.all([
     forgejoTeaRequest(repository, endpoint + '/comments', signal).catch(() => null),
-    readForgejoCommentAccess(repository, number, signal, raw).catch(() => null),
+    readForgejoIssueAuthority(repository, number, signal, raw).catch(() => null),
   ])
   const comments = Array.isArray(replyComments?.body)
     ? replyComments.body.filter(comment => numericId(comment?.id) && typeof comment.body === 'string' && belongsToIssue(repository, endpoint, comment))
@@ -177,7 +193,7 @@ export async function readForgejoIssue(repository: ForgejoIssueRepository, numbe
   })
   return { ...row, description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
     dateLabel: row.created ? dates.format(row.created) : '', activity, reactions: null, commentTotal,
-    commentAccess, activityAvailable: Boolean(comments), activityDegraded: false, olderActivity: '', newerActivity: '',
+    authority, activityAvailable: Boolean(comments), activityDegraded: false, olderActivity: '', newerActivity: '',
     commentPage: page, moreComments: Boolean(comments && comments.length > page * pageSize), relatedRequests: [] as { href: string, label: string }[],
   }
 }

@@ -25,7 +25,7 @@ const flag = key => args[args.indexOf(key) + 1]
 const url = new URL(args.at(-1))
 const endpoint = forgejo.base + '/api/v1/repos/' + forgejo.repository
 const method = flag('--method')
-if (!['GET', 'POST'].includes(method) || flag('--login') !== forgejo.selected || flag('--repo') !== forgejo.repository) reply(401, {})
+if (!['GET', 'POST', 'PATCH'].includes(method) || flag('--login') !== forgejo.selected || flag('--repo') !== forgejo.repository) reply(401, {})
 if (forgejo.unavailable) reply(503, {})
 const viewer = { id: forgejo.viewerId ?? 17, login: forgejo.viewer }
 if (method === 'GET' && url.origin + url.pathname === forgejo.base + '/api/v1/user') reply(200, viewer)
@@ -35,6 +35,26 @@ if (!url.href.startsWith(endpoint + '/')) reply(404, {})
 const path = (url.origin + url.pathname).slice(endpoint.length)
 const page = Math.max(1, Number(url.searchParams.get('page')) || 1)
 const find = url.searchParams
+if (method === 'PATCH') {
+  const match = /^\\/issues\\/(\\d+)$/.exec(path)
+  const issue = match && forgejo.issues.find(row => row.number === Number(match[1]))
+  if (!issue || !args.includes('@-')) reply(404, {})
+  if (forgejo.archived || (issue.user?.id !== viewer.id && !forgejo.push)) reply(403, {})
+  if (forgejo.refuseStatus) reply(422, {})
+  const input = await new Response(Bun.stdin.stream()).json()
+  if (!['open', 'closed'].includes(input.state) || Object.keys(input).length !== 1) reply(422, {})
+  issue.state = input.state
+  forgejo.statusWrites ??= []
+  forgejo.statusWrites.push([issue.number, viewer.id, input.state])
+  if (forgejo.dropStatusReply) {
+    delete forgejo.dropStatusReply
+    forgejo.failIssueRead = true
+    writeFileSync(statePath, JSON.stringify(state))
+    reply(502, {})
+  }
+  writeFileSync(statePath, JSON.stringify(state))
+  reply(200, issue)
+}
 if (method === 'POST') {
   const match = /^\\/issues\\/(\\d+)\\/comments$/.exec(path)
   const issue = match && forgejo.issues.find(row => row.number === Number(match[1]))
@@ -80,7 +100,14 @@ if (path === '/labels' || path === '/assignees') reply(200, page === 1 ? forgejo
 const individual = /^\\/issues\\/(\\d+)(\\/comments)?$/.exec(path)
 const issue = individual && forgejo.issues.find(row => row.number === Number(individual[1]))
 if (!issue) reply(404, {})
-if (!individual[2]) reply(200, issue)
+if (!individual[2]) {
+  if (forgejo.failIssueRead) {
+    delete forgejo.failIssueRead
+    writeFileSync(statePath, JSON.stringify(state))
+    reply(503, {})
+  }
+  reply(200, issue)
+}
 if (forgejo.failCommentRead) {
   delete forgejo.failCommentRead
   writeFileSync(statePath, JSON.stringify(state))

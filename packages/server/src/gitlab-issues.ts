@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { issueRepositoryKey, parseIssueUrl } from '@harness/contract'
 import type { IssueActivityItem } from './issue-activity'
 import type { GitLabIssueRepository } from './issue-repositories'
-import { gitLabIssueStatusPlan } from './issue-status'
+import { openClosedIssueStatusPlan } from './issue-status'
 import { defaultGitLabIssueHost, gitLabCli } from './issue-repositories'
 import { RepositoryPullRequestError } from './repository-pull-request'
 
@@ -239,7 +239,7 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
   const canEditText = project.archived === false && issue.userPermissions?.updateIssue === true
   const canTriage = canEditText && issue.userPermissions?.adminIssue === true
   const applied = triage ? triageChoices(triage, issue[triage]) : null
-  const status = gitLabIssueStatusPlan(issue.state, canEditText && (issue.state !== 'closed' || issue.userPermissions?.reopenIssue === true))
+  const status = openClosedIssueStatusPlan(issue.state === 'opened' ? 'open' : issue.state, canEditText && (issue.state !== 'closed' || issue.userPermissions?.reopenIssue === true))
   return { scope: scope('issue-text'), commentScope: scope('issue-comment'), commentBlocked, viewer,
     statusScope: scope('issue-status'), status, issueId: issue.id, canEditText,
     reactionScope: scope('issue-reaction'), canReact: project.archived === false

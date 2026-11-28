@@ -14,7 +14,7 @@ import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssue
 import type { IssueRepository } from './issue-repositories'
 import { issueReferenceForSelection, mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
-import { gitLabStatusEditor, issueMetadataKind, readGitLabTriageEditor, readIssueMetadata } from './issue-metadata'
+import { hostedStatusEditor, issueMetadataKind, readGitLabTriageEditor, readIssueMetadata } from './issue-metadata'
 import { createIssueTextDraft, issueTextField, issueTextLimits } from './issue-text'
 import { newThreadLink, parsePullRequest } from './prompt-links'
 import { readFilterViewer, readRepositoryFilterChoices } from './pull-request-list-filters'
@@ -302,7 +302,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   }
   const { selected, error } = await detail ?? { selected: null, error: selectionName || number ? 'This issue is outside the selected profile.' : '' }
   const [choices, metadata, gitLabText, gitLabTriage] = await Promise.all([lookup, metadataRead, gitLabTextRead, gitLabTriageRead])
-  const forgejoComment = selected?.tracker === 'forgejo' ? selected.commentAccess : null
+  const forgejoAuthority = selected?.tracker === 'forgejo' ? selected.authority : null
+  const hostedAuthority = gitLabText ?? forgejoAuthority
   const labelChoices = choices?.kind === 'labels' ? choices : null
   const people = choices?.kind === 'assignees' ? choices : null
   signal.throwIfAborted()
@@ -334,7 +335,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const textConflict = textResult === 'stale'
   const textLocked = textResult === 'changed' || textResult === 'denied'
   const metadataEditor = metadataSubmission ? metadataSubmission.editor : metadata?.editor ?? gitLabTriage
-    ?? (gitLabText && editMetadata === 'state' ? gitLabStatusEditor(gitLabText.status, gitLabText.statusScope) : null)
+    ?? (gitLabText && editMetadata === 'state' ? hostedStatusEditor(gitLabText.status, gitLabText.statusScope) : null)
   const statusEdit = editMetadata === 'state' || metadataSubmission?.kind === 'state'
   const metadataMessage = metadataSubmission?.message
     ?? (selected && query.get('metadataResult') === 'updated' ? 'Issue updated on ' + textForge + '.' : '')
@@ -418,8 +419,9 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadataDraft: selected && !statusEdit ? metadataSubmission?.draft : null,
     metadataMessage: statusEdit ? '' : metadataMessage,
     metadataUnavailable: Boolean(selected && editMetadata && !statusEdit && !metadataSubmission && !metadataEditor),
-    issueStatus: gitLabText?.status?.current ?? metadata?.status ?? (selected?.state === 'closed' ? 'Closed' : 'Open'),
-    canChangeIssueStatus: Boolean(selected && (gitLabText?.status?.choices.length || metadata?.canChangeStatus)),
+    issueStatus: hostedAuthority?.status?.current ?? metadata?.status ?? (selected?.state === 'closed' ? 'Closed' : 'Open'),
+    canChangeIssueStatus: Boolean(selected && (hostedAuthority?.status?.choices.length || metadata?.canChangeStatus)),
+    forgejoStatusMenu: forgejoAuthority && !metadataSubmission?.draft ? hostedStatusEditor(forgejoAuthority.status, forgejoAuthority.statusScope) : null,
     statusEditor: selected && statusEdit ? metadataEditor : null,
     statusDraft: selected && statusEdit ? metadataSubmission?.draft : null,
     statusMessage,
@@ -428,10 +430,10 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadataHref,
     commentAction: metadataHref.replace('/issues?', '/issues/comments?') + '#issue-comment-composer',
     commentText: commentSubmission?.text ?? '',
-    commentScope: commentSubmission?.result === 'pending' ? commentSubmission.scope : forgejoComment?.scope ?? gitLabText?.commentScope ?? metadata?.commentScope ?? '',
+    commentScope: commentSubmission?.result === 'pending' ? commentSubmission.scope : hostedAuthority?.commentScope ?? metadata?.commentScope ?? '',
     commentIntent: commentSubmission?.result === 'pending' ? commentSubmission.intent : crypto.randomUUID(),
     commentPending: commentSubmission?.result === 'pending',
-    commentBlocked: forgejoComment?.blocked ?? gitLabText?.commentBlocked ?? metadata?.commentBlocked ?? textForge + ' could not check commenting access.',
+    commentBlocked: hostedAuthority?.commentBlocked ?? metadata?.commentBlocked ?? textForge + ' could not check commenting access.',
     commentMessage: commentSubmission?.message
       ?? (selected && query.get('commentResult') === 'posted' ? 'Comment posted to ' + textForge + '.' : ''),
     metadataLabelsHref: selected ? href({ ...metadataFields, editMetadata: 'labels' }) : '',

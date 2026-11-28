@@ -17,7 +17,7 @@
       @endif
     @endforeach
     @if(bar.allowed)
-      <details @keydown="closeIssueReactions">
+      <details @keydown="closeIssueDisclosure">
         <summary data-issue-button>Add reaction</summary>
         <div data-issue-reaction-options>
           @foreach(bar.items as item)

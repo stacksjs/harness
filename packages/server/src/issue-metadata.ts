@@ -4,6 +4,7 @@ import type { GitLabTriageChoice, GitLabTriageKind } from './gitlab-issues'
 import type { GitLabIssueRepository } from './issue-repositories'
 import type { IssueStatusPlan, RawIssueStatus, RawPlanningStatuses } from './issue-status'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
+import { readForgejoIssueAuthority, writeForgejoIssueStatus } from './forgejo-issues'
 import { createHash } from 'node:crypto'
 import { issueRepositoryKey } from '@harness/contract'
 import { gitLabIssueCredential, gitLabTriageKey, readGitLabIssueText, searchGitLabTriage, writeGitLabIssueStatus, writeGitLabTriage } from './gitlab-issues'
@@ -166,12 +167,12 @@ function statusEditor(status: IssueStatusPlan | null, version: (form: StatusEdit
     })) }
 }
 
-function gitLabMetadataRevision(identity: string, form: StatusEditorForm) {
+function hostedMetadataRevision(identity: string, form: StatusEditorForm) {
   return hash(['issue-metadata', identity, form.kind, form.intent, form.scope])
 }
 
-export function gitLabStatusEditor(status: IssueStatusPlan | null, identity: string) {
-  return statusEditor(status, form => gitLabMetadataRevision(identity, form))
+export function hostedStatusEditor(status: IssueStatusPlan | null, identity: string) {
+  return statusEditor(status, form => hostedMetadataRevision(identity, form))
 }
 
 type GitLabIssueContext = { repository: GitLabIssueRepository, number: number, signal: AbortSignal,
@@ -217,7 +218,7 @@ async function makeGitLabTriageEditor(context: GitLabIssueContext, authority: Gi
   }
   const choices = [...options.values()]
   const form = { kind, intent, scope: JSON.stringify(choices.map(row => [row.key, row.name, row.description, row.applied])) }
-  return { ...form, revision: gitLabMetadataRevision(authority.triageScope, form), options: choices, search,
+  return { ...form, revision: hostedMetadataRevision(authority.triageScope, form), options: choices, search,
     matches: catalog.choices.length, more: catalog.more, checked: choices.filter(row => row.checked).map(row => row.key) }
 }
 
@@ -422,7 +423,7 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
   const reviewed = values.get('revision') ?? ''
   const selected = values.getAll('choice').sort()
   const operation = values.get('operation') ?? 'save'
-  if (!reference || reference.tracker === 'forgejo' || !state.profiles.has(profile) || !kind || !uuid.test(intent) || !/^[a-f0-9]{64}$/u.test(reviewed)
+  if (!reference || (reference.tracker === 'forgejo' && kind !== 'state') || !state.profiles.has(profile) || !kind || !uuid.test(intent) || !/^[a-f0-9]{64}$/u.test(reviewed)
     || !scope.startsWith('[') || scope.length > 950_000 || !['save', 'search'].includes(operation)) return null
   const gitLabOptions = reference.tracker === 'gitlab' && kind !== 'state' ? parseGitLabTriage(scope, selected, kind) : null
   const labels = reference.tracker === 'github' && kind === 'labels' ? parseLabelSelection(scope, selected) : null
@@ -430,7 +431,7 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
   if (kind === 'state' ? operation !== 'save' || selected.length !== 1 || !id(selected[0]) || scope.length > 40_000
     : !labels && !assignees && !gitLabOptions) return null
   const form: IssueMetadataForm = { kind, scope, intent, revision: reviewed, checked: selected }
-  const forge = reference.tracker === 'gitlab' ? 'GitLab' : 'GitHub'
+  const forge = { github: 'GitHub', gitlab: 'GitLab', forgejo: 'Forgejo' }[reference.tracker]
   const finish = (result: Result, editor?: IssueMetadataEditor | null) => {
     const denied = kind === 'state' ? forge + ' does not allow this issue status change.'
       : forge === 'GitLab' ? 'This GitLab account cannot edit labels or assignees.' : messages.denied
@@ -443,12 +444,11 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
   }
   try {
     const repositoryKey = issueRepositoryKey(reference)
-    const gitLabRepository = reference.tracker === 'gitlab'
-      ? (await trustedIssueRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey)
-      : null
-    const repository = reference.tracker === 'gitlab' ? gitLabRepository
-      : (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey)
-    if (!repository) return finish('changed')
+    const github = reference.tracker === 'github'
+      ? (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey) : null
+    const repository = reference.tracker === 'github' ? (github ? { ...github, tracker: 'github' as const } : null)
+      : (await trustedIssueRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey)
+    if (!repository || repository.tracker !== reference.tracker) return finish('changed')
     const trusted = () => {
       const current = state.workspaces.get(repository.workspace.id)
       return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === repository.workspace.path)
@@ -459,14 +459,24 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
     if (locked) changingMetadata.add(key)
     try {
       const fingerprint = hash(['issue-metadata-write', reviewed, selected])
-      if (gitLabRepository?.tracker === 'gitlab') {
-        const credential = await gitLabIssueCredential(gitLabRepository, signal)
-        const read = () => readGitLabIssueText(gitLabRepository, reference.number, signal, credential, kind === 'state' ? undefined : kind)
+      if (repository.tracker === 'forgejo') {
+        const read = () => readForgejoIssueAuthority(repository, reference.number, signal)
+        const authority = await read()
+        if (!authority?.status) return finish('unavailable')
+        if (!trusted() || hostedMetadataRevision(authority.statusScope, form) !== reviewed) return finish('changed')
+        return finish(await saveIssueStatus(authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
+          const after = await read()
+          return after?.statusScope === authority.statusScope ? after.status : null
+        }, choice => writeForgejoIssueStatus(repository, reference.number, choice.state, signal)))
+      }
+      if (repository.tracker === 'gitlab') {
+        const credential = await gitLabIssueCredential(repository, signal)
+        const read = () => readGitLabIssueText(repository, reference.number, signal, credential, kind === 'state' ? undefined : kind)
         const authority = await read()
         if (kind !== 'state' && gitLabOptions) {
           if (!authority?.applied) return finish('unavailable')
-          if (!trusted() || gitLabMetadataRevision(authority.triageScope, form) !== reviewed) return finish('changed')
-          const context = { repository: gitLabRepository, number: reference.number, credential, signal }
+          if (!trusted() || hostedMetadataRevision(authority.triageScope, form) !== reviewed) return finish('changed')
+          const context = { repository, number: reference.number, credential, signal }
           if (operation === 'search') {
             if (!authority.canTriage) return finish('denied')
             if (receipts.inspect(intent, fingerprint) || !sameTriageSelection(authority.applied, gitLabOptions.filter(row => row.applied))) return finish('changed')
@@ -478,11 +488,11 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
           return finish(result, result === 'limit' ? { ...form, options: gitLabOptions, search: '', more: false, matches: gitLabOptions.length } : null)
         }
         if (!authority?.status) return finish('unavailable')
-        if (!trusted() || gitLabMetadataRevision(authority.statusScope, form) !== reviewed) return finish('changed')
+        if (!trusted() || hostedMetadataRevision(authority.statusScope, form) !== reviewed) return finish('changed')
         return finish(await saveIssueStatus(authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
           const after = await read()
           return after?.statusScope === authority.statusScope ? after.status : null
-        }, choice => writeGitLabIssueStatus(gitLabRepository, reference.number, choice.state, signal, credential)))
+        }, choice => writeGitLabIssueStatus(repository, reference.number, choice.state, signal, credential)))
       }
       const credential = await repositoryGitHubCredential(repository.path, signal)
       const context = { repository, number: reference.number, credential, signal }

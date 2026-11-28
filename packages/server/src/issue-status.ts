@@ -74,8 +74,8 @@ const openAndClosed: Destination[] = [
   { key: 'closed', name: 'Closed', state: 'closed', reason: null },
 ]
 
-export function gitLabIssueStatusPlan(state: unknown, allowed: boolean): IssueStatusPlan | null {
-  const current = openAndClosed.find(choice => state === (choice.state === 'open' ? 'opened' : 'closed'))
+export function openClosedIssueStatusPlan(state: unknown, allowed: boolean): IssueStatusPlan | null {
+  const current = openAndClosed.find(choice => state === choice.state)
   if (!current) return null
   const choices = allowed ? openAndClosed.filter(choice => choice !== current) : []
   return { current: current.name, choices, all: openAndClosed, matches: target => current.state === target.state,

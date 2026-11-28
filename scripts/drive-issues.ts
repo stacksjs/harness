@@ -1397,7 +1397,7 @@ try {
   const forgejoPath = localProject('forgejo project', 'git@issue-ssh.fixture.invalid:' + forgejoRepository + '.git')
   const forgejoIssue = {
     id: 300, is_locked: false, ...row(forgejoRepository, 73, forgejoTitle, '2026-11-02T00:00:00Z', '2026-11-27T16:00:00Z'),
-    html_url: forgejoUrl, body: 'Keep **Forgejo drafts** available for @fixture-user.',
+    html_url: forgejoUrl, body: 'Keep **Forgejo drafts** available for @fixture-user.', user: { id: 17, login: 'fixture-user' },
     assignees: [{ login: 'fixture-user', full_name: 'Fixture review team' }], labels: [{ id: 7, name: 'offline', color: '#5577aa' }], comments: 1,
   }
   const otherForgejoIssue = { ...forgejoIssue, id: 301, number: 74, html_url: forgejoUrl.replace(/73$/u, '74'),
@@ -1559,8 +1559,75 @@ try {
   assert.equal(await forgejoComment.inputValue(), '')
   assert.equal((await sendForgejo(lostForgejo)).status, 303)
   assert.deepEqual(readForge().forgejo.commentWrites, [[73, 17, 703], [73, 17, 704]])
+  const forgejoDetail = forge({ selected: forgejoKey, issue: '73', repository: forgejoKey, state: 'all' })
+  const forgejoStatus = page.locator('#issue-status')
+  const statusControlForForgejo = (state: 'Open' | 'Closed') => page.locator('[data-issue-status-menu] summary').and(page.getByLabel('Change issue status, ' + state, { exact: true }))
+  const forgejoStatusForm = page.getByRole('form', { name: 'New issue status', exact: true })
+  const readForgejoStatus = (choice: string) => forgejoStatusForm.evaluate((form: HTMLFormElement, choice: string) => {
+    const values = new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)]))
+    values.set('choice', choice)
+    return { url: form.action, body: values.toString() }
+  }, choice)
+  const closeForgejoIssue = forgejoStatusForm.getByRole('button', { name: 'Closed', exact: true })
+  const openForgejoIssue = forgejoStatusForm.getByRole('button', { name: 'Open', exact: true })
+  alterForge(current => { current.forgejo.push = false; current.forgejo.viewerId = 18 })
+  await page.goto(forgejoDetail)
+  assert.equal(await statusControlForForgejo('Open').count(), 0)
+  alterForge(current => { delete current.forgejo.viewerId })
+  await page.reload()
+  await statusControlForForgejo('Open').press('ArrowDown')
+  assert.ok(await closeForgejoIssue.evaluate(node => node === node.ownerDocument.activeElement))
+  await closeForgejoIssue.press('Escape')
+  await closeForgejoIssue.waitFor({ state: 'hidden' })
+  assert.ok(await statusControlForForgejo('Open').evaluate(node => node === node.ownerDocument.activeElement))
+  await statusControlForForgejo('Open').click()
+  const forgejoClose = await readForgejoStatus('closed')
+  assert.equal((await sendForgejo(forgejoClose, 'https://outside.invalid')).status, 403)
+  alterForge(current => { current.forgejo.viewerId = 18 })
+  assert.equal((await sendForgejo(forgejoClose)).status, 409)
+  alterForge(current => { delete current.forgejo.viewerId; current.forgejo.archived = true })
+  assert.equal((await sendForgejo(forgejoClose)).status, 403)
+  alterForge(current => { current.forgejo.archived = false; current.forgejo.issues[0].state = 'closed' })
+  assert.equal((await sendForgejo(forgejoClose)).status, 409)
+  alterForge(current => { current.forgejo.issues[0].state = 'open'; current.forgejo.refuseStatus = true })
+  await closeForgejoIssue.click()
+  await forgejoStatus.getByText('Forgejo refused a reviewed change.', { exact: false }).waitFor()
+  assert.equal(readForge().forgejo.statusWrites, undefined)
+  alterForge(current => { delete current.forgejo.refuseStatus })
+  await statusControlForForgejo('Open').click()
+  const interruptedForgejoClose = await readForgejoStatus('closed')
+  for (const [width, height] of viewports) {
+    await page.setViewportSize({ width, height })
+    assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+    const menu = await closeForgejoIssue.boundingBox()
+    assert.ok(menu && menu.x >= 0 && menu.x + menu.width <= width && menu.y + menu.height <= height)
+    const draft = await page.getByRole('link', { name: 'Open as draft', exact: true }).boundingBox()
+    assert.ok(draft && menu.y + menu.height <= draft.y)
+    await capture('forgejo-status-' + width + 'x' + height)
+  }
+  alterForge(current => { current.forgejo.dropStatusReply = true })
+  await closeForgejoIssue.click()
+  const checkForgejoStatus = forgejoStatus.getByRole('button', { name: 'Check Forgejo', exact: true })
+  await checkForgejoStatus.waitFor()
+  await capture('forgejo-status-recovery-360x800')
+  const forgejoStatusPort = host.server.port
+  host.stop()
+  host = await startHost(forgejoStatusPort)
+  await checkForgejoStatus.click()
+  await statusControlForForgejo('Closed').waitFor()
+  assert.equal((await sendForgejo(interruptedForgejoClose)).status, 303)
+  assert.deepEqual(readForge().forgejo.statusWrites, [[73, 17, 'closed']])
+  alterForge(current => {
+    current.forgejo.viewerId = 18
+    current.forgejo.push = true
+  })
+  await page.reload()
+  await statusControlForForgejo('Closed').click()
+  await openForgejoIssue.click()
+  await statusControlForForgejo('Open').waitFor()
+  assert.deepEqual(readForge().forgejo.statusWrites, [[73, 17, 'closed'], [73, 18, 'open']])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links and comment recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links, comments and status recovery')
 }
 catch (error) {
   console.error(error)
