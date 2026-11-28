@@ -1,7 +1,8 @@
 import type { LoadedWorkflow, WorkflowIssue } from './definitions'
 import type { WorkflowSchedule } from './schedules'
+import type { WorkflowTrackerItem, WorkflowTrackerTrigger } from './tracker-triggers'
 import { Database } from 'bun:sqlite'
-import { mintToken } from '../access'
+import { hashToken, mintToken } from '../access'
 import { nextScheduleAt, shouldFireSchedule } from './schedules'
 
 export type WorkflowStatus = 'running' | 'paused' | 'completed' | 'cancelled'
@@ -34,12 +35,20 @@ type StepRow = {
 }
 
 type RunDefinition = Pick<LoadedWorkflow, 'name' | 'version' | 'revision'>
+type TrackerCursor = { scope: string, since: number, activated_at: number }
+
+// Tracker indexes can expose a newer item before an older one. IDs still deduplicate overlapping scans.
+function trackerFloor(cursor: TrackerCursor) {
+  return Math.max(cursor.activated_at, cursor.since - 5 * 60_000)
+}
 
 type IssueIntent = { target: string, scope: string, intent: string }
 export function presentRun(row: RunRow) {
   const schedule = /^\nscheduled:([^:]+):/u.exec(row.start_key)
   const webhook = /^\nwebhook:([^:]+):/u.exec(row.start_key)
+  const tracker = /^\ntracker:([^:]+):/u.exec(row.start_key)
   return {
+    ...(tracker && { tracker: { id: tracker[1]!, ...trackerReference(JSON.parse(row.payload)) } }),
     ...(schedule && { schedule: { id: schedule[1]!, ...(JSON.parse(row.payload) as { scheduledAt: string }) } }),
     ...(webhook && { webhook: { name: webhook[1]! } }),
     runId: row.id, workflow: row.name, version: row.version, title: row.title, status: row.status, detail: row.detail,
@@ -47,6 +56,11 @@ export function presentRun(row: RunRow) {
     startedAt: new Date(row.started_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(),
     endedAt: row.ended_at === null ? null : new Date(row.ended_at).toISOString(),
   }
+}
+
+function trackerReference(item: WorkflowTrackerItem) {
+  const { kind, tracker, url, displayKey, title } = item
+  return { kind, tracker, url, displayKey, title }
 }
 
 export class WorkflowStore {
@@ -66,6 +80,9 @@ export class WorkflowStore {
       CREATE INDEX IF NOT EXISTS harness_workflow_run_status ON harness_workflow_runs (status, lease_until);
       CREATE TABLE IF NOT EXISTS harness_workflow_schedule_cursors (
         key TEXT PRIMARY KEY, name TEXT NOT NULL, due_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS harness_workflow_tracker_cursors (
+        key TEXT PRIMARY KEY, name TEXT NOT NULL, activated_at INTEGER NOT NULL, since INTEGER NOT NULL, scope TEXT
       );
       CREATE TABLE IF NOT EXISTS harness_workflow_webhook_tokens (
         hook_id TEXT PRIMARY KEY, token TEXT NOT NULL
@@ -171,13 +188,55 @@ export class WorkflowStore {
     }).immediate()
   }
 
+  registerTrackers(entries: { key: string, name: string }[], loadedNames: string[] | undefined, now: number) {
+    const scope = loadedNames ? JSON.stringify(loadedNames) : null
+    this.db.transaction(() => {
+      this.db.query(`DELETE FROM harness_workflow_tracker_cursors
+        WHERE key NOT IN (SELECT value FROM json_each(?))
+          AND (? IS NULL OR name IN (SELECT value FROM json_each(?)))`).run(JSON.stringify(entries.map(entry => entry.key)), scope, scope)
+      const insert = this.db.query(`INSERT INTO harness_workflow_tracker_cursors (key, name, activated_at, since)
+        VALUES (?, ?, ?, ?) ON CONFLICT (key) DO NOTHING`)
+      for (const { key, name } of entries) insert.run(key, name, now, now)
+    }).immediate()
+  }
+
+  bindTracker(key: string, scope: string) {
+    return this.db.transaction(() => {
+      this.db.query('UPDATE harness_workflow_tracker_cursors SET scope = ? WHERE key = ? AND scope IS NULL').run(scope, key)
+      const cursor = this.db.query<TrackerCursor, [string]>('SELECT scope, since, activated_at FROM harness_workflow_tracker_cursors WHERE key = ?').get(key)
+      return cursor && { scope: cursor.scope, floor: trackerFloor(cursor) }
+    }).immediate()
+  }
+
+  acceptTrackerBatch(key: string, scope: string, definition: RunDefinition, trigger: WorkflowTrackerTrigger,
+    batch: { rows: WorkflowTrackerItem[], complete: boolean }, now: number) {
+    return this.db.transaction(() => {
+      const cursor = this.db.query<TrackerCursor, [string, string]>(`SELECT scope, since, activated_at FROM harness_workflow_tracker_cursors
+        WHERE key = ? AND scope = ?`).get(key, scope)
+      if (!cursor) return
+      const floor = trackerFloor(cursor)
+      let latest = cursor.since
+      const ordered = batch.rows.map(row => ({ row, created: Date.parse(row.createdAt) }))
+        .sort((left, right) => left.created - right.created || left.row.number - right.row.number)
+      for (const { row, created } of ordered) {
+        if (created < floor) continue
+        const startKey = '\ntracker:' + trigger.id + ':' + hashToken(key + '\n' + row.url.toLowerCase())
+        if (!this.findStart(trigger.profile, definition.name, startKey))
+          this.insertRun(trigger.profile, definition, startKey, JSON.stringify(row), now)
+        latest = Math.max(latest, created)
+      }
+      if (batch.complete && latest > cursor.since)
+        this.db.query('UPDATE harness_workflow_tracker_cursors SET since = ? WHERE key = ?').run(latest, key)
+    }).immediate()
+  }
+
   run(profile: number, id: string) {
     return this.db.query<RunRow, [number, string]>('SELECT * FROM harness_workflow_runs WHERE profile = ? AND id = ?').get(profile, id)
   }
 
   list(profile: number) {
     return this.db.query<RunRow, [number]>(`SELECT * FROM harness_workflow_runs
-      WHERE profile = ? ORDER BY started_at DESC, id DESC LIMIT 100`).all(profile)
+      WHERE profile = ? ORDER BY started_at DESC, rowid DESC LIMIT 100`).all(profile)
   }
 
   steps(id: string) {
@@ -191,7 +250,7 @@ export class WorkflowStore {
 
   eligible(now: number, limit: number) {
     return this.db.query<RunRow, [number, number]>(`SELECT * FROM harness_workflow_runs
-      WHERE status = 'running' AND (lease_until IS NULL OR lease_until <= ?) ORDER BY started_at LIMIT ?`).all(now, limit)
+      WHERE status = 'running' AND (lease_until IS NULL OR lease_until <= ?) ORDER BY started_at, rowid LIMIT ?`).all(now, limit)
   }
 
   claim(id: string, owner: string, now: number, leaseUntil: number) {

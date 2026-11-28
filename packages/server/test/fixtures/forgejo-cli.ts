@@ -41,6 +41,12 @@ if (!url.href.startsWith(endpoint + '/')) reply(404, {})
 const path = (url.origin + url.pathname).slice(endpoint.length)
 const page = Math.max(1, Number(url.searchParams.get('page')) || 1)
 const find = url.searchParams
+if (method === 'GET' && path === '/pulls' && Array.isArray(forgejo.trackerPulls)) {
+  if (find.get('state') !== 'all') reply(422, {})
+  const rows = [...forgejo.trackerPulls].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+  const size = Number(find.get('limit'))
+  reply(200, rows.slice((page-1)*size, page*size), page*size < rows.length)
+}
 const reactionTarget = /^\\/issues\\/(comments\\/)?(\\d+)\\/reactions$/.exec(path)
 if (reactionTarget) {
   const [, comment, id] = reactionTarget

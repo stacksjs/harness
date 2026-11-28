@@ -2,7 +2,7 @@ import type { HarnessState } from '@harness/engine'
 import type { LoadedWorkflow, WorkflowContext, WorkflowIssueInput } from './definitions'
 import type { WorkflowSchedule } from './schedules'
 import type { WorkflowWebhook, WorkflowWebhookRequest } from './webhooks'
-import { basename } from 'node:path'
+import type { TrackerStatus, WorkflowTrackerItem, WorkflowTrackerTrigger } from './tracker-triggers'
 import { hashesMatch, hashToken } from '../access'
 import { createIssue, issueCreationScope } from '../issue-create'
 import { trustedIssueProjects } from '../issue-repositories'
@@ -10,10 +10,13 @@ import { PullRequestReplyReceipts } from '../pull-request-reply-receipts'
 import { loadWorkflowDefinitions, workflowName } from './definitions'
 import { scheduleKey } from './schedules'
 import { presentRun, WorkflowStore } from './store'
+import { openTrackerFeed, readTrackerBatch, trackerKey, trackerRepository, workflowProject } from './tracker-triggers'
 import { webhookDeliveryKey, workflowHookId, workflowHookPrefix } from './webhooks'
 
 const leaseMs = 30_000
 const concurrency = 4
+const trackerInterval = 60_000
+const trackerConcurrency = 4
 const contentsLimit = 450_000
 const stepName = /^[^\p{Cc}]{1,120}$/u
 const message = {
@@ -24,6 +27,14 @@ const message = {
   'unknown-assignee': 'The issue tracker does not recognize an assignee.',
   refused: 'The issue tracker refused the requested fields.',
   pending: 'The issue tracker has yet to confirm the write. Resume to check the original request.',
+}
+
+type TrackerPoll = {
+  key: string
+  definition: LoadedWorkflow
+  trigger: WorkflowTrackerTrigger
+  nextAt: number
+  status: TrackerStatus
 }
 
 type RegisteredHook = { definition: LoadedWorkflow, hook: WorkflowWebhook, token: string, tokenHash: string }
@@ -42,6 +53,9 @@ export class WorkflowRunner {
   private readonly active = new Map<string, AbortController>()
   private readonly store: WorkflowStore
   private readonly receipts: PullRequestReplyReceipts
+  private readonly trackers: TrackerPoll[]
+  private readonly trackerAbort = new AbortController()
+  private activeTrackerPolls = 0
   private readonly webhooks = new Map<string, RegisteredHook>()
   private readonly schedules: { key: string, definition: LoadedWorkflow, schedule: WorkflowSchedule }[]
   private readonly zone = Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -58,6 +72,10 @@ export class WorkflowRunner {
     // A read error can hide an existing definition. Keep its cursor until a file loads or is removed.
     const loadedNames = loaded.problems.length ? [...loaded.definitions.keys()] : undefined
     this.store.keepSchedules(this.schedules.map(item => item.key), loadedNames)
+    this.trackers = current.flatMap(definition => definition.trackerTriggers.map(trigger => ({
+      key: trackerKey(definition.name, trigger), definition, trigger, nextAt: 0, status: 'waiting' as const,
+    })))
+    this.store.registerTrackers(this.trackers.map(({ key, definition }) => ({ key, name: definition.name })), loadedNames, Date.now())
     for (const definition of current) {
       for (const hook of definition.webhooks) {
         const id = workflowHookId(definition.name, hook)
@@ -91,7 +109,10 @@ export class WorkflowRunner {
             nextAt: due === undefined ? null : new Date(due).toISOString(),
           }
         })
-        return { name: current.name, version: current.version, triggers }
+        const trackerTriggers = this.trackers
+          .filter(item => item.definition === current && item.trigger.profile === profile)
+          .map(({ trigger, status }) => ({ id: trigger.id, kind: trigger.kind, status }))
+        return { name: current.name, version: current.version, triggers, trackerTriggers }
       }),
       runs: this.store.list(profile).map(presentRun),
       problems: this.loaded.problems,
@@ -172,6 +193,7 @@ export class WorkflowRunner {
           if (profiles.has(schedule.profile)) this.store.scanSchedule(key, definition, schedule, now)
         }
       }
+      this.scanTrackers(now)
       const remaining = concurrency - this.active.size
       if (remaining < 1) return
       for (const row of this.store.eligible(now, remaining)) {
@@ -180,7 +202,7 @@ export class WorkflowRunner {
         this.active.set(row.id, controller)
         const registered = this.loaded.definitions.get(row.name)?.get(row.version)
         const definition = registered?.revision === row.revision ? registered : undefined
-        void this.execute(row.id, row.profile, row.payload, definition, controller).catch(() => {
+        void this.execute(row.id, row.profile, row.payload, definition, controller, row.start_key.startsWith('\ntracker:')).catch(() => {
           // A storage failure leaves the lease to expire. Another attempt reads the saved steps.
           console.warn('[workflows] Could not update a run. Its lease will expire.')
         })
@@ -189,11 +211,58 @@ export class WorkflowRunner {
     catch { console.warn('[workflows] Could not scan for runnable workflows. Retrying.') }
   }
 
-  private async execute(id: string, profile: number, payload: string, definition: LoadedWorkflow | undefined, controller: AbortController) {
+  private scanTrackers(now: number) {
+    const slots = trackerConcurrency - this.activeTrackerPolls
+    if (slots <= 0 || !this.trackers.length) return
+    const ready = this.trackers.filter(item => item.status !== 'polling' && item.nextAt <= now
+      && this.state().profiles.has(item.trigger.profile)).sort((a, b) => a.nextAt - b.nextAt)
+    for (const item of ready.slice(0, slots)) {
+      item.nextAt = now + trackerInterval
+      item.status = 'polling'
+      this.activeTrackerPolls++
+      void this.pollTracker(item).then((status) => {
+        item.status = status
+      }, () => {
+        item.status = 'unavailable'
+      }).finally(() => {
+        this.activeTrackerPolls--
+        if (!this.stopped) queueMicrotask(() => this.wake())
+      })
+    }
+  }
+
+  private async pollTracker(item: TrackerPoll): Promise<TrackerStatus> {
+    const signal = AbortSignal.any([this.trackerAbort.signal, AbortSignal.timeout(45_000)])
+    const { key, definition, trigger } = item
+    const repository = await trackerRepository(this.state(), trigger, signal)
+    if (!repository) return 'unavailable'
+    const feed = await openTrackerFeed(repository, trigger, signal)
+    signal.throwIfAborted()
+    const cursor = this.store.bindTracker(key, feed.scope)
+    if (!cursor || cursor.scope !== feed.scope) return 'account-changed'
+    const batch = await readTrackerBatch(feed, repository, trigger, cursor.floor)
+    if (await feed.verify() !== feed.scope) return 'account-changed'
+    signal.throwIfAborted()
+    const current = workflowProject(this.state(), trigger.profile, trigger.project)
+    if (!current || current.id !== repository.workspace.id || current.path !== repository.workspace.path) return 'unavailable'
+    this.store.acceptTrackerBatch(key, feed.scope, definition, trigger, batch, Date.now())
+    return batch.complete ? 'ready' : 'backlog'
+  }
+
+  private async execute(id: string, profile: number, payload: string, definition: LoadedWorkflow | undefined,
+    controller: AbortController, triggeredByTracker: boolean,
+  ) {
     const { signal } = controller
+    let projectId: number | undefined
     const alive = () => {
       signal.throwIfAborted()
-      if (!this.state().profiles.has(profile)) throw new WorkflowProblem('The workflow profile is unavailable.')
+      const state = this.state()
+      if (!state.profiles.has(profile)) throw new WorkflowProblem('The workflow profile is unavailable.')
+      if (projectId !== undefined) {
+        const project = state.workspaces.get(projectId)
+        if (project?.profileId !== profile || !project.trusted || project.scratch)
+          throw new WorkflowProblem('Restore trust in the source project to resume this run.')
+      }
       if (!this.store.owns(id, this.owner, Date.now())) throw new WorkflowProblem('This run lost its lease.')
     }
     const used = new Set<string>()
@@ -215,9 +284,11 @@ export class WorkflowRunner {
       },
     }
     try {
+      const input = JSON.parse(payload) as unknown
+      if (triggeredByTracker) projectId = (input as WorkflowTrackerItem).projectId
       alive()
       if (!definition) throw new WorkflowProblem('The workflow version is unavailable. Restore its definition and resume.')
-      const result = await definition.run(JSON.parse(payload), context)
+      const result = await definition.run(input, context)
       await Promise.all(pending)
       alive()
       this.store.finish(id, this.owner, 'completed', Date.now(), null, json(result))
@@ -272,10 +343,8 @@ export class WorkflowRunner {
   ) {
     if (!input || (typeof input.project !== 'number' && typeof input.project !== 'string') || typeof input.title !== 'string')
       throw new WorkflowProblem('Issue creation needs a project and title.')
-    const projects = [...this.state().workspaces.values()].filter(workspace => workspace.profileId === profile && workspace.trusted && !workspace.scratch
-      && (workspace.id === input.project || workspace.path === input.project || basename(workspace.path) === input.project))
-    if (projects.length !== 1) throw new WorkflowProblem('Choose one trusted project in the workflow’s profile.')
-    const workspace = projects[0]!
+    const workspace = workflowProject(this.state(), profile, input.project)
+    if (!workspace) throw new WorkflowProblem('Choose one trusted project in the workflow’s profile.')
     const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(60_000)])
     const [project] = await trustedIssueProjects([workspace], profile, requestSignal)
     const repository = input.repository ? project?.repositories.get(input.repository) : project?.repositories.values().next().value
@@ -307,6 +376,7 @@ export class WorkflowRunner {
     if (this.stopped) return
     this.stopped = true
     clearInterval(this.timer)
+    this.trackerAbort.abort()
     for (const controller of this.active.values()) controller.abort()
     this.store.release(this.owner)
     this.store.close()

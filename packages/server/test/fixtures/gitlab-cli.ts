@@ -39,9 +39,22 @@ const root = project + '/issues'
 const creation = gitlab.creation
 const templatePath = project + '/templates/issues'
 const creationRoute = creation && (path === root || path === '/users' || path === templatePath || path.startsWith(templatePath + '/'))
-if ((process.env.GITLAB_TOKEN && (!pinned || (endpoint !== 'graphql' && !path.endsWith('/award_emoji') && !creationRoute)))
+const trackerRoute = gitlab.trackerFeeds && [project, '/user', root, project + '/merge_requests'].includes(path)
+if ((process.env.GITLAB_TOKEN && (!pinned || (!trackerRoute && endpoint !== 'graphql' && !path.endsWith('/award_emoji') && !creationRoute)))
   || process.env.GITLAB_ACCESS_TOKEN || process.env.OAUTH_TOKEN)
   respond(412, {})
+if (trackerRoute) {
+  if (!pinned) respond(401, {})
+  if (path === '/user') respond(200, { id: viewer, username: 'fixture-reviewer' })
+  if (path === project) respond(200, { id: 74, path_with_namespace: gitlab.repository })
+  const rows = (path === root ? gitlab.trackerFeeds.issues : gitlab.trackerFeeds.pulls)
+    .filter(row => !address.searchParams.has('search') || (row.title + ' ' + row.description).includes(address.searchParams.get('search')))
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+  const number = Number(address.searchParams.get('page'))
+  const size = Number(address.searchParams.get('per_page'))
+  if (address.searchParams.get('state') !== 'all' || address.searchParams.get('order_by') !== 'created_at') respond(422, {})
+  respond(200, rows.slice((number-1)*size, number*size), number*size < rows.length ? String(number+1) : '')
+}
 const awards = subject => gitlab.awards?.[subject] ?? []
 const ownNote = id => gitlab.notes.find(item => item.id === id)
 if (path === '/graphql') {
