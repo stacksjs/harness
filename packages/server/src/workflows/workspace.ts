@@ -11,6 +11,10 @@ const statuses = [
   { key: 'all', label: 'All', status: '', empty: 'No runs yet.' },
 ]
 const words: Record<string, string> = { running: 'Running', paused: 'Paused', completed: 'Completed', cancelled: 'Cancelled', failed: 'Failed' }
+const trackerStates = {
+  waiting: 'Waiting for the host', polling: 'Checking', ready: 'Watching', unavailable: 'Check project and account access',
+  'account-changed': 'Restore the original account or repository', backlog: 'More items than this poll can read',
+} as const
 const date = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' })
 const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const intervalUnits = [[86_400_000, 'day'], [3_600_000, 'hour'], [60_000, 'minute'], [1000, 'second']] as const
@@ -80,6 +84,13 @@ export function workflowWorkspace(runner: WorkflowRunner, state: HarnessState, p
     conflict: 'The run changed or its original definition is unavailable. Refresh and check its status.',
     missing: 'This run is unavailable in the selected profile.',
   }
+  const tracker = detail?.run.tracker
+  const trackerSource = tracker && {
+    text: (tracker.kind === 'issue' ? 'Issue ' : 'Pull request ') + tracker.displayKey,
+    href: tracker.kind === 'issue' ? issueLink(profile, tracker.url)
+      : tracker.tracker === 'github' ? '/pull-requests?' + new URLSearchParams({ profile: String(profile), selectedUrl: tracker.url }) : tracker.url,
+    title: tracker.title,
+  }
   const references = detail?.references.flatMap(reference => {
     const href = issueLink(profile, reference.url)
     return href ? [{ ...reference, issueHref: href }] : []
@@ -89,6 +100,9 @@ export function workflowWorkspace(runner: WorkflowRunner, state: HarnessState, p
     profiles: [...state.profiles.values()].map(item => ({ id: item.id, name: item.name })),
     definitions: snapshot.workflows.map(definition => ({
       ...definition,
+      trackerTriggers: definition.trackerTriggers.map(trigger => ({ ...trigger, status: trackerStates[trigger.status],
+        kind: trigger.kind === 'issue' ? 'New issue' : 'New pull request',
+      })),
       triggers: definition.triggers.map(trigger => ({
         ...trigger,
         cadence: trigger.everyMs !== undefined ? workflowInterval(trigger.everyMs)
@@ -113,7 +127,7 @@ export function workflowWorkspace(runner: WorkflowRunner, state: HarnessState, p
     detail: detail && {
       ...detail.run, word: words[detail.run.status], started: date.format(new Date(detail.run.startedAt)),
       scheduled: detail.run.schedule ? date.format(new Date(detail.run.schedule.scheduledAt)) : '',
-      result: preview(detail.run.result), references, canResume: detail.run.status === 'paused',
+      result: preview(detail.run.result), references, trackerSource, canResume: detail.run.status === 'paused',
       canCancel: detail.run.status === 'paused' || detail.run.status === 'running',
       steps: detail.steps.map(step => ({ ...step, word: words[step.status], result: preview(step.result),
         references: references.filter(reference => reference.step === step.name),

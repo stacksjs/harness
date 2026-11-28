@@ -73,7 +73,16 @@ writeFileSync(definition, `
       return step('Record arrival', () => ({ accepted: request.method === 'POST' }))
     },
   }
-  export default [review, delayed, scheduled, webhook]
+  const tracker = {
+    name: 'triage-drafts', version: 1, trackerTriggers: [
+      { id: 'draft-issues', profile: ${profile}, project: 'workbench', kind: 'issue', labels: ['draft-fixture'] },
+    ],
+    async run(issue, { title, step }) {
+      title('Triage the new draft issue')
+      return step('Record source', () => ({ source: issue.displayKey, state: issue.state }))
+    },
+  }
+  export default [review, delayed, scheduled, webhook, tracker]
 `)
 {
   using db = new Database(databasePath)
@@ -221,6 +230,15 @@ try {
   await capture('empty-profile')
   await page.getByRole('link', { name: 'Definitions', exact: true }).click()
   assert.equal(await page.getByRole('list', { name: 'Schedules' }).count(), 0)
+  const state = JSON.parse(readFileSync(cli.state, 'utf8'))
+  const source = {
+    number: 202, state: 'closed', title: 'Draft queue update',
+    html_url: 'https://github.com/' + repository + '/issues/202', body: 'Send this issue to triage.',
+    created_at: '2026-11-28T12:00:30.000Z', updated_at: '2026-11-28T12:00:50.000Z',
+    user: { login: 'fixture-user' }, labels: [{ name: 'draft-fixture', color: '3377bb' }],
+  }
+  state.issues[repository].push(source)
+  writeFileSync(cli.state, JSON.stringify(state))
   fixtureTime = fixtureClock + 65_000
   const deadline = performance.now() + 8000
   let scheduledId
@@ -256,6 +274,33 @@ try {
     await noOverflow()
     await capture('webhook')
   }
+
+  const trackerExpiry = performance.now() + 8000
+  let trackerRun
+  while (!trackerRun && performance.now() < trackerExpiry) {
+    const data = await fetch(base + '/workflows?' + query()).then(response => response.json())
+    trackerRun = data.runs.find(run => run.tracker?.id === 'draft-issues' && run.status === 'completed')?.runId
+    if (!trackerRun) await Bun.sleep(100)
+  }
+  assert.ok(trackerRun, 'Issue trigger completed')
+  await page.goto(base + '/workflows?' + query({ view: 'workspace', run: trackerRun }))
+  await page.getByRole('heading', { name: 'Triage the new draft issue', exact: true }).waitFor()
+  const sourceLink = page.getByRole('link', { name: 'Issue #202', exact: true })
+  await sourceLink.waitFor()
+  await page.locator('[data-workflow-tracker-source]').getByText('Draft queue update', { exact: true }).waitFor()
+  for (const [width, height] of dimensions) {
+    await page.setViewportSize({ width, height })
+    await noOverflow()
+    await capture('tracker')
+  }
+  await sourceLink.click()
+  await page.getByRole('heading', { name: 'Draft queue update', exact: true }).waitFor()
+  await page.goto(base + '/workflows?' + query({ view: 'workspace', page: 'definitions' }))
+  const trackerList = page.getByRole('list', { name: 'Tracker triggers' })
+  await trackerList.getByText('Watching', { exact: true }).waitFor()
+  await trackerList.getByText('New issue', { exact: true }).waitFor()
+  await noOverflow()
+  await capture('tracker-definitions')
 
   const writes = JSON.parse(readFileSync(cli.state, 'utf8')).issueCreate.writes
   assert.equal(writes.length, 1)
