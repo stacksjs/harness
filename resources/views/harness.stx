@@ -174,7 +174,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   <link rel="modulepreload" href="{{ codecUrl }}">
 @endif
 <div data-harness-shell :data-sidebar-collapsed="sidebarCollapsed()" :data-terminal-keyboard-visible="Boolean(terminalKeyboardViewport())"
-  :style="{ height: terminalKeyboardViewport() ? terminalKeyboardViewport() + 'px' : '100dvh' }"
+  :style="{ height: workspaceKeyboardViewport() ? workspaceKeyboardViewport() + 'px' : '100dvh',
+    position: composerKeyboardTop() ? 'relative' : '', top: composerKeyboardTop() ? composerKeyboardTop() + 'px' : '' }"
   class="flex overflow-hidden h-[100dvh] w-full text-neutral-900 dark:text-neutral-100">
   {{--
     `data-harness-sidebar`, not `data-stx-sidebar`: the latter is the Sidebar
@@ -854,7 +855,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         @input="promptEdited"
         @compositionstart="closeComposerFiles"
         @compositionend="updateComposerFiles"
-        @blur="closeComposerFiles"
+        @focus="fitComposerKeyboardViewport"
+        @blur="composerBlurred"
         aria-controls="composer-file-options"
         aria-autocomplete="list"
         :aria-activedescendant="(composerFileMenu()?.selected ?? -1) >= 0 ? 'composer-file-option-' + composerFileMenu().selected : null"
@@ -7389,6 +7391,9 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const terminalPasteText = state('')
   const terminalKeyboardOpen = state(false)
   const terminalKeyboardViewport = state(0)
+  const composerKeyboardViewport = state(0)
+  const composerKeyboardTop = state(0)
+  const workspaceKeyboardViewport = derived(() => terminalKeyboardViewport() || composerKeyboardViewport())
   let terminalKeyboardRestingHeight = 0
   let terminalActionKey = ''
   let terminalActionOrigin = null
@@ -7566,9 +7571,34 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     }
   }
 
+  function fitComposerKeyboardViewport() {
+    const input = promptRef.current
+    const owner = input?.ownerDocument
+    const view = owner?.defaultView?.visualViewport
+    const height = view && Math.round(view.height)
+    const keyboardVisible = input && owner.activeElement === input && view?.scale === 1
+      && owner.defaultView?.matchMedia('(pointer: coarse)').matches
+      && owner.documentElement.clientHeight - height > 100
+    composerKeyboardViewport.set(keyboardVisible ? height : 0)
+    // iOS can pan the visual viewport to reveal the focused composer before
+    // the page shrinks. Follow that offset while the keyboard owns the view.
+    composerKeyboardTop.set(keyboardVisible ? Math.max(0, Math.round(view.pageTop)) : 0)
+  }
+
+  function composerBlurred() {
+    composerKeyboardViewport.set(0)
+    composerKeyboardTop.set(0)
+    closeComposerFiles()
+  }
+
   onMount(() => {
-    const view = terminalKeyboardInput.current?.ownerDocument.defaultView?.visualViewport
-    if (view) useEventListener('resize', fitTerminalKeyboardViewport, { target: view })
+    const owner = (terminalKeyboardInput.current || promptRef.current)?.ownerDocument
+    const view = owner?.defaultView?.visualViewport
+    if (view) {
+      useEventListener('resize', fitTerminalKeyboardViewport, { target: view })
+      useEventListener('resize', fitComposerKeyboardViewport, { target: view })
+      useEventListener('scroll', fitComposerKeyboardViewport, { target: view })
+    }
   })
 
   function terminalKeyboardSend(data) {

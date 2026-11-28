@@ -913,6 +913,29 @@ try {
   await touchThreadActions.getByRole('button', { name: 'Close thread actions' }).tap()
   await touchThreadActions.waitFor({ state: 'hidden' })
   check('closing the thread action sheet restores the title focus', await touchTitle.evaluate(title => title === document.activeElement))
+  const touchPrompt = touch.getByRole('textbox', { name: 'Message', exact: true })
+  await touchPrompt.tap()
+  await touch.keyboard.insertText('Draft with the phone keyboard open')
+  await touch.evaluate(() => {
+    const view = window.visualViewport!
+    Object.defineProperty(view, 'height', { configurable: true, value: 510 })
+    Object.defineProperty(view, 'pageTop', { configurable: true, value: 210 })
+    view.dispatchEvent(new Event('resize'))
+  })
+  await touch.waitForFunction(() => document.querySelector('[data-harness-shell]')?.getBoundingClientRect().height === 510)
+  check('touch composer keeps the workspace header and send control in view', await touchTitle.evaluate(el =>
+    el.getBoundingClientRect().top >= 210) && await touch.locator('[data-send]').evaluate(el =>
+    el.getBoundingClientRect().bottom <= 720) && await touchPrompt.inputValue() === 'Draft with the phone keyboard open')
+  await touch.evaluate(() => {
+    const view = window.visualViewport!
+    Reflect.deleteProperty(view, 'height')
+    Reflect.deleteProperty(view, 'pageTop')
+    view.dispatchEvent(new Event('resize'))
+  })
+  await touch.waitForFunction(() => (document.querySelector('[data-harness-shell]')?.getBoundingClientRect().height ?? 0) > 510)
+  check('dismissing the composer keyboard restores the workspace origin', await touchTitle.evaluate(el =>
+    el.getBoundingClientRect().top < 100))
+  await touchPrompt.fill('')
   await touch.locator('[data-header-terminal]').tap()
   const screen = touch.locator('[data-terminal-screen]')
   await screen.filter({ hasText: 'Harness test terminal' }).waitFor()
