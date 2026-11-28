@@ -55,8 +55,9 @@ fixture.issues = {
     'Notebook issue ' + (index + 25), new Date(Date.UTC(2026, 10, index + 1)).toISOString()))],
   'fixture/atlas': [row('fixture/atlas', 51, 'Newest fixture issue', '2026-11-26T12:00:00Z')],
 }
-fixture.filterAssignees = [{ login: 'fixture-reviewer', name: 'Review Team' }]
-fixture.labelCatalog = [{ id: 42, name: 'Needs triage', color: '8794a1', description: 'Fixture label for new reports' }]
+fixture.filterAssignees = [{ login: 'fixture-reviewer', name: 'Review Team' }, { login: 'fixture-helper', name: 'Helper' }]
+const triageLabel = { id: 42, name: 'Needs triage', color: '8794a1', description: 'Fixture label for new reports' }
+fixture.labelCatalog = [...fixture.issues['fixture/notebook'][0].labels, triageLabel]
 writeFileSync(cli.state, JSON.stringify(fixture))
 
 const databasePath = join(dir, 'fixture.sqlite')
@@ -68,7 +69,7 @@ const databasePath = join(dir, 'fixture.sqlite')
   db.exec('CREATE TABLE command_receipts (id INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, seqs TEXT, at INTEGER, created_at TEXT, updated_at TEXT, uuid TEXT)')
 }
 const observedPrompts: string[] = []
-const host = await serve({ port: 0, databasePath, resolveDriver: kind => ({
+const startHost = (port = 0) => serve({ port, databasePath, resolveDriver: kind => ({
   kind,
   async probe() { return { status: 'ready' } },
   async create() {
@@ -83,6 +84,7 @@ const host = await serve({ port: 0, databasePath, resolveDriver: kind => ({
     }
   },
 }) })
+let host = await startHost()
 let browser: Browser | undefined
 try {
   browser = await browserKind.launch()
@@ -343,8 +345,107 @@ try {
   assert.equal(await pullLink.count(), 0)
   await issuePage.reload()
   await issuePage.getByRole('link', { name: 'Existing offline thread', exact: true }).waitFor()
+  await issuePage.goto(detailUrl)
+  const changeLabels = issuePage.getByRole('link', { name: 'Change labels', exact: true })
+  const changeAssignees = issuePage.getByRole('link', { name: 'Change assignees', exact: true })
+  assert.equal(await changeLabels.count(), 0)
+  assert.equal(await changeAssignees.count(), 0)
+  function alterForge(update: (current: typeof fixture) => void) {
+    const current = JSON.parse(readFileSync(cli.state, 'utf8'))
+    update(current)
+    writeFileSync(cli.state, JSON.stringify(current))
+  }
+  alterForge(current => { current.issuePermission = 'TRIAGE' })
+  await issuePage.setViewportSize({ width: 360, height: 800 })
+  await issuePage.reload()
+  await changeLabels.click()
+  const labelsForm = issuePage.getByRole('form', { name: 'Change labels', exact: true })
+  const bug = labelsForm.getByRole('checkbox', { name: 'bug', exact: true })
+  await bug.waitFor()
+  assert.equal(await bug.isChecked(), true)
+  await bug.uncheck()
+  await labelsForm.getByRole('searchbox', { name: 'Search labels', exact: true }).fill('triage')
+  await labelsForm.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+  const triage = labelsForm.getByRole('checkbox', { name: /Needs triage/ })
+  await triage.waitFor()
+  assert.equal(await bug.isChecked(), false)
+  await triage.check()
+  const requestData = await labelsForm.evaluate(form => {
+    const values = new URLSearchParams()
+    for (const [key, value] of new FormData(form as HTMLFormElement)) {
+      if (typeof value === 'string') values.append(key, value)
+    }
+    return { url: (form as HTMLFormElement).action, body: values.toString() }
+  })
+  async function captureEditor(name: string, button: ReturnType<typeof issuePage.getByRole>) {
+    for (const [width, height] of viewports) {
+      await issuePage.setViewportSize({ width, height })
+      await button.scrollIntoViewIfNeeded()
+      const bounds = await button.boundingBox()
+      assert.ok(bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= height)
+      if (destination) await issuePage.screenshot({ path: join(destination, 'issues-' + label + '-' + name + '-' + width + 'x' + height + '.png') })
+    }
+  }
+  const saveLabels = labelsForm.getByRole('button', { name: 'Save labels', exact: true })
+  await captureEditor('edit-labels', saveLabels)
+  const post = () => fetch(requestData.url, {
+    method: 'POST', body: requestData.body, redirect: 'manual',
+    headers: { origin: base, 'content-type': 'application/x-www-form-urlencoded' },
+  })
+  assert.equal((await fetch(requestData.url, {
+    method: 'POST', body: requestData.body, headers: { origin: 'https://outside.invalid', 'content-type': 'application/x-www-form-urlencoded' },
+  })).status, 403)
+  alterForge(current => { current.issuePermission = 'READ' })
+  assert.equal((await post()).status, 403)
+  alterForge(current => { current.issuePermission = 'TRIAGE'; current.actor = 'different-actor' })
+  assert.equal((await post()).status, 409)
+  assert.equal(JSON.parse(readFileSync(cli.state, 'utf8')).labelWrites?.length, undefined)
+  alterForge(current => { delete current.actor; current.labelDropResponse = 42 })
+  await saveLabels.click()
+  const recover = issuePage.getByRole('form', { name: 'Recover issue changes' })
+  await recover.waitFor()
+  const editorPort = host.server.port
+  host.stop()
+  host = await startHost(editorPort)
+  alterForge(current => {
+    current.issues['fixture/notebook'][0].labels.push({ id: 91, name: 'Concurrent label', color: '654321' })
+  })
+  await recover.getByRole('button', { name: 'Check GitHub and finish changes' }).click()
+  await issuePage.getByText('Issue updated on GitHub.', { exact: true }).waitFor()
+  const issuedMetadata = issuePage.getByRole('region', { name: 'Issue labels and assignees' })
+  await issuedMetadata.getByText('Concurrent label', { exact: true }).waitFor()
+  assert.equal(await issuedMetadata.getByText('bug', { exact: true }).count(), 0)
+  assert.equal((await post()).status, 303)
+  assert.deepEqual(JSON.parse(readFileSync(cli.state, 'utf8')).labelWrites.map((write: unknown[]) => write[2]), [42, 1])
+
+  await issuePage.setViewportSize({ width: 1280, height: 800 })
+  await changeAssignees.click()
+  const people = issuePage.getByRole('form', { name: 'Change assignees', exact: true })
+  const reviewer = people.getByRole('checkbox', { name: 'fixture-reviewer', exact: true })
+  await reviewer.uncheck()
+  await people.getByRole('searchbox', { name: 'Search assignees', exact: true }).fill('Helper')
+  await people.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+  const helper = people.getByRole('checkbox', { name: /fixture-helper/ })
+  await helper.check()
+  assert.equal(await reviewer.isChecked(), false)
+  const saveAssignees = people.getByRole('button', { name: 'Save assignees', exact: true })
+  await captureEditor('edit-assignees', saveAssignees)
+  alterForge(current => { current.assigneeDropResponse = 'PERSON_fixture-helper' })
+  await saveAssignees.click()
+  await recover.waitFor()
+  alterForge(current => {
+    current.issues['fixture/notebook'][0].assignees.push({ login: 'concurrent-person' })
+  })
+  await recover.getByRole('button', { name: 'Check GitHub and finish changes' }).click()
+  await issuePage.getByText('Issue updated on GitHub.', { exact: true }).waitFor()
+  await issuedMetadata.getByText('fixture-helper', { exact: true }).waitFor()
+  await issuedMetadata.getByText('concurrent-person', { exact: true }).waitFor()
+  assert.equal(await issuedMetadata.getByText('fixture-reviewer', { exact: true }).count(), 0)
+  assert.deepEqual(JSON.parse(readFileSync(cli.state, 'utf8')).assigneeWrites, [
+    [24, false, 'PERSON_fixture-reviewer'], [24, true, 'PERSON_fixture-helper'],
+  ])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters and lookup, saved views, draft and send, and issue and PR links')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated edits and recovery')
 }
 catch (error) {
   console.error(error)

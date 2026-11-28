@@ -26,6 +26,7 @@ import type { WorkspaceReviewTurn } from './diff'
 import { isWorkspaceGitRoot, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
+import { updateIssueMetadata } from './issue-metadata'
 import { issueThreadUpdate, issueWorkspace, renderIssueMarkdown } from './issue-workspace'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
 import { ComposerAttachments } from './composer-attachments'
@@ -2282,7 +2283,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams, request.signal)
       }
 
-      if (url.pathname === '/issues' || url.pathname === '/issues/threads') {
+      if (url.pathname === '/issues' || url.pathname === '/issues/threads' || url.pathname === '/issues/metadata') {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
@@ -2306,13 +2307,34 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             return new Response(message, { status: 409, headers })
           })
         }
-        if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
+        if (url.pathname === '/issues/metadata' ? request.method !== 'POST' : request.method !== 'GET')
+          return new Response(null, { status: 405, headers: { ...headers, allow: url.pathname === '/issues/metadata' ? 'POST' : 'GET' } })
         srv.timeout(request, 70)
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
-        return issueWorkspace(engine.current, url.searchParams, signal).then(async (view) => {
+        const render = async (submission?: NonNullable<Awaited<ReturnType<typeof updateIssueMetadata>>>) => {
+          const view = await issueWorkspace(engine.current, url.searchParams, signal, submission)
           const html = await renderHarnessTemplate(join(process.cwd(), 'resources/views/harness-issues.stx'), view)
-          return new Response(renderIssueMarkdown(html, view), { headers })
-        }).catch(() => new Response('Issues could not be loaded. Return to the workspace and try again.', { status: 503, headers }))
+          const status = !submission || submission.result === 'search' ? 200 : submission.result === 'pending' ? 202
+            : submission.result === 'denied' ? 403 : 409
+          return new Response(renderIssueMarkdown(html, view), { status, headers })
+        }
+        const unavailable = () => new Response('Issues could not be loaded. Return to the workspace and try again.', { status: 503, headers })
+        if (url.pathname === '/issues/metadata') {
+          if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
+            return new Response(null, { status: 415, headers })
+          return readRepositoryBody(request, 3_300_000).then(async (raw) => {
+            const submission = raw === null ? null : await updateIssueMetadata(engine.current, url.searchParams, new URLSearchParams(raw), signal, reviewReplies)
+            if (!submission) return new Response('Invalid issue edit form.', { status: 400, headers })
+            if (submission.result === 'updated' || submission.result === 'confirmed') {
+              const params = new URLSearchParams(url.searchParams)
+              params.delete('editMetadata')
+              params.set('metadataResult', 'updated')
+              return new Response(null, { status: 303, headers: { ...headers, location: '/issues?' + params + '#issue-metadata' } })
+            }
+            return render(submission)
+          }).catch(unavailable)
+        }
+        return render().catch(unavailable)
       }
 
       if (['/pull-requests', '/pull-requests/results', '/pull-requests/viewed', '/pull-requests/conversation', '/pull-requests/reply', '/pull-requests/comments', '/pull-requests/review', '/pull-requests/lifecycle', '/pull-requests/labels', '/pull-requests/reviewers'].includes(url.pathname)) {

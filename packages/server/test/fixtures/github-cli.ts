@@ -322,6 +322,53 @@ if (url.pathname === '/graphql' && method === 'POST') {
     }
     reply(200, { data: { viewer, node } })
   }
+  const issueActor = actor => ({ id: actor.id ?? 'PERSON_' + actor.login, login: actor.login, name: actor.name ?? '' })
+  const issueNodeId = (repo, issue) => 'ISSUE_' + repo.replace('/', '_') + '_' + issue.number
+  if (query.includes('query HarnessIssueMetadataAuthority')) {
+    const repo = variables.owner + '/' + variables.name
+    const issue = state.issues?.[repo]?.find(issue => issue.number === variables.number)
+    const unavailable = state.assigneeHiddenRead
+    if (unavailable) {
+      delete state.assigneeHiddenRead
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
+    reply(200, { data: { viewer: { id: 'VIEWER_' + (state.actor ?? 'fixture-user') },
+      repository: state.repositories[repo] && { id: 'REPO_' + repo.replace('/', '_'), nameWithOwner: repo,
+        viewerPermission: state.issuePermission ?? 'READ', isArchived: Boolean(state.issueArchived),
+        issue: issue && !issue.pull_request ? { id: issueNodeId(repo, issue), number: issue.number,
+          assignees: { nodes: (issue.assignees ?? []).map(issueActor), pageInfo: { hasNextPage: false } } } : null } } })
+  }
+  if (query.includes('query HarnessIssueAssignablePeople')) {
+    const repo = variables.owner + '/' + variables.name
+    if (!state.repositories[repo] || !process.env.GH_TOKEN) reply(403, {})
+    const needle = variables.search.toLowerCase()
+    const users = (state.filterAssignees ?? []).filter(user => (user.login + ' ' + user.name).toLowerCase().includes(needle))
+    reply(200, { data: { repository: { nameWithOwner: repo,
+      assignableUsers: { nodes: users.slice(0, 50).map(issueActor), pageInfo: { hasNextPage: users.length > 50 } } } } })
+  }
+  if (query.includes('mutation HarnessIssueAssignee')) {
+    if (!process.env.GH_TOKEN || state.issuePermission !== 'TRIAGE') reply(403, { message: 'Private issue diagnostics' })
+    const add = query.includes('addAssigneesToAssignable')
+    const key = variables.input.assigneeIds[0]
+    const issue = Object.entries(state.issues ?? {}).flatMap(([repo, rows]) =>
+      rows.filter(issue => issueNodeId(repo, issue) === variables.input.assignableId))[0]
+    if (!issue || issue.pull_request) reply(404, {})
+    const current = (issue.assignees ?? []).map(issueActor)
+    const actor = (add ? (state.filterAssignees ?? []).map(issueActor) : current).find(person => person.id === key)
+    if (!actor || variables.input.assigneeIds.length !== 1) reply(200, { errors: [{ message: 'Unknown fixture assignee' }] })
+    issue.assignees = current.filter(person => person.id !== key)
+    if (add) issue.assignees.push(actor)
+    state.assigneeWrites = [...(state.assigneeWrites ?? []), [issue.number, add, key]]
+    if (state.assigneeDropResponse === key) {
+      delete state.assigneeDropResponse
+      state.assigneeHiddenRead = true
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(200, { data: { [add ? 'addAssigneesToAssignable' : 'removeAssigneesFromAssignable']: { clientMutationId: variables.input.clientMutationId } } })
+  }
   const name = variables.owner + '/' + variables.name
   const pull = state.pulls.find(pull => pull.base.repo.full_name === name && pull.number === variables.number)
   if (query.includes('query HarnessSearchRepositoryLabels')) {
@@ -592,8 +639,10 @@ if (parts[4] === 'labels' && method === 'GET') {
   const next = pages && page < pages.length ? 'Link: <https://api.github.com' + url.pathname + '?page=' + (page+1) + '>; rel="next"\\r\\n' : ''
   reply(200, pages ? pages[page-1] ?? [] : state.labelCatalog ?? [], next)
 }
-if (parts[4] === 'issues' && parts[6] === 'labels' && detail) {
-  const applied = detail.labels ?? []
+const issueForMetadata = parts[4] === 'issues' ? state.issues?.[name]?.find(issue => issue.number === Number(parts[5]) && !issue.pull_request) : undefined
+const labelled = issueForMetadata ?? detail
+if (parts[4] === 'issues' && parts[6] === 'labels' && labelled) {
+  const applied = labelled.labels ?? []
   if (method === 'GET') {
     if (state.labelHiddenRead) {
       state.labelHiddenRead = false
@@ -602,14 +651,14 @@ if (parts[4] === 'issues' && parts[6] === 'labels' && detail) {
     }
     reply(200, applied)
   }
-  if (!process.env.GH_TOKEN || state.labelDenied) reply(403, { message: 'Private label diagnostics' })
+  if (!process.env.GH_TOKEN || state.labelDenied || (issueForMetadata && state.issuePermission !== 'TRIAGE')) reply(403, { message: 'Private label diagnostics' })
   const names = method === 'POST' ? JSON.parse(await Bun.stdin.text()).labels : [decodeURIComponent(parts[7] ?? '')]
   const catalog = state.labelPages?.flat() ?? state.labelCatalog ?? []
   const label = (method === 'POST' ? catalog : applied).find(candidate => candidate.name === names[0])
   if (!label || names.length !== 1 || (method === 'POST' && label.archived_at)) reply(404, {})
-  state.labelWrites = [...(state.labelWrites ?? []), [detail.number, method, label.id, label.name]]
-  detail.labels = applied.filter(candidate => candidate.id !== label.id)
-  if (method === 'POST') detail.labels.push(label)
+  state.labelWrites = [...(state.labelWrites ?? []), [labelled.number, method, label.id, label.name]]
+  labelled.labels = applied.filter(candidate => candidate.id !== label.id)
+  if (method === 'POST') labelled.labels.push(label)
   if (state.labelDropResponse === label.id) {
     delete state.labelDropResponse
     state.labelHiddenRead = true
@@ -618,7 +667,7 @@ if (parts[4] === 'issues' && parts[6] === 'labels' && detail) {
   }
   writeFileSync(stateFile, JSON.stringify(state))
   if (method === 'DELETE') reply(204)
-  reply(200, detail.labels)
+  reply(200, labelled.labels)
 }
 if (parts[4] === 'issues' && parts[6] === 'timeline' && detail) reply(200, [
   { id: 5, event: 'commented', user: { login: 'fixture-reviewer' }, created_at: '2026-11-01T13:00:00Z', body: 'Check the **export**. <script>globalThis.__pr_html = true</script>' },

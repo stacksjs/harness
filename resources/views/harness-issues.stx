@@ -38,6 +38,15 @@ export const labelFound = $props.labelFound
 export const lookupLimited = $props.lookupLimited
 export const findAssignee = $props.findAssignee
 export const assigneeChoices = $props.assigneeChoices
+export const canEditMetadata = $props.canEditMetadata
+export const metadataEditor = $props.metadataEditor
+export const metadataDraft = $props.metadataDraft
+export const metadataMessage = $props.metadataMessage
+export const metadataUnavailable = $props.metadataUnavailable
+export const metadataHref = $props.metadataHref
+export const metadataLabelsHref = $props.metadataLabelsHref
+export const metadataAssigneesHref = $props.metadataAssigneesHref
+export const metadataAction = $props.metadataAction
 export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name: 'Closed' }, { value: 'all', name: 'All states' }]
 </script>
 <script client>
@@ -329,16 +338,37 @@ function closeIssueFilters(event) {
             <a data-issue-button data-issue-primary href="{{ draftHref }}">Open as draft</a>
             <a data-issue-button href="{{ selected.url }}" rel="noreferrer" target="_blank">View on GitHub</a>
           </div>
-          @if(selected.labels.length || selected.assignees.length)
+          <section id="issue-metadata" aria-label="Issue labels and assignees">
             <dl data-issue-metadata>
-              @if(selected.labels.length)
-                <div><dt>Labels</dt><dd>@foreach(selected.labels as label)<span data-issue-label>{{ label.name }}</span>@endforeach</dd></div>
-              @endif
-              @if(selected.assignees.length)
-                <div><dt>Assignees</dt><dd>@foreach(selected.assignees as assignee)<span>{{ assignee }}</span>@endforeach</dd></div>
-              @endif
+              <div>
+                <dt>Labels</dt>
+                <dd>
+                  @if(selected.labels.length)
+                    @foreach(selected.labels as label)<span data-issue-label>{{ label.name }}</span>@endforeach
+                  @else
+                    <span>None</span>
+                  @endif
+                  @if(canEditMetadata && !metadataEditor && !metadataDraft)
+                    <a href="{{ metadataLabelsHref }}#issue-metadata" data-issue-button>Change labels</a>
+                  @endif
+                </dd>
+              </div>
+              <div>
+                <dt>Assignees</dt>
+                <dd>
+                  @if(selected.assignees.length)
+                    @foreach(selected.assignees as assignee)<span>{{ assignee }}</span>@endforeach
+                  @else
+                    <span>None</span>
+                  @endif
+                  @if(canEditMetadata && !metadataEditor && !metadataDraft)
+                    <a href="{{ metadataAssigneesHref }}#issue-metadata" data-issue-button>Change assignees</a>
+                  @endif
+                </dd>
+              </div>
             </dl>
-          @endif
+            @include('../partials/harness-issue-metadata-editor')
+          </section>
           <div data-issue-markdown="description" class="transcript-markdown">@if(!selected.description)No description.@endif</div>
           @if(linkedThreads.length || threadChoices.length)
             <section data-issue-relations aria-labelledby="issue-threads">

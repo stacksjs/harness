@@ -1,0 +1,56 @@
+@if(metadataMessage)
+  <p role="status" data-issue-metadata-message>{{ metadataMessage }}</p>
+@endif
+@if(metadataDraft)
+  <form method="post" action="{{ metadataAction }}" aria-label="Recover issue changes" data-issue-metadata-editor>
+    <input type="hidden" name="kind" value="{{ metadataDraft.kind }}">
+    <input type="hidden" name="scope" value="{{ metadataDraft.scope }}">
+    <input type="hidden" name="revision" value="{{ metadataDraft.revision }}">
+    <input type="hidden" name="intent" value="{{ metadataDraft.intent }}">
+    @foreach(metadataDraft.checked as key)
+      <input type="hidden" name="choice" value="{{ key }}">
+    @endforeach
+    <button type="submit" data-issue-button>Check GitHub and finish changes</button>
+    <a href="{{ metadataHref }}#issue-metadata" data-issue-button>Return to issue</a>
+  </form>
+@elseif(metadataEditor)
+  <form method="post" action="{{ metadataAction }}" aria-labelledby="issue-metadata-editor-title" data-issue-metadata-editor>
+    <h3 id="issue-metadata-editor-title">@if(metadataEditor.kind === 'labels')Change labels@else Change assignees@endif</h3>
+    <input type="hidden" name="kind" value="{{ metadataEditor.kind }}">
+    <input type="hidden" name="scope" value="{{ metadataEditor.scope }}">
+    <input type="hidden" name="revision" value="{{ metadataEditor.revision }}">
+    <input type="hidden" name="intent" value="{{ metadataEditor.intent }}">
+    <div data-issue-label-search>
+      <label class="sr-only" for="issue-metadata-search">@if(metadataEditor.kind === 'labels')Search labels@else Search assignees@endif</label>
+      <input id="issue-metadata-search" type="search" name="query" maxlength="120" value="{{ metadataEditor.search }}"
+        placeholder="@if(metadataEditor.kind === 'labels')Search labels@else Search assignees@endif" autofocus>
+      <button type="submit" name="operation" value="search" data-issue-button>Search GitHub</button>
+    </div>
+    @if(metadataEditor.search && metadataEditor.matches === 0)
+      <p role="status">No matches on GitHub.</p>
+    @elseif(metadataEditor.more)
+      <p>Search to see more results.</p>
+    @endif
+    @if(metadataEditor.options.length)
+      <fieldset data-issue-filter-choices>
+        <legend class="sr-only">@if(metadataEditor.kind === 'labels')Repository labels@else Assignable people@endif</legend>
+        @foreach(metadataEditor.options as item)
+          <label>
+            <input type="checkbox" name="choice" value="{{ item.key }}" @if(item.checked)checked@endif>
+            <span>{{ item.name }}@if(item.archived) <small>Archived</small>@endif
+              @if(item.description)<small>{{ item.description }}</small>@endif
+            </span>
+          </label>
+        @endforeach
+      </fieldset>
+    @endif
+    <div data-issue-metadata-editor-actions>
+      <a href="{{ metadataHref }}#issue-metadata" data-issue-button>Cancel</a>
+      @if(metadataEditor.options.length)
+        <button type="submit" name="operation" value="save" data-issue-button data-issue-primary>@if(metadataEditor.kind === 'labels')Save labels@else Save assignees@endif</button>
+      @endif
+    </div>
+  </form>
+@elseif(metadataUnavailable)
+  <p role="status" data-issue-metadata-message>GitHub could not open this editor. Changing labels or assignees requires triage access.</p>
+@endif

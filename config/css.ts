@@ -620,6 +620,22 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-detail-heading] { display: grid; gap: 7px; margin-block: 12px 18px; }
 [data-issue-detail-heading] h2, [data-issue-detail] > h2 { font-size: clamp(19px, 2vw, 25px); font-weight: 650; line-height: 1.3; }
 [data-issue-detail-heading] > p, [data-issue-meta], [data-issue-metadata] { font-size: 13px; }
+[data-issue-metadata-editor] {
+  display: grid; gap: 8px; border: 1px solid var(--workspace-line); border-radius: 8px;
+  padding: 12px; margin-block: 8px 16px; font-size: 13px; background: var(--workspace-bg);
+}
+[data-issue-metadata-editor] h3 { font-size: 14px; font-weight: 650; }
+[data-issue-metadata-editor] input[type=search] {
+  min-inline-size: 0; min-block-size: 38px; border: 1px solid var(--workspace-line); border-radius: 7px;
+  padding-inline: 10px; background: var(--workspace-surface);
+}
+[data-issue-metadata-editor] fieldset { min-width: 0; max-block-size: 14rem; }
+[data-issue-metadata-editor] small { display: block; opacity: .8; }
+[data-issue-metadata-editor-actions] { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }
+[data-issue-metadata-message] { font-size: 13px; margin-block: 8px; }
+@media (max-width: 767px) {
+  [data-issue-metadata-editor] input[type=search] { min-block-size: 44px; font-size: 16px; }
+}
 [data-issue-meta], [data-issue-actions], [data-issue-pages] { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 [data-issue-actions], [data-issue-pages] { margin-block: 14px; }
 [data-issue-primary] { background: var(--workspace-accent); color: var(--workspace-bg); border-color: transparent; }
