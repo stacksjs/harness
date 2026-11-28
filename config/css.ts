@@ -736,6 +736,12 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-reactions] [aria-pressed="true"] { border-color: var(--workspace-accent); background: var(--workspace-hover); }
 [data-issue-reaction-options] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-block-start: 6px; }
 [data-issue-reaction-options] button { justify-self: stretch; width: auto; min-inline-size: 34px; }
+@media (min-width: 1024px) {
+  [data-issue-reaction-options] { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  [data-issue-reaction-options] button { min-inline-size: 44px; }
+}
 [data-issue-event] a:focus-visible, [data-issue-reactions] summary:focus-visible { outline-offset: 2px; }
 [data-issue-comments] h3 { font-size: 14px; font-weight: 650; }
 [data-issue-comments] article { padding-block: 10px; border-block-end: 1px solid var(--workspace-line); }

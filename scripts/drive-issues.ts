@@ -1892,8 +1892,15 @@ try {
   for (const [width, height] of viewports) {
     await page.setViewportSize({ width, height })
     await forgejoHeart.scrollIntoViewIfNeeded()
-    const bounds = await forgejoHeart.boundingBox()
-    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width)
+    const choices = await forgejoCommentReactions.locator('[data-issue-reaction-options] button').evaluateAll(buttons =>
+      buttons.map(button => {
+        const box = button.getBoundingClientRect()
+        return { x: box.x, top: Math.round(box.top), width: box.width, height: box.height }
+      }))
+    assert.equal(choices.length, 8)
+    assert.equal(new Set(choices.map(choice => choice.top)).size, width >= 1024 ? 1 : 2)
+    assert.ok(choices.every(choice => choice.x >= 0 && choice.x + choice.width <= width))
+    if (width < 768) assert.ok(choices.every(choice => choice.width >= 44 && choice.height >= 44))
     await capture('forgejo-reactions-' + width + 'x' + height)
   }
   alterForge(current => { current.forgejo.refuseReaction = true })
