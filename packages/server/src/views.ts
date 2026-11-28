@@ -238,6 +238,7 @@ export function viewProps(state: HarnessState, options: {
           title: threadTitle(active),
           navigation: active.navigation,
           linkedPullRequests: active.linkedPullRequests,
+          linkedIssues: active.linkedIssues,
           pullRequest: active.pullRequest ? {
             reference: active.pullRequest,
             url: 'https://github.com/' + active.pullRequest.repository + '/pull/' + active.pullRequest.number,

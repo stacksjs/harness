@@ -6,6 +6,7 @@ import { Database } from 'bun:sqlite'
 
 import type { Browser } from 'playwright-core'
 import { chromium, webkit } from 'playwright-core'
+import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/server'
 import { fixtureGitHubCli } from '../packages/server/test/fixtures/github-cli'
 
@@ -81,7 +82,8 @@ try {
   for (const [repo, path] of Object.entries(projects))
     await host.engine.dispatch({ id: 'register-' + repo, at: now, command: { type: 'workspace.register', path, trusted: true } })
   const base = 'http://127.0.0.1:' + host.server.port
-  const page = await browser.newPage({ colorScheme: appearance, reducedMotion: 'reduce', viewport: { width: 1440, height: 900 } })
+  const context = await browser.newContext({ colorScheme: appearance, reducedMotion: 'reduce', viewport: { width: 1440, height: 900 } })
+  const page = await context.newPage()
   page.setDefaultTimeout(25_000)
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -122,23 +124,69 @@ try {
   assert.equal(await page.locator('[data-issue-markdown="20"]').count(), 0)
   await page.getByRole('link', { name: 'Older comments' }).click()
   await page.locator('[data-issue-markdown="1"]').waitFor()
+  const detailUrl = page.url()
   await draft.click()
   await page.getByRole('button', { name: 'Open project draft' }).click()
   const composer = page.getByRole('textbox', { name: 'Message', exact: true })
-  await page.waitForFunction(url => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === url, issueUrl)
-  assert.ok(new URL(page.url()).searchParams.has('workspace'))
+  const awaitPrompt = (text: string) => page.waitForFunction(value => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === value, text)
+  await awaitPrompt(issueUrl)
+  const workspaceId = Number(new URL(page.url()).searchParams.get('workspace'))
+  assert.equal(workspaceId, derivedId('register-fixture/notebook'))
   assert.equal(host.engine.current.sessions.size, 0)
   assert.equal(observedPrompts.length, 0)
+  const draftBadge = page.locator('[data-draft-issue]').getByRole('link', { name: 'fixture/notebook#24' })
+  await draftBadge.waitFor()
+  const prompt = 'Review recovery on both devices.\n\n' + issueUrl
+  await composer.fill(prompt)
   await page.reload()
-  await page.waitForFunction(url => document.querySelector<HTMLTextAreaElement>('[data-prompt]')?.value === url, issueUrl)
-  assert.equal(await composer.inputValue(), issueUrl)
+  await awaitPrompt(prompt)
+  await draftBadge.waitFor()
   await capture('project-draft')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await page.getByText('Fixture issue draft received.').waitFor()
-  assert.deepEqual(observedPrompts, [issueUrl])
+  assert.deepEqual(observedPrompts, [prompt])
   assert.equal(host.engine.current.sessions.size, 1)
+  const original = [...host.engine.current.sessions.values()][0]!
+  assert.deepEqual(original.linkedIssues, [{ tracker: 'github', repository: 'fixture/notebook', number: 24 }])
+  const chip = page.locator('[data-thread-issues]').getByRole('link', { name: 'fixture/notebook#24' })
+  await chip.waitFor()
+  await capture('linked-thread')
+  await host.engine.dispatchInternal({
+    id: 'issue-thread-related-pr', at: now,
+    command: { type: 'thread.pull-request.link', sessionId: original.id, pullRequest: { repository: 'fixture/notebook', number: 81, repositoryKey: '' } },
+  })
+  await host.engine.dispatch({ id: 'issue-existing-thread', at: now, command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
+  const existing = derivedId('issue-existing-thread')
+  await host.engine.dispatch({ id: 'name-existing-issue-thread', at: now,
+    command: { type: 'session.organize', sessionId: existing, action: 'rename', title: 'Existing offline thread' } })
+  const issuePage = await context.newPage()
+  const existingPage = await context.newPage()
+  await existingPage.goto(base + '/s/' + existing)
+  await issuePage.goto(detailUrl)
+  await issuePage.getByRole('heading', { name: 'Linked threads' }).waitFor()
+  await issuePage.getByRole('link', { name: 'fixture/notebook#24', exact: true }).waitFor()
+  const pullLink = issuePage.getByRole('link', { name: 'fixture/notebook#81', exact: true })
+  assert.equal(new URL(await pullLink.getAttribute('href') ?? '', base).searchParams.get('selectedUrl'), 'https://github.com/fixture/notebook/pull/81')
+  await issuePage.getByText('Link an existing thread', { exact: true }).click()
+  await issuePage.getByLabel('Thread', { exact: true }).selectOption(String(existing))
+  const [linkedResponse] = await Promise.all([
+    issuePage.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/issues/threads'),
+    issuePage.getByRole('button', { name: 'Link thread', exact: true }).click(),
+  ])
+  assert.equal(linkedResponse.status(), 303)
+  await issuePage.getByRole('link', { name: 'Existing offline thread', exact: true }).waitFor()
+  await existingPage.locator('[data-thread-issues]').getByRole('link', { name: 'fixture/notebook#24' }).waitFor()
+  await issuePage.getByRole('button', { name: 'Unlink fixture/notebook#24' }).click()
+  await chip.waitFor({ state: 'hidden' })
+  assert.equal(await pullLink.count(), 0)
+  await issuePage.reload()
+  await issuePage.getByRole('link', { name: 'Existing offline thread', exact: true }).waitFor()
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, list and detail, sorting, search, comments, draft and explicit send')
+  console.log('PASS', label, 'six sizes, draft and send, issue and PR links, and live link and unlink')
+}
+catch (error) {
+  console.error(error)
+  throw error
 }
 finally {
   try { await browser?.close() }

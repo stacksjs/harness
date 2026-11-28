@@ -109,6 +109,7 @@ export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialFork = activeSession?.fork || null
 export const sessionPullRequest = activeSession?.pullRequest || null
 export const initialLinkedPullRequests = activeSession?.linkedPullRequests || []
+export const initialLinkedIssues = activeSession?.linkedIssues || []
 export const promptLinkProfile = $props.promptLinkProfile || 0
 export const initialCodexSelection = activeCodex && activeSession.model
   ? { model: activeSession.model, ...activeSession.codexTurnOptions } : null
@@ -384,6 +385,14 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     </div>
     <div data-workspace-content>
     <div data-workspace-lane @if(!activeSession)data-workspace-draft@endif :inert="workspaceActionsOpen()">
+    @if(activeSession)
+      <nav data-thread-issues aria-label="Linked issues" hidden :hidden="!threadIssues().length">
+        <span>Issues</span>
+        <template :for="(issue, index) in threadIssues()">
+          <a :href="issueHref(issue)" :text="issue.repository + '#' + issue.number" :target="projectCloneAllowed ? null : '_blank'" rel="noreferrer"></a>
+        </template>
+      </nav>
+    @endif
     {{--
       The transcript. Settled turns are plain server-rendered HTML and hydrate
       on `visible`, so scrolling back through a long session costs nothing until
@@ -828,6 +837,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
     @if(canCompose)
     <form data-composer :data-steer-ready="canSteer()" :data-session-online="sessionOnline()" @if(initialInputs.length || initialNavigation.archivedAt || (initialFork && initialFork.state !== 'ready'))hidden@endif :hidden="Boolean(terminalKeyboardViewport() || inputRequest() || threadNavigation().archivedAt || forkStatus() !== 'ready')" @submit.prevent="sendPrompt()" @dragover="composerDragOver" @drop="composerFileActions()?.drop($event)" class="grid gap-2 items-end shrink-0">
+      <div data-draft-issue hidden :hidden="!draftIssue()">
+        <a :href="issueHref(draftIssue())" :text="draftIssue() ? draftIssue().repository + '#' + draftIssue().number : ''"></a>
+        <button type="button" @click="removeDraftIssue" :disabled="startPending()" aria-label="Remove issue link" class="harness-icon-button">
+          <span class="size-4 i-hugeicons-cancel-01" aria-hidden="true"></span>
+        </button>
+      </div>
       <div data-linked-prompt-notice hidden :hidden="!sharedPromptNotice()">
         <span role="status" :text="sharedPromptNotice()"></span>
         <button type="button" @click="dismissLinkedPromptNotice" aria-label="Dismiss linked prompt notice" class="harness-icon-button">
@@ -1852,7 +1867,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const threadUndoBatch = useSessionStorage('harness.thread-undo-batch.v1', '', { listenToStorageChanges: false })
   const draftDiscardTemplate = useRef('draftDiscardTemplate')
   const sidebarDraftTemplate = useRef('sidebarDraftTemplate')
-  const draftDiscardReady = state(false)
+  const draftToolsReady = state(false)
   let composerDraftTools
   let composerRecall
   let sidebarDrafts
@@ -3085,6 +3100,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const linkReviewError = state('')
   const linkOpening = state(false)
   const sharedPromptNotice = state('')
+  const threadIssues = state(initialLinkedIssues)
   const missingTurnLink = state(false)
   const selectedThreadSearchId = derived(() => {
     const id = threadSearchResults()[threadSearchIndex()]?.id
@@ -6506,17 +6522,40 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       ...(provider ? { provider, model } : {}),
       ...(worktree ? { worktree } : {}),
       ...(linkNotice ? { linkNotice } : {}),
+      ...(previous?.issue ? { issue: previous.issue } : {}),
       ...(sameSelection && previous?.text === text && previous.commandId ? { commandId: previous.commandId } : {}),
     })
   }
 
   function canDiscardComposer() {
-    return draftDiscardReady() && Boolean(composerDraft()?.text || composerFiles().length) && !editingFollowUp() && !startPending()
+    return draftToolsReady() && Boolean(composerDraft()?.text || composerFiles().length) && !editingFollowUp() && !startPending()
       && !composerFiles().some(file => file.status === 'uploading')
   }
 
   function discardCurrentDraft() {
     discardDraft(promptDraftKey)
+  }
+
+  function draftIssue() {
+    const issue = composerDraft()?.issue
+    return !sessionId && draftProject && issue && draftToolsReady() ? composerDraftTools.githubIssueReference(issue) : null
+  }
+
+  function issueHref(issue) {
+    if (!issue) return '#'
+    if (projectCloneAllowed) return '/issues?' + new URLSearchParams({
+      profile: String(activeProfile), selected: issue.repository, issue: String(issue.number),
+    })
+    return draftToolsReady() ? composerDraftTools.githubIssueUrl(issue) : '#'
+  }
+
+  function removeDraftIssue() {
+    const previous = composerDraft()
+    if (!previous?.issue || startPending()) return
+    const draft = { ...previous }
+    delete draft.issue
+    composerDraft.set(draft)
+    promptRef.current?.focus({ preventScroll: true })
   }
 
   function linkedPromptWarning(prompt) {
@@ -6576,7 +6615,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       if (!choice) notice = [notice, 'The linked model is unavailable. Your default model was selected.'].filter(Boolean).join(' ')
     }
     const address = composerDraftTools.storeLinkedDraft(target, { profile, workspace: project?.id, id: newCommandId() }, {
-      text: prompt.text, notice, ...choice,
+      text: prompt.text, notice, ...(project && prompt.issue ? { issue: prompt.issue } : {}), ...choice,
     })
     openDraftAddress(address)
   }
@@ -6729,7 +6768,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         discard: discardDraft, startProject: startProjectDraft, open: openDraftAddress,
       })
     }
-    draftDiscardReady.set(true)
+    draftToolsReady.set(true)
     expireUndoNotices()
     if (initialRewoundPrompt && requestedRewind() === initialRewoundPrompt.operation) await restoreEarlierPrompt()
     if (!resumeProjectClone()) await openIncomingPromptLink()
@@ -6925,6 +6964,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     if (!draftWorktreeOptions()?.canStartWorktree) throw new Error('Choose a Git project to send to multiple models.')
     const worktree = draftWorktreeSelection()
     const selections = modelChoicesWithOptions()
+    const issue = draftIssue()
     const targets = selections.map(selection => {
       const account = composerProviders().find(account => account.value === selection.account && account.status === 'ready')
       const model = account?.models?.find(model => model.id === selection.id)
@@ -6932,7 +6972,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
       const id = newCommandId()
       return {
         id, sessionId: derivedSessionId(id), name: modelBatchTargetName(selection),
-        create: { type: 'session.create', workspaceId: draftProject.id, ...modelLaunchOptions(selection, model), isolate: true, worktree },
+        create: { type: 'session.create', workspaceId: draftProject.id, ...modelLaunchOptions(selection, model), isolate: true, worktree, ...(issue && { issue }) },
       }
     })
     draftModelChoices.set(selections)
@@ -7128,9 +7168,10 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         }
         else {
           const worktree = draftUsesWorktree() ? draftWorktreeSelection() : undefined
+          const issue = draftIssue()
           await sendCommand({
             type: 'session.create', workspaceId: draftProject.id, ...options, ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
-            ...(worktree && { isolate: true, worktree }),
+            ...(worktree && { isolate: true, worktree }), ...(issue && { issue }),
           }, commandId)
           if (worktree) worktreePreferences.update(preferences => ({ ...preferences, [draftProject.id]: worktree }))
         }
@@ -8386,6 +8427,12 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         if (typeof payload.changes.settledAt === 'number') void refreshProjectSettlement()
       }
       if (payload.type === 'session.pull-request-linked') rememberRepositoryPullRequest(payload.pullRequest)
+      if (payload.type === 'session.issue-link-changed') {
+        threadIssues.update(issues => {
+          const remaining = issues.filter(issue => issue.repository !== payload.issue.repository || issue.number !== payload.issue.number)
+          return payload.linked ? [...remaining, payload.issue] : remaining
+        })
+      }
       if (payload.type === 'session.worktree-reserved') worktreeSetup.set(Boolean(payload.intent?.layout))
       if (payload.type === 'session.git-branch-resolved') {
         if (payload.worktreeBranch) workspaceBranch.set(payload.worktreeBranch)

@@ -6,9 +6,9 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ApprovalSelection, ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, ToolApprovalChoice, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ApprovalSelection, ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, GitHubIssueReference, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, ToolApprovalChoice, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
-import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, threadDisplayTitle } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, sameGitHubIssue, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
 import type { ThreadUndoStack } from './thread-undo'
 
@@ -51,6 +51,7 @@ export interface SessionState {
   fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', nativeSessionId?: string, error?: string }
   pullRequest?: PullRequestCheckout
   linkedPullRequests?: RepositoryPullRequest[]
+  linkedIssues?: GitHubIssueReference[]
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
   lastSeq: number
@@ -611,6 +612,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
           pullRequest: p.pullRequest,
           navigation: { title: p.pullRequest.repository + '#' + p.pullRequest.number },
         }),
+        ...(p.issue && { linkedIssues: [p.issue], navigation: { title: p.issue.repository + '#' + p.issue.number } }),
         state: 'idle',
         lastSeq: 0,
         turns: copied,
@@ -861,6 +863,17 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
     case 'session.pull-request-linked': {
       const session = state.sessions.get(event.sessionId)
       if (session) (session.linkedPullRequests ??= []).push(p.pullRequest)
+      break
+    }
+
+    case 'session.issue-link-changed': {
+      const session = state.sessions.get(event.sessionId)
+      if (session) {
+        const previous = session.linkedIssues ?? []
+        session.linkedIssues = p.linked
+          ? [...previous, p.issue]
+          : previous.filter(issue => !sameGitHubIssue(issue, p.issue))
+      }
       break
     }
 

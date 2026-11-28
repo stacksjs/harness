@@ -1,13 +1,17 @@
+import type { GitHubIssueReference } from '@harness/contract'
+import { parseGitHubIssueUrl } from '@harness/contract'
+
 // Prompt sanitization follows T3 Code's MIT-licensed promptLinks.ts at
 // 431da7f4e55b82b386e68a9f32c543fac2efedf5. See ../../drivers/T3CODE-LICENSE.md.
 export const maxLinkedPromptLength = 8_000
-export const promptLinkKeys = ['prompt', 'repo', 'pr', 'provider', 'model'] as const
+export const promptLinkKeys = ['prompt', 'repo', 'pr', 'provider', 'model', 'issue'] as const
 
 export interface LinkedPrompt {
   text: string
   hiddenCharacters: number
   repository?: string
   pullRequest?: string
+  issue?: GitHubIssueReference
   provider?: string
   model?: string
 }
@@ -76,6 +80,12 @@ export function parseLinkedPrompt(params: URLSearchParams, newThread: boolean): 
     const repository = linkedRepository(params.get('repo')!)
     if (!repository) return { error: 'This link names an unreadable GitHub repository.' }
     prompt.repository = repository
+  }
+  if (params.has('issue')) {
+    const issue = parseGitHubIssueUrl(params.get('issue')!)
+    if (!issue || issue.repository !== prompt.repository?.toLowerCase())
+      return { error: 'This issue link does not match the linked repository.' }
+    prompt.issue = issue
   }
   const provider = params.get('provider')?.trim().toLowerCase()
   const model = params.get('model')?.trim()

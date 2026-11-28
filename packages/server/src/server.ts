@@ -16,7 +16,7 @@ import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { ChatGptCredentialStore, driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
-import { CborError, decode, encode, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
+import { CborError, decode, encode, githubIssueReference, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState, SessionState } from '@harness/engine'
 import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, InvalidCommand, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, sharesCheckout, SqliteStore, threadUndoOffer, workspaceSettings } from '@harness/engine'
@@ -26,7 +26,8 @@ import type { WorkspaceReviewTurn } from './diff'
 import { isWorkspaceGitRoot, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
-import { issueWorkspace, renderIssueMarkdown } from './issue-workspace'
+import { issueThreadUpdate, issueWorkspace, renderIssueMarkdown } from './issue-workspace'
+import { trustedGitHubRepositories } from './github-workspace-repositories'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
@@ -40,7 +41,7 @@ import { projectWorktreeLayout, resolveProjectRepository, scanProjectRepositorie
 import { findPromptLinkProject, linkedProject, promptLinkProjects } from './prompt-link-projects'
 import { parsePullRequest, promptLinkKeys } from './prompt-links'
 import { fetchPullRequest, findPullRequestThread } from './pull-request-links'
-import { CommitGenerationError, createRepositoryCommit, generatedCommitMessage, prepareRepositoryCommit, readRepositorySubmission, RepositoryCommitError, reviewedCommitPatch, sameRepositoryCommitFiles, verifyRepositoryCommit } from './repository-commit'
+import { CommitGenerationError, createRepositoryCommit, generatedCommitMessage, prepareRepositoryCommit, readRepositoryBody, readRepositorySubmission, RepositoryCommitError, reviewedCommitPatch, sameRepositoryCommitFiles, verifyRepositoryCommit } from './repository-commit'
 import { planRepositoryBranch, reconcileRepositoryBranch, startRepositoryBranch } from './repository-feature-branch'
 import type { PublicationReceipt } from './repository-publications'
 import { previewCommitPublication, publicationKey, publicationMarker, RepositoryPublications } from './repository-publications'
@@ -271,6 +272,16 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         const workspace = workspaceId === undefined ? undefined : engine.current.workspaces.get(workspaceId)
         if (!workspace || !savedProviders.find(command.providerInstanceId, workspace.profileId, command.driverKind, workspace.path))
           throw new Error('The selected provider account is unavailable for this project.')
+      }
+      if (command.type === 'session.create' && command.issue !== undefined) {
+        const issue = githubIssueReference(command.issue)
+        const workspace = engine.current.workspaces.get(command.workspaceId)
+        if (!issue || !workspace?.trusted || workspace.scratch)
+          throw new Error('This issue needs a matching trusted project. Remove the issue link to continue without it.')
+        const repositories = await trustedGitHubRepositories([workspace], workspace.profileId, AbortSignal.timeout(10_000))
+        if (!repositories.has(issue.repository))
+          throw new Error('This issue belongs to a different repository. Remove the issue link to continue without it.')
+        return { ...command, issue }
       }
       if (command.type === 'session.fork') {
         const source = engine.current.sessions.get(command.sessionId)
@@ -2271,12 +2282,30 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams, request.signal)
       }
 
-      if (url.pathname === '/issues') {
+      if (url.pathname === '/issues' || url.pathname === '/issues/threads') {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
-          'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' }
+          'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
         if (!canUseHostPrivileges(request, url) || !isLoopbackHost(srv.requestIP(request)?.address ?? '')
           || site === 'cross-site' || site === 'same-site') return new Response(null, { status: 403, headers })
+        if (url.pathname === '/issues/threads') {
+          if (request.method !== 'POST') return new Response(null, { status: 405, headers: { ...headers, allow: 'POST' } })
+          if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
+            return new Response(null, { status: 415, headers })
+          const signal = AbortSignal.any([request.signal, AbortSignal.timeout(10_000)])
+          return readRepositoryBody(request, 4_096).then(async (form) => {
+            if (form === null) return new Response('Invalid issue link form.', { status: 400, headers })
+            const command = await issueThreadUpdate(engine.current, url.searchParams, new URLSearchParams(form), signal)
+            if (!command) return new Response('Choose a thread in a trusted project for this issue.', { status: 409, headers })
+            signal.throwIfAborted()
+            const result = await engine.dispatchInternal({ id: 'issue-link_' + crypto.randomUUID(), at: Date.now(), command })
+            broadcast(result.events)
+            return new Response(null, { status: 303, headers: { ...headers, location: '/issues?' + url.searchParams } })
+          }).catch((error) => {
+            const message = error instanceof InvalidCommand ? error.message : 'Could not update the issue link. Try again.'
+            return new Response(message, { status: 409, headers })
+          })
+        }
         if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } })
         srv.timeout(request, 70)
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])

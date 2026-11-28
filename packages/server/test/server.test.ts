@@ -235,6 +235,7 @@ describe('GitHub issue workspace', () => {
       expect(draft.pathname).toBe('/new')
       expect(draft.searchParams.get('repo')).toBe('fixture/notebook')
       expect(draft.searchParams.get('prompt')).toBe(notebook.html_url)
+      expect(draft.searchParams.get('issue')).toBe(notebook.html_url)
       expect(draft.searchParams.get('profile')).toBe(String(derivedId('issues-profile')))
       const projectLookup = host + '/prompt-link/project?repo=fixture%2Fnotebook&profile='
       expect(await (await fetch(projectLookup + derivedId('issues-profile'))).json()).toMatchObject({
@@ -243,6 +244,48 @@ describe('GitHub issue workspace', () => {
       expect(await (await fetch(projectLookup + derivedId('other-profile'))).json()).toEqual({ project: null })
       expect((await fetch(draft)).status).toBe(200)
       expect(harness.engine.current.sessions.size).toBe(0)
+
+      const reference = { tracker: 'github' as const, repository: 'fixture/notebook', number: 24 }
+      const create = { type: 'session.create' as const, workspaceId: derivedId('issues-project-0'), driverKind: 'claude' as const, issue: reference }
+      await expect(dispatch('wrong-issue-repo', { ...create, workspaceId: derivedId('issues-project-1') })).rejects.toThrow('different repository')
+      await dispatch('issue-thread', create)
+      const replay = await dispatch('issue-thread', create)
+      expect(replay.replayed).toBe(true)
+      const threadId = derivedId('issue-thread')
+      expect(harness.engine.current.sessions.get(threadId)?.linkedIssues).toEqual([reference])
+      await dispatch('existing-issue-thread', { ...create, issue: undefined })
+      await dispatch('other-issue-thread', { ...create, workspaceId: derivedId('issues-project-2'), issue: undefined })
+      await harness.engine.dispatchInternal({ id: 'fixture-issue-pr', at: 2, command: {
+        type: 'thread.pull-request.link', sessionId: threadId, pullRequest: { repository: 'fixture/notebook', repositoryKey: '', number: 81 },
+      } })
+      const update = (thread: number, action: string, origin?: string) =>
+        fetch(picked.replace('/issues?', '/issues/threads?'), {
+          method: 'POST', redirect: 'manual', ...(origin && { headers: { origin } }),
+          body: new URLSearchParams({ thread: String(thread), action }),
+        })
+      const existing = derivedId('existing-issue-thread')
+      expect((await update(derivedId('other-issue-thread'), 'link')).status).toBe(409)
+      expect((await update(existing, 'link', 'https://outside.invalid')).status).toBe(403)
+      expect((await update(existing, 'link')).status).toBe(303)
+      expect((await update(existing, 'link')).status).toBe(303)
+      expect(harness.engine.current.sessions.get(existing)?.linkedIssues).toEqual([reference])
+      let linked = await (await fetch(picked)).text()
+      expect(linked).toContain('/s/' + threadId)
+      expect(linked).toContain('/s/' + existing)
+      expect(linked).toContain('fixture/notebook#81')
+
+      harness.stop()
+      harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+      expect(harness.engine.current.sessions.get(threadId)?.linkedIssues).toEqual([reference])
+      expect(harness.engine.current.sessions.get(existing)?.linkedIssues).toEqual([reference])
+      expect((await update(threadId, 'unlink')).status).toBe(303)
+      expect((await update(threadId, 'unlink')).status).toBe(303)
+      expect(harness.engine.current.sessions.get(threadId)?.linkedIssues).toEqual([])
+      linked = await (await fetch(picked)).text()
+      expect(linked).not.toContain('/s/' + threadId)
+      expect(linked).toContain('/s/' + existing)
+      expect(linked).not.toContain('fixture/notebook#81')
+      expect(harness.engine.current.sessions.get(threadId)?.linkedPullRequests).toHaveLength(1)
 
       const foreignIssue = await (await fetch(address + '&selected=fixture%2Fprivate&issue=1')).text()
       expect(foreignIssue).toContain('This issue is outside the selected profile.')

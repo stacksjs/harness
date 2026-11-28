@@ -55,3 +55,11 @@ describe('linked prompts', () => {
     expect(matchingLinkedModel('claude', undefined, rows)).toBeNull()
   })
 })
+
+it('opens an issue-link draft only when its GitHub repository matches', () => {
+  const params = new URLSearchParams({ prompt: 'Review the issue', repo: 'Owner/Repo', issue: 'https://github.com/Owner/Repo/issues/24' })
+  expect(parseLinkedPrompt(params, true)).toMatchObject({ prompt: { issue: { tracker: 'github', repository: 'owner/repo', number: 24 } } })
+  params.set('issue', 'https://github.com/other/repo/issues/24')
+  expect(parseLinkedPrompt(params, true)).toHaveProperty('error')
+  expect(parseLinkedPrompt(params, false)).toEqual({ prompt: { text: 'Review the issue', hiddenCharacters: 0 } })
+})

@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { chromium, webkit } from 'playwright-core'
-import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/index'
 import { fixtureGitHubCli } from '../packages/server/test/fixtures/github-cli'
 
@@ -42,6 +41,15 @@ try {
 
   const forge = fixtureGitHubCli(root, { 'fixture/notebook': { bare: remote } })
   const readForge = () => JSON.parse(readFileSync(forge.state, 'utf8'))
+  const issue = { tracker: 'github' as const, repository: 'fixture/notebook', number: 24 }
+  const issueUrl = 'https://github.com/fixture/notebook/issues/24'
+  const fixture = readForge()
+  fixture.issues = { [issue.repository]: [{
+    number: issue.number, html_url: issueUrl, title: 'Review the report from a project issue',
+    state: 'open', created_at: '2026-11-25T12:00:00Z', updated_at: '2026-11-26T12:00:00Z',
+    body: 'Publish the reviewed report from the connected thread.',
+  }] }
+  writeFileSync(forge.state, JSON.stringify(fixture))
   process.env.PATH = [forge.bin, toolPath].filter(Boolean).join(delimiter)
   const databasePath = join(root, 'test.sqlite')
   {
@@ -54,10 +62,21 @@ try {
 
   const commitPatches: string[] = []
   const pullRequestPatches: string[] = []
+  const issuePrompts: string[] = []
   host = await serve({ port: 0, databasePath, resolveDriver: kind => ({
     kind,
     async probe() { return { status: 'ready' } },
-    async create() { throw new Error('Unexpected provider session') },
+    async create() {
+      return {
+        async *startTurn(input) {
+          issuePrompts.push(input.text)
+          yield { type: 'assistant-delta', text: 'Fixture reviewed the connected issue.' }
+          yield { type: 'turn-complete', tokensIn: 1, tokensOut: 1, costMicros: 0 }
+        },
+        async interrupt() {},
+        async stop() {},
+      }
+    },
     async generateCommitMessage(_config, input) {
       commitPatches.push(input.patch)
       return { subject: 'Review the report', body: '' }
@@ -68,14 +87,8 @@ try {
     },
   }) })
   const now = new Date('2026-11-26T17:00:00Z')
-  const workspaceId = derivedId('stacked-pr-workspace')
-  const sessionId = derivedId('stacked-pr-thread')
   await host.engine.dispatch({ id: 'stacked-pr-workspace', at: now.getTime(), command: { type: 'workspace.register', path: checkout, trusted: true } })
-  await host.engine.dispatch({ id: 'stacked-pr-thread', at: now.getTime(), command: { type: 'session.create', workspaceId, driverKind: 'claude' } })
-  const address = 'http://127.0.0.1:' + host.server.port + '/s/' + sessionId
-  const warmup = await host.server.fetch(new Request(address))
-  assert.equal(warmup.status, 200)
-  await warmup.body?.cancel()
+  const base = 'http://127.0.0.1:' + host.server.port
 
   const engine = process.env.HARNESS_BROWSER === 'webkit' ? webkit : chromium
   const colorScheme = process.env.HARNESS_COLOR_SCHEME === 'dark' ? 'dark' : 'light'
@@ -95,7 +108,18 @@ try {
   }
 
   try {
-    await page.goto(address)
+    await page.goto(base + '/issues?' + new URLSearchParams({ selected: issue.repository, issue: String(issue.number) }))
+    await page.getByRole('link', { name: 'Open as draft' }).click()
+    await page.getByRole('button', { name: 'Open project draft' }).click()
+    await page.locator('[data-draft-issue]').getByRole('link', { name: 'fixture/notebook#24' }).waitFor()
+    assert.equal(host.engine.current.sessions.size, 0)
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await page.getByText('Fixture reviewed the connected issue.').waitFor()
+    assert.deepEqual(issuePrompts, [issueUrl])
+    const [thread] = host.engine.current.sessions.values()
+    assert.ok(thread)
+    assert.deepEqual(thread.linkedIssues, [issue])
+    assert.equal(thread.isolate, false)
     await openChanges()
     const trigger = page.getByRole('button', { name: 'Commit, push & PR', exact: true })
     const review = page.getByRole('dialog', { name: 'Commit, push & create PR', exact: true })
@@ -161,7 +185,16 @@ try {
     assert.equal(commitPatches.length, 1)
     assert.equal(pullRequestPatches.length, 1)
     await capture('linked-360x800')
-    console.log('PASS combined publication recovers after reload with one commit and one pull request')
+    await page.getByRole('button', { name: /close changes/i }).click()
+    await page.getByRole('navigation', { name: 'Linked issues' }).getByRole('link', { name: 'fixture/notebook#24' }).click()
+    await page.getByRole('heading', { name: 'Review the report from a project issue' }).waitFor()
+    const pull = page.getByRole('link', { name: 'fixture/notebook#1', exact: true })
+    const pullAddress = new URL(await pull.getAttribute('href') ?? '', base)
+    assert.equal(pullAddress.pathname, '/pull-requests')
+    assert.equal(pullAddress.searchParams.get('selectedUrl'), 'https://github.com/fixture/notebook/pull/1')
+    await pull.scrollIntoViewIfNeeded()
+    await capture('issue-to-pr-360x800')
+    console.log('PASS combined publication recovers with one commit, one pull request, and a link from the issue')
   }
   catch (error) {
     await capture('failure').catch(() => {})

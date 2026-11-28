@@ -1,3 +1,4 @@
+import type { GitHubIssueReference } from '@harness/contract'
 import { parseLinkedPrompt, promptLinkKeys } from './prompt-links'
 
 export function readPromptLink(element: Element, activeThread: boolean) {
@@ -36,6 +37,7 @@ export function linkedTurn(transcript: HTMLElement): 'opened' | 'missing' | null
 export function storeLinkedDraft(target: Element, destination: { profile: string, workspace?: number, id: string }, draft: {
   text: string
   notice?: string
+  issue?: GitHubIssueReference
   provider?: string
   model?: string
 }): string {
@@ -49,6 +51,7 @@ export function storeLinkedDraft(target: Element, destination: { profile: string
     end: draft.text.length,
     createdAt: Date.now(),
     ...(draft.notice ? { linkNotice: draft.notice } : {}),
+    ...(workspace && draft.issue ? { issue: draft.issue } : {}),
     ...(draft.provider ? { provider: draft.provider, model: draft.model } : {}),
   }))
   const params = workspace ? new URLSearchParams({ workspace: String(workspace) }) : new URLSearchParams({ profile, project: 'none' })

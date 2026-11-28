@@ -1,10 +1,13 @@
+import type { InternalCommand } from '@harness/contract'
+import { githubIssueReference, sameGitHubIssue } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
-import { newThreadLink } from './prompt-links'
+import { newThreadLink, parsePullRequest } from './prompt-links'
 import { pullRequestLabels } from './pull-request-labels'
 import { RepositoryPullRequestError, repositoryGitHubRequest } from './repository-pull-request'
 import { renderPullRequestCommentMarkdown } from './transcript-markdown'
+import { threadTitle } from './thread-search'
 
 const pageSize = 20
 const searchLimit = 1000
@@ -118,6 +121,25 @@ async function issueDetail(repository: GitHubWorkspaceRepository, number: number
   }
 }
 
+export async function issueThreadUpdate(
+  state: HarnessState, query: URLSearchParams, form: URLSearchParams, signal: AbortSignal,
+): Promise<Extract<InternalCommand, { type: 'thread.issue.set' }> | null> {
+  const issue = githubIssueReference({ tracker: 'github', repository: query.get('selected'), number: positiveInteger(query.get('issue')) })
+  const profile = positiveInteger(query.get('profile'))
+  const sessionId = positiveInteger(form.get('thread'))
+  const action = form.get('action')
+  const session = state.sessions.get(sessionId)
+  const workspace = session && state.workspaces.get(session.workspaceId)
+  if (!issue || !profile || !session || !workspace?.trusted || workspace.scratch || workspace.profileId !== profile
+    || session.navigation?.archivedAt || (action !== 'link' && action !== 'unlink')) return null
+
+  if (action === 'link') {
+    const repositories = await trustedGitHubRepositories([workspace], profile, signal)
+    if (!repositories.has(issue.repository)) return null
+  }
+  return { type: 'thread.issue.set', sessionId, issue, linked: action === 'link' }
+}
+
 export async function issueWorkspace(state: HarnessState, query: URLSearchParams, signal: AbortSignal) {
   const profiles = [...state.profiles.values()].map(({ id, name }) => ({ id, name }))
   const requestedProfile = positiveInteger(query.get('profile'))
@@ -166,17 +188,44 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   signal.throwIfAborted()
   const selectedScope: Record<string, string | number> = selected ? { selected: selected.repository, issue: selected.number } : {}
   const pageEnd = scope.page * pageSize
+  const reference = selected && githubIssueReference({ tracker: 'github', repository: selected.repository, number: selected.number })
+  const linkedThreads = []
+  const threadChoices = []
+  const pullRequests = new Map<string, { href: string, label: string }>()
+  if (reference && selection) {
+    const threads = [...state.sessions.values()].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || b.id - a.id)
+    for (const thread of threads) {
+      const workspace = state.workspaces.get(thread.workspaceId)
+      if (!workspace?.trusted || workspace.scratch || workspace.profileId !== profile || thread.navigation?.archivedAt) continue
+      const row = { id: thread.id, title: threadTitle(thread) }
+      if (!thread.linkedIssues?.some(issue => sameGitHubIssue(issue, reference))) {
+        if (thread.workspaceId === selection.workspace.id) threadChoices.push(row)
+        continue
+      }
+      linkedThreads.push(row)
+      const pulls = [...(thread.linkedPullRequests ?? []), ...(thread.pullRequest ? [thread.pullRequest] : [])]
+      for (const pull of pulls) {
+        const details = parsePullRequest(pull.repository + '/pull/' + pull.number)
+        if (!details) continue
+        const href = '/pull-requests?' + new URLSearchParams({ profile: String(profile), selectedUrl: details.url })
+        pullRequests.set(details.url.toLowerCase(), { href, label: details.repository + '#' + details.number })
+      }
+    }
+  }
   let draftHref = ''
   if (selected) {
     // The shared composer reviews the project and waits for an explicit send.
     // The link carries only the issue address, keeping private text off the URL.
     const draft = new URL(newThreadLink('http://localhost', selected.url, { repository: selected.repository }))
     draft.searchParams.set('profile', String(profile))
+    draft.searchParams.set('issue', selected.url)
     draftHref = draft.pathname + draft.search
   }
   return {
     profiles, profile, repositories: [...repositories.values()].map(item => item.name).sort(),
     repository: repository?.name || '', scope, failures, partial, error, selected, draftHref,
+    linkedThreads, threadChoices, pullRequests: [...pullRequests.values()],
+    issueThreadAction: selected ? href(selectedScope).replace('/issues?', '/issues/threads?') : '',
     retryHref: href(selectedScope), datePurpose: scope.sort === 'created' ? 'Created' : 'Last updated',
     backHref: '/?' + new URLSearchParams({ profile: String(profile) }), listHref: href(),
     previousHref: scope.page > 1 ? href({ page: scope.page - 1 }) : '',
