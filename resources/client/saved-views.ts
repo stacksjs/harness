@@ -21,16 +21,17 @@ export const issueViews: SavedViewsKind = {
   path: '/issues',
   storageKey: 'harness.issue-views.v1',
   activeKey: 'harness.issue-views.active.v1',
-  scopeKeys: ['profile', 'state', 'sort', 'q', 'repository', 'involvement', 'assignee', 'label', 'hideRepository'],
+  scopeKeys: ['profile', 'state', 'sort', 'q', 'repository', 'involvement', 'assignee', 'label', 'hideRepository', 'hideProject'],
 }
 
 export const SAVED_VIEW_NAME_LIMIT = 80
+const collectionKeys = ['label', 'hideRepository', 'hideProject']
 
 function listScope(value: string, kind: SavedViewsKind) {
   const source = new URLSearchParams(value)
   const scope = new URLSearchParams()
   for (const key of kind.scopeKeys) {
-    if (key === 'label' || key === 'hideRepository') {
+    if (collectionKeys.includes(key)) {
       for (const value of source.getAll(key)) scope.append(key, value)
     }
     else {
@@ -43,7 +44,7 @@ function listScope(value: string, kind: SavedViewsKind) {
 
 function matchingScope(value: string, kind: SavedViewsKind) {
   const scope = listScope(value, kind)
-  const collections = ['label', 'hideRepository'].map((key) => {
+  const collections = collectionKeys.map((key) => {
     const values = scope.getAll(key).map(value => value.toLowerCase()).sort()
     scope.delete(key)
     return values

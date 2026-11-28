@@ -75,7 +75,7 @@ export function fixtureGitHubCli(directory: string, repositories: Record<string,
     if (invisibleReply) writeFileSync(state, JSON.stringify({ ...shown, replies: [...(shown.replies ?? []), invisibleReply] }))
   }
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bun
-import { readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const stateFile = join(import.meta.dir, 'state.json')
@@ -448,6 +448,7 @@ if (url.pathname === '/search/issues') {
   const keyword = url.searchParams.get('q') ?? ''
   const selected = /repo:([^ ]+)/.exec(keyword)?.[1]
   if (keyword.startsWith('is:issue ')) {
+    if (state.issueSearchLog) appendFileSync(state.issueSearchLog, JSON.stringify({ repository: selected, cwd: process.cwd() }) + '\\n')
     if (state.issueFailure === selected) reply(503, { message: 'Private fixture issue diagnostics' })
     const phrase = /in:title,body "([^"]+)"/.exec(keyword)?.[1]?.toLowerCase() ?? ''
     const terms = keyword.replace(/in:title,body "[^"]+"/, '')

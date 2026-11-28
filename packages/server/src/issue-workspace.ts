@@ -1,8 +1,9 @@
+import { basename } from 'node:path'
 import type { InternalCommand } from '@harness/contract'
 import { githubIssueReference, sameGitHubIssue } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
-import { trustedGitHubRepositories } from './github-workspace-repositories'
+import { mergeGitHubProjectRepositories, trustedGitHubProjectRepositories, trustedGitHubRepositories } from './github-workspace-repositories'
 import { newThreadLink, parsePullRequest } from './prompt-links'
 import { readFilterViewer, readRepositoryFilterChoices } from './pull-request-list-filters'
 import { pullRequestLabels } from './pull-request-labels'
@@ -163,7 +164,13 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const profiles = [...state.profiles.values()].map(({ id, name }) => ({ id, name }))
   const requestedProfile = positiveInteger(query.get('profile'))
   const profile = profiles.some(item => item.id === requestedProfile) ? requestedProfile : profiles[0]?.id || 0
-  const repositories = await trustedGitHubRepositories(state.workspaces.values(), profile, signal)
+  const projects = await trustedGitHubProjectRepositories(state.workspaces.values(), profile, signal)
+  const repositories = mergeGitHubProjectRepositories(projects)
+  const projectIds = new Set(projects.map(project => project.workspace.id))
+  const hiddenProjects = new Set(query.getAll('hideProject').map(positiveInteger).filter(id => projectIds.has(id)))
+  const includedRepositories = hiddenProjects.size ? mergeGitHubProjectRepositories(
+    projects.filter(project => !hiddenProjects.has(project.workspace.id)),
+  ) : repositories
   const repository = repositories.get((query.get('repository') || '').toLowerCase())
   const selectionProfile = positiveInteger(query.get('selectionProfile'))
   const preserveSelection = !selectionProfile || selectionProfile === profile
@@ -199,6 +206,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   if (scope.assignee) params.set('assignee', scope.assignee)
   for (const value of scope.labels) params.append('label', value)
   for (const name of [...hidden].sort()) params.append('hideRepository', name)
+  for (const id of [...hiddenProjects].sort((a, b) => a - b)) params.append('hideProject', String(id))
   const savedViewScope = params.toString()
   if (scope.page > 1) params.set('page', String(scope.page))
   const href = (overrides: Record<string, string | number> = {}) => {
@@ -208,7 +216,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   }
   const detail = selection && number ? issueDetail(selection, number, commentPage, signal)
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error) })) : null
-  const targets = (repository ? [repository] : [...repositories.values()]).filter(repo => !hidden.has(repo.name.toLowerCase()))
+  const targets = [...includedRepositories].flatMap(([key, repo]) =>
+    !hidden.has(key) && (!repository || key === repository.name.toLowerCase()) ? [repo] : [])
   const findLabel = (query.get('findLabel') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
   const lookup = findAssignee ? readRepositoryFilterChoices(targets, { kind: 'assignees', search: findAssignee }, signal)
     : query.has('findLabels') && findLabel ? readRepositoryFilterChoices(targets, { kind: 'labels', search: findLabel }, signal) : null
@@ -279,12 +288,27 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     draft.searchParams.set('issue', selected.url)
     draftHref = draft.pathname + draft.search
   }
+  const nameCounts = new Map<string, number>()
+  for (const { workspace } of projects) {
+    const name = basename(workspace.path).toLowerCase()
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1)
+  }
+  const projectFilters = projects.map(({ workspace }) => {
+    const name = basename(workspace.path) || workspace.path
+    return {
+      id: workspace.id,
+      name,
+      path: (nameCounts.get(name.toLowerCase()) ?? 0) > 1 ? workspace.path : '',
+      hidden: hiddenProjects.has(workspace.id),
+    }
+  }).sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path))
   return {
     profiles, profile, repositories: [...repositories.values()].map(item => item.name).sort(),
     repository: repository?.name || '', scope, failures, partial, error, selected, draftHref,
     hasIncludedRepositories: targets.length > 0,
     filterCount: Number(Boolean(repository)) + Number(scope.state !== 'open') + Number(Boolean(scope.involvement))
-      + Number(Boolean(scope.assignee)) + scope.labels.length + Number(hidden.size > 0),
+      + Number(Boolean(scope.assignee)) + scope.labels.length + Number(hidden.size > 0) + Number(hiddenProjects.size > 0),
+    projectFilters,
     repositoryFilters: [...repositories].map(([key, repo]) => ({ name: repo.name, hidden: hidden.has(key) })),
     labelOptions: [...labelOptions].map(([key, name]) => ({ name, checked: labels.has(key) })),
     assigneeOptions: [...new Set(rows.flatMap(row => row.assignees))].sort().slice(0, 30),

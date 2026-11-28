@@ -15,19 +15,43 @@ async function repositoryNames(path: string) {
   })
 }
 
-export async function trustedGitHubRepositories(workspaces: Iterable<WorkspaceState>, profile: number, signal: AbortSignal) {
-  const found = new Map<string, GitHubWorkspaceRepository>()
+interface GitHubProjectRepositories {
+  workspace: WorkspaceState
+  repositories: Map<string, GitHubWorkspaceRepository>
+}
+
+export async function trustedGitHubProjectRepositories(workspaces: Iterable<WorkspaceState>, profile: number, signal: AbortSignal) {
+  const projects: GitHubProjectRepositories[] = []
   for (const workspace of workspaces) {
     if (workspace.profileId !== profile || !workspace.trusted || workspace.scratch) continue
     signal.throwIfAborted()
     const roots = await scanProjectRepositories(workspace.path)
     const paths = await Promise.all(roots.map(root => resolveProjectRepository(workspace.path, root.key)))
     if (await isWorkspaceGitRoot(workspace.path)) paths.unshift(workspace.path)
+    const repositories = new Map<string, GitHubWorkspaceRepository>()
     for (const path of paths) {
       if (!path) continue
       signal.throwIfAborted()
-      for (const name of await repositoryNames(path)) if (!found.has(name.toLowerCase())) found.set(name.toLowerCase(), { name, path, workspace })
+      for (const name of await repositoryNames(path)) {
+        const key = name.toLowerCase()
+        if (!repositories.has(key)) repositories.set(key, { name, path, workspace })
+      }
+    }
+    projects.push({ workspace, repositories })
+  }
+  return projects
+}
+
+export function mergeGitHubProjectRepositories(projects: Iterable<GitHubProjectRepositories>) {
+  const repositories = new Map<string, GitHubWorkspaceRepository>()
+  for (const project of projects) {
+    for (const [key, repository] of project.repositories) {
+      if (!repositories.has(key)) repositories.set(key, repository)
     }
   }
-  return found
+  return repositories
+}
+
+export async function trustedGitHubRepositories(workspaces: Iterable<WorkspaceState>, profile: number, signal: AbortSignal) {
+  return mergeGitHubProjectRepositories(await trustedGitHubProjectRepositories(workspaces, profile, signal))
 }

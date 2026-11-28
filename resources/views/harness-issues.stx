@@ -28,6 +28,8 @@ export const savedViewDetail = $props.savedViewDetail
 export const listSelectionFields = $props.listSelectionFields
 export const hasIncludedRepositories = $props.hasIncludedRepositories
 export const filterCount = $props.filterCount
+export const projectFilters = $props.projectFilters
+export const hiddenProjectIds = projectFilters.filter(item => item.hidden).map(item => item.id)
 export const repositoryFilters = $props.repositoryFilters
 export const labelOptions = $props.labelOptions
 export const assigneeOptions = $props.assigneeOptions
@@ -42,6 +44,14 @@ export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name:
 import { initialSavedViews, issueViews, savedViewsMenu } from '../client/saved-views'
 
 const issueScope = @json(savedViewScope)
+const projectNames = new Map(@json(projectFilters.map(item => [item.id, (item.name + ' ' + item.path).toLowerCase()])))
+const hiddenProjects = state(@json(hiddenProjectIds))
+const projectSearch = state('')
+const projectVisibility = derived(() => hiddenProjects().length ? hiddenProjects().length + ' hidden' : 'All shown')
+const matchingProjects = derived(() => {
+  const search = projectSearch().trim().toLowerCase()
+  return new Set([...projectNames].filter(([, name]) => name.includes(search)).map(([id]) => id))
+})
 const issueFilters = useRef('issueFilters')
 const issueFilterTrigger = useRef('issueFilterTrigger')
 const savedViewTitle = 'issue view'
@@ -71,6 +81,14 @@ useEventListener('pointerdown', event => {
   const filters = issueFilters.current
   if (filters?.open && !filters.contains(event.target)) filters.open = false
 })
+
+function changeProjectVisibility(event) {
+  const id = Number(event.target.value)
+  const next = new Set(hiddenProjects())
+  if (event.target.checked) next.add(id)
+  else next.delete(id)
+  hiddenProjects.set([...next])
+}
 
 function submitIssueLookup(event, action) {
   if (event.key !== 'Enter' || event.isComposing) return
@@ -160,6 +178,34 @@ function closeIssueFilters(event) {
                   <option value="mentioned" @if(scope.involvement === 'mentioned')selected@endif>Mentioning me</option>
                 </select>
               </label>
+              @if(projectFilters.length)
+                <details data-issue-project-filter>
+                  <summary>
+                    <span>Projects</span>
+                    <span :text="projectVisibility()">@if(hiddenProjectIds.length){{ hiddenProjectIds.length }} hidden@else All shown@endif</span>
+                  </summary>
+                  <div data-issue-project-actions>
+                    @if(projectFilters.length > 8)
+                      <label for="issue-project-search" class="sr-only">Search projects</label>
+                      <input id="issue-project-search" type="search" placeholder="Search projects"
+                        @input="projectSearch.set($event.target.value)" @keydown="$event.key === 'Enter' && !$event.isComposing && $event.preventDefault()">
+                    @endif
+                    <button type="button" data-issue-button :disabled="!hiddenProjects().length" @click="hiddenProjects.set([])">Show all</button>
+                    <button type="button" data-issue-button :disabled="hiddenProjects().length === projectNames.size"
+                      @click="hiddenProjects.set([...projectNames.keys()])">Hide all</button>
+                  </div>
+                  <div data-issue-filter-choices role="group" aria-label="Project visibility">
+                    @foreach(projectFilters as item)
+                      <label :hidden="!matchingProjects().has({{ item.id }})">
+                        <input type="checkbox" name="hideProject" value="{{ item.id }}" @if(item.hidden)checked@endif
+                          :checked="hiddenProjects().includes({{ item.id }})" @change="changeProjectVisibility">
+                        <span>Hide {{ item.name }}@if(item.path) <small>{{ item.path }}</small>@endif</span>
+                      </label>
+                    @endforeach
+                    <p data-issue-filter-feedback hidden :hidden="matchingProjects().size > 0">No matching projects.</p>
+                  </div>
+                </details>
+              @endif
               <fieldset>
                 <legend>Assignee</legend>
                 <input type="hidden" name="shownAssignee" value="{{ scope.assignee }}">
@@ -237,7 +283,7 @@ function closeIssueFilters(event) {
       @if(!repositories.length)
         <p data-issue-empty>Trust a project with a GitHub remote to browse its issues.</p>
       @elseif(!hasIncludedRepositories)
-        <p data-issue-empty>Change Filters to show at least one repository.</p>
+        <p data-issue-empty>Show at least one project or repository in Filters.</p>
       @elseif(rows.length)
         <ul data-issue-rows aria-label="Issue results">
           @foreach(rows as row)

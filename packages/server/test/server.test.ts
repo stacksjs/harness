@@ -164,6 +164,11 @@ describe('GitHub issue workspace', () => {
       return [name, path]
     }))
     const cli = fixtureGitHubCli(dir, Object.fromEntries(names.map(name => [name, { bare: join(projects[name]!, '.git') }])))
+    const archive = join(dir, 'archive', 'notebook')
+    mkdirSync(archive, { recursive: true })
+    for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/fixture/notebook']])
+      expect(Bun.spawnSync(['git', ...args], { cwd: archive }).success).toBe(true)
+    const issueSearchLog = join(dir, 'issue-search.ndjson')
     const modelIssue = (repo: string, number: number, title: string, created: string, updated = created) => ({
       number, title, state: 'open', created_at: created, updated_at: updated, user: { login: 'fixture-user' },
       html_url: `https://github.com/${repo}/issues/${number}`,
@@ -176,6 +181,7 @@ describe('GitHub issue workspace', () => {
       body: 'Fixture comment **' + (index + 1) + '**.', user: { login: 'fixture-reviewer' }, created_at: '2026-11-26T00:00:00Z',
     }))
     const fixture = JSON.parse(readFileSync(cli.state, 'utf8'))
+    fixture.issueSearchLog = issueSearchLog
     fixture.issues = {
       [names[0]!]: [{ ...notebook, body: 'Read the **offline behavior**. <img src=x onerror=alert(1)>',
         assignees: [{ login: 'fixture-assignee' }, { login: 'fixture-user' }],
@@ -203,6 +209,8 @@ describe('GitHub issue workspace', () => {
           profileId: derivedId(index === 2 ? 'other-profile' : 'issues-profile'), path: realpathSync(projects[name]!) })
         await dispatch('issues-trust-' + index, { type: 'workspace.trust', workspaceId: derivedId('issues-project-' + index), trusted: true })
       }
+      await dispatch('issues-archive', { type: 'workspace.add', profileId: derivedId('issues-profile'), path: realpathSync(archive) })
+      await dispatch('issues-archive-trust', { type: 'workspace.trust', workspaceId: derivedId('issues-archive'), trusted: true })
       const host = 'http://127.0.0.1:' + port
       const address = host + '/issues?profile=' + derivedId('issues-profile')
       const initial = await fetch(address)
@@ -212,6 +220,18 @@ describe('GitHub issue workspace', () => {
       expect(first.indexOf(notebook.title)).toBeLessThan(first.indexOf(atlas.title))
       expect(first).not.toContain(privateIssue.title)
       expect(first).not.toContain('Pull request pretending')
+      writeFileSync(issueSearchLog, '')
+      const hidden = '&hideProject=' + derivedId('issues-project-0') + '&hideProject=' + derivedId('issues-project-2')
+      const remaining = await (await fetch(address + hidden + '&repository=fixture%2Fnotebook')).text()
+      expect(remaining).toContain(notebook.title)
+      const requests = readFileSync(issueSearchLog, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      expect(requests).toEqual([{ repository: names[0], cwd: realpathSync(archive) }])
+      writeFileSync(issueSearchLog, '')
+      const allHidden = await (await fetch(address + hidden + '&hideProject=' + derivedId('issues-archive')
+        + '&repository=fixture%2Fnotebook&selected=fixture%2Fnotebook&issue=24')).text()
+      expect(allHidden).toContain('Show at least one project or repository in Filters.')
+      expect(allHidden).toContain('<strong>offline behavior</strong>')
+      expect(readFileSync(issueSearchLog, 'utf8')).toBe('')
       const newest = await (await fetch(address + '&sort=created')).text()
       expect(newest.indexOf(atlas.title)).toBeLessThan(newest.indexOf(notebook.title) === -1 ? newest.length : newest.indexOf(notebook.title))
       const page2 = await (await fetch(address + '&page=2')).text()

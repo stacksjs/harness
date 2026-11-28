@@ -17,15 +17,20 @@ const label = browserKind.name() + '-' + appearance
 const destination = process.env.HARNESS_SCREENSHOT_DIR
 if (destination) mkdirSync(destination, { recursive: true })
 const now = Date.parse('2026-11-27T18:00:00Z')
-const projects = Object.fromEntries(['fixture/notebook', 'fixture/atlas'].map(repo => {
-  const path = join(dir, repo.split('/').at(-1)!)
+function localProject(repo: string, folder: string) {
+  const path = join(dir, folder)
   mkdirSync(path)
   for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repo]]) {
     const result = Bun.spawnSync(['git', ...args], { cwd: path })
     assert.ok(result.success, result.stderr.toString())
   }
-  return [repo, path]
-}))
+  return path
+}
+const projects = {
+  'fixture/notebook': localProject('fixture/notebook', 'notebook'),
+  'fixture/atlas': localProject('fixture/atlas', 'atlas'),
+}
+const atlasMirror = localProject('fixture/atlas', 'atlas archive')
 const cli = fixtureGitHubCli(dir, Object.fromEntries(Object.entries(projects).map(([repo, path]) => [repo, { bare: join(path, '.git') }])))
 const previousPath = process.env.PATH
 process.env.PATH = [cli.bin, previousPath].join(delimiter)
@@ -83,6 +88,9 @@ try {
   browser = await browserKind.launch()
   for (const [repo, path] of Object.entries(projects))
     await host.engine.dispatch({ id: 'register-' + repo, at: now, command: { type: 'workspace.register', path, trusted: true } })
+  await host.engine.dispatch({ id: 'register-atlas-archive', at: now, command: {
+    type: 'workspace.register', path: atlasMirror, trusted: true,
+  } })
   const base = 'http://127.0.0.1:' + host.server.port
   const context = await browser.newContext({ colorScheme: appearance, reducedMotion: 'reduce', viewport: { width: 1440, height: 900 } })
   const page = await context.newPage()
@@ -115,6 +123,30 @@ try {
   await page.getByLabel('Order').selectOption('created')
   await page.waitForURL(url => url.searchParams.get('sort') === 'created')
   assert.match((await page.locator('[data-issue-row]').first().textContent()) ?? '', /Newest fixture issue/)
+  const projectMenu = page.locator('[data-issue-project-filter] > summary')
+  const applyFilters = page.getByRole('button', { name: 'Apply filters' })
+  const atlasIssue = page.getByRole('link', { name: /Newest fixture issue/ })
+  async function openProjectFilters() {
+    await filters.click()
+    await projectMenu.click()
+  }
+  await openProjectFilters()
+  await page.getByRole('checkbox', { name: 'Hide atlas', exact: true }).check()
+  await capture('project-filter-360x800')
+  await applyFilters.click()
+  await page.waitForURL(url => url.searchParams.getAll('hideProject').length === 1)
+  await atlasIssue.waitFor()
+  assert.equal(await atlasIssue.count(), 1)
+  await openProjectFilters()
+  await page.getByRole('checkbox', { name: 'Hide atlas archive', exact: true }).check()
+  await applyFilters.click()
+  await page.waitForURL(url => url.searchParams.getAll('hideProject').length === 2)
+  assert.equal(await atlasIssue.count(), 0)
+  await openProjectFilters()
+  await page.getByRole('button', { name: 'Show all', exact: true }).click()
+  await applyFilters.click()
+  await page.waitForURL(url => !url.searchParams.has('hideProject'))
+  await atlasIssue.waitFor()
   await page.getByLabel('Search issues').fill('offline')
   await page.getByLabel('Search issues').press('Enter')
   await page.waitForURL(url => url.searchParams.get('q') === 'offline')
@@ -132,6 +164,8 @@ try {
   await page.getByRole('checkbox', { name: 'bug', exact: true }).check()
   await page.getByRole('checkbox', { name: 'offline', exact: true }).check()
   await page.getByRole('checkbox', { name: 'fixture/atlas', exact: true }).check()
+  await projectMenu.click()
+  await page.getByRole('checkbox', { name: 'Hide atlas archive', exact: true }).check()
   await page.getByRole('searchbox', { name: 'Find labels', exact: true }).fill('triage')
   await page.getByRole('searchbox', { name: 'Find labels', exact: true }).press('Enter')
   const foundLabel = page.getByRole('checkbox', { name: 'Needs triage', exact: true })
@@ -214,7 +248,16 @@ try {
   assert.equal(restored.get('assignee'), 'fixture-reviewer')
   assert.deepEqual(restored.getAll('label').sort(), ['bug', 'offline'])
   assert.deepEqual(restored.getAll('hideRepository'), ['fixture/atlas'])
+  assert.deepEqual(restored.getAll('hideProject'), [String(derivedId('register-atlas-archive'))])
   assert.equal(restored.has('findLabel'), false)
+  await views.getByText('Modified', { exact: true }).waitFor({ state: 'hidden' })
+  await openProjectFilters()
+  await page.getByRole('button', { name: 'Hide all', exact: true }).click()
+  await applyFilters.click()
+  await page.getByText('Show at least one project or repository in Filters.', { exact: true }).waitFor()
+  await page.getByRole('heading', { name: longTitle }).waitFor()
+  await views.click()
+  await page.getByRole('button', { name: savedName, exact: true }).click()
   await views.getByText('Modified', { exact: true }).waitFor({ state: 'hidden' })
 
   await filters.click()
