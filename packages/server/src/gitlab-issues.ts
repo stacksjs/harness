@@ -86,7 +86,7 @@ export async function gitLabIssueCredential(repository: GitLabIssueRepository, s
     }
     catch { /* A failed credential read never exposes the helper output. */ }
   }
-  throw new RepositoryPullRequestError('Sign in with the current GitLab CLI on this host to save edits.', 401)
+  throw new RepositoryPullRequestError('Sign in with the current GitLab CLI on this host to update issues.', 401)
 }
 
 async function api(repository: GitLabIssueRepository, endpoint: string, signal: AbortSignal,
@@ -148,7 +148,7 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
       currentUser?: { id?: string }
       project?: { id?: string, fullPath?: string, archived?: boolean, issue?: {
         id?: string, iid?: string, webUrl?: string, title?: string, description?: string | null,
-        userPermissions?: { updateIssue?: boolean },
+        discussionLocked?: boolean, userPermissions?: { updateIssue?: boolean, createNote?: boolean },
       } }
     }
     errors?: unknown[]
@@ -157,7 +157,7 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
     currentUser { id }
     project(fullPath: $path) {
       id fullPath archived
-      issue(iid: $iid) { id iid webUrl title description userPermissions { updateIssue } }
+      issue(iid: $iid) { id iid webUrl title description discussionLocked userPermissions { updateIssue createNote } }
     }
   }`, { path: repository.name, iid: String(number) }, signal, credential) as PermissionResponse | null
   const project = reply?.data?.project
@@ -169,9 +169,13 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
     || reference.number !== number || issue?.iid !== String(number) || typeof issue.id !== 'string' || !/^gid:\/\/gitlab\/(?:Issue|WorkItem)\/\d+$/u.test(issue.id)
     || typeof viewer !== 'string' || !/^gid:\/\/gitlab\/User\/\d+$/u.test(viewer) || typeof issue.title !== 'string'
     || (issue.description !== null && typeof issue.description !== 'string')) return null
-  const scope = createHash('sha256').update(JSON.stringify(['issue-text', repository.key, repository.workspace.profileId,
-    repository.workspace.id, project.id, issue.id, viewer])).digest('hex')
-  return { scope, issueId: issue.id, canEditText: project.archived === false && issue.userPermissions?.updateIssue === true,
+  const identity = [repository.key, repository.workspace.profileId, repository.workspace.id, project.id, issue.id, viewer]
+  const scope = (operation: string) => createHash('sha256').update(JSON.stringify([operation, ...identity])).digest('hex')
+  const commentBlocked = project.archived !== false ? 'This project is archived.'
+    : issue.userPermissions?.createNote === true ? ''
+      : issue.discussionLocked ? 'This issue is locked.' : 'This GitLab account cannot comment on this issue.'
+  return { scope: scope('issue-text'), commentScope: scope('issue-comment'), commentBlocked, viewer,
+    issueId: issue.id, canEditText: project.archived === false && issue.userPermissions?.updateIssue === true,
     text: { title: issue.title, body: issue.description ?? '' } }
 }
 
@@ -193,6 +197,71 @@ export async function writeGitLabIssueText(repository: GitLabIssueRepository, nu
     return 'updated'
   if (!result?.issue && result?.errors?.length) return 'refused'
   return 'pending'
+}
+
+type GitLabNote = {
+  id?: string, body?: string, noteableId?: number, noteableType?: string, system?: boolean, internal?: boolean, author?: { id?: string }
+}
+const noteFields = 'id body noteableId noteableType system internal author { id }'
+
+function gitLabCommentId(note: GitLabNote | null | undefined, issueId: string, viewer: string, body: string) {
+  const boundary = body.indexOf('\n\n')
+  if (boundary < 1 || note?.author?.id !== viewer || String(note.noteableId) !== issueId.split('/').at(-1)
+    || (note.noteableType !== 'Issue' && note.noteableType !== 'WorkItem') || note.system !== false || note.internal !== false
+    || typeof note.body !== 'string' || !note.body.startsWith(body.slice(0, boundary))) return null
+  // Check the unique marker so quick actions and later edits do not hide an already posted note.
+  const id = Number(typeof note.id === 'string' ? /^gid:\/\/gitlab\/Note\/([1-9]\d*)$/u.exec(note.id)?.[1] : undefined)
+  return Number.isSafeInteger(id) ? id : null
+}
+
+export async function postGitLabIssueComment(repository: GitLabIssueRepository, issueId: string, viewer: string,
+  body: string, signal: AbortSignal, credential: IssueCredential,
+): Promise<number | 'denied' | 'refused' | null> {
+  const reply = await gitLabGraphQL(repository, `mutation HarnessPostGitLabIssueComment($input: CreateNoteInput!) {
+    createNote(input: $input) { note { ${noteFields} } errors quickActionsStatus { commandNames } }
+  }`, { input: { noteableId: issueId, body } }, signal, credential)
+    .catch((error: unknown) => {
+      const status = error instanceof RepositoryPullRequestError ? error.status : undefined
+      return status === 401 || status === 403 ? 'denied' : status === 400 || status === 422 ? 'refused' : null
+    })
+  if (reply === 'denied' || reply === 'refused') return reply
+  const result = (reply as { data?: { createNote?: { note?: GitLabNote, errors?: string[], quickActionsStatus?: { commandNames?: string[] } } } } | null)
+    ?.data?.createNote
+  const id = gitLabCommentId(result?.note, issueId, viewer, body)
+  if (id) return id
+  if (!result?.note && result?.errors?.length && !result.quickActionsStatus?.commandNames?.length) return 'refused'
+  return null
+}
+
+export async function findGitLabIssueComment(repository: GitLabIssueRepository, number: number, issueId: string, viewer: string,
+  body: string, signal: AbortSignal, credential: IssueCredential, trusted: () => boolean,
+): Promise<number | null> {
+  type Reply = { errors?: unknown[], data?: { currentUser?: { id?: string }, project?: { issue?: {
+    id?: string, notes?: { nodes?: (GitLabNote | null)[], pageInfo?: { hasPreviousPage?: boolean, startCursor?: string } },
+  } } } }
+  let before: string | undefined
+  for (let page = 0; page < 10 && trusted(); page++) {
+    const reply = await gitLabGraphQL(repository, `query HarnessFindGitLabIssueComment($path: ID!, $iid: String!, $before: String) {
+      currentUser { id }
+      project(fullPath: $path) {
+        issue(iid: $iid) {
+          id
+          notes(last: 50, before: $before) { nodes { ${noteFields} } pageInfo { hasPreviousPage startCursor } }
+        }
+      }
+    }`, { path: repository.name, iid: String(number), before }, signal, credential) as Reply | null
+    const issue = reply?.data?.project?.issue
+    const notes = issue?.notes
+    if (!trusted() || reply?.errors?.length || reply?.data?.currentUser?.id !== viewer || issue?.id !== issueId || !Array.isArray(notes?.nodes)) break
+    for (const note of notes.nodes) {
+      const id = gitLabCommentId(note, issueId, viewer, body)
+      if (id) return id
+    }
+    const cursor = notes.pageInfo?.startCursor
+    if (!notes.pageInfo?.hasPreviousPage || !cursor || cursor === before) break
+    before = cursor
+  }
+  return null
 }
 
 export async function searchGitLabIssueChoices(repository: GitLabIssueRepository, kind: 'labels' | 'assignees', search: string, signal: AbortSignal) {

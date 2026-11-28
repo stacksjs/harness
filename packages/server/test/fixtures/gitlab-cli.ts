@@ -36,8 +36,12 @@ const root = project + '/issues'
 if (path === '/graphql') {
   if (!flags.includes('--method') || !flags.includes('POST')) respond(400, {})
   const { query, variables } = await new Response(Bun.stdin.stream()).json()
+  const currentUser = { id: 'gid://gitlab/User/' + viewer }
   const issue = () => ({ id: 'gid://gitlab/Issue/2000', iid: String(gitlab.issue.iid), webUrl: gitlab.issue.web_url,
-    title: gitlab.issue.title, description: gitlab.issue.description ?? null, userPermissions: { updateIssue: gitlab.canEditText === true } })
+    title: gitlab.issue.title, description: gitlab.issue.description ?? null, discussionLocked: gitlab.locked === true,
+    userPermissions: { updateIssue: gitlab.canEditText === true, createNote: gitlab.canComment === true && !gitlab.locked } })
+  const note = item => ({ id: 'gid://gitlab/Note/' + item.id, body: item.body, noteableId: 2000, noteableType: 'Issue',
+    system: item.system === true, internal: item.internal === true, author: { id: 'gid://gitlab/User/' + item.author.id } })
   if (query.includes('query HarnessGitLabIssueText')) {
     if (gitlab.failTextRead) {
       delete gitlab.failTextRead
@@ -45,8 +49,46 @@ if (path === '/graphql') {
       respond(503, {})
     }
     if (variables.path !== gitlab.repository || variables.iid !== String(gitlab.issue.iid)) respond(200, { data: { project: null } })
-    respond(200, { data: { currentUser: { id: 'gid://gitlab/User/' + viewer },
+    respond(200, { data: { currentUser,
       project: { id: 'gid://gitlab/Project/74', fullPath: gitlab.repository, archived: gitlab.archived === true, issue: issue() } } })
+  }
+  if (query.includes('mutation HarnessPostGitLabIssueComment')) {
+    if (!pinned || !gitlab.canComment || gitlab.locked || gitlab.archived) respond(403, {})
+    const input = variables.input
+    if (input.noteableId !== issue().id || typeof input.body !== 'string') respond(400, {})
+    if (gitlab.refuseComment) respond(200, { data: { createNote: { note: null, errors: ['Fixture rejected the comment'] } } })
+    const body = input.body.replaceAll('\\n/subscribe\\n', '\\n')
+    const item = { id: (gitlab.notes.at(-1)?.id ?? 0) + 1, body, created_at: '2026-11-27T19:00:00Z',
+      author: { id: viewer, username: 'fixture-reviewer' } }
+    gitlab.notes.push(item)
+    gitlab.issue.user_notes_count = gitlab.notes.length
+    gitlab.commentWrites = (gitlab.commentWrites ?? 0) + 1
+    if (gitlab.dropCommentReply) {
+      delete gitlab.dropCommentReply
+      gitlab.failCommentRead = true
+      writeFileSync(statePath, JSON.stringify(state))
+      respond(502, {})
+    }
+    writeFileSync(statePath, JSON.stringify(state))
+    respond(200, { data: { createNote: { note: note(item), errors: [] } } })
+  }
+  if (query.includes('query HarnessFindGitLabIssueComment')) {
+    if (!pinned || variables.path !== gitlab.repository || variables.iid !== String(gitlab.issue.iid)) respond(400, {})
+    if (gitlab.failCommentRead) {
+      delete gitlab.failCommentRead
+      writeFileSync(statePath, JSON.stringify(state))
+      respond(503, {})
+    }
+    const authored = gitlab.notes.filter(item => item.author.id).map(note)
+    const decoy = authored.at(-1)
+    const nodes = decoy && !variables.before ? [
+      { ...decoy, id: 'gid://gitlab/Note/9101', author: { id: 'gid://gitlab/User/99' } },
+      { ...decoy, id: 'gid://gitlab/Note/9102', noteableId: 9999 },
+      { ...decoy, id: 'gid://gitlab/Note/9103', internal: true },
+      { ...decoy, id: 'gid://gitlab/Note/9104', system: true },
+    ] : authored
+    const pageInfo = { hasPreviousPage: Boolean(decoy && !variables.before), startCursor: 'fixture-page-2' }
+    respond(200, { data: { currentUser, project: { issue: { id: issue().id, notes: { nodes, pageInfo } } } } })
   }
   if (query.includes('mutation HarnessGitLabEditIssue')) {
     if (!pinned || !gitlab.canEditText || gitlab.archived) respond(403, {})

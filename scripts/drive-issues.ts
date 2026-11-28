@@ -957,7 +957,7 @@ try {
     assert.equal(await request.getAttribute('href'), mergeRequestUrl)
     assert.equal(await page.getByRole('link', { name: 'Foreign merge request' }).count(), 0)
     assert.equal(await page.getByRole('link', { name: 'View comment 21 on GitLab' }).getAttribute('href'), gitlabUrl + '#note_21')
-    assert.equal(await page.getByRole('button', { name: 'Post comment', exact: true }).count(), 0)
+    assert.equal(await page.getByRole('button', { name: 'Post comment', exact: true }).isDisabled(), true)
     await page.getByRole('link', { name: 'Older comments', exact: true }).click()
     await page.getByRole('link', { name: 'View comment 1 on GitLab' }).waitFor()
     assert.equal(await page.getByRole('link', { name: 'View comment 21 on GitLab' }).count(), 0)
@@ -1044,15 +1044,15 @@ try {
     const gitLabSubmission = () => gitLabEditor.evaluate((form: HTMLFormElement) => ({
       url: form.action, body: new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)])).toString(),
     }))
-    const postGitLabText = (request: { url: string, body: string }, origin = base) => fetch(request.url, {
+    const postGitLabForm = (request: { url: string, body: string }, origin = base) => fetch(request.url, {
       method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: request.body, redirect: 'manual',
     })
     const titleSubmission = await gitLabSubmission()
-    assert.equal((await postGitLabText(titleSubmission, 'https://outside.invalid')).status, 403)
+    assert.equal((await postGitLabForm(titleSubmission, 'https://outside.invalid')).status, 403)
     alterForge(current => { current.gitlab.viewer = 18 })
-    assert.equal((await postGitLabText(titleSubmission)).status, 409)
+    assert.equal((await postGitLabForm(titleSubmission)).status, 409)
     alterForge(current => { delete current.gitlab.viewer; current.gitlab.archived = true })
-    assert.equal((await postGitLabText(titleSubmission)).status, 403)
+    assert.equal((await postGitLabForm(titleSubmission)).status, 403)
     alterForge(current => { delete current.gitlab.archived; current.gitlab.refuseText = true })
     await saveGitLabText.click()
     await gitLabEditor.getByText('GitLab rejected the edit. Review your draft and try again.', { exact: true }).waitFor()
@@ -1093,7 +1093,7 @@ try {
     host = await startHost(gitLabTextPort)
     await recoverGitLabText.click()
     await page.locator('[data-issue-markdown="description"]').getByText('Reviewed GitLab description', { exact: true }).waitFor()
-    assert.equal((await postGitLabText(originalWrite)).status, 303)
+    assert.equal((await postGitLabForm(originalWrite)).status, 303)
     assert.deepEqual(readForge().gitlab.textWrites, [['title', newTitle, 17], ['description', gitLabDescription, 17]])
     await editGitLabBody.click()
     await body.fill('')
@@ -1101,13 +1101,74 @@ try {
     await page.getByText('Issue text saved on GitLab.', { exact: true }).waitFor()
     assert.equal(readForge().gitlab.issue.description, '')
     assert.equal(readForge().gitlab.issue.title, newTitle)
+
+    const gitLabComposer = page.getByRole('form', { name: 'Issue comment', exact: true })
+    const commentInput = gitLabComposer.getByRole('textbox', { name: 'Add a comment', exact: true })
+    const postComment = gitLabComposer.getByRole('button', { name: 'Post comment', exact: true })
+    assert.equal(await postComment.isDisabled(), true)
+    alterForge(current => { current.gitlab.canComment = true })
+    await page.goto(gitlabSelection.href)
+    const commentSubmission = () => gitLabComposer.evaluate((form: HTMLFormElement) => ({
+      url: form.action, body: new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)])).toString(),
+    }))
+    const note = '    a preserved code line\n\n**First GitLab comment**'
+    await commentInput.fill(note)
+    const originalComment = await commentSubmission()
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height })
+      assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+      const button = await postComment.boundingBox()
+      assert.ok(button && button.x >= 0 && button.x + button.width <= width && button.y + button.height <= height)
+      await capture('gitlab-comment-' + width + 'x' + height)
+    }
+    assert.equal((await postGitLabForm(originalComment, 'https://outside.invalid')).status, 403)
+    alterForge(current => { current.gitlab.viewer = 18 })
+    assert.equal((await postGitLabForm(originalComment)).status, 409)
+    alterForge(current => { delete current.gitlab.viewer; current.gitlab.locked = true })
+    assert.equal((await postGitLabForm(originalComment)).status, 403)
+    alterForge(current => { delete current.gitlab.locked; current.gitlab.refuseComment = true })
+    await postComment.click()
+    await gitLabComposer.getByText('GitLab rejected the comment. Review your draft and try again.').waitFor()
+    assert.equal(await commentInput.inputValue(), note)
+    assert.equal(readForge().gitlab.commentWrites, undefined)
+    alterForge(current => { delete current.gitlab.refuseComment })
+    await commentInput.press('Control+Enter')
+    await page.getByText('Comment posted to GitLab.', { exact: true }).waitFor()
+    const firstCommentId = readForge().gitlab.notes.at(-1).id
+    assert.equal(new URL(page.url()).hash, '#issue-comment-' + firstCommentId)
+    const firstComment = page.locator('#issue-comment-' + firstCommentId)
+    await firstComment.getByText('First GitLab comment', { exact: true }).waitFor()
+    await firstComment.getByText('a preserved code line', { exact: true }).waitFor()
+    assert.ok(readForge().gitlab.notes.at(-1).body.endsWith(note))
+    assert.doesNotMatch(await firstComment.innerText(), /harness:issue-comment/)
+
+    const interruptedNote = '/subscribe\n\n**Recovered GitLab comment**'
+    await commentInput.fill(interruptedNote)
+    const interrupted = await commentSubmission()
+    alterForge(current => { current.gitlab.dropCommentReply = true })
+    await postComment.click()
+    const checkGitLab = gitLabComposer.getByRole('button', { name: 'Check GitLab', exact: true })
+    await checkGitLab.waitFor()
+    assert.equal(await commentInput.inputValue(), interruptedNote)
+    assert.equal(await commentInput.getAttribute('readonly'), '')
+    await gitLabComposer.scrollIntoViewIfNeeded()
+    await capture('gitlab-comment-recovery-360x800')
+    const gitLabCommentPort = host.server.port
+    host.stop()
+    host = await startHost(gitLabCommentPort)
+    await checkGitLab.click()
+    const recoveredId = readForge().gitlab.notes.at(-1).id
+    await page.locator('#issue-comment-' + recoveredId).getByText('Recovered GitLab comment', { exact: true }).waitFor()
+    assert.equal(new URL(page.url()).hash, '#issue-comment-' + recoveredId)
+    assert.equal((await postGitLabForm(interrupted)).status, 303)
+    assert.equal(readForge().gitlab.commentWrites, 2)
   }
   finally {
     if (previousGitLabToken === undefined) delete process.env.GITLAB_TOKEN
     else process.env.GITLAB_TOKEN = previousGitLabToken
   }
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, GitLab draft persistence and GitLab text editing')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, GitLab draft persistence, GitLab text editing and comment recovery')
 }
 catch (error) {
   console.error(error)

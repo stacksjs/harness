@@ -14,6 +14,6 @@
     @if(commentBlocked && !commentPending) aria-describedby="issue-comment-blocked" @endif>{{ commentText }}</textarea>
   <button type="submit" data-issue-button data-issue-primary
     @if(commentBlocked && !commentPending) disabled @endif>
-    @if(commentPending)Check GitHub@else Post comment@endif
+    @if(commentPending)Check {{ textForge }}@else Post comment@endif
   </button>
 </form>

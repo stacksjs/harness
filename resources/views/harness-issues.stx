@@ -581,9 +581,7 @@ function closeIssueFilters(event) {
               </nav>
             @endif
           </section>
-          @if(selected.tracker === 'github')
-            @include('../partials/harness-issue-comment-composer')
-          @endif
+          @include('../partials/harness-issue-comment-composer')
         @else
           <h2 id="issue-title">Issue unavailable</h2>
           <p role="status">{{ error }}</p>
