@@ -7,7 +7,7 @@
  */
 
 import type { CodexTurnOptions, CodexTurnSelection, Command, ComposerAttachment, CommandEnvelope, EventPayload, ThreadNavigation, ThreadUndoRecord } from '@harness/contract'
-import { acceptedClaudeAccountCompaction, acceptedSettingKeys, githubIssueReference, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, offeredToolApproval, projectSettingsDelta, sameGitHubIssue, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, acceptedSettingKeys, issueReference, GLOBAL_SESSION_ID, inputResponseValues, isClearCommand, isCompactCommand, maximumThreadSnooze, offeredToolApproval, projectSettingsDelta, sameIssue, settingsDelta, threadPlacementKeys, threadUndoDuration, validInputAnswers } from '@harness/contract'
 import { activeThreadOrder, checkpointReviewRepositories, conversationRewindPoint, forkResponsePoint, inactivityDeadline, isTurnActive, isolatedRewindScope, isVisiblePin, modelFavoriteIndex, profilePinnedThreads, providerConversation, sharesCheckout, threadShelf, workspaceSettings } from './projections'
 import { claudeIdleCompaction, effectiveClaudeCompaction } from './idle-compaction'
 import type { AppendableEvent } from './store'
@@ -682,10 +682,10 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
     case 'thread.issue.set': {
       const session = state.sessions.get(command.sessionId)
       const workspace = session && state.workspaces.get(session.workspaceId)
-      const issue = githubIssueReference(command.issue)
+      const issue = issueReference(command.issue)
       if (!issue || !session || !workspace?.trusted || workspace.scratch || session.navigation?.archivedAt)
         throw new InvalidCommand('Choose an issue and an available thread in a trusted project.')
-      const linked = session.linkedIssues?.some(existing => sameGitHubIssue(existing, issue)) ?? false
+      const linked = session.linkedIssues?.some(existing => sameIssue(existing, issue)) ?? false
       if (linked === command.linked) return []
       return [{ sessionId: session.id, commandId, at, payload: { type: 'session.issue-link-changed', issue, linked: command.linked } }]
     }
@@ -722,7 +722,7 @@ export function reduce(state: HarnessState, command: Command, envelope: CommandE
       if (!workspace.trusted)
         throw new InvalidCommand(`workspace ${command.workspaceId} is not trusted`)
 
-      const issue = command.issue === undefined ? null : githubIssueReference(command.issue)
+      const issue = command.issue === undefined ? null : issueReference(command.issue)
       if (command.issue !== undefined && (!issue || workspace.scratch))
         throw new InvalidCommand('Choose a GitHub issue in a trusted project.')
 

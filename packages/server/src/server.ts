@@ -16,7 +16,7 @@ import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { ChatGptCredentialStore, driverKinds, resolveDriver as resolveRegisteredDriver } from '@harness/drivers'
 import type { DoomedWorktree } from './runtime'
-import { CborError, decode, encode, githubIssueReference, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
+import { CborError, decode, encode, issueReference, issueRepositoryKey, inputResponseValues, questionAllowsAttachments, validInputAnswers } from '@harness/contract'
 import { findDenShell } from './pty'
 import type { HarnessState, SessionState } from '@harness/engine'
 import { checkpointReviewRepositories, claudeIdleCompaction, effectiveClaudeCompaction, Engine, forkResponsePoint, inactivityDeadline, InvalidCommand, isTurnActive, isVisiblePin, profilePinnedThreads, reduce, sharesCheckout, SqliteStore, threadUndoOffer, workspaceSettings } from '@harness/engine'
@@ -32,6 +32,7 @@ import { submitIssueComment } from './issue-comment'
 import { updateIssueMetadata } from './issue-metadata'
 import { issueThreadUpdate, issueWorkspace, renderIssueMarkdown } from './issue-workspace'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
+import { trustedIssueRepositories } from './issue-repositories'
 import { ComposerAttachments } from './composer-attachments'
 import { buildClientCodec } from './client-bundle'
 import { readPreviewServers } from './preview-servers'
@@ -278,12 +279,14 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           throw new Error('The selected provider account is unavailable for this project.')
       }
       if (command.type === 'session.create' && command.issue !== undefined) {
-        const issue = githubIssueReference(command.issue)
+        const issue = issueReference(command.issue)
         const workspace = engine.current.workspaces.get(command.workspaceId)
         if (!issue || !workspace?.trusted || workspace.scratch)
           throw new Error('This issue needs a matching trusted project. Remove the issue link to continue without it.')
-        const repositories = await trustedGitHubRepositories([workspace], workspace.profileId, AbortSignal.timeout(10_000))
-        if (!repositories.has(issue.repository))
+        const signal = AbortSignal.timeout(10_000)
+        const repositories = issue.tracker === 'gitlab' ? await trustedIssueRepositories([workspace], workspace.profileId, signal)
+          : await trustedGitHubRepositories([workspace], workspace.profileId, signal)
+        if (!repositories.has(issueRepositoryKey(issue)))
           throw new Error('This issue belongs to a different repository. Remove the issue link to continue without it.')
         return { ...command, issue }
       }

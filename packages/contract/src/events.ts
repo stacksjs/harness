@@ -10,7 +10,7 @@ import type { ApprovalSelection, CodexTurnOptions, CodexTurnSelection, Connector
 import type { ComposerAttachment } from './composer-attachments'
 import type { QueuedFollowUp, SteeringOutcome } from './follow-ups'
 import type { InputQuestion, QuestionAttachment } from './input'
-import type { GitHubIssueReference } from './issue-reference'
+import type { IssueReference } from './issue-reference'
 import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { ThreadNavigation, ThreadUndoRecord, ThreadUndoScopeUpdate } from './thread-navigation'
 
@@ -99,7 +99,7 @@ export interface ForkSource {
 }
 
 export type EventPayload =
-  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, worktree?: WorktreeSelection, forkFrom?: ForkSource, pullRequest?: PullRequestCheckout, issue?: GitHubIssueReference }
+  | { type: 'session.created', workspaceId: number, driverKind: DriverKind, providerInstanceId?: number, model?: string, codexTurnOptions?: CodexTurnOptions, isolate?: boolean, worktree?: WorktreeSelection, forkFrom?: ForkSource, pullRequest?: PullRequestCheckout, issue?: IssueReference }
   | { type: 'session.stopped' }
   | { type: 'session.navigation-changed', changes: Partial<ThreadNavigation>, undo?: ThreadUndoRecord, undoScope?: ThreadUndoScopeUpdate }
   | { type: 'session.failed', message: string }
@@ -154,7 +154,7 @@ export type EventPayload =
   | { type: 'session.git-branch-started', attempt: GitBranchAttempt }
   | { type: 'session.git-branch-resolved', id: string, switched: boolean, worktreeBranch?: string }
   | { type: 'session.pull-request-linked', pullRequest: RepositoryPullRequest }
-  | { type: 'session.issue-link-changed', issue: GitHubIssueReference, linked: boolean }
+  | { type: 'session.issue-link-changed', issue: IssueReference, linked: boolean }
   | { type: 'session.worktree-restored' }
   | { type: 'checkpoint.restored', checkpointId: number, restored: number, removed: number, skipped?: string[] }
   | { type: 'checkpoint.restore-failed', checkpointId: number, message: string }

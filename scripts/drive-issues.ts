@@ -10,6 +10,7 @@ import { chromium, webkit } from 'playwright-core'
 import { derivedId } from '../packages/engine/src/index'
 import { serve } from '../packages/server/src/server'
 import { fixtureGitHubCli } from '../packages/server/test/fixtures/github-cli'
+import { fixtureGitLabCli } from '../packages/server/test/fixtures/gitlab-cli'
 
 const dir = mkdtempSync(join(tmpdir(), 'harness-issues-drive-'))
 const browserKind = process.env.HARNESS_BROWSER === 'webkit' ? webkit : chromium
@@ -18,21 +19,22 @@ const label = browserKind.name() + '-' + appearance
 const destination = process.env.HARNESS_SCREENSHOT_DIR
 if (destination) mkdirSync(destination, { recursive: true })
 const now = Date.parse('2026-11-27T18:00:00Z')
-function localProject(repo: string, folder: string) {
+function localProject(folder: string, remote: string) {
   const path = join(dir, folder)
   mkdirSync(path)
-  for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repo]]) {
+  for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', remote]]) {
     const result = Bun.spawnSync(['git', ...args], { cwd: path })
     assert.ok(result.success, result.stderr.toString())
   }
   return path
 }
 const projects = {
-  'fixture/notebook': localProject('fixture/notebook', 'notebook'),
-  'fixture/atlas': localProject('fixture/atlas', 'atlas'),
+  'fixture/notebook': localProject('notebook', 'https://github.com/fixture/notebook'),
+  'fixture/atlas': localProject('atlas', 'https://github.com/fixture/atlas'),
 }
-const atlasMirror = localProject('fixture/atlas', 'atlas archive')
+const atlasMirror = localProject('atlas archive', 'https://github.com/fixture/atlas')
 const cli = fixtureGitHubCli(dir, Object.fromEntries(Object.entries(projects).map(([repo, path]) => [repo, { bare: join(path, '.git') }])))
+fixtureGitLabCli(cli.bin)
 const previousPath = process.env.PATH
 process.env.PATH = [cli.bin, previousPath].join(delimiter)
 const fixture = JSON.parse(readFileSync(cli.state, 'utf8'))
@@ -811,8 +813,151 @@ try {
   await issuePage.getByText('GitHub could only load comments. Refresh for issue events.', { exact: true }).waitFor()
   await issuePage.locator('[data-issue-markdown="1"]').waitFor()
   assert.equal(await issuePage.locator('[data-issue-markdown="21"]').count(), 0)
+  const gitlabHost = 'forge.fixture.invalid'
+  const gitlabRepo = 'fixture/mobile/notebook'
+  const gitlabKey = 'gitlab:' + gitlabHost + '/' + gitlabRepo
+  const gitlabUrl = 'https://' + gitlabHost + '/' + gitlabRepo + '/-/work_items/24'
+  const gitlabTitle = 'Review offline drafts on GitLab'
+  const mergeRequestUrl = 'https://' + gitlabHost + '/' + gitlabRepo + '/-/merge_requests/19'
+  const gitlabPath = localProject('gitlab project', 'git@' + gitlabHost + ':' + gitlabRepo + '.git')
+  const untrustedPath = localProject('untrusted gitlab project', 'https://' + gitlabHost + '/fixture/private/workspace.git')
+  const unlistedPath = localProject('other forge project', 'https://other.fixture.invalid/fixture/other/workspace.git')
+  const gitlabIssue = {
+    iid: 24, web_url: gitlabUrl, title: gitlabTitle, state: 'opened', created_at: '2026-09-03T00:00:00Z', updated_at: '2026-11-27T14:00:00Z',
+    description: 'Keep **GitLab draft attachments** after reconnect.', author: { username: 'fixture-reviewer' },
+    assignees: [{ username: 'fixture-reviewer' }], labels: ['offline'], user_notes_count: 20,
+  }
+  alterForge(current => {
+    current.gitlab = {
+      host: gitlabHost, repository: gitlabRepo, issue: gitlabIssue,
+      otherIssues: [{ ...gitlabIssue, iid: 25, web_url: gitlabUrl.replace(/24$/u, '25'), title: 'Completed background scheduling', state: 'closed' }],
+      notes: Array.from({ length: 21 }, (_, index) => ({
+        id: index + 1, author: gitlabIssue.author, created_at: new Date(now + index * 60_000).toISOString(),
+        ...(index === 10 ? { system: true, body: 'changed the milestone' } : { body: 'GitLab note **' + (index + 1) + '**' }),
+      })),
+      relatedRequests: [{ web_url: mergeRequestUrl, title: 'Preserve GitLab draft' }, { web_url: 'https://external.invalid/-/merge_requests/1', title: 'Foreign merge request' }],
+    }
+  })
+  for (const [id, path, trusted] of [
+    ['register-gitlab-project', gitlabPath, true],
+    ['register-untrusted-gitlab-project', untrustedPath, false],
+    ['register-other-forge-project', unlistedPath, true],
+  ] as const) {
+    await host.engine.dispatch({ id, at: now, command: { type: 'workspace.register', path, trusted } })
+  }
+  const previousGitLabToken = process.env.GITLAB_TOKEN
+  process.env.GITLAB_TOKEN = 'fixture-default-host-token'
+  const mixed = base + '/issues?' + new URLSearchParams({ q: 'offline', state: 'all', profile: String(restored.get('profile')) })
+  try {
+    await page.goto(mixed)
+    const issueRows = page.locator('[data-issue-row]')
+    const gitlabRow = page.getByRole('link', { name: new RegExp(gitlabTitle) })
+    await gitlabRow.waitFor()
+    assert.match((await issueRows.first().textContent()) ?? '', /Review offline drafts on GitLab/)
+    assert.equal(await issueRows.count(), 2)
+    await page.getByLabel('Order').selectOption('created')
+    await page.waitForURL(url => url.searchParams.get('sort') === 'created')
+    assert.match((await issueRows.first().textContent()) ?? '', /Review offline drafts after reopening/)
+    assert.match((await gitlabRow.textContent()) ?? '', /forge\.fixture\.invalid/)
+    const gitlabSelection = new URL((await gitlabRow.getAttribute('href')) ?? '', base)
+    assert.equal(gitlabSelection.searchParams.get('selected'), gitlabKey)
+    assert.equal(gitlabSelection.searchParams.get('issue'), '24')
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height })
+      assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+      await capture('mixed-trackers-' + width + 'x' + height)
+    }
+    const gitlabFilter = new URL(mixed)
+    gitlabFilter.searchParams.set('repository', gitlabKey)
+    gitlabFilter.searchParams.set('label', 'offline')
+    gitlabFilter.searchParams.set('involvement', 'authored')
+    gitlabFilter.searchParams.set('assignee', '@me')
+    await page.goto(gitlabFilter.href)
+    await gitlabRow.waitFor()
+    assert.equal(await issueRows.count(), 1)
+    await filters.click()
+    const options = await page.locator('select[name="repository"] option').allTextContents()
+    assert.ok(options.some(option => option.includes(gitlabHost + '/' + gitlabRepo)))
+    assert.ok(options.every(option => !option.includes('private/workspace') && !option.includes('other.fixture.invalid')))
+    await page.keyboard.press('Escape')
+    gitlabFilter.searchParams.delete('q')
+    gitlabFilter.searchParams.set('state', 'closed')
+    await page.goto(gitlabFilter.href)
+    await page.getByRole('link', { name: /Completed background scheduling/ }).waitFor()
+    assert.equal(await issueRows.count(), 1)
+
+    await page.goto(gitlabSelection.href)
+    await page.getByRole('heading', { name: gitlabTitle }).waitFor()
+    assert.equal(await page.getByRole('link', { name: 'View on GitLab' }).getAttribute('href'), gitlabUrl)
+    await page.getByText('GitLab draft attachments', { exact: true }).waitFor()
+    await page.getByText('changed the milestone', { exact: true }).waitFor()
+    const request = page.getByRole('link', { name: 'Preserve GitLab draft', exact: true })
+    assert.equal(await request.getAttribute('href'), mergeRequestUrl)
+    assert.equal(await page.getByRole('link', { name: 'Foreign merge request' }).count(), 0)
+    assert.equal(await page.getByRole('link', { name: 'View comment 21 on GitLab' }).getAttribute('href'), gitlabUrl + '#note_21')
+    assert.equal(await page.getByRole('button', { name: 'Post comment', exact: true }).count(), 0)
+    await page.getByRole('link', { name: 'Older comments', exact: true }).click()
+    await page.getByRole('link', { name: 'View comment 1 on GitLab' }).waitFor()
+    assert.equal(await page.getByRole('link', { name: 'View comment 21 on GitLab' }).count(), 0)
+    await page.getByRole('link', { name: 'Newer comments', exact: true }).click()
+    const newestNote = page.getByRole('link', { name: 'View comment 21 on GitLab' })
+    await newestNote.waitFor()
+    await page.setViewportSize({ width: 360, height: 800 })
+    await capture('gitlab-activity-360x800')
+    await page.goto(gitlabSelection.href)
+    const draftAction = page.getByRole('link', { name: 'Open as draft' })
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height })
+      assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+      const rect = await draftAction.boundingBox()
+      assert.ok(rect && rect.x >= 0 && rect.x + rect.width <= width && rect.y + rect.height <= height)
+      await capture('gitlab-detail-' + width + 'x' + height)
+    }
+    alterForge(current => { current.gitlab.listUnavailable = true })
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.reload()
+    await page.getByText('GitLab access is unavailable. Check glab auth status for this host.', { exact: false }).waitFor()
+    await page.getByRole('link', { name: /Review offline drafts after reopening/ }).first().waitFor()
+    await page.getByRole('heading', { name: gitlabTitle }).waitFor()
+    await capture('gitlab-partial-failure')
+    alterForge(current => { delete current.gitlab.listUnavailable })
+    const expectedLink = { tracker: 'gitlab' as const, host: gitlabHost, repository: gitlabRepo, number: 24 }
+    await assert.rejects(host.engine.dispatch({ id: 'foreign-gitlab-issue', at: now, command: {
+      type: 'session.create', workspaceId, driverKind: 'claude', issue: expectedLink,
+    } }), /different repository/)
+    await page.setViewportSize({ width: 360, height: 800 })
+    const beforeDraft = host.engine.current.sessions.size
+    await page.getByRole('link', { name: 'Open as draft' }).click()
+    await page.getByRole('button', { name: 'Open project draft' }).click()
+    await awaitPrompt(gitlabUrl)
+    assert.equal(Number(new URL(page.url()).searchParams.get('workspace')), derivedId('register-gitlab-project'))
+    assert.equal(host.engine.current.sessions.size, beforeDraft)
+    await page.locator('[data-draft-issue]').getByRole('link', { name: gitlabRepo + '#24' }).waitFor()
+    await capture('gitlab-project-draft')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await page.getByText('Fixture issue draft received.').waitFor()
+    assert.equal(observedPrompts.at(-1), gitlabUrl)
+    const session = [...host.engine.current.sessions.values()].find(item => item.workspaceId === derivedId('register-gitlab-project'))
+    assert.ok(session)
+    assert.deepEqual(session.linkedIssues, [expectedLink])
+    const port = host.server.port
+    host.stop()
+    host = await startHost(port)
+    await page.reload()
+    const linked = page.locator('[data-thread-issues]').getByRole('link', { name: gitlabRepo + '#24' })
+    await linked.waitFor()
+    assert.deepEqual(host.engine.current.sessions.get(session.id)?.linkedIssues, [expectedLink])
+    await linked.click()
+    await page.getByRole('link', { name: 'View on GitLab' }).waitFor()
+    await page.getByRole('heading', { name: 'Linked threads' }).waitFor()
+    await page.locator('a[href="/s/' + session.id + '"]').waitFor()
+  }
+  finally {
+    if (previousGitLabToken === undefined) delete process.env.GITLAB_TOKEN
+    else process.env.GITLAB_TOKEN = previousGitLabToken
+  }
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions and recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers and GitLab draft persistence')
 }
 catch (error) {
   console.error(error)

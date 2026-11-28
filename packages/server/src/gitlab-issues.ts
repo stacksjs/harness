@@ -1,0 +1,137 @@
+import { issueRepositoryKey, parseIssueUrl } from '@harness/contract'
+import type { IssueActivityItem } from './issue-activity'
+import type { GitLabIssueRepository } from './issue-repositories'
+import { defaultGitLabIssueHost, gitLabCli } from './issue-repositories'
+import { RepositoryPullRequestError } from './repository-pull-request'
+
+const pageSize = 20
+const searchLimit = 1000
+const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+
+type ListScope = {
+  state: 'open' | 'closed' | 'all', sort: 'created' | 'updated', search: string, involvement: string,
+  assignee: string, labels: string[], page: number,
+}
+type User = { username?: string }
+type GitLabIssue = {
+  iid?: number, web_url?: string, title?: string, description?: string, state?: string, created_at?: string, updated_at?: string,
+  author?: User, assignees?: User[], labels?: string[], user_notes_count?: number,
+}
+
+function stamp(value?: string) { return Date.parse(value ?? '') || 0 }
+function account(user?: User) {
+  return user?.username && /^[a-z\d._-]{1,255}$/iu.test(user.username) ? user.username : ''
+}
+
+function issueRow(repository: GitLabIssueRepository, issue?: GitLabIssue | null) {
+  if (!issue || typeof issue.iid !== 'number' || !Number.isSafeInteger(issue.iid) || issue.iid < 1
+    || typeof issue.title !== 'string' || (issue.state !== 'opened' && issue.state !== 'closed')) return null
+  if (typeof issue.web_url !== 'string') return null
+  const reference = parseIssueUrl(issue.web_url)
+  if (!reference || reference.number !== issue.iid || issueRepositoryKey(reference) !== repository.key) return null
+  return { tracker: 'gitlab' as const, sourceKey: repository.key, repository: repository.name, url: issue.web_url,
+    sourceLabel: repository.host === 'gitlab.com' ? 'GitLab' : 'GitLab · ' + repository.host,
+    number: issue.iid, title: issue.title.slice(0, 512), state: issue.state === 'opened' ? 'open' as const : 'closed' as const,
+    created: stamp(issue.created_at), updated: stamp(issue.updated_at), author: account(issue.author),
+    assignees: Array.isArray(issue.assignees) ? issue.assignees.map(account).filter(Boolean).slice(0, 50) : [],
+    labels: Array.isArray(issue.labels) ? issue.labels.filter(label => typeof label === 'string').slice(0, 50)
+      .map(name => ({ name: name.slice(0, 100), color: '' })) : [],
+  }
+}
+
+async function api(repository: GitLabIssueRepository, endpoint: string, signal: AbortSignal) {
+  const glab = gitLabCli()
+  if (!glab) throw new RepositoryPullRequestError('Install the GitLab CLI on this host to read issues.')
+  const env = { ...process.env, GLAB_DEBUG_HTTP: '', GLAB_NO_PROMPT: '1', GLAB_CHECK_UPDATE: '0', NO_COLOR: '1' }
+  if (repository.host !== defaultGitLabIssueHost()) {
+    // An environment credential belongs to the configured GitLab instance.
+    for (const key of ['GITLAB_TOKEN', 'GITLAB_ACCESS_TOKEN', 'OAUTH_TOKEN', 'GLAB_TOKEN', 'CI_JOB_TOKEN', 'GITLAB_HOST', 'GITLAB_URI', 'GITLAB_URL', 'GL_HOST',
+      'GITLAB_REPO', 'GITLAB_API_HOST', 'GITLAB_SUBFOLDER', 'GLAB_ENABLE_CI_AUTOLOGIN'])
+      delete (env as NodeJS.ProcessEnv)[key]
+  }
+  const child = Bun.spawn([glab, 'api', endpoint, '--hostname', repository.host, '--include'], {
+    cwd: repository.path, env, stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', signal, timeout: 15_000,
+  })
+  const [output, exit] = await Promise.all([new Response(child.stdout).text(), child.exited])
+  const split = /\r?\n\r?\n/u.exec(output)
+  const status = Number(/^HTTP\/\S+ (\d{3})\b/u.exec(output)?.[1])
+  if (status === 404) throw new RepositoryPullRequestError('GitLab could not find this resource or grant access to it.', status)
+  if (status === 429) throw new RepositoryPullRequestError('GitLab is rate limiting requests. Try again shortly.', status)
+  if (status === 401 || status === 403 || (!status && exit !== 0))
+    throw new RepositoryPullRequestError('GitLab access is unavailable. Check glab auth status for this host.', status)
+  if (status !== 200 || !split) throw new RepositoryPullRequestError('GitLab could not load this resource.', status)
+  let body: unknown
+  try { body = JSON.parse(output.slice(split.index + split[0].length)) }
+  catch { throw new RepositoryPullRequestError('GitLab returned an unreadable response.') }
+  const headers = output.slice(0, split.index)
+  const next = /^x-next-page:[ \t]*(\d+)?[ \t]*\r?$/imu.exec(headers)
+  const link = /^link:[^\r\n]+/imu.exec(headers)?.[0]
+  return { body, more: next ? Boolean(next[1]) : link ? /;\s*rel="next"/u.test(link) : undefined }
+}
+
+const projectIssues = (repository: GitLabIssueRepository) => 'projects/' + encodeURIComponent(repository.name) + '/issues'
+
+export async function listGitLabIssues(repository: GitLabIssueRepository, scope: ListScope, signal: AbortSignal) {
+  if (scope.involvement === 'mentioned') throw new RepositoryPullRequestError('GitLab does not offer a mentions filter.')
+  const viewer = scope.involvement || scope.assignee === '@me' ? account((await api(repository, 'user', signal)).body as User) : ''
+  if ((scope.involvement || scope.assignee === '@me') && !viewer)
+    throw new RepositoryPullRequestError('GitLab could not identify the signed-in account.')
+  const assignee = scope.assignee === '@me' ? viewer : scope.assignee
+  const required = [...new Set([assignee, scope.involvement === 'assigned' ? viewer : ''].filter(Boolean).map(name => name.toLowerCase()))]
+  const end = Math.min(searchLimit, scope.page * pageSize + 1)
+  const size = required.length > 1 ? 100 : Math.min(end, 100)
+  const filters = new URLSearchParams({ scope: 'all', order_by: scope.sort + '_at', sort: 'desc', per_page: String(size) })
+  if (scope.state !== 'all') filters.set('state', scope.state === 'open' ? 'opened' : 'closed')
+  if (scope.search) filters.set('search', scope.search)
+  if (scope.labels.length && scope.labels.every(label => !label.includes(','))) filters.set('labels', scope.labels.join(','))
+  if (scope.involvement === 'authored') filters.set('author_username', viewer)
+  if (required.length) filters.set('assignee_username', required[0]!)
+  const rows = new Map<number, NonNullable<ReturnType<typeof issueRow>>>()
+  let partial = false
+  for (let page = 1; (page - 1) * size < searchLimit && rows.size < end; page++) {
+    filters.set('page', String(page))
+    const reply = await api(repository, projectIssues(repository) + '?' + filters, signal)
+    if (!Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitLab returned an unreadable issue list.')
+    for (const item of reply.body.slice(0, size)) {
+      const row = issueRow(repository, item as GitLabIssue)
+      if (row && (scope.state === 'all' || row.state === scope.state)
+        && required.every(name => row.assignees.some(person => person.toLowerCase() === name))
+        && scope.labels.every(label => row.labels.some(item => item.name.toLowerCase() === label.toLowerCase())))
+        rows.set(row.number, row)
+    }
+    if (!(reply.more ?? reply.body.length === size)) break
+    if (page * size >= searchLimit) partial = true
+  }
+  return { rows: [...rows.values()], partial }
+}
+
+export async function readGitLabIssue(repository: GitLabIssueRepository, number: number, requestedPage: number | 'latest' | null, signal: AbortSignal) {
+  const endpoint = projectIssues(repository) + '/' + number
+  const raw = (await api(repository, endpoint, signal)).body as GitLabIssue
+  const row = issueRow(repository, raw)
+  if (!row || row.number !== number) throw new RepositoryPullRequestError('GitLab could not verify this issue.')
+  const page = typeof requestedPage === 'number' ? requestedPage : 1
+  const [notes, related] = await Promise.all([
+    api(repository, endpoint + '/notes?' + new URLSearchParams({ sort: 'desc', per_page: String(pageSize), page: String(page) }), signal).catch(() => null),
+    api(repository, endpoint + '/related_merge_requests', signal).catch(() => null),
+  ])
+  const items: IssueActivityItem[] = Array.isArray(notes?.body) ? notes.body.flatMap<IssueActivityItem>(note => {
+    if (!Number.isSafeInteger(note?.id) || note.id < 1 || typeof note.body !== 'string') return []
+    const created = stamp(note.created_at)
+    const data = { id: note.id, author: account(note.author), dateLabel: created ? dates.format(created) : '' }
+    return note.system === true ? [{ ...data, kind: 'event' as const, label: note.body.slice(0, 512) }]
+      : [{ ...data, kind: 'comment' as const, body: note.body.slice(0, 32_768), url: row.url + '#note_' + note.id }]
+  }).reverse() : []
+  const relatedRequests = Array.isArray(related?.body) ? related.body.flatMap(request => {
+    const url = typeof request?.web_url === 'string' ? request.web_url : ''
+    const match = /\/-\/merge_requests\/([1-9]\d*)$/u.exec(url)
+    const reference = match ? parseIssueUrl(url.slice(0, match.index) + '/-/issues/' + match[1]) : null
+    if (reference?.tracker !== 'gitlab' || reference.host !== repository.host) return []
+    return [{ href: url, label: typeof request.title === 'string' ? request.title.slice(0, 160) : 'Merge request' }]
+  }) : []
+  return { ...row, description: typeof raw.description === 'string' ? raw.description.slice(0, 65_536) : '',
+    dateLabel: row.created ? dates.format(row.created) : '', activity: items, reactions: null, commentTotal: typeof raw.user_notes_count === 'number' && Number.isSafeInteger(raw.user_notes_count) ? Math.max(0, raw.user_notes_count) : 0,
+    activityAvailable: Array.isArray(notes?.body), activityDegraded: false, olderActivity: '', newerActivity: '',
+    commentPage: page, moreComments: Boolean(notes?.more ?? (Array.isArray(notes?.body) && notes.body.length === pageSize)),
+    relatedRequests }
+}

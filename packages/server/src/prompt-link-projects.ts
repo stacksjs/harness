@@ -3,7 +3,9 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { isWorkspaceGitRoot } from './diff'
+import { issueReference, issueRepositoryKey } from '@harness/contract'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
+import { trustedIssueRepositories } from './issue-repositories'
 import { resolveProjectRepository, scanProjectRepositories } from './project-repositories'
 import { linkedRepository, repositoryFromRemote } from './prompt-links'
 
@@ -65,11 +67,16 @@ export async function promptLinkProjects(state: HarnessState, params: URLSearchP
     const remote = workspace?.trusted && !workspace.scratch ? await remoteOf(workspace.path) : null
     return Response.json({ repository: remote?.repository ?? null }, options)
   }
-  const named = linkedRepository(params.get('repo') ?? '')?.toLowerCase()
-  if (!named) return Response.json({ error: 'Invalid GitHub repository.' }, { ...options, status: 400 })
+  const key = params.get('repo') ?? ''
+  const gitlab = /^gitlab:([^/]+)\/(.+)$/iu.exec(key)
+  const issue = gitlab ? issueReference({ tracker: 'gitlab', host: gitlab[1], repository: gitlab[2], number: 1 }) : null
+  const named = issue ? issueRepositoryKey(issue) : linkedRepository(key)?.toLowerCase()
+  if (!named || (issue && !params.has('profile'))) return Response.json({ error: 'Invalid linked repository.' }, { ...options, status: 400 })
   if (params.has('profile')) {
     const profile = Number(params.get('profile'))
-    const match = (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(named)
+    const projects = issue ? await trustedIssueRepositories(state.workspaces.values(), profile, signal)
+      : await trustedGitHubRepositories(state.workspaces.values(), profile, signal)
+    const match = projects.get(named)
     return Response.json({ project: match ? linkedProject(match.workspace) : null }, options)
   }
   const match = await findPromptLinkProject(state, named)

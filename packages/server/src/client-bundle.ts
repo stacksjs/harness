@@ -30,7 +30,7 @@ export { updateTranscriptMarkdown } from './packages/server/src/transcript-markd
 export { sendBrowserCommand } from './packages/server/src/browser-command'
 export { createPromptRecall } from './packages/server/src/browser-prompt-recall'
 export { cloneRemote } from './packages/server/src/project-clone-url'
-export { githubIssueReference, githubIssueUrl } from './packages/contract/src/issue-reference'
+export { githubIssueReference, githubIssueUrl, issueReference, issueRepositoryKey, issueUrl } from './packages/contract/src/issue-reference'
 export { clearPromptLink, linkedTurn, matchingLinkedModel, readPromptLink, storeLinkedDraft } from './packages/server/src/browser-prompt-links'
 export { newThreadLink, threadLink } from './packages/server/src/prompt-links'
 export { readClipboardText, writeClipboardText } from './packages/server/src/browser-clipboard'

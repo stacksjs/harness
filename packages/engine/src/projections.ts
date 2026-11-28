@@ -6,9 +6,9 @@
  * states, and the whole reason for keeping a log evaporates.
  */
 
-import type { ApprovalSelection, ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, GitHubIssueReference, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, ToolApprovalChoice, WorktreeIntent, WorktreeSelection } from '@harness/contract'
+import type { ApprovalSelection, ClaudeAccountCompaction, CodexTurnOptions, CodexTurnSelection, CombinedWorktreeIntent, ComposerAttachment, ConnectorApproval, ConversationRewindPoint, DriverKind, EventPayload, FollowUpQueue, ForkSource, GitBranchAttempt, IssueReference, HarnessEvent, HostSettings, InputQuestion, ModelFavorite, ProjectSettings, ProviderContextUsage, PullRequestCheckout, QuestionAttachment, RepositoryCheckpoint, RepositoryPullRequest, ThreadNavigation, ThreadUndoRecord, ToolApprovalChoice, WorktreeIntent, WorktreeSelection } from '@harness/contract'
 
-import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, sameGitHubIssue, threadDisplayTitle } from '@harness/contract'
+import { acceptedClaudeAccountCompaction, acceptedSettingKeys, acceptedSettings, applyFollowUpEvent, effectiveSettings, hostSettings, pinOrder, sameIssue, threadDisplayTitle } from '@harness/contract'
 import { projectThreadUndo } from './thread-undo'
 import type { ThreadUndoStack } from './thread-undo'
 
@@ -51,7 +51,7 @@ export interface SessionState {
   fork?: ForkSource & { state: 'pending' | 'ready' | 'failed', nativeSessionId?: string, error?: string }
   pullRequest?: PullRequestCheckout
   linkedPullRequests?: RepositoryPullRequest[]
-  linkedIssues?: GitHubIssueReference[]
+  linkedIssues?: IssueReference[]
   state: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'stopped' | 'failed'
   lastError?: string
   lastSeq: number
@@ -872,7 +872,7 @@ export function apply(state: HarnessState, event: HarnessEvent): HarnessState {
         const previous = session.linkedIssues ?? []
         session.linkedIssues = p.linked
           ? [...previous, p.issue]
-          : previous.filter(issue => !sameGitHubIssue(issue, p.issue))
+          : previous.filter(issue => !sameIssue(issue, p.issue))
       }
       break
     }

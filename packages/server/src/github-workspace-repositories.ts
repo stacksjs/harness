@@ -6,12 +6,11 @@ import { repositoryGit } from './repository-commit'
 
 export type GitHubWorkspaceRepository = { name: string, path: string, workspace: WorkspaceState }
 
-async function repositoryNames(path: string) {
+async function repositoryRemotes(path: string) {
   const result = await repositoryGit(path, ['config', '--local', '--null', '--get-regexp', '^remote\\..*\\.(url|pushurl)$']).catch(() => null)
   return (result?.stdout ?? '').split('\0').flatMap((entry) => {
     const split = entry.indexOf('\n')
-    const name = split >= 0 ? repositoryFromRemote(entry.slice(split + 1)) : null
-    return name ? [name] : []
+    return split >= 0 ? [entry.slice(split + 1)] : []
   })
 }
 
@@ -20,22 +19,33 @@ interface GitHubProjectRepositories {
   repositories: Map<string, GitHubWorkspaceRepository>
 }
 
-export async function trustedGitHubProjectRepositories(workspaces: Iterable<WorkspaceState>, profile: number, signal: AbortSignal) {
-  const projects: GitHubProjectRepositories[] = []
+export async function trustedProjectGitRemotes(workspaces: Iterable<WorkspaceState>, profile: number, signal: AbortSignal) {
+  const projects: { workspace: WorkspaceState, remotes: { path: string, url: string }[] }[] = []
   for (const workspace of workspaces) {
     if (workspace.profileId !== profile || !workspace.trusted || workspace.scratch) continue
     signal.throwIfAborted()
     const roots = await scanProjectRepositories(workspace.path)
     const paths = await Promise.all(roots.map(root => resolveProjectRepository(workspace.path, root.key)))
     if (await isWorkspaceGitRoot(workspace.path)) paths.unshift(workspace.path)
-    const repositories = new Map<string, GitHubWorkspaceRepository>()
+    const remotes = []
     for (const path of paths) {
       if (!path) continue
       signal.throwIfAborted()
-      for (const name of await repositoryNames(path)) {
-        const key = name.toLowerCase()
-        if (!repositories.has(key)) repositories.set(key, { name, path, workspace })
-      }
+      for (const url of await repositoryRemotes(path)) remotes.push({ path, url })
+    }
+    projects.push({ workspace, remotes })
+  }
+  return projects
+}
+
+export async function trustedGitHubProjectRepositories(workspaces: Iterable<WorkspaceState>, profile: number, signal: AbortSignal) {
+  const projects: GitHubProjectRepositories[] = []
+  for (const { workspace, remotes } of await trustedProjectGitRemotes(workspaces, profile, signal)) {
+    const repositories = new Map<string, GitHubWorkspaceRepository>()
+    for (const { path, url } of remotes) {
+      const name = repositoryFromRemote(url)
+      const key = name?.toLowerCase()
+      if (key && name && !repositories.has(key)) repositories.set(key, { name, path, workspace })
     }
     projects.push({ workspace, repositories })
   }

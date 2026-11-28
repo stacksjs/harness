@@ -63,3 +63,29 @@ it('opens an issue-link draft only when its GitHub repository matches', () => {
   expect(parseLinkedPrompt(params, true)).toHaveProperty('error')
   expect(parseLinkedPrompt(params, false)).toEqual({ prompt: { text: 'Review the issue', hiddenCharacters: 0 } })
 })
+
+it('requires a matching GitLab host, project path, and issue number for a linked draft', () => {
+  const repo = 'gitlab:forge.example/group/next/notebook'
+  const issue = 'https://forge.example/group/next/notebook/-/issues/24'
+  const params = new URLSearchParams({ prompt: issue, repo, issue })
+  expect(parseLinkedPrompt(params, true)).toMatchObject({ prompt: {
+    repository: repo, issue: { tracker: 'gitlab', host: 'forge.example', repository: 'group/next/notebook', number: 24 },
+  } })
+  for (const substitute of [
+    issue.replace('forge.example', 'other.example'),
+    issue.replace('forge.example', 'forge.example@other.example'),
+    issue.replace('/next/', '/../'),
+    issue.replace('/24', '/024'),
+    issue + '#note_7',
+    'https://github.com/next/notebook/issues/24',
+  ]) {
+    params.set('issue', substitute)
+    expect(parseLinkedPrompt(params, true)).toHaveProperty('error')
+  }
+  params.set('issue', issue.replace('/issues/', '/work_items/'))
+  expect(parseLinkedPrompt(params, true)).toMatchObject({ prompt: {
+    repository: repo, issue: { tracker: 'gitlab', host: 'forge.example', repository: 'group/next/notebook', number: 24 },
+  } })
+  params.delete('issue')
+  expect(parseLinkedPrompt(params, true)).toHaveProperty('error')
+})

@@ -6538,15 +6538,15 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
 
   function draftIssue() {
     const issue = composerDraft()?.issue
-    return !sessionId && draftProject && issue && draftToolsReady() ? composerDraftTools.githubIssueReference(issue) : null
+    return !sessionId && draftProject && issue && draftToolsReady() ? composerDraftTools.issueReference(issue) : null
   }
 
   function issueHref(issue) {
     if (!issue) return '#'
     if (projectCloneAllowed) return '/issues?' + new URLSearchParams({
-      profile: String(activeProfile), selected: issue.repository, issue: String(issue.number),
+      profile: String(activeProfile), selected: draftToolsReady() ? composerDraftTools.issueRepositoryKey(issue) : issue.repository, issue: String(issue.number),
     })
-    return draftToolsReady() ? composerDraftTools.githubIssueUrl(issue) : '#'
+    return draftToolsReady() ? composerDraftTools.issueUrl(issue) : '#'
   }
 
   function removeDraftIssue() {
@@ -6666,7 +6666,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const request = new AbortController()
     linkedPromptRequest = request
     const projectParams = new URLSearchParams({ repo: prompt.repository })
-    if (promptLinkProfile) projectParams.set('profile', String(promptLinkProfile))
+    if (promptLinkProfile || prompt.issue?.tracker === 'gitlab')
+      projectParams.set('profile', String(promptLinkProfile || activeProfile))
     const endpoint = prompt.pullRequest ? pullRequestAddress(prompt.pullRequest) : '/prompt-link/project?' + projectParams
     const result = await fetch(endpoint, { signal: request.signal })
       .then(response => response.ok ? response.json() : null).catch(() => null)
@@ -6683,7 +6684,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     const detail = canCheckOut ? 'This creates an isolated worktree in ' + project.name + ' and runs any configured setup.'
       : prompt.pullRequest && project ? 'Check out this pull request from the Harness host.'
         : project ? 'Open a draft in ' + project.name + '.' : prompt.repository + ' is unavailable on this host.'
-    showLinkedPrompt({ title, detail, prompt, newThread, project, canCheckOut, rawText, canClone: projectCloneAllowed && !project })
+    showLinkedPrompt({ title, detail, prompt, newThread, project, canCheckOut, rawText, canClone: projectCloneAllowed && !project && prompt.issue?.tracker !== 'gitlab' })
   }
 
   function pullRequestAddress(pullRequest, project, thread) {

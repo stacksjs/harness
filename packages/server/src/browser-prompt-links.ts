@@ -1,4 +1,4 @@
-import type { GitHubIssueReference } from '@harness/contract'
+import type { IssueReference } from '@harness/contract'
 import { parseLinkedPrompt, promptLinkKeys } from './prompt-links'
 
 export function readPromptLink(element: Element, activeThread: boolean) {
@@ -37,7 +37,7 @@ export function linkedTurn(transcript: HTMLElement): 'opened' | 'missing' | null
 export function storeLinkedDraft(target: Element, destination: { profile: string, workspace?: number, id: string }, draft: {
   text: string
   notice?: string
-  issue?: GitHubIssueReference
+  issue?: IssueReference
   provider?: string
   model?: string
 }): string {

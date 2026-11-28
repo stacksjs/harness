@@ -44,5 +44,5 @@ export type { ClaudeAccountCompaction, ClaudeIdleCompaction, FollowUpBehavior, H
 export { maximumThreadSnooze, pinOrder, threadDisplayTitle, threadPlacementKeys, threadUndoDuration } from './thread-navigation'
 export type { ThreadDrop, ThreadNavigation, ThreadOrganizationAction, ThreadPlacement, ThreadUndoOffer, ThreadUndoRecord, ThreadUndoResult, ThreadUndoScopeUpdate } from './thread-navigation'
 
-export type { GitHubIssueReference } from './issue-reference'
-export { githubIssueReference, githubIssueUrl, parseGitHubIssueUrl, sameGitHubIssue } from './issue-reference'
+export type { GitHubIssueReference, GitLabIssueReference, IssueReference } from './issue-reference'
+export { githubIssueReference, githubIssueUrl, gitLabProject, issueReference, issueRepositoryKey, issueUrl, parseGitHubIssueUrl, parseIssueUrl, sameGitHubIssue, sameIssue } from './issue-reference'

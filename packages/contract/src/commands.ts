@@ -14,7 +14,7 @@ import type { ClaudeAccountCompaction, HostSettings } from './settings'
 import type { ComposerAttachment, ComposerUploads } from './composer-attachments'
 import type { InputQuestion, InputResponse, QuestionAttachment } from './input'
 import type { ThreadOrganizationAction } from './thread-navigation'
-import type { GitHubIssueReference } from './issue-reference'
+import type { IssueReference } from './issue-reference'
 
 export type DriverKind = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok'
 
@@ -94,7 +94,7 @@ export type ClientCommand =
       isolate?: boolean
       worktree?: WorktreeSelection
       providerInstanceId?: number
-      issue?: GitHubIssueReference
+      issue?: IssueReference
     }
   | { type: 'session.scratch.create', profileId?: number, driverKind: DriverKind, label: string, model?: string, codexTurnOptions?: CodexTurnOptions }
   | { type: 'session.fork', sessionId: number, turnId: number }
@@ -207,7 +207,7 @@ export type InternalCommand =
   | { type: 'thread.fork.failed', sessionId: number, message: string }
   | { type: 'thread.pull-request.create', workspaceId: number, pullRequest: PullRequestCheckout }
   | { type: 'thread.pull-request.link', sessionId: number, pullRequest: RepositoryPullRequest }
-  | { type: 'thread.issue.set', sessionId: number, issue: GitHubIssueReference, linked: boolean }
+  | { type: 'thread.issue.set', sessionId: number, issue: IssueReference, linked: boolean }
   | { type: 'thread.worktree.reserve', sessionId: number, intent: WorktreeIntent }
   | { type: 'thread.worktree.set', sessionId: number, worktreePath: string, branch: string }
   | { type: 'thread.worktree.restored', sessionId: number }

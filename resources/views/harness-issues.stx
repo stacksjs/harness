@@ -2,6 +2,7 @@
 export const profiles = $props.profiles
 export const profile = $props.profile
 export const repositories = $props.repositories
+export const repositoryOptions = $props.repositoryOptions
 export const repository = $props.repository
 export const scope = $props.scope
 export const rows = $props.rows
@@ -233,8 +234,8 @@ function closeIssueFilters(event) {
                 <span id="issue-filter-repository">Repository</span>
                 <select name="repository" aria-labelledby="issue-filter-repository">
                   <option value="">All repositories</option>
-                  @foreach(repositories as item)
-                    <option value="{{ item }}" @if(item === repository)selected@endif>{{ item }}</option>
+                  @foreach(repositoryOptions as item)
+                    <option value="{{ item.key }}" @if(item.key === repository)selected@endif>{{ item.label }}</option>
                   @endforeach
                 </select>
               </label>
@@ -336,7 +337,7 @@ function closeIssueFilters(event) {
                   <legend>Hide repositories</legend>
                   <div data-issue-filter-choices>
                     @foreach(repositoryFilters as item)
-                      <label><input type="checkbox" name="hideRepository" value="{{ item.name }}" @if(item.hidden)checked@endif>{{ item.name }}</label>
+                      <label><input type="checkbox" name="hideRepository" value="{{ item.key }}" @if(item.hidden)checked@endif>{{ item.name }}</label>
                     @endforeach
                   </div>
                 </fieldset>
@@ -358,7 +359,7 @@ function closeIssueFilters(event) {
         </div>
       @endif
       @if(!repositories.length)
-        <p data-issue-empty>Trust a project with a GitHub remote to browse its issues.</p>
+        <p data-issue-empty>Trust a project with a GitHub or GitLab remote to browse its issues.</p>
       @elseif(!hasIncludedRepositories)
         <p data-issue-empty>Show at least one project or repository in Filters.</p>
       @elseif(rows.length)
@@ -369,7 +370,7 @@ function closeIssueFilters(event) {
                 <span data-issue-state="{{ row.state }}">@if(row.state === 'open')Open@else Closed@endif</span>
                 <span data-issue-row-name>
                   <strong>{{ row.title }}</strong>
-                  <span>{{ row.repository }} #{{ row.number }}@if(row.author) · {{ row.author }}@endif</span>
+                  <span>{{ row.repository }} #{{ row.number }}@if(row.tracker === 'gitlab') · {{ row.sourceLabel }}@endif@if(row.author) · {{ row.author }}@endif</span>
                 </span>
                 @if(row.dateLabel)<span data-issue-date aria-label="{{ datePurpose }} {{ row.dateLabel }}">{{ row.dateLabel }}</span>@endif
               </a>
@@ -394,7 +395,7 @@ function closeIssueFilters(event) {
         </a>
         @if(selected)
           <header data-issue-detail-heading>
-            <p>{{ selected.repository }} #{{ selected.number }}</p>
+            <p>{{ selected.repository }} #{{ selected.number }}@if(selected.tracker === 'gitlab') · {{ selected.sourceLabel }}@endif</p>
             <div data-issue-field-header>
               <h2 id="issue-title" tabindex="-1">{{ selected.title }}</h2>
               @if(canEditText && !textDraft)
@@ -424,7 +425,7 @@ function closeIssueFilters(event) {
           </div>
           <div data-issue-actions>
             <a data-issue-button data-issue-primary href="{{ draftHref }}">Open as draft</a>
-            <a data-issue-button href="{{ selected.url }}" rel="noreferrer" target="_blank">View on GitHub</a>
+            <a data-issue-button href="{{ selected.url }}" rel="noreferrer" target="_blank">@if(selected.tracker === 'gitlab')View on GitLab@else View on GitHub@endif</a>
           </div>
           <section id="issue-metadata" aria-label="Issue labels and assignees">
             <dl data-issue-metadata>
@@ -479,7 +480,7 @@ function closeIssueFilters(event) {
               @include('../partials/harness-issue-reactions', { bar: issueReactions, barLabel: 'Issue reactions' })
             @endif
           </section>
-          @if(linkedThreads.length || threadChoices.length)
+          @if(linkedThreads.length || threadChoices.length || pullRequests.length)
             <section data-issue-relations aria-labelledby="issue-threads">
               <h3 id="issue-threads">Linked threads</h3>
               @if(linkedThreads.length)
@@ -515,10 +516,10 @@ function closeIssueFilters(event) {
                 </details>
               @endif
               @if(pullRequests.length)
-                <h4>Pull requests</h4>
+                <h4>@if(selected.tracker === 'gitlab')Related changes@else Pull requests@endif</h4>
                 <ul data-issue-thread-list>
                   @foreach(pullRequests as pull)
-                    <li><a href="{{ pull.href }}">{{ pull.label }}</a></li>
+                    <li><a href="{{ pull.href }}" @if(selected.tracker === 'gitlab' && pull.href.startsWith('https://'))target="_blank" rel="noreferrer"@endif>{{ pull.label }}</a></li>
                   @endforeach
                 </ul>
               @endif
@@ -539,7 +540,7 @@ function closeIssueFilters(event) {
               <p role="status">GitHub could only load comments. Refresh for issue events.</p>
             @endif
             @if(!selected.activityAvailable)
-              <p role="status">GitHub could not load activity. Refresh to try again.</p>
+              <p role="status">{{ selected.tracker === 'gitlab' ? 'GitLab' : 'GitHub' }} could not load activity. Refresh to try again.</p>
             @elseif(!activityRows.length)
               <p>No activity on this page.</p>
             @else
@@ -547,8 +548,8 @@ function closeIssueFilters(event) {
                 @if(item.kind === 'comment')
                   <article id="issue-comment-{{ item.id }}" tabindex="-1">
                     <header>
-                      <strong>{{ item.author || 'GitHub user' }}</strong>
-                      <a href="{{ item.url }}" target="_blank" rel="noreferrer" aria-label="View comment {{ item.id }} on GitHub">{{ item.dateLabel || 'View on GitHub' }}</a>
+                      <strong>{{ item.author || (selected.tracker === 'gitlab' ? 'GitLab user' : 'GitHub user') }}</strong>
+                      <a href="{{ item.url }}" target="_blank" rel="noreferrer" aria-label="View comment {{ item.id }} on {{ selected.tracker === 'gitlab' ? 'GitLab' : 'GitHub' }}">{{ item.dateLabel || (selected.tracker === 'gitlab' ? 'View on GitLab' : 'View on GitHub') }}</a>
                     </header>
                     <div data-issue-markdown="{{ item.id }}" class="transcript-markdown"></div>
                     @if(item.reactions)
@@ -574,7 +575,9 @@ function closeIssueFilters(event) {
               </nav>
             @endif
           </section>
-          @include('../partials/harness-issue-comment-composer')
+          @if(selected.tracker === 'github')
+            @include('../partials/harness-issue-comment-composer')
+          @endif
         @else
           <h2 id="issue-title">Issue unavailable</h2>
           <p role="status">{{ error }}</p>
