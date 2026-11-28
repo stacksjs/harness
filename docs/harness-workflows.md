@@ -39,7 +39,7 @@ Use the `runId` from the response to inspect or control a run.
 ./buddy harness:workflow:cancel 123 "$run_id"
 ```
 
-All five commands accept `--port`. The local CLI reads the host token when paired access is enabled. Run and definition data are available to the local host.
+All workflow commands accept `--port`. The local CLI reads the host token when paired access is enabled. Run and definition data are available to the local host.
 
 ## Follow runs in Harness
 
@@ -69,6 +69,29 @@ An interval starts one full interval after the schedule first loads, with a mini
 
 The schedule cursor and new run commit together. After restart, an unchanged schedule keeps its next due time. Changing the cadence, removing the schedule, or re-enabling it starts a new cadence. Scheduled runs receive the original due time in `scheduledAt`. The run page displays that time and the schedule ID.
 
+## Receive webhook deliveries
+
+Declare a named hook and its target profile in the latest workflow definition.
+
+```ts
+export default {
+  name: 'receive-draft',
+  version: 1,
+  webhooks: [{ name: 'draft-intake', profile: 123 }],
+  async run(request, { step }) {
+    return step('Record arrival', () => ({ accepted: request.method === 'POST' }))
+  },
+}
+```
+
+After restarting the host, run `./buddy harness:workflow:hooks 123` on that machine. Prepend the host address to the returned path and give the URL to the sender. The path contains the hook credential. Keep it out of shared logs and protect copies of the host database. Serving only on loopback keeps ingress local. Use a reachable HTTPS address and the host's remote mode for external delivery.
+
+GET, POST, PUT, and PATCH requests receive a run ID after the host stores the delivery. The workflow receives the method, lower-case headers, original query string without the question mark, and UTF-8 body. Harness omits credential headers and refuses bodies over 1 MiB.
+
+A sender retry with the same delivery ID returns the original run, including after restart. Harness recognizes `X-GitHub-Delivery`, `X-Gitea-Delivery`, `X-Gitlab-Event-UUID`, `Linear-Delivery`, `Webhook-Id`, and `Idempotency-Key`. A hook can also define a `key(request)` function for its sender's format. Return a stable string, or `undefined` to use a standard delivery header. Deliveries without a stable key start separate runs. Each hook allows 60 new runs per rolling minute. A retry for an existing run still returns its ID while the hook is at capacity.
+
+Set `HARNESS_WORKFLOW_WEBHOOKS=0` on the host and restart to block deliveries and hide hook paths from the CLI. Removing a hook definition also stops its deliveries. Run history shows the hook name.
+
 ## Save step results and file issues
 
 Give each step a unique name. Completed steps return their saved JSON results when the body replays. Keep the workflow body focused on coordination and put actions inside steps. Use the step's `signal` in asynchronous code so that cancellation or shutdown can interrupt it.
@@ -87,4 +110,4 @@ const issue = await step('File issue', ({ issues }) =>
 
 The host supports GitHub, GitLab, and Forgejo through their configured host accounts. On first execution, Harness records the account scope and request intent before posting. If a reply is lost, resuming checks the original intent. A changed account pauses the step until the original connection is available.
 
-A failure pauses the run with its saved steps intact. After a crash, the restarted host takes over once the previous lease expires. Cancellation is terminal. Webhook triggers, agent steps, questions, and editing workflow definitions in the app are tracked in the parity backlog. [P31](https://github.com/stacksjs/harness/issues/41)
+A failure pauses the run with its saved steps intact. After a crash, the restarted host takes over once the previous lease expires. Cancellation is terminal. Tracker triggers, hosted webhook relay, agent steps, questions, and editing workflow definitions in the app are tracked in the parity backlog. [P31](https://github.com/stacksjs/harness/issues/41)
