@@ -204,6 +204,8 @@ Two stx source changes avoid unnecessary tag matching and reuse utility class ca
 
 Three paired macOS runs on Bun 1.3.14 and stx 0.2.959 brought the median of uncached workspace render times from 259.0 ms to 188.1 ms against a 150 ms limit. RSS after the change ranged from 364.0 to 477.0 MB. Results varied across pairs, and all three scoped runs exceeded the 350 MB limit. [P34 memory and performance tracking](https://github.com/stacksjs/harness/issues/44)
 
+A separate cache-lifetime comparison isolated the two stx HTML masking modules on source revision `a795a877e2b` and Harness `050700d`. Large intermediate HTML now uses two 4 MiB caches tied to the render, while small templates still share the existing process-wide budget. On Bun 1.3.14 and macOS arm64, the three paired runs reduced 20-session RSS from 727.2, 761.3, and 770.6 MB to 670.2, 669.7, and 678.1 MB. Median uncached SSR moved from 271.5 ms to 272.4 ms. All 24 before-and-after screenshots matched across Chromium, WebKit, six viewport sizes, and both appearances. Both engines restored the draft after reload and closed Settings back to the draft. The draft and Settings HTML matched after normalizing the per-process build ID. The 150 ms and 350 MB limits remain open. Harness CI still resolves published stx 0.2.960. [stx change](https://github.com/stacksjs/stx/commit/aea999790268f5ff1a2f99aa04cf5e482054d747) · [P34](https://github.com/stacksjs/harness/issues/44)
+
 ## Named provider accounts on the host
 
 Run `./buddy migrate` before adding accounts to a database that predates provider settings. Use `./buddy profiles:list` to get your profile ID. Add a Claude config directory or Codex session home and select the account in the composer of a project in that profile.
