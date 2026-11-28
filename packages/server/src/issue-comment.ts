@@ -3,7 +3,7 @@ import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { githubIssueReference } from '@harness/contract'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
-import { issueCommentScope, readIssueMetadataAuthority } from './issue-metadata'
+import { issueWriteScope, readIssueMetadataAuthority } from './issue-metadata'
 import { repositoryGitHubCredential, repositoryGitHubRequest, RepositoryPullRequestError } from './repository-pull-request'
 
 const maxCommentBytes = 16_384
@@ -52,7 +52,7 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
     const credential = await repositoryGitHubCredential(repository.path, signal)
     const authority = await readIssueMetadataAuthority({ repository, number: reference.number, credential, signal })
     if (!authority) return finish('unavailable')
-    if (!trusted() || issueCommentScope(repository, authority) !== scope) return finish('changed')
+    if (!trusted() || issueWriteScope(repository, authority, 'issue-comment') !== scope) return finish('changed')
     const { issueId, viewer } = authority
     const fingerprintOf = (text: string) => createHash('sha256').update(JSON.stringify([scope, text])).digest('hex')
     let text = draft

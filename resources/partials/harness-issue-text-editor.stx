@@ -1,0 +1,48 @@
+<form id="issue-text-editor" method="post" action="{{ textAction }}" data-issue-metadata-editor data-issue-text-editor
+  aria-labelledby="issue-text-editor-heading" @keydown="issueTextShortcut">
+  <h3 id="issue-text-editor-heading">@if(textDraft.field === 'title')Edit title@else Edit description@endif</h3>
+  @if(textMessage)<p role="status">{{ textMessage }}</p>@endif
+  <input type="hidden" name="field" value="{{ textDraft.field }}">
+  <input type="hidden" name="scope" value="{{ textDraft.scope }}">
+  <input type="hidden" name="before" value="{{ textDraft.before }}">
+  <input type="hidden" name="intent" value="{{ textDraft.intent }}">
+  @if(textConflict)
+    <input type="hidden" name="currentVersion" value="{{ currentVersion }}">
+    <strong>Current on GitHub</strong>
+    <pre data-issue-text-current>@if(currentText){{ currentText }}@else Empty@endif</pre>
+  @endif
+  @if(textConflict)
+    <label for="issue-text-input"><strong>Your draft</strong><span class="sr-only"> {{ textTitle }}</span></label>
+  @else
+    <label class="sr-only" for="issue-text-input">{{ textTitle }}</label>
+  @endif
+  @if(textDraft.field === 'title')
+    <input id="issue-text-input" name="text" value="{{ textDraft.text }}" maxlength="{{ textLimit }}" required
+      @if(textLocked || textPending) readonly @endif>
+  @else
+    <textarea id="issue-text-input" name="text" rows="6" maxlength="{{ textLimit }}"
+      @if(textPreview) hidden @endif @if(textLocked || textPending) readonly @endif>{{ textDraft.text }}</textarea>
+    @if(textPreview)
+      <div data-issue-text-preview data-issue-markdown="preview" class="transcript-markdown" aria-label="Markdown preview">
+        @if(!textDraft.text.trim())Nothing to preview.@endif
+      </div>
+    @endif
+  @endif
+  <div data-issue-metadata-editor-actions>
+    <a href="{{ metadataHref }}@if(textDraft.field === 'title')#issue-title@else#issue-description@endif" data-issue-button data-issue-text-cancel>Cancel</a>
+    @if(textPending)
+      <button type="submit" data-issue-button data-issue-primary>Check GitHub</button>
+    @elseif(textConflict)
+      <button type="submit" name="operation" value="rebase" data-issue-button data-issue-primary>Keep my draft</button>
+    @elseif(!textLocked)
+      @if(textDraft.field === 'body')
+        @if(textPreview)
+          <button type="submit" name="operation" value="write" data-issue-button>Write</button>
+        @else
+          <button type="submit" name="operation" value="preview" data-issue-button>Preview</button>
+        @endif
+      @endif
+      <button type="submit" data-issue-button data-issue-primary data-issue-text-save>Save</button>
+    @endif
+  </div>
+</form>

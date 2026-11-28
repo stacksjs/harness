@@ -4,9 +4,11 @@ import { githubIssueReference, sameGitHubIssue } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
 import type { IssueCommentSubmission } from './issue-comment'
+import type { IssueTextSubmission } from './issue-text'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
 import { mergeGitHubProjectRepositories, trustedGitHubProjectRepositories, trustedGitHubRepositories } from './github-workspace-repositories'
 import { issueMetadataKind, readIssueMetadata } from './issue-metadata'
+import { createIssueTextDraft, issueTextField, issueTextLimits } from './issue-text'
 import { newThreadLink, parsePullRequest } from './prompt-links'
 import { readFilterViewer, readRepositoryFilterChoices } from './pull-request-list-filters'
 import { pullRequestLabels } from './pull-request-labels'
@@ -167,7 +169,12 @@ export async function issueThreadUpdate(
 }
 
 export async function issueWorkspace(state: HarnessState, query: URLSearchParams, signal: AbortSignal,
-  metadataSubmission?: { kind: IssueMetadataKind, message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }, commentSubmission?: IssueCommentSubmission) {
+  writes: {
+    metadata?: { kind: IssueMetadataKind, message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }
+    comment?: IssueCommentSubmission
+    text?: IssueTextSubmission
+  } = {}) {
+  const { metadata: metadataSubmission, comment: commentSubmission, text: textSubmission } = writes
   const profiles = [...state.profiles.values()].map(({ id, name }) => ({ id, name }))
   const requestedProfile = positiveInteger(query.get('profile'))
   const profile = profiles.some(item => item.id === requestedProfile) ? requestedProfile : profiles[0]?.id || 0
@@ -225,7 +232,11 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const detail = selection && number ? issueDetail(selection, number, requestedComments, signal)
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error) })) : null
   const editMetadata = issueMetadataKind(query.get('editMetadata'))
-  const metadataRead = selection && number ? readIssueMetadata({ repository: selection, number, signal }, metadataSubmission ? null : editMetadata) : null
+  const editText = issueTextField(query.get('editText'))
+  const metadataRead = selection && number
+    ? readIssueMetadata({ repository: selection, number, signal, includeText: Boolean(editText && !textSubmission) },
+        metadataSubmission ? null : editMetadata)
+    : null
   const targets = [...includedRepositories].flatMap(([key, repo]) =>
     !hidden.has(key) && (!repository || key === repository.name.toLowerCase()) ? [repo] : [])
   const findLabel = (query.get('findLabel') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
@@ -267,6 +278,14 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   }
   const metadataFields = selected ? Object.fromEntries(savedViewDetail) : {}
   const metadataHref = selected ? href(metadataFields) : ''
+  const editableText = metadata?.editableText
+  const textDraft = textSubmission?.draft
+    ?? (editText && editableText ? createIssueTextDraft(editText, editableText.scope, editableText[editText]) : null)
+  const textResult = textSubmission?.result
+  const textPreview = textResult === 'preview'
+  const textPending = textResult === 'pending'
+  const textConflict = textResult === 'stale'
+  const textLocked = textResult === 'changed' || textResult === 'denied'
   const metadataEditor = metadataSubmission ? metadataSubmission.editor : metadata?.editor
   const statusEdit = editMetadata === 'state' || metadataSubmission?.kind === 'state'
   const metadataMessage = metadataSubmission?.message
@@ -360,6 +379,18 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadataLabelsHref: selected ? href({ ...metadataFields, editMetadata: 'labels' }) : '',
     metadataAssigneesHref: selected ? href({ ...metadataFields, editMetadata: 'assignees' }) : '',
     metadataAction: metadataHref.replace('/issues?', '/issues/metadata?'),
+    canEditText: Boolean(selected && metadata?.canEditText),
+    textDraft, textPreview, textPending, textConflict, textLocked,
+    textLimit: textDraft ? issueTextLimits[textDraft.field] : 0,
+    textTitle: textDraft?.field === 'title' ? 'Issue title' : 'Description',
+    currentText: textSubmission?.current ?? '',
+    currentVersion: textSubmission?.currentVersion ?? '',
+    textMessageField: issueTextField(query.get('textResult')) ?? editText ?? 'title',
+    textMessage: textSubmission?.message ?? (selected && issueTextField(query.get('textResult')) ? 'Issue text saved on GitHub.'
+      : editText && !textDraft ? 'GitHub could not open this editor.' : ''),
+    textAction: metadataHref.replace('/issues?', '/issues/text?') + '#issue-text-editor',
+    titleEditHref: selected ? href({ ...metadataFields, editText: 'title' }) + '#issue-title' : '',
+    bodyEditHref: selected ? href({ ...metadataFields, editText: 'body' }) + '#issue-description' : '',
     issueThreadAction: selected ? href(selectedScope).replace('/issues?', '/issues/threads?') : '',
     retryHref: href(selectedScope), datePurpose: scope.sort === 'created' ? 'Created' : 'Last updated',
     backHref: '/?' + new URLSearchParams({ profile: String(profile) }), listHref: href(),
@@ -379,6 +410,7 @@ export function renderIssueMarkdown(html: string, view: Awaited<ReturnType<typeo
   if (!view.selected) return html
   const bodies = new Map(view.selected.comments.map(comment => [String(comment.id), comment.body]))
   bodies.set('description', view.selected.description)
+  if (view.textPreview && view.textDraft?.text.trim()) bodies.set('preview', view.textDraft.text)
   return new HTMLRewriter().on('[data-issue-markdown]', { element(element) {
     const text = bodies.get(element.getAttribute('data-issue-markdown') ?? '')
     if (text) element.setInnerContent(renderPullRequestCommentMarkdown(text), { html: true })

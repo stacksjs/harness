@@ -61,6 +61,21 @@ export const commentIntent = $props.commentIntent
 export const commentPending = $props.commentPending
 export const commentBlocked = $props.commentBlocked
 export const commentMessage = $props.commentMessage
+export const canEditText = $props.canEditText
+export const textDraft = $props.textDraft
+export const textPreview = $props.textPreview
+export const textPending = $props.textPending
+export const textConflict = $props.textConflict
+export const textLocked = $props.textLocked
+export const textLimit = $props.textLimit
+export const textTitle = $props.textTitle
+export const currentText = $props.currentText
+export const currentVersion = $props.currentVersion
+export const textMessage = $props.textMessage
+export const textMessageField = $props.textMessageField
+export const textAction = $props.textAction
+export const titleEditHref = $props.titleEditHref
+export const bodyEditHref = $props.bodyEditHref
 export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name: 'Closed' }, { value: 'all', name: 'All states' }]
 </script>
 <script client>
@@ -104,6 +119,22 @@ useEventListener('pointerdown', event => {
   const filters = issueFilters.current
   if (filters?.open && !filters.contains(event.target)) filters.open = false
 })
+
+function issueTextShortcut(event) {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat) return
+  if (event.key === 'Escape') {
+    const cancel = event.currentTarget.querySelector('[data-issue-text-cancel]')
+    if (cancel) {
+      event.preventDefault()
+      cancel.click()
+    }
+  }
+  if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) return
+  const save = event.currentTarget.querySelector('[data-issue-text-save]')
+  if (!save) return
+  event.preventDefault()
+  event.currentTarget.requestSubmit(save)
+}
 
 function submitIssueCommentShortcut(event) {
   if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || event.shiftKey
@@ -348,7 +379,17 @@ function closeIssueFilters(event) {
         @if(selected)
           <header data-issue-detail-heading>
             <p>{{ selected.repository }} #{{ selected.number }}</p>
-            <h2 id="issue-title" tabindex="-1">{{ selected.title }}</h2>
+            <div data-issue-field-header>
+              <h2 id="issue-title" tabindex="-1">{{ selected.title }}</h2>
+              @if(canEditText && !textDraft)
+                <a href="{{ titleEditHref }}" data-issue-button aria-label="Edit title">Edit title</a>
+              @endif
+            </div>
+            @if(textDraft?.field === 'title')
+              @include('../partials/harness-issue-text-editor')
+            @elseif(textMessage && !textDraft && textMessageField === 'title')
+              <p role="status" data-issue-metadata-message>{{ textMessage }}</p>
+            @endif
             <div data-issue-meta>
               @if(canChangeIssueStatus && !statusEditor && !statusDraft)
                 <a href="{{ statusHref }}#issue-title" data-issue-status-control data-issue-button aria-label="Change issue status, {{ issueStatus }}">
@@ -400,7 +441,22 @@ function closeIssueFilters(event) {
             </dl>
             @include('../partials/harness-issue-metadata-editor')
           </section>
-          <div data-issue-markdown="description" class="transcript-markdown">@if(!selected.description)No description.@endif</div>
+          <section aria-labelledby="issue-description" data-issue-description>
+            <div data-issue-field-header>
+              <h3 id="issue-description" tabindex="-1">Description</h3>
+              @if(canEditText && !textDraft)
+                <a href="{{ bodyEditHref }}" data-issue-button aria-label="Edit description">Edit description</a>
+              @endif
+            </div>
+            @if(textDraft?.field === 'body')
+              @include('../partials/harness-issue-text-editor')
+            @else
+              @if(textMessage && !textDraft && textMessageField === 'body')
+                <p role="status" data-issue-metadata-message>{{ textMessage }}</p>
+              @endif
+              <div data-issue-markdown="description" class="transcript-markdown">@if(!selected.description)No description.@endif</div>
+            @endif
+          </section>
           @if(linkedThreads.length || threadChoices.length)
             <section data-issue-relations aria-labelledby="issue-threads">
               <h3 id="issue-threads">Linked threads</h3>
@@ -472,6 +528,7 @@ function closeIssueFilters(event) {
           <h2 id="issue-title">Issue unavailable</h2>
           <p role="status">{{ error }}</p>
           @if(commentText)@include('../partials/harness-issue-comment-composer')@endif
+          @if(textDraft)@include('../partials/harness-issue-text-editor')@endif
         @endif
       </section>
     @endif

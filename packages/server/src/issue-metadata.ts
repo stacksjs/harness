@@ -23,8 +23,8 @@ export function issueMetadataKind(value: string | null): IssueMetadataKind | nul
 type Person = { key: string, name: string, description: string }
 type Option = Person & { applied: boolean, checked: boolean, archived?: boolean }
 type Change = Option & { apply: boolean }
-type Authority = { repositoryId: string, issueId: string, viewer: string, canEdit: boolean, commentBlocked: string, assignees: Person[], status: ReturnType<typeof issueStatusPlan> }
-type MetadataContext = { repository: GitHubWorkspaceRepository, number: number, credential?: string, signal: AbortSignal }
+type Authority = { repositoryId: string, issueId: string, viewer: string, canEdit: boolean, canEditText: boolean, text: { title: string, body: string } | null, commentBlocked: string, assignees: Person[], status: ReturnType<typeof issueStatusPlan> }
+type MetadataContext = { repository: GitHubWorkspaceRepository, number: number, credential?: string, signal: AbortSignal, includeText?: boolean }
 export type IssueMetadataForm = { kind: IssueMetadataKind, intent: string, revision: string, scope: string, checked: string[] }
 export type IssueMetadataEditor = IssueMetadataForm & { options: Option[], search: string, more: boolean, matches: number }
 
@@ -37,13 +37,13 @@ function person(value: { id?: unknown, login?: unknown, name?: unknown } | null)
   return { key: value.id, name: value.login, description: typeof value.name === 'string' ? value.name.slice(0, 160) : '' }
 }
 
-export async function readIssueMetadataAuthority({ repository, number, credential, signal }: MetadataContext): Promise<Authority | null> {
+export async function readIssueMetadataAuthority({ repository, number, credential, signal, includeText }: MetadataContext): Promise<Authority | null> {
   const [owner, name] = repository.name.split('/')
   type AuthorityResponse = {
     errors?: { extensions?: { type?: string, code?: string, fieldName?: string } }[], data?: { viewer?: { id?: unknown }, repository?: {
       id?: unknown, nameWithOwner?: string, isArchived?: boolean, viewerPermission?: string,
       planningStatuses?: RawPlanningStatuses,
-      issue?: RawIssueStatus & { id?: unknown, number?: number, locked?: boolean, assignees?: { nodes?: (Parameters<typeof person>[0])[], pageInfo?: { hasNextPage?: boolean } } },
+      issue?: RawIssueStatus & { id?: unknown, number?: number, locked?: boolean, viewerCanUpdate?: boolean, title?: unknown, body?: unknown, assignees?: { nodes?: (Parameters<typeof person>[0])[], pageInfo?: { hasNextPage?: boolean } } },
     } },
   }
   const fields = 'id name category { state stateReason }'
@@ -54,7 +54,8 @@ export async function readIssueMetadataAuthority({ repository, number, credentia
         id nameWithOwner viewerPermission isArchived
         ${planning ? `planningStatuses(first: 50) { nodes { ${fields} } pageInfo { hasNextPage } }` : ''}
         issue(number: $number) {
-          id number state stateReason viewerCanClose viewerCanReopen locked
+          id number state stateReason viewerCanClose viewerCanReopen locked viewerCanUpdate
+          ${includeText ? 'title body' : ''}
           ${planning ? `viewerCanSetStatus status { ${fields} }` : ''}
           assignees(first: 100) { nodes { id login name } pageInfo { hasNextPage } }
         }
@@ -80,7 +81,9 @@ export async function readIssueMetadataAuthority({ repository, number, credentia
   const canEdit = repo.isArchived === false && triage.has(repo.viewerPermission ?? '')
   const commentBlocked = repo.isArchived !== false ? 'This repository is archived.'
     : issue.locked !== false && !canEdit ? 'This issue is locked.' : ''
-  return { repositoryId: repo.id, issueId: issue.id, viewer, canEdit, commentBlocked, assignees: assignees.filter(actor => actor !== null),
+  const canEditText = repo.isArchived === false && issue.viewerCanUpdate === true
+  const text = typeof issue.title === 'string' && typeof issue.body === 'string' ? { title: issue.title, body: issue.body } : null
+  return { repositoryId: repo.id, issueId: issue.id, viewer, canEdit, canEditText, text, commentBlocked, assignees: assignees.filter(actor => actor !== null),
     status: issueStatusPlan(issue, repo.planningStatuses, repo.isArchived === false) }
 }
 
@@ -182,19 +185,22 @@ async function makeEditor(context: MetadataContext & { credential: string }, aut
     checked: options.filter(option => option.checked).map(option => option.key), options, search, more, matches }
 }
 
-export function issueCommentScope(repository: GitHubWorkspaceRepository, authority: Authority) {
-  return hash(['issue-comment', repository.workspace.profileId, repository.workspace.id, authority.repositoryId, authority.issueId, authority.viewer])
+export function issueWriteScope(repository: GitHubWorkspaceRepository, authority: Authority, operation: 'issue-comment' | 'issue-text') {
+  return hash([operation, repository.workspace.profileId, repository.workspace.id, authority.repositoryId, authority.issueId, authority.viewer])
 }
 
 export async function readIssueMetadata(context: MetadataContext, kind: IssueMetadataKind | null) {
-  const credential = kind ? await repositoryGitHubCredential(context.repository.path, context.signal).catch(() => undefined) : undefined
+  const credential = (kind || context.includeText) ? await repositoryGitHubCredential(context.repository.path, context.signal).catch(() => undefined) : undefined
   const authority = await readIssueMetadataAuthority({ ...context, credential }).catch(() => null)
   const editor = authority && kind && credential && (kind === 'state' || authority.canEdit)
     ? await makeEditor({ ...context, credential }, authority, kind).catch(() => null)
     : null
   return { canEdit: Boolean(authority?.canEdit), editor, status: authority?.status?.current,
     canChangeStatus: Boolean(authority?.status?.choices.length),
-    commentScope: authority ? issueCommentScope(context.repository, authority) : '',
+    canEditText: Boolean(authority?.canEditText),
+    editableText: context.includeText && credential && authority?.canEditText && authority.text
+      ? { ...authority.text, scope: issueWriteScope(context.repository, authority, 'issue-text') } : null,
+    commentScope: authority ? issueWriteScope(context.repository, authority, 'issue-comment') : '',
     commentBlocked: authority?.commentBlocked ?? 'GitHub could not check commenting access.' }
 }
 

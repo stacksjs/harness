@@ -619,6 +619,28 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-state="closed"] { color: var(--workspace-accent); }
 [data-issue-state]::before { content: ''; width: 7px; height: 7px; border: 1px solid currentColor; border-radius: 100%; }
 [data-issue-state="closed"]::before { background: currentColor; }
+[data-issue-field-header] {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 8px;
+}
+[data-issue-field-header] h2 { flex: 1 1 18rem; min-inline-size: 0; }
+[data-issue-description] { display: grid; gap: 10px; padding-block-start: 14px; }
+[data-issue-description] h3 { font-size: 14px; font-weight: 650; scroll-margin-block-start: 1rem; }
+[data-issue-text-editor] { scroll-margin-block-start: 12px; }
+[data-issue-text-editor] :is(input:not([type=hidden]), textarea) {
+  inline-size: 100%; min-inline-size: 0; padding: 8px; border: 1px solid var(--workspace-line);
+  border-radius: 6px; background: var(--workspace-surface); color: inherit;
+}
+[data-issue-text-editor] textarea { resize: vertical; min-block-size: 8rem; }
+[data-issue-text-editor] [data-issue-text-current] {
+  max-block-size: 12rem; overflow: auto; white-space: pre-wrap; padding: 8px;
+  background: var(--workspace-surface); border-radius: 6px;
+}
+[data-issue-text-editor] [data-issue-text-preview] {
+  min-block-size: 4rem; padding: 8px; border: 1px solid var(--workspace-line); border-radius: 6px;
+}
+@media (max-width: 767px) {
+  [data-issue-text-editor] :is(input:not([type=hidden]), textarea) { font-size: 16px; }
+}
 [data-issue-detail-heading] #issue-title { scroll-margin-block-start: 2rem; }
 [data-issue-status-control] { min-height: 30px; gap: 5px; padding: 3px 7px; }
 [data-issue-status-control] > [data-issue-state] { min-width: 0; }

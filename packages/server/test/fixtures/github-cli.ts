@@ -330,7 +330,8 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const issue = state.issues?.[repo]?.find(issue => issue.number === variables.number)
     if (state.issueUnsupportedPlanning && query.includes('planningStatuses(first'))
       reply(200, { errors: [{ extensions: { code: 'undefinedField', fieldName: 'planningStatuses' } }] })
-    if (state.assigneeHiddenRead || state.issueStateHiddenRead) {
+    if (state.assigneeHiddenRead || state.issueStateHiddenRead || (state.issueTextHiddenRead && query.includes('title body'))) {
+      delete state.issueTextHiddenRead
       delete state.assigneeHiddenRead
       delete state.issueStateHiddenRead
       writeFileSync(stateFile, JSON.stringify(state))
@@ -341,7 +342,8 @@ if (url.pathname === '/graphql' && method === 'POST') {
         viewerPermission: state.issuePermission ?? 'READ', isArchived: Boolean(state.issueArchived),
         ...(state.planningStatuses && { planningStatuses: { nodes: state.planningStatuses, pageInfo: { hasNextPage: false } } }),
         issue: issue && !issue.pull_request ? { id: issueNodeId(repo, issue), number: issue.number,
-          locked: Boolean(state.issueLocked), state: issue.state.toUpperCase(), stateReason: issue.state_reason?.toUpperCase() ?? null,
+          locked: Boolean(state.issueLocked), viewerCanUpdate: state.issueCanEditText === true,
+          title: issue.title, body: issue.body ?? '', state: issue.state.toUpperCase(), stateReason: issue.state_reason?.toUpperCase() ?? null,
           viewerCanClose: canChangeIssueState, viewerCanReopen: canChangeIssueState,
           viewerCanSetStatus: canChangeIssueState && state.issuePermission === 'TRIAGE',
           status: state.planningStatuses?.find(item => item.id === issue.status_id) ?? null,
@@ -390,6 +392,25 @@ if (url.pathname === '/graphql' && method === 'POST') {
     }
     writeFileSync(stateFile, JSON.stringify(state))
     reply(200, { data: { addComment: { commentEdge: { node: toNode(comment) } } } })
+  }
+  if (query.includes('mutation HarnessUpdateIssueText')) {
+    if (!process.env.GH_TOKEN || state.issueCanEditText !== true || state.issueArchived) reply(403, {})
+    const input = variables.input
+    const issue = Object.entries(state.issues ?? {}).flatMap(([repo, rows]) =>
+      rows.filter(issue => issueNodeId(repo, issue) === input.id && !issue.pull_request))[0]
+    const field = typeof input.title === 'string' ? 'title' : 'body'
+    if (!issue || typeof input[field] !== 'string' || (input.title !== undefined && input.body !== undefined)
+      || state.issueRefuseText) reply(200, { errors: [{ type: 'UNPROCESSABLE', message: 'Private fixture validation' }] })
+    issue[field] = input[field]
+    state.issueTextWrites = [...(state.issueTextWrites ?? []), [issue.number, field, input[field]]]
+    if (state.issueDropText) {
+      delete state.issueDropText
+      state.issueTextHiddenRead = true
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(200, { data: { updateIssue: { issue: { id: input.id, [field]: input[field] } } } })
   }
   if (query.includes('mutation HarnessIssueStatus')) {
     if (!process.env.GH_TOKEN || state.issuePermission !== 'TRIAGE' || !canChangeIssueState) reply(403, {})
