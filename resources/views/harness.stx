@@ -29,7 +29,7 @@ export const projectSettingsId = $props.projectSettingsId || 0
 export const draftProject = $props.draftWorkspace || null
 export const draftWithoutProject = $props.draftWithoutProject === true
 export const missingThread = $props.missingThread === true
-export const freshDraftId = $props.freshDraftId || ''
+export const freshDraft = $props.freshDraft === true
 export const serverUrl = $props.serverUrl || ''
 // The browser CBOR bundle. Empty when the server could not build one, which
 // costs the page its live updates but not its rendered transcript.
@@ -863,7 +863,7 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
         rows="2"
         :rows="Math.min(7, Math.max(2, composerText().split('\n').length + 1))"
         aria-label="Message"
-        @if(freshDraftId && !initialSettingsSection)autofocus@endif
+        @if(freshDraft && !initialSettingsSection)autofocus@endif
         :aria-keyshortcuts="composerShortcuts()"
         placeholder="{{ promptPlaceholder }}"
         :placeholder="composerPlaceholder()"
@@ -1722,6 +1722,16 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
     return Boolean(sessionId && runningTurnId() > 0 && !editingFollowUp()
       && text.startsWith('/') && '/clear'.startsWith(text))
   })
+  function currentDraftId() {
+    // SSR already validated the ID on this workspace route. Read it here so
+    // rendering and caching the shell never depends on it.
+    if (!freshDraft) return null
+    const route = new URL(useRoute().fullPath, 'http://harness.local')
+    const from = initialSettingsSection && route.searchParams.get('from')
+    const workspace = from ? new URL(from, route) : route
+    return workspace.searchParams.get('draft')
+  }
+  const freshDraftId = currentDraftId()
   const draftStorageScope = freshDraftId ? [promptScope, 'draft', freshDraftId].join(':') : promptScope
   const promptDraftKey = `harness.composer.v1:${activeProfile || 0}:${draftStorageScope}`
   const composerDraft = useLocalStorage(promptDraftKey, null, {

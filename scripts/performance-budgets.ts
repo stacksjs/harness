@@ -2,7 +2,7 @@
  * The §11 performance budgets, enforced. PLAN.md promises "lint → typecheck →
  * test → perf budgets" in CI; this is the fourth step.
  *
- * Four budgets run headless, against a real server in a child process — a
+ * The budgets run headless, against a real server in a child process — a
  * child, not in-process, so the RSS numbers are the server's own and not this
  * script's socket client and buffers:
  *
@@ -18,6 +18,8 @@
  *   SSR render of /          < 150ms   median of 9, 3 profiles seeded — the
  *                                      harness-controlled slice of the desktop
  *                                      cold-start budget (see §11 re-baseline)
+ *   cached workspace         < 20ms    repeat visit and new draft URLs against
+ *                                      the same workspace state
  *   reconnect catch-up       < 200ms   ~600 missed events replayed through
  *                                      subscribe(sinceSeq), the scale of ~30s
  *                                      of unseen deltas
@@ -129,19 +131,28 @@ async function orchestrate(): Promise<void> {
 
     console.log(`  rss after seed: ${rssOf().toFixed(1)}MB`)
 
-    // 3. SSR of / — median of 9 after 3 warmups, everything warm, like the
-    // desktop window's request against a running server. Each fetch selects
-    // a distinct composer draft so it exercises a real rendering input.
-    for (let i = 0; i < 3; i++) await fetchRoot(port, { draft: 900 + i, expect: 'miss' })
+    // 3. SSR of / — median of 9 after 3 warmups. Change visible state
+    // between requests and confirm it was rendered. Draft IDs themselves
+    // do not change the workspace HTML, so they cannot cause a render miss.
+    const renderRevision = async (revision: number): Promise<number> => {
+      const name = `Budget revision ${revision}`
+      await dispatch({ type: 'profile.update', profileId: firstProfileId, name })
+      return fetchRoot(port, { draft: 'web_budget_0', profileName: name, expect: 'miss' })
+    }
+    for (let i = 0; i < 3; i++) await renderRevision(i)
     const renders: number[] = []
-    for (let i = 0; i < 9; i++) renders.push(await fetchRoot(port, { draft: i, expect: 'miss' }))
+    for (let i = 3; i < 12; i++) renders.push(await renderRevision(i))
     report('SSR render of /', median(renders), 150, 'ms', 150 * slack)
-
-    // 3b. The render cache: a repeat of an already-rendered URL must come
-    // from memory — this is what a polling control surface actually pays
-    // between state changes (issue #11).
-    report('cached render of /', await fetchRoot(port, { draft: 0, expect: 'hit' }), 20, 'ms', 20 * slack)
     console.log(`  rss after renders: ${rssOf().toFixed(1)}MB`)
+
+    // An unchanged workspace template should serve both repeated opens and
+    // brand-new drafts. Their private composer contents live in client storage.
+    const profileName = 'Budget revision 11'
+    report('cached render of /', await fetchRoot(port, { draft: 'web_budget_0', profileName, expect: 'hit' }), 20, 'ms', 20 * slack)
+    const freshDrafts: number[] = []
+    for (let i = 1; i <= 12; i++)
+      freshDrafts.push(await fetchRoot(port, { draft: `web_budget_${i}`, profileName, expect: 'hit' }))
+    report('cached workspace for a new draft', median(freshDrafts), 20, 'ms', 20 * slack)
 
     // 4. Reconnect: pile up ~600 events, then time a cold subscribe from zero
     // to its `subscribed` marker — the lossless-reconnect path.
@@ -175,15 +186,15 @@ async function orchestrate(): Promise<void> {
   process.exit(0)
 }
 
-async function fetchRoot(port: number, options: { draft: number, expect: 'hit' | 'miss' }): Promise<number> {
-  const draft = `web_budget_${options.draft}`
-  const query = `?draft=${draft}`
+async function fetchRoot(port: number, options: { draft: string, profileName: string, expect: 'hit' | 'miss' }): Promise<number> {
+  const query = `?draft=${options.draft}`
   const t0 = performance.now()
   const response = await fetch(`http://127.0.0.1:${port}/${query}`)
   const html = await response.text()
   const elapsed = performance.now() - t0
   if (response.status !== 200) throw new Error(`GET /${query} answered ${response.status}`)
-  if (!html.includes(draft)) throw new Error(`GET /${query} did not render its draft`)
+  if (!html.includes(options.profileName)) throw new Error(`GET /${query} did not render the current profile name`)
+  if (!/aria-label="Message"\s+autofocus/u.test(html)) throw new Error(`GET /${query} did not render a fresh draft composer`)
   // The render cache is part of the perf contract: a gate that thinks it is
   // timing a render while timing a Map lookup gates nothing.
   const cache = response.headers.get('x-render-cache')

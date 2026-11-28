@@ -5742,6 +5742,16 @@ await backgroundPage.goto(backgroundDraftUrl)
 await backgroundPage.waitForFunction(text => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value === text, savedProjectText)
 check('a fresh draft survives reload and preserves the project draft', true)
 
+const firstDraftAddress = new URL(firstFreshUrl)
+const draftSettingsUrl = new URL('/settings/general', baseUrl)
+draftSettingsUrl.searchParams.set('from', firstDraftAddress.pathname + firstDraftAddress.search)
+await backgroundPage.goto(draftSettingsUrl.href)
+await backgroundPage.getByRole('dialog', { name: 'Settings', exact: true }).waitFor()
+await backgroundPage.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value === 'Keep this separate fresh draft.')
+await backgroundPage.keyboard.press('Escape')
+await backgroundPage.waitForURL(firstFreshUrl)
+check('settings reopens the same independent draft', await backgroundMessage.inputValue() === 'Keep this separate fresh draft.')
+
 await Promise.all([waitForWorktreeStatusReads(new URL(sourceThreadUrl).pathname), backgroundPage.goto(sourceThreadUrl)])
 await backgroundPage.getByText('Holding the source turn.', { exact: true }).waitFor()
 const queuedBackgroundText = 'Background fixture: wait behind the source'

@@ -4107,6 +4107,20 @@ describe('the render cache', () => {
       expect(third.headers.get('x-render-cache')).toBe('miss')
       // The invalidation was not ceremonial: the new state is in the page.
       expect(await third.text()).toContain('Cache')
+
+      const fresh = await fetch(`${base}/?project=none&draft=web_cache_one`)
+      const freshBody = await fresh.text()
+      expect(fresh.headers.get('x-render-cache')).toBe('miss')
+      expect(freshBody).toMatch(/aria-label="Message"\s+autofocus/u)
+      expect(freshBody).not.toContain('web_cache_one')
+
+      const anotherDraft = await fetch(`${base}/?project=none&draft=web_cache_two`)
+      expect(anotherDraft.headers.get('x-render-cache')).toBe('hit')
+      expect(await anotherDraft.text()).toBe(freshBody)
+
+      const ordinaryDraft = await fetch(`${base}/?project=none&draft=invalid`)
+      expect(ordinaryDraft.headers.get('x-render-cache')).toBe('miss')
+      expect(await ordinaryDraft.text()).not.toMatch(/aria-label="Message"\s+autofocus/u)
     }
     finally {
       process.chdir(previousCwd)

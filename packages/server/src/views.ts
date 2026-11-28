@@ -43,7 +43,7 @@ export interface ViewProps {
   draftWorkspace: ProjectSummary | null
   draftWithoutProject: boolean
   missingThread: boolean
-  freshDraftId: string | null
+  freshDraft: boolean
   pullRequestProfile: number | null
   activeSession: {
     turns: ReadonlyArray<{ id: number, response: string, status: string }>
@@ -130,7 +130,7 @@ export function viewProps(state: HarnessState, options: {
   profileId?: number
   workspaceId?: number
   withoutProject?: boolean
-  freshDraftId?: string | null
+  freshDraft?: boolean
   pullRequestProfile?: number
   serverUrl: string
   codecUrl?: string
@@ -231,7 +231,7 @@ export function viewProps(state: HarnessState, options: {
     draftWorkspace,
     draftWithoutProject,
     pullRequestProfile: options.pullRequestProfile ?? null,
-    freshDraftId: !active && (draftWorkspace || draftWithoutProject) ? parseFreshDraftId(options.freshDraftId) : null,
+    freshDraft: !active && !options.missingThread && Boolean((draftWorkspace || draftWithoutProject) && options.freshDraft),
     activeSession: active
       ? {
           id: active.id,

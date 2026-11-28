@@ -2434,7 +2434,9 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           profileId: Number(workspaceUrl.searchParams.get('profile')) || undefined,
           workspaceId: Number(workspaceUrl.searchParams.get('workspace')) || undefined,
           withoutProject: sharedDraft || workspaceUrl.searchParams.get('project') === 'none',
-          freshDraftId: id && !missingThread ? null : parseFreshDraftId(workspaceUrl.searchParams.get('draft')),
+          // A fresh composer may autofocus. Its ID belongs to browser
+          // storage, so independent drafts share the same rendered page.
+          freshDraft: !id && Boolean(parseFreshDraftId(workspaceUrl.searchParams.get('draft'))),
           pullRequestProfile: sharedDraft ? Number(workspaceUrl.searchParams.get('profile')) || undefined : undefined,
           settingsSection: settings ?? undefined,
           serverUrl: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/ws`,
