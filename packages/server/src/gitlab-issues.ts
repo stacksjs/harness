@@ -124,6 +124,38 @@ function projectPath(repository: GitLabIssueRepository) {
 }
 
 type IssueTextField = 'title' | 'body'
+export type GitLabTriageKind = 'labels' | 'assignees'
+export type GitLabTriageChoice = { key: string, name: string, description: string }
+type TriageConnection = { nodes?: unknown[], pageInfo?: { hasNextPage?: boolean } }
+
+export function gitLabTriageKey(kind: GitLabTriageKind, value: unknown): value is string {
+  return typeof value === 'string' && (kind === 'labels' ? /^gid:\/\/gitlab\/(?:GroupLabel|ProjectLabel|Label)\/[1-9]\d{0,18}$/u
+    : /^gid:\/\/gitlab\/User\/[1-9]\d{0,18}$/u).test(value)
+}
+
+function triageChoices(kind: GitLabTriageKind, connection?: TriageConnection) {
+  if (!Array.isArray(connection?.nodes) || typeof connection.pageInfo?.hasNextPage !== 'boolean') return null
+  const choices = new Map<string, GitLabTriageChoice>()
+  for (const value of connection.nodes) {
+    const row = value as { id?: unknown, title?: unknown, username?: unknown, description?: unknown, name?: unknown, archived?: boolean } | null
+    if (!gitLabTriageKey(kind, row?.id)) return null
+    const label = kind === 'labels'
+    const name = label ? row.title : gitLabIssueUsername(row.username)
+    if (typeof name !== 'string' || !name.trim() || name.length > 255 || /\p{Cc}/u.test(name)) return null
+    const description = label ? row.description : row.name
+    if (row.archived !== true)
+      choices.set(row.id, { key: row.id, name, description: typeof description === 'string' ? description.slice(0, 160) : '' })
+  }
+  return { choices: [...choices.values()], more: connection.pageInfo.hasNextPage }
+}
+
+const triageFields = { labels: 'id title description', assignees: 'id username name' }
+
+type GitLabGraphQLError = { extensions?: { code?: string, fieldName?: string, typeName?: string } }
+function missingGitLabField(errors: GitLabGraphQLError[] | undefined, fieldName: string, typeName: string) {
+  return errors?.length && errors.every(({ extensions }) =>
+    extensions?.code === 'undefinedField' && extensions.fieldName === fieldName && extensions.typeName === typeName)
+}
 
 async function gitLabGraphQL(repository: GitLabIssueRepository, query: string, variables: object, signal: AbortSignal, credential?: IssueCredential) {
   if (credential?.type !== 'oauth2')
@@ -143,24 +175,34 @@ async function gitLabGraphQL(repository: GitLabIssueRepository, query: string, v
   return response.json()
 }
 
-export async function readGitLabIssueText(repository: GitLabIssueRepository, number: number, signal: AbortSignal, credential?: IssueCredential) {
+export async function readGitLabIssueText(repository: GitLabIssueRepository, number: number, signal: AbortSignal, credential?: IssueCredential,
+  triage?: GitLabTriageKind,
+) {
   type PermissionResponse = {
     data?: {
       currentUser?: { id?: string }
-      project?: { id?: string, fullPath?: string, archived?: boolean, issue?: {
+      project?: { id?: string, fullPath?: string, archived?: boolean, multipleAssignees?: { available?: boolean }, issue?: {
         id?: string, iid?: string, webUrl?: string, title?: string, description?: string | null,
-        state?: string, discussionLocked?: boolean, userPermissions?: { updateIssue?: boolean, createNote?: boolean, reopenIssue?: boolean },
+        state?: string, discussionLocked?: boolean, userPermissions?: { updateIssue?: boolean, createNote?: boolean, reopenIssue?: boolean, adminIssue?: boolean },
+        labels?: TriageConnection, assignees?: TriageConnection,
       } }
     }
-    errors?: unknown[]
+    errors?: GitLabGraphQLError[]
   }
-  const reply = await gitLabGraphQL(repository, `query HarnessGitLabIssueText($path: ID!, $iid: String!) {
+  const request = (withLimit: boolean) => gitLabGraphQL(repository, `query HarnessGitLabIssueText($path: ID!, $iid: String!) {
     currentUser { id }
     project(fullPath: $path) {
       id fullPath archived
-      issue(iid: $iid) { id iid webUrl title description state discussionLocked userPermissions { updateIssue createNote reopenIssue } }
+      ${withLimit ? 'multipleAssignees: licensedFeatureAvailability(feature: MULTIPLE_ISSUE_ASSIGNEES) { available }' : ''}
+      issue(iid: $iid) {
+        id iid webUrl title description state discussionLocked
+        userPermissions { updateIssue createNote reopenIssue adminIssue }
+        ${triage ? `${triage}(first: 100) { nodes { ${triageFields[triage]} } pageInfo { hasNextPage } }` : ''}
+      }
     }
-  }`, { path: repository.name, iid: String(number) }, signal, credential) as PermissionResponse | null
+  }`, { path: repository.name, iid: String(number) }, signal, credential) as Promise<PermissionResponse | null>
+  let reply = await request(triage === 'assignees')
+  if (triage === 'assignees' && missingGitLabField(reply?.errors, 'licensedFeatureAvailability', 'Project')) reply = await request(false)
   const project = reply?.data?.project
   const issue = project?.issue
   const viewer = reply?.data?.currentUser?.id
@@ -176,10 +218,65 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
     : issue.userPermissions?.createNote === true ? ''
       : issue.discussionLocked ? 'This issue is locked.' : 'This GitLab account cannot comment on this issue.'
   const canEditText = project.archived === false && issue.userPermissions?.updateIssue === true
+  const canTriage = canEditText && issue.userPermissions?.adminIssue === true
+  const applied = triage ? triageChoices(triage, issue[triage]) : null
   const status = gitLabIssueStatusPlan(issue.state, canEditText && (issue.state !== 'closed' || issue.userPermissions?.reopenIssue === true))
   return { scope: scope('issue-text'), commentScope: scope('issue-comment'), commentBlocked, viewer,
     statusScope: scope('issue-status'), status, issueId: issue.id, canEditText,
+    triageScope: scope('issue-triage'), projectId: project.id, canTriage, applied: applied && !applied.more ? applied.choices : null,
+    multipleAssignees: project.multipleAssignees?.available ?? null,
     text: { title: issue.title, body: issue.description ?? '' } }
+}
+
+export async function searchGitLabTriage(repository: GitLabIssueRepository, kind: GitLabTriageKind, search: string,
+  authority: { viewer: string, projectId: string }, signal: AbortSignal, credential: IssueCredential,
+) {
+  const request = (withArchive: boolean) => {
+    const field = kind === 'labels'
+      ? `labels(first: 50, searchTerm: $search, includeAncestorGroups: true) { nodes { id title description ${withArchive ? 'archived' : ''} } pageInfo { hasNextPage } }`
+      : 'projectMembers(first: 50, search: $search, relations: [DIRECT, INHERITED, INVITED_GROUPS, SHARED_INTO_ANCESTORS]) { nodes { user { id username name state } } pageInfo { hasNextPage } }'
+    return gitLabGraphQL(repository, `query HarnessGitLabTriageChoices($path: ID!, $search: String!) {
+    currentUser { id }
+    project(fullPath: $path) { id fullPath ${field} }
+  }`, { path: repository.name, search }, signal, credential) as {
+    errors?: GitLabGraphQLError[], data?: { currentUser?: { id?: string }, project?: { id?: string, fullPath?: string, labels?: TriageConnection,
+      projectMembers?: { nodes?: { user?: { state?: string } }[], pageInfo?: { hasNextPage?: boolean } },
+    } },
+  } | null
+  }
+  let reply = await request(kind === 'labels')
+  if (kind === 'labels' && missingGitLabField(reply?.errors, 'archived', 'Label')) reply = await request(false)
+  const project = reply?.data?.project
+  if (reply?.errors?.length || reply?.data?.currentUser?.id !== authority.viewer || project?.id !== authority.projectId
+    || project.fullPath?.toLowerCase() !== repository.name.toLowerCase()) return null
+  const members = project.projectMembers
+  return triageChoices(kind, kind === 'labels' ? project.labels : members && {
+    nodes: members.nodes?.flatMap(node => node?.user?.state === 'active' ? [node.user] : []), pageInfo: members.pageInfo,
+  })
+}
+
+export async function writeGitLabTriage(repository: GitLabIssueRepository, number: number, kind: GitLabTriageKind,
+  added: GitLabTriageChoice[], removed: GitLabTriageChoice[], target: GitLabTriageChoice[], signal: AbortSignal, credential: IssueCredential,
+) {
+  const name = kind === 'labels' ? 'updateIssue' : 'issueSetAssignees'
+  const type = kind === 'labels' ? 'UpdateIssueInput' : 'IssueSetAssigneesInput'
+  const ids = (rows: GitLabTriageChoice[]) => rows.map(row => row.key.split('/').at(-1))
+  const input = { projectPath: repository.name, iid: String(number), ...(kind === 'labels'
+    ? { addLabelIds: ids(added), removeLabelIds: ids(removed) }
+    : { assigneeUsernames: target.map(row => row.name), operationMode: 'REPLACE' }) }
+  try {
+    const reply = await gitLabGraphQL(repository, `mutation HarnessGitLabTriage($input: ${type}!) {
+      ${name}(input: $input) { issue { id } errors }
+    }`, { input }, signal, credential) as { data?: Record<string, { issue?: { id?: string }, errors?: unknown[] }>, errors?: unknown[] } | null
+    const result = reply?.data?.[name]
+    if (result?.errors?.length || reply?.errors?.length) return 'refused' as const
+    return result?.issue?.id ? 'acknowledged' as const : 'ambiguous' as const
+  }
+  catch (error) {
+    const status = error instanceof RepositoryPullRequestError ? error.status : undefined
+    if (status === 401 || status === 403) return 'denied' as const
+    return status === 400 || status === 404 || status === 422 ? 'refused' as const : 'ambiguous' as const
+  }
 }
 
 export async function writeGitLabIssueStatus(repository: GitLabIssueRepository, number: number, state: 'open' | 'closed',

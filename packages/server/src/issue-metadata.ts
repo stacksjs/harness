@@ -1,10 +1,12 @@
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
+import type { GitLabTriageChoice, GitLabTriageKind } from './gitlab-issues'
+import type { GitLabIssueRepository } from './issue-repositories'
 import type { IssueStatusPlan, RawIssueStatus, RawPlanningStatuses } from './issue-status'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { issueRepositoryKey } from '@harness/contract'
-import { gitLabIssueCredential, readGitLabIssueText, writeGitLabIssueStatus } from './gitlab-issues'
+import { gitLabIssueCredential, gitLabTriageKey, readGitLabIssueText, searchGitLabTriage, writeGitLabIssueStatus, writeGitLabTriage } from './gitlab-issues'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
 import { issueReferenceForSelection, trustedIssueRepositories } from './issue-repositories'
 import { issueStatusPlan, saveIssueStatus, writeGitHubIssueStatus } from './issue-status'
@@ -12,7 +14,7 @@ import { applyPullRequestLabelChanges, parseLabelSelection, readPullRequestLabel
 import { repositoryGitHubCredential, repositoryGitHubRequest, RepositoryPullRequestError } from './repository-pull-request'
 
 const maxAssigneeOptions = 150
-const changingStatus = new Set<string>()
+const changingMetadata = new Set<string>()
 const triage = new Set(['TRIAGE', 'MODERATE', 'WRITE', 'MAINTAIN', 'ADMIN'])
 const nodeId = /^[A-Za-z0-9_+\/=:.-]{1,256}$/u
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
@@ -164,12 +166,124 @@ function statusEditor(status: IssueStatusPlan | null, version: (form: StatusEdit
     })) }
 }
 
-function gitLabStatusRevision(identity: string, form: StatusEditorForm) {
+function gitLabMetadataRevision(identity: string, form: StatusEditorForm) {
   return hash(['issue-metadata', identity, form.kind, form.intent, form.scope])
 }
 
 export function gitLabStatusEditor(status: IssueStatusPlan | null, identity: string) {
-  return statusEditor(status, form => gitLabStatusRevision(identity, form))
+  return statusEditor(status, form => gitLabMetadataRevision(identity, form))
+}
+
+type GitLabIssueContext = { repository: GitLabIssueRepository, number: number, signal: AbortSignal,
+  credential: Awaited<ReturnType<typeof gitLabIssueCredential>> }
+type GitLabTriageAuthority = NonNullable<Awaited<ReturnType<typeof readGitLabIssueText>>>
+
+function parseGitLabTriage(scope: string, checked: string[], kind: GitLabTriageKind) {
+  let rows: unknown
+  try { rows = JSON.parse(scope) }
+  catch { return null }
+  if (!Array.isArray(rows) || rows.length > maxAssigneeOptions) return null
+  const selected = new Set(checked)
+  if (selected.size !== checked.length) return null
+  const options = new Map<string, Option>()
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length !== 4 || !gitLabTriageKey(kind, row[0]) || options.has(row[0])
+      || typeof row[1] !== 'string' || !row[1].trim() || row[1].length > 255 || /\p{Cc}/u.test(row[1])
+      || typeof row[2] !== 'string' || row[2].length > 160 || typeof row[3] !== 'boolean') return null
+    options.set(row[0], { key: row[0], name: row[1], description: row[2], applied: row[3], checked: selected.has(row[0]) })
+  }
+  return checked.every(key => options.has(key)) ? [...options.values()] : null
+}
+
+function sameTriageSelection(left: GitLabTriageChoice[], right: GitLabTriageChoice[]) {
+  const keys = new Set(left.map(row => row.key))
+  return keys.size === right.length && right.every(row => keys.has(row.key))
+}
+
+async function makeGitLabTriageEditor(context: GitLabIssueContext, authority: GitLabTriageAuthority, kind: GitLabTriageKind,
+  search = '', intent: string = crypto.randomUUID(), staged: Option[] = [],
+): Promise<IssueMetadataEditor | null> {
+  if (!authority.canTriage || !authority.applied) return null
+  const catalog = await searchGitLabTriage(context.repository, kind, search, authority, context.signal, context.credential)
+  if (!catalog) return null
+  const options = new Map<string, Option>(authority.applied.map(row => [row.key, { ...row, applied: true, checked: true }]))
+  for (const row of staged) {
+    if (row.applied !== row.checked) options.set(row.key, row)
+  }
+  if (options.size > maxAssigneeOptions) return null
+  for (const row of catalog.choices) {
+    if (options.size >= maxAssigneeOptions) break
+    if (!options.has(row.key)) options.set(row.key, { ...row, applied: false, checked: false })
+  }
+  const choices = [...options.values()]
+  const form = { kind, intent, scope: JSON.stringify(choices.map(row => [row.key, row.name, row.description, row.applied])) }
+  return { ...form, revision: gitLabMetadataRevision(authority.triageScope, form), options: choices, search,
+    matches: catalog.choices.length, more: catalog.more, checked: choices.filter(row => row.checked).map(row => row.key) }
+}
+
+export async function readGitLabTriageEditor(repository: GitLabIssueRepository, number: number, signal: AbortSignal, kind: GitLabTriageKind) {
+  const credential = await gitLabIssueCredential(repository, signal)
+  const authority = await readGitLabIssueText(repository, number, signal, credential, kind)
+  return authority ? makeGitLabTriageEditor({ repository, number, signal, credential }, authority, kind) : null
+}
+
+async function saveGitLabTriage(context: GitLabIssueContext, kind: GitLabTriageKind, authority: GitLabTriageAuthority, options: Option[],
+  form: IssueMetadataForm, fingerprint: string, receipts: PullRequestReplyReceipts, trusted: () => boolean,
+  read: () => Promise<GitLabTriageAuthority | null>,
+): Promise<Result> {
+  if (!authority.applied) return 'unavailable'
+  const added = options.filter(row => !row.applied && row.checked)
+  const removed = options.filter(row => row.applied && !row.checked)
+  const target = options.filter(row => row.checked)
+  const matches = (rows: GitLabTriageChoice[]) => {
+    if (kind === 'assignees') return sameTriageSelection(rows, target)
+    const keys = new Set(rows.map(row => row.key))
+    return added.every(row => keys.has(row.key)) && removed.every(row => !keys.has(row.key))
+  }
+  const previous = receipts.inspect(form.intent, fingerprint)
+  if (previous === 'confirmed' || previous === 'conflict') return previous === 'confirmed' ? 'confirmed' : 'changed'
+  if (previous === 'pending') {
+    if (!matches(authority.applied)) return 'pending'
+    receipts.confirm(form.intent, fingerprint)
+    return 'confirmed'
+  }
+  if (!authority.canTriage) return 'denied'
+  if (!sameTriageSelection(authority.applied, options.filter(row => row.applied))) return 'changed'
+  if (!added.length && !removed.length) return 'updated'
+  if (kind === 'assignees' && target.length > 1 && authority.multipleAssignees !== true
+    && (authority.multipleAssignees === false || target.length > authority.applied.length)) return 'limit'
+  for (const row of added) {
+    const catalog = await searchGitLabTriage(context.repository, kind, row.name, authority, context.signal, context.credential)
+    if (!catalog?.choices.some(choice => choice.key === row.key && choice.name === row.name)) return 'changed'
+  }
+  // Search can take time. Re-read the current choices under the pinned account before claiming.
+  const current = await read()
+  if (!current?.applied || current.triageScope !== authority.triageScope || !trusted()
+    || !sameTriageSelection(current.applied, authority.applied)) return 'changed'
+  if (!current.canTriage) return 'denied'
+  if (kind === 'assignees' && authority.multipleAssignees !== current.multipleAssignees) return 'changed'
+  const retained = new Map(current.applied.map(row => [row.key, row.name]))
+  if (kind === 'assignees' && target.some(row => row.applied && retained.get(row.key) !== row.name)) return 'changed'
+  const claim = receipts.claim(form.intent, fingerprint, trusted())
+  if (claim !== 'claimed') return claim === 'conflict' ? 'changed' : claim
+  try {
+    const result = await writeGitLabTriage(context.repository, context.number, kind, added, removed, target, context.signal, context.credential)
+    if (result === 'denied') {
+      receipts.reject(form.intent, fingerprint)
+      return 'denied'
+    }
+    const after = await read().catch(() => null)
+    if (after?.applied && after.triageScope === authority.triageScope && trusted() && matches(after.applied)) {
+      receipts.confirm(form.intent, fingerprint)
+      return 'updated'
+    }
+    if (result === 'refused' || (result === 'acknowledged' && after?.applied && after.triageScope === authority.triageScope)) {
+      receipts.reject(form.intent, fingerprint)
+      return 'refused'
+    }
+    return 'pending'
+  }
+  catch { return 'pending' }
 }
 
 async function makeEditor(context: MetadataContext & { credential: string }, authority: Authority, kind: IssueMetadataKind,
@@ -309,18 +423,24 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
   const selected = values.getAll('choice').sort()
   const operation = values.get('operation') ?? 'save'
   if (!reference || !state.profiles.has(profile) || !kind || !uuid.test(intent) || !/^[a-f0-9]{64}$/u.test(reviewed)
-    || !scope.startsWith('[') || scope.length > 950_000 || !['save', 'search'].includes(operation)
-    || (reference.tracker === 'gitlab' && kind !== 'state')) return null
-  const labels = kind === 'labels' ? parseLabelSelection(scope, selected) : null
-  const assignees = kind === 'assignees' ? parseAssignees(scope, selected) : null
+    || !scope.startsWith('[') || scope.length > 950_000 || !['save', 'search'].includes(operation)) return null
+  const gitLabOptions = reference.tracker === 'gitlab' && kind !== 'state' ? parseGitLabTriage(scope, selected, kind) : null
+  const labels = reference.tracker === 'github' && kind === 'labels' ? parseLabelSelection(scope, selected) : null
+  const assignees = reference.tracker === 'github' && kind === 'assignees' ? parseAssignees(scope, selected) : null
   if (kind === 'state' ? operation !== 'save' || selected.length !== 1 || !id(selected[0]) || scope.length > 40_000
-    : !labels && !assignees) return null
+    : !labels && !assignees && !gitLabOptions) return null
   const form: IssueMetadataForm = { kind, scope, intent, revision: reviewed, checked: selected }
   const forge = reference.tracker === 'gitlab' ? 'GitLab' : 'GitHub'
-  const finish = (result: Result, editor?: IssueMetadataEditor | null) => ({
-    result, kind, message: kind === 'state' && result === 'denied' ? forge + ' does not allow this issue status change.'
-      : messages[result].replaceAll('GitHub', forge), editor, draft: result === 'pending' ? form : null,
-  })
+  const finish = (result: Result, editor?: IssueMetadataEditor | null) => {
+    const denied = kind === 'state' ? forge + ' does not allow this issue status change.'
+      : forge === 'GitLab' ? 'This GitLab account cannot edit labels or assignees.' : messages.denied
+    const message = result === 'denied' ? denied
+      : result === 'limit' && forge === 'GitLab' ? 'This project has no confirmed support for multiple assignees. Select one assignee.'
+        : result === 'busy' && kind !== 'state' ? 'An issue edit is in progress. Reopen the issue to check the result.'
+          : messages[result].replaceAll('GitHub', forge)
+    return { result, kind, message,
+      editor, draft: result === 'pending' ? form : null }
+  }
   try {
     const repositoryKey = issueRepositoryKey(reference)
     const gitLabRepository = reference.tracker === 'gitlab'
@@ -333,17 +453,32 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
       const current = state.workspaces.get(repository.workspace.id)
       return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === repository.workspace.path)
     }
-    const key = repositoryKey + '#' + reference.number
-    if (kind === 'state' && changingStatus.has(key)) return finish('busy')
-    if (kind === 'state') changingStatus.add(key)
+    const key = repositoryKey + '#' + reference.number + ':' + kind
+    const locked = kind === 'state' || Boolean(gitLabOptions)
+    if (locked && changingMetadata.has(key)) return finish('busy')
+    if (locked) changingMetadata.add(key)
     try {
       const fingerprint = hash(['issue-metadata-write', reviewed, selected])
       if (gitLabRepository?.tracker === 'gitlab') {
         const credential = await gitLabIssueCredential(gitLabRepository, signal)
-        const read = () => readGitLabIssueText(gitLabRepository, reference.number, signal, credential)
+        const read = () => readGitLabIssueText(gitLabRepository, reference.number, signal, credential, kind === 'state' ? undefined : kind)
         const authority = await read()
+        if (kind !== 'state' && gitLabOptions) {
+          if (!authority?.applied) return finish('unavailable')
+          if (!trusted() || gitLabMetadataRevision(authority.triageScope, form) !== reviewed) return finish('changed')
+          const context = { repository: gitLabRepository, number: reference.number, credential, signal }
+          if (operation === 'search') {
+            if (!authority.canTriage) return finish('denied')
+            if (receipts.inspect(intent, fingerprint) || !sameTriageSelection(authority.applied, gitLabOptions.filter(row => row.applied))) return finish('changed')
+            const search = (values.get('query') ?? '').slice(0, 120).replace(/\p{Cc}/gu, '').trim()
+            const editor = await makeGitLabTriageEditor(context, authority, kind, search, intent, gitLabOptions).catch(() => null)
+            return editor ? finish('search', editor) : finish('unavailable', { ...form, options: gitLabOptions, search, more: false, matches: -1 })
+          }
+          const result = await saveGitLabTriage(context, kind, authority, gitLabOptions, form, fingerprint, receipts, trusted, read)
+          return finish(result, result === 'limit' ? { ...form, options: gitLabOptions, search: '', more: false, matches: gitLabOptions.length } : null)
+        }
         if (!authority?.status) return finish('unavailable')
-        if (!trusted() || gitLabStatusRevision(authority.statusScope, form) !== reviewed) return finish('changed')
+        if (!trusted() || gitLabMetadataRevision(authority.statusScope, form) !== reviewed) return finish('changed')
         return finish(await saveIssueStatus(authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
           const after = await read()
           return after?.statusScope === authority.statusScope ? after.status : null
@@ -372,7 +507,7 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
         number: reference.number, credential, signal, receipts, trusted }, labels.changes, intent, fingerprint))
       return finish(await saveAssignees(context, authority, assignees!.changes, receipts, form, fingerprint, trusted))
     }
-    finally { if (kind === 'state') changingStatus.delete(key) }
+    finally { if (locked) changingMetadata.delete(key) }
   }
   catch { return finish('unavailable') }
 }

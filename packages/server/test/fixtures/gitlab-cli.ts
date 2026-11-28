@@ -37,21 +37,82 @@ if (path === '/graphql') {
   if (!flags.includes('--method') || !flags.includes('POST')) respond(400, {})
   const { query, variables } = await new Response(Bun.stdin.stream()).json()
   const currentUser = { id: 'gid://gitlab/User/' + viewer }
+  const connect = nodes => ({ nodes, pageInfo: { hasNextPage: false } })
+  const allLabels = [...(gitlab.labels ?? []), { name: 'offline' }, { name: 'Unrelated label' }].flatMap((label, i) =>
+    typeof label.name === 'string' ? [{ id: 'gid://gitlab/' + (i === 0 ? 'GroupLabel/' : 'ProjectLabel/') + (700 + i),
+      title: label.name, description: label.description ?? '', archived: label.archived === true }] : [])
+  const allMembers = (gitlab.members ?? []).flatMap((member, i) => /^[a-z0-9._-]+$/i.test(member.username ?? '')
+    ? [{ id: 'gid://gitlab/User/' + (800 + i), username: member.username, name: member.name, state: member.state ?? 'active' }] : [])
+  const projectInfo = { id: 'gid://gitlab/Project/74', fullPath: gitlab.repository, archived: gitlab.archived === true,
+    multipleAssignees: { available: gitlab.multipleAssignees !== false } }
   const issue = () => ({ id: 'gid://gitlab/Issue/2000', iid: String(gitlab.issue.iid), webUrl: gitlab.issue.web_url,
     title: gitlab.issue.title, description: gitlab.issue.description ?? null, state: gitlab.issue.state, discussionLocked: gitlab.locked === true,
+    labels: connect(allLabels.filter(label => gitlab.issue.labels.includes(label.title))),
+    assignees: connect(allMembers.filter(member => gitlab.issue.assignees?.some(assignee => assignee.username === member.username))),
     userPermissions: { updateIssue: gitlab.canEditText === true, createNote: gitlab.canComment === true && !gitlab.locked,
-      reopenIssue: gitlab.canEditText === true && !gitlab.denyReopen } })
+      adminIssue: gitlab.canTriage === true, reopenIssue: gitlab.canEditText === true && !gitlab.denyReopen } })
   const note = item => ({ id: 'gid://gitlab/Note/' + item.id, body: item.body, noteableId: 2000, noteableType: 'Issue',
     system: item.system === true, internal: item.internal === true, author: { id: 'gid://gitlab/User/' + item.author.id } })
   if (query.includes('query HarnessGitLabIssueText')) {
+    if (gitlab.noLicensedField && query.includes('licensedFeatureAvailability'))
+      respond(200, { errors: [{ extensions: { code: 'undefinedField', typeName: 'Project', fieldName: 'licensedFeatureAvailability' } }] })
     if (gitlab.failTextRead) {
       delete gitlab.failTextRead
       writeFileSync(statePath, JSON.stringify(state))
       respond(503, {})
     }
     if (variables.path !== gitlab.repository || variables.iid !== String(gitlab.issue.iid)) respond(200, { data: { project: null } })
-    respond(200, { data: { currentUser,
-      project: { id: 'gid://gitlab/Project/74', fullPath: gitlab.repository, archived: gitlab.archived === true, issue: issue() } } })
+    if (gitlab.failTriageRead && (query.includes('labels(first:') || query.includes('assignees(first:'))) {
+      delete gitlab.failTriageRead
+      writeFileSync(statePath, JSON.stringify(state))
+      respond(503, {})
+    }
+    const project = { ...projectInfo, issue: issue() }
+    if (gitlab.noLicensedField) delete project.multipleAssignees
+    respond(200, { data: { currentUser, project } })
+  }
+  if (query.includes('query HarnessGitLabTriageChoices')) {
+    if (!pinned || variables.path !== gitlab.repository || typeof variables.search !== 'string') respond(400, {})
+    if (gitlab.catalogUnavailable) respond(403, {})
+    const search = variables.search.toLowerCase()
+    if (query.includes('labels(first:')) {
+      if (!query.includes('includeAncestorGroups: true')) respond(400, {})
+      if (gitlab.noArchivedField && query.includes('description archived'))
+        respond(200, { errors: [{ extensions: { code: 'undefinedField', typeName: 'Label', fieldName: 'archived' } }] })
+      respond(200, { data: { currentUser, project: { ...projectInfo, labels: connect(allLabels.filter(label => label.title.toLowerCase().includes(search))) } } })
+    }
+    const nodes = allMembers.filter(member => member.username.toLowerCase().includes(search) || member.name.toLowerCase().includes(search)).map(user => ({ user }))
+    respond(200, { data: { currentUser, project: { ...projectInfo, projectMembers: connect(nodes) } } })
+  }
+  if (query.includes('mutation HarnessGitLabTriage')) {
+    if (!pinned || !gitlab.canTriage || gitlab.archived) respond(403, {})
+    const input = variables.input
+    if (input.projectPath !== gitlab.repository || input.iid !== String(gitlab.issue.iid)) respond(400, {})
+    const assignees = query.includes('issueSetAssignees')
+    const name = assignees ? 'issueSetAssignees' : 'updateIssue'
+    if (gitlab.refuseTriage) respond(200, { data: { [name]: { issue: issue(), errors: ['Fixture rejected this change'] } } })
+    if (assignees) {
+      if (input.operationMode !== 'REPLACE' || !Array.isArray(input.assigneeUsernames)) respond(400, {})
+      const users = input.assigneeUsernames.map(username => allMembers.find(member => member.username === username))
+      if (users.some(user => !user)) respond(400, {})
+      gitlab.issue.assignees = users.map(({ id, username }) => ({ id: Number(id.split('/').at(-1)), username }))
+    }
+    else {
+      const labels = ids => Array.isArray(ids) ? ids.map(id => allLabels.find(label => label.id.endsWith('/' + id))?.title) : [null]
+      const added = labels(input.addLabelIds), removed = labels(input.removeLabelIds)
+      if (added.some(label => !label) || removed.some(label => !label)) respond(400, {})
+      gitlab.issue.labels = [...new Set([...gitlab.issue.labels.filter(label => !removed.includes(label)), ...added])]
+    }
+    gitlab.triageWrites ??= []
+    gitlab.triageWrites.push({ viewer, kind: assignees ? 'assignees' : 'labels', input })
+    if (gitlab.dropTriageReply) {
+      delete gitlab.dropTriageReply
+      gitlab.failTriageRead = true
+      writeFileSync(statePath, JSON.stringify(state))
+      respond(502, {})
+    }
+    writeFileSync(statePath, JSON.stringify(state))
+    respond(200, { data: { [name]: { issue: issue(), errors: [] } } })
   }
   if (query.includes('mutation HarnessPostGitLabIssueComment')) {
     if (!pinned || !gitlab.canComment || gitlab.locked || gitlab.archived) respond(403, {})

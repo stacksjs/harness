@@ -10,7 +10,7 @@ import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from '
 import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssueText } from './gitlab-issues'
 import { issueReferenceForSelection, mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
-import { gitLabStatusEditor, issueMetadataKind, readIssueMetadata } from './issue-metadata'
+import { gitLabStatusEditor, issueMetadataKind, readGitLabTriageEditor, readIssueMetadata } from './issue-metadata'
 import { createIssueTextDraft, issueTextField, issueTextLimits } from './issue-text'
 import { newThreadLink, parsePullRequest } from './prompt-links'
 import { readFilterViewer, readRepositoryFilterChoices } from './pull-request-list-filters'
@@ -260,6 +260,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     : null
   const gitLabTextRead = selection?.tracker === 'gitlab' && number
     ? readGitLabIssueText(selection, number, signal).catch(() => null) : null
+  const gitLabTriageRead = selection?.tracker === 'gitlab' && number && !metadataSubmission && (editMetadata === 'labels' || editMetadata === 'assignees')
+    ? readGitLabTriageEditor(selection, number, signal, editMetadata).catch(() => null) : null
   const targets = [...includedRepositories].flatMap(([key, repo]) =>
     !hidden.has(key) && (!repository || key === repository.key) ? [repo] : [])
   const findLabel = (query.get('findLabel') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
@@ -285,7 +287,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     })
   }
   const { selected, error } = await detail ?? { selected: null, error: selectionName || number ? 'This issue is outside the selected profile.' : '' }
-  const [choices, metadata, gitLabText] = await Promise.all([lookup, metadataRead, gitLabTextRead])
+  const [choices, metadata, gitLabText, gitLabTriage] = await Promise.all([lookup, metadataRead, gitLabTextRead, gitLabTriageRead])
   const labelChoices = choices?.kind === 'labels' ? choices : null
   const people = choices?.kind === 'assignees' ? choices : null
   signal.throwIfAborted()
@@ -316,11 +318,11 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const textPending = textResult === 'pending'
   const textConflict = textResult === 'stale'
   const textLocked = textResult === 'changed' || textResult === 'denied'
-  const metadataEditor = metadataSubmission ? metadataSubmission.editor : metadata?.editor
+  const metadataEditor = metadataSubmission ? metadataSubmission.editor : metadata?.editor ?? gitLabTriage
     ?? (gitLabText && editMetadata === 'state' ? gitLabStatusEditor(gitLabText.status, gitLabText.statusScope) : null)
   const statusEdit = editMetadata === 'state' || metadataSubmission?.kind === 'state'
   const metadataMessage = metadataSubmission?.message
-    ?? (selected && query.get('metadataResult') === 'updated' ? 'Issue updated on GitHub.' : '')
+    ?? (selected && query.get('metadataResult') === 'updated' ? 'Issue updated on ' + textForge + '.' : '')
   const statusMessage = statusEdit ? metadataMessage
     : selected && query.get('metadataResult') === 'state' ? 'Issue status updated on ' + textForge + '.' : ''
   const pageEnd = scope.page * pageSize
@@ -396,7 +398,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     savedViewScope, savedViewDetail: savedViewDetail.toString(),
     listSelectionFields: selected ? [...savedViewDetail, ['selectionProfile', String(profile)]] : [],
     linkedThreads, threadChoices, pullRequests: [...pullRequests.values(), ...(selected?.relatedRequests ?? [])],
-    canEditMetadata: Boolean(selected && metadata?.canEdit),
+    canEditMetadata: Boolean(selected && (metadata?.canEdit || gitLabText?.canTriage)),
     metadataEditor: selected && !statusEdit ? metadataEditor : null,
     metadataDraft: selected && !statusEdit ? metadataSubmission?.draft : null,
     metadataMessage: statusEdit ? '' : metadataMessage,

@@ -10,7 +10,7 @@
     @foreach(metadataDraft.checked as key)
       <input type="hidden" name="choice" value="{{ key }}">
     @endforeach
-    <button type="submit" data-issue-button>Check GitHub and finish changes</button>
+    <button type="submit" data-issue-button>Check {{ textForge }}@if(textForge === 'GitHub') and finish changes@endif</button>
     <a href="{{ metadataHref }}#issue-metadata" data-issue-button>Return to issue</a>
   </form>
 @elseif(metadataEditor)
@@ -24,10 +24,10 @@
       <label class="sr-only" for="issue-metadata-search">@if(metadataEditor.kind === 'labels')Search labels@else Search assignees@endif</label>
       <input id="issue-metadata-search" type="search" name="query" maxlength="120" value="{{ metadataEditor.search }}"
         placeholder="@if(metadataEditor.kind === 'labels')Search labels@else Search assignees@endif" autofocus>
-      <button type="submit" name="operation" value="search" data-issue-button>Search GitHub</button>
+      <button type="submit" name="operation" value="search" data-issue-button>Search {{ textForge }}</button>
     </div>
     @if(metadataEditor.search && metadataEditor.matches === 0)
-      <p role="status">No matches on GitHub.</p>
+      <p role="status">No matches on {{ textForge }}.</p>
     @elseif(metadataEditor.more)
       <p>Search to see more results.</p>
     @endif
@@ -52,5 +52,5 @@
     </div>
   </form>
 @elseif(metadataUnavailable)
-  <p role="status" data-issue-metadata-message>GitHub could not open this editor. Changing labels or assignees requires triage access.</p>
+  <p role="status" data-issue-metadata-message>{{ textForge }} could not open this editor. Check your triage access and try again.</p>
 @endif
