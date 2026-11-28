@@ -560,6 +560,31 @@ describe('resize', () => {
     expect(saved.toText()).toBe('abcd\ne!gh\nijk')
   })
 
+  it('redraws a reflowed Den prompt at its original start after reconnect', () => {
+    const t = term(16, 6)
+    t.write('one compiler\r\ntwo compiler\r\n\x1b]6973;S\x1b\\long-working-directory> pending command')
+    t.resize(44, 5)
+
+    const reopened = Terminal.fromCheckpoint(t.checkpoint())
+    const redraw = '\x1b]6973;R\x1b\\long-working-directory> edited command'
+    t.write(redraw)
+    reopened.write(redraw)
+    expect(reopened.toText()).toBe('one compiler\ntwo compiler\nlong-working-directory> edited command')
+    expect(reopened.checkpoint()).toEqual(t.checkpoint())
+  })
+
+  it('replaces only the editable part when the prompt wraps into scrollback', () => {
+    const t = term(10, 2)
+    t.write('output\r\nleft \x1b]6973;S\x1b\\a long prompt that wraps several times')
+    expect(t.scrollback.length).toBeGreaterThan(1)
+    t.resize(12, 2)
+    t.write('\x1b]6973;R\x1b\\> edit')
+    t.resize(20, 2)
+    expect(t.toText()).toBe('output\nleft > edit')
+    t.write('\r\n\x1b]133;C\x1b\\running\x1b]6973;R\x1b\\!')
+    expect(t.toText()).toBe('output\nleft > edit\nrunning!')
+  })
+
   it('preserves styled blank cells and cursor positioning past the last visible character', () => {
     const term = new Terminal({ cols: 12, rows: 2 })
     term.write('start\x1b[41m  \x1b[0m\x1b[11G')

@@ -61,7 +61,7 @@ function shellEnvironment(shell: string, denIntegration?: boolean) {
     ...process.env,
     SHELL: shell,
     TERM: 'xterm-256color',
-    ...(denIntegration && { DEN_SHELL_INTEGRATION: '1' }),
+    ...(denIntegration && { DEN_SHELL_INTEGRATION: '1', DEN_TERMINAL_PROMPT_ANCHOR: '1' }),
   }
 }
 

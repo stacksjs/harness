@@ -174,6 +174,7 @@ type Screen = Position & {
   grid: TerminalRow[]
   wrap?: boolean
   cursor?: Position | null
+  promptStart?: Position | null
 }
 
 function visibleCell(cell: Cell): boolean {
@@ -274,6 +275,8 @@ export class Terminal {
   /** The main buffer, parked while the alternate screen is active. */
   private savedMain: Screen | null = null
   private savedCursor: Position | null = null
+  // May be above the viewport while a long prompt or input wraps.
+  private promptStart: Position | null = null
 
   constructor(options: TerminalOptions = {}) {
     this._cols = Math.max(2, options.cols ?? 80)
@@ -331,6 +334,7 @@ export class Terminal {
       parser: this.state, csi: this.csiParams, csiPrivate: this.csiPrivate, osc: this.oscData, oscEscape: this.oscEscape,
       ...(this.oscOverflow && { oscOverflow: true }),
       ...(this.cwd && { cwd: this.cwd }),
+      ...(this.promptStart && { promptStart: this.promptStart }),
       bracketedPaste: this.bracketedPaste, shellPhase: this.shellPhase, lastExitStatus: this.lastExitStatus,
     }
   }
@@ -356,6 +360,7 @@ export class Terminal {
     terminal.oscEscape = checkpoint.oscEscape
     terminal.oscOverflow = checkpoint.oscOverflow === true
     terminal.cwd = checkpoint.cwd
+    terminal.promptStart = checkpoint.promptStart ?? null
     terminal.bracketedPaste = checkpoint.bracketedPaste
     terminal.shellPhase = checkpoint.shellPhase
     terminal.lastExitStatus = checkpoint.lastExitStatus
@@ -404,7 +409,7 @@ export class Terminal {
     const nextRows = Math.max(1, Math.floor(rows))
     if (nextCols === this._cols && nextRows === this._rows) return
 
-    const current = { grid: this.grid, x: this.x, y: this.y, wrap: this.pendingWrap, cursor: this.savedCursor }
+    const current = { grid: this.grid, x: this.x, y: this.y, wrap: this.pendingWrap, cursor: this.savedCursor, promptStart: this.promptStart }
     let screen: Screen
     if (this.savedMain) {
       this.savedMain = this.resizeMain(this.savedMain, nextCols, nextRows)
@@ -419,10 +424,11 @@ export class Terminal {
     this.y = screen.y
     this.pendingWrap = screen.wrap ?? false
     this.savedCursor = screen.cursor ?? null
+    this.promptStart = screen.promptStart ?? null
   }
 
   private resizeMain(screen: Screen, cols: number, rows: number): Screen {
-    const last = Math.max(screen.y, screen.cursor?.y ?? 0,
+    const last = Math.max(screen.y, screen.cursor?.y ?? 0, screen.promptStart?.y ?? 0,
       screen.grid.findLastIndex(row => row.wrapFrom !== undefined || row.some(visibleCell)))
     const drawn = screen.grid.slice(0, last + 1)
     if (cols === this.cols) {
@@ -431,14 +437,22 @@ export class Terminal {
       const grid = drawn.slice(top, top + rows)
       while (grid.length < rows) grid.push(blankRow(cols))
       const cursor = screen.cursor && { x: screen.cursor.x, y: clamp(screen.cursor.y - top, 0, rows - 1) }
-      return { ...screen, grid, y: screen.y - top, cursor }
+      const prompt = screen.promptStart
+      const promptStart = prompt && prompt.y < top + rows ? { x: prompt.x, y: prompt.y - top } : null
+      return { ...screen, grid, y: screen.y - top, cursor, promptStart }
     }
 
     const historyLength = this.scrollback.length
     const points = [{ x: screen.x, y: historyLength + screen.y }, { x: 0, y: historyLength }]
+    const savedIndex = points.length
     if (screen.cursor) points.push({ x: screen.cursor.x, y: historyLength + screen.cursor.y })
+    const promptIndex = points.length
+    if (screen.promptStart) points.push({
+      x: screen.promptStart.y < -historyLength ? 0 : screen.promptStart.x,
+      y: Math.max(0, historyLength + screen.promptStart.y),
+    }) - 1
     const layout = reflowRows([...this.scrollback, ...drawn], cols, points, screen.wrap ?? false)
-    const [active, visibleStart, saved] = layout.points
+    const [active, visibleStart] = layout.points
     // Keep the active cursor on screen even when content below it wraps.
     const top = Math.min(active!.y, Math.max(visibleStart!.y, layout.rows.length - rows))
     this.scrollback = []
@@ -447,8 +461,11 @@ export class Terminal {
     for (const row of layout.rows.slice(Math.max(0, top - this.scrollbackLimit), top)) this.rememberRow(row)
     const grid = layout.rows.slice(top, top + rows)
     while (grid.length < rows) grid.push(blankRow(cols))
+    const saved = screen.cursor && layout.points[savedIndex]
     const cursor = saved && { x: saved.x, y: clamp(saved.y - top, 0, rows - 1) }
-    return { grid, x: active!.x, y: active!.y - top, wrap: layout.wrap, cursor }
+    const prompt = layout.points[promptIndex]
+    const promptStart = prompt && prompt.y < top + rows ? { x: prompt.x, y: prompt.y - top } : null
+    return { grid, x: active!.x, y: active!.y - top, wrap: layout.wrap, cursor, promptStart }
   }
 
   private resizeAlternate(screen: Screen, cols: number, rows: number): Screen {
@@ -566,16 +583,44 @@ export class Terminal {
   }
 
   private applyShellMarker(): void {
-    if (this.oscData === '133;A') this.shellPhase = 'prompt'
+    if (this.oscData === '6973;S') {
+      if (!this.onAltScreen) this.promptStart = { x: this.x, y: this.y }
+    }
+    else if (this.oscData === '6973;R') this.clearPrompt()
+    else if (this.oscData === '133;A') this.shellPhase = 'prompt'
     else if (this.oscData === '133;B') this.shellPhase = 'ready'
-    else if (this.oscData === '133;C') this.shellPhase = 'running'
+    else if (this.oscData === '133;C') {
+      this.shellPhase = 'running'
+      this.promptStart = null
+    }
     else {
       const result = /^133;D(?:;(-?\d{1,10}))?$/.exec(this.oscData)
       if (result) {
         this.shellPhase = 'prompt'
+        this.promptStart = null
         if (result[1] !== undefined) this.lastExitStatus = Number(result[1])
       }
     }
+  }
+
+  /** Clear the editable prompt from its reflowed start, preserving earlier output. */
+  private clearPrompt(): void {
+    const start = this.promptStart
+    if (!start || this.onAltScreen) return
+
+    this.x = start.x
+    this.y = start.y
+    if (start.y < 0) {
+      const index = this.scrollback.length + start.y
+      const [row] = this.scrollback.splice(Math.max(0, index))
+      for (const bytes of this.scrollbackRowBytes.splice(Math.max(0, index))) this.scrollbackBytes -= bytes
+      this.grid[0] = row ?? blankRow(this.cols)
+      this.x = index >= 0 ? start.x : 0
+      this.y = 0
+      this.promptStart = { x: this.x, y: 0 }
+    }
+    this.pendingWrap = false
+    this.eraseDisplay(0)
   }
 
   private ground(ch: string): void {
@@ -632,6 +677,7 @@ export class Terminal {
       this.grid.push(blankRow(this.cols))
       // The alternate screen's offscreen rows are repaint debris.
       if (!this.onAltScreen) this.rememberRow(scrolled)
+      if (this.promptStart) this.promptStart = { x: this.promptStart.x, y: this.promptStart.y - 1 }
     }
     const row = this.grid[this.y]!
     if (wrapFrom === undefined) delete row.wrapFrom
@@ -712,6 +758,7 @@ export class Terminal {
     }
     else if (mode === 2 || mode === 3) {
       for (let row = 0; row < this.rows; row++) this.grid[row] = blankRow(this.cols)
+      this.promptStart = null
       if (mode === 3) {
         this.scrollback = []
         this.scrollbackRowBytes = []
@@ -729,12 +776,13 @@ export class Terminal {
 
   private enterAlt(): void {
     if (this.onAltScreen) return
-    this.savedMain = { grid: this.grid, x: this.x, y: this.y, wrap: this.pendingWrap, cursor: this.savedCursor }
+    this.savedMain = { grid: this.grid, x: this.x, y: this.y, wrap: this.pendingWrap, cursor: this.savedCursor, promptStart: this.promptStart }
     this.grid = Array.from({ length: this.rows }, () => blankRow(this.cols))
     this.x = 0
     this.y = 0
     this.pendingWrap = false
     this.savedCursor = null
+    this.promptStart = null
   }
 
   private exitAlt(): void {
@@ -744,6 +792,7 @@ export class Terminal {
     this.y = this.savedMain.y
     this.pendingWrap = this.savedMain.wrap ?? false
     this.savedCursor = this.savedMain.cursor ?? null
+    this.promptStart = this.savedMain.promptStart ?? null
     this.savedMain = null
   }
 
