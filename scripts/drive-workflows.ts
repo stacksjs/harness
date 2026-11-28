@@ -240,6 +240,7 @@ try {
     if (width === 1440 || width === 390) await capture('scheduled')
   }
 
+  fixtureTime += 1000
   const { hooks } = await fetch(base + '/workflows/hooks?' + query()).then(response => response.json())
   assert.equal(hooks.length, 1)
   const delivery = await fetch(new URL(hooks[0].path, base), { method: 'POST', headers: { 'x-github-delivery': 'draft-fixture' } })
