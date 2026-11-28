@@ -10,7 +10,7 @@ import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from '
 import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssueText } from './gitlab-issues'
 import { issueReferenceForSelection, mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
-import { issueMetadataKind, readIssueMetadata } from './issue-metadata'
+import { gitLabStatusEditor, issueMetadataKind, readIssueMetadata } from './issue-metadata'
 import { createIssueTextDraft, issueTextField, issueTextLimits } from './issue-text'
 import { newThreadLink, parsePullRequest } from './prompt-links'
 import { readFilterViewer, readRepositoryFilterChoices } from './pull-request-list-filters'
@@ -317,11 +317,12 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const textConflict = textResult === 'stale'
   const textLocked = textResult === 'changed' || textResult === 'denied'
   const metadataEditor = metadataSubmission ? metadataSubmission.editor : metadata?.editor
+    ?? (gitLabText && editMetadata === 'state' ? gitLabStatusEditor(gitLabText.status, gitLabText.statusScope) : null)
   const statusEdit = editMetadata === 'state' || metadataSubmission?.kind === 'state'
   const metadataMessage = metadataSubmission?.message
     ?? (selected && query.get('metadataResult') === 'updated' ? 'Issue updated on GitHub.' : '')
   const statusMessage = statusEdit ? metadataMessage
-    : selected && query.get('metadataResult') === 'state' ? 'Issue status updated on GitHub.' : ''
+    : selected && query.get('metadataResult') === 'state' ? 'Issue status updated on ' + textForge + '.' : ''
   const pageEnd = scope.page * pageSize
   const reference = selected && selection && issueReference({ tracker: selection.tracker,
     ...(selection.tracker === 'gitlab' && { host: selection.host }), repository: selected.repository, number: selected.number })
@@ -400,8 +401,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadataDraft: selected && !statusEdit ? metadataSubmission?.draft : null,
     metadataMessage: statusEdit ? '' : metadataMessage,
     metadataUnavailable: Boolean(selected && editMetadata && !statusEdit && !metadataSubmission && !metadataEditor),
-    issueStatus: metadata?.status ?? (selected?.state === 'closed' ? 'Closed' : 'Open'),
-    canChangeIssueStatus: Boolean(selected && metadata?.canChangeStatus),
+    issueStatus: gitLabText?.status?.current ?? metadata?.status ?? (selected?.state === 'closed' ? 'Closed' : 'Open'),
+    canChangeIssueStatus: Boolean(selected && (gitLabText?.status?.choices.length || metadata?.canChangeStatus)),
     statusEditor: selected && statusEdit ? metadataEditor : null,
     statusDraft: selected && statusEdit ? metadataSubmission?.draft : null,
     statusMessage,

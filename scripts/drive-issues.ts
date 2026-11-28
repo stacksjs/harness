@@ -1162,13 +1162,70 @@ try {
     assert.equal(new URL(page.url()).hash, '#issue-comment-' + recoveredId)
     assert.equal((await postGitLabForm(interrupted)).status, 303)
     assert.equal(readForge().gitlab.commentWrites, 2)
+
+    const gitLabStatusControl = (state: 'Open' | 'Closed') => page.getByRole('link', { name: 'Change issue status, ' + state, exact: true })
+    const gitLabStatus = page.locator('#issue-status')
+    const statusForm = gitLabStatus.locator('form')
+    const statusSubmission = () => statusForm.evaluate((form: HTMLFormElement) => ({
+      url: form.action, body: new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)])).toString(),
+    }))
+    const openStatusEditor = async () => {
+      await gitLabStatusControl('Open').click()
+      assert.equal(await gitLabStatus.getByRole('radio').count(), 1)
+      await gitLabStatus.getByRole('radio', { name: 'Closed', exact: true }).check()
+    }
+    await openStatusEditor()
+    const statusPost = await statusSubmission()
+    assert.equal((await postGitLabForm(statusPost, 'https://outside.invalid')).status, 403)
+    alterForge(current => { current.gitlab.viewer = 18 })
+    assert.equal((await postGitLabForm(statusPost)).status, 409)
+    alterForge(current => { delete current.gitlab.viewer; current.gitlab.archived = true })
+    assert.equal((await postGitLabForm(statusPost)).status, 403)
+    alterForge(current => { delete current.gitlab.archived; current.gitlab.issue.state = 'closed' })
+    assert.equal((await postGitLabForm(statusPost)).status, 409)
+    alterForge(current => { current.gitlab.issue.state = 'opened'; current.gitlab.refuseStatus = true })
+    const saveStatus = gitLabStatus.getByRole('button', { name: 'Save status', exact: true })
+    await saveStatus.click()
+    await gitLabStatus.getByText('GitLab refused a reviewed change.', { exact: false }).waitFor()
+    assert.equal(readForge().gitlab.statusWrites, undefined)
+    alterForge(current => { delete current.gitlab.refuseStatus })
+    await openStatusEditor()
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height })
+      assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+      await capture('gitlab-status-' + width + 'x' + height)
+    }
+    const closePost = await statusSubmission()
+    alterForge(current => { current.gitlab.dropStatusReply = true })
+    await saveStatus.click()
+    const checkStatus = gitLabStatus.getByRole('button', { name: 'Check GitLab', exact: true })
+    await checkStatus.waitFor()
+    await capture('gitlab-status-recovery-360x800')
+    const gitLabStatusPort = host.server.port
+    host.stop()
+    host = await startHost(gitLabStatusPort)
+    await checkStatus.click()
+    await gitLabStatusControl('Closed').waitFor()
+    assert.equal((await postGitLabForm(closePost)).status, 303)
+    assert.deepEqual(readForge().gitlab.statusWrites, [['closed', 17]])
+    alterForge(current => { current.gitlab.denyReopen = true })
+    await page.reload()
+    assert.equal(await gitLabStatusControl('Closed').count(), 0)
+    alterForge(current => { delete current.gitlab.denyReopen })
+    await page.reload()
+    await gitLabStatusControl('Closed').click()
+    await gitLabStatus.getByRole('radio', { name: 'Open', exact: true }).check()
+    await saveStatus.click()
+    await gitLabStatusControl('Open').waitFor()
+    await gitLabStatus.getByText('Issue status updated on GitLab.', { exact: true }).waitFor()
+    assert.deepEqual(readForge().gitlab.statusWrites, [['closed', 17], ['opened', 17]])
   }
   finally {
     if (previousGitLabToken === undefined) delete process.env.GITLAB_TOKEN
     else process.env.GITLAB_TOKEN = previousGitLabToken
   }
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, GitLab draft persistence, GitLab text editing and comment recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, GitLab draft persistence, GitLab text editing, comment recovery and status changes')
 }
 catch (error) {
   console.error(error)

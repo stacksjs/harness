@@ -1,11 +1,13 @@
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
-import type { RawIssueStatus, RawPlanningStatuses } from './issue-status'
+import type { IssueStatusPlan, RawIssueStatus, RawPlanningStatuses } from './issue-status'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
-import { githubIssueReference } from '@harness/contract'
+import { issueRepositoryKey } from '@harness/contract'
+import { gitLabIssueCredential, readGitLabIssueText, writeGitLabIssueStatus } from './gitlab-issues'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
-import { issueStatusPlan, saveIssueStatus } from './issue-status'
+import { issueReferenceForSelection, trustedIssueRepositories } from './issue-repositories'
+import { issueStatusPlan, saveIssueStatus, writeGitHubIssueStatus } from './issue-status'
 import { applyPullRequestLabelChanges, parseLabelSelection, readPullRequestLabelEditor } from './pull-request-labels'
 import { repositoryGitHubCredential, repositoryGitHubRequest, RepositoryPullRequestError } from './repository-pull-request'
 
@@ -150,17 +152,29 @@ function assigneeOptions(authority: Authority, catalog: Person[], staged: Change
 }
 
 type LabelChanges = NonNullable<ReturnType<typeof parseLabelSelection>>['changes']
+type StatusEditorForm = Pick<IssueMetadataForm, 'kind' | 'intent' | 'scope'>
+
+function statusEditor(status: IssueStatusPlan | null, version: (form: StatusEditorForm) => string,
+  intent: string = crypto.randomUUID()): IssueMetadataEditor | null {
+  if (!status?.choices.length) return null
+  const form = { kind: 'state' as const, intent, scope: status.scope }
+  return { ...form, revision: version(form), checked: [], search: '', more: false,
+    matches: status.choices.length, options: status.choices.map(option => ({
+      key: option.key, name: option.name, description: '', applied: false, checked: false,
+    })) }
+}
+
+function gitLabStatusRevision(identity: string, form: StatusEditorForm) {
+  return hash(['issue-metadata', identity, form.kind, form.intent, form.scope])
+}
+
+export function gitLabStatusEditor(status: IssueStatusPlan | null, identity: string) {
+  return statusEditor(status, form => gitLabStatusRevision(identity, form))
+}
+
 async function makeEditor(context: MetadataContext & { credential: string }, authority: Authority, kind: IssueMetadataKind,
   search = '', intent: string = crypto.randomUUID(), labels: LabelChanges = [], assignees: Change[] = []): Promise<IssueMetadataEditor | null> {
-  if (kind === 'state') {
-    const status = authority.status
-    if (!status?.choices.length) return null
-    const form = { kind, intent, scope: status.scope }
-    return { ...form, revision: revision(context, authority, form), checked: [], search: '', more: false,
-      matches: status.choices.length, options: status.choices.map(option => ({
-        key: option.key, name: option.name, description: '', applied: false, checked: false,
-      })) }
-  }
+  if (kind === 'state') return statusEditor(authority.status, form => revision(context, authority, form), intent)
   let options: Option[], scope: string, more: boolean, matches: number
   if (kind === 'labels') {
     const editor = await readPullRequestLabelEditor({ path: context.repository.path, repository: context.repository.name,
@@ -287,7 +301,7 @@ type Result = keyof typeof messages
 export async function updateIssueMetadata(state: HarnessState, query: URLSearchParams, values: URLSearchParams,
   signal: AbortSignal, receipts: PullRequestReplyReceipts) {
   const profile = Number(query.get('profile'))
-  const reference = githubIssueReference({ tracker: 'github', repository: query.get('selected'), number: Number(query.get('issue')) })
+  const reference = issueReferenceForSelection(query.get('selected'), Number(query.get('issue')))
   const kind = issueMetadataKind(values.get('kind'))
   const scope = values.get('scope') ?? ''
   const intent = values.get('intent') ?? ''
@@ -295,40 +309,57 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
   const selected = values.getAll('choice').sort()
   const operation = values.get('operation') ?? 'save'
   if (!reference || !state.profiles.has(profile) || !kind || !uuid.test(intent) || !/^[a-f0-9]{64}$/u.test(reviewed)
-    || !scope.startsWith('[') || scope.length > 950_000 || !['save', 'search'].includes(operation)) return null
+    || !scope.startsWith('[') || scope.length > 950_000 || !['save', 'search'].includes(operation)
+    || (reference.tracker === 'gitlab' && kind !== 'state')) return null
   const labels = kind === 'labels' ? parseLabelSelection(scope, selected) : null
   const assignees = kind === 'assignees' ? parseAssignees(scope, selected) : null
   if (kind === 'state' ? operation !== 'save' || selected.length !== 1 || !id(selected[0]) || scope.length > 40_000
     : !labels && !assignees) return null
   const form: IssueMetadataForm = { kind, scope, intent, revision: reviewed, checked: selected }
+  const forge = reference.tracker === 'gitlab' ? 'GitLab' : 'GitHub'
   const finish = (result: Result, editor?: IssueMetadataEditor | null) => ({
-    result, kind, message: kind === 'state' && result === 'denied' ? 'GitHub does not allow this issue status change.'
-      : messages[result], editor, draft: result === 'pending' ? form : null,
+    result, kind, message: kind === 'state' && result === 'denied' ? forge + ' does not allow this issue status change.'
+      : messages[result].replaceAll('GitHub', forge), editor, draft: result === 'pending' ? form : null,
   })
   try {
-    const repository = (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(reference.repository)
+    const repositoryKey = issueRepositoryKey(reference)
+    const gitLabRepository = reference.tracker === 'gitlab'
+      ? (await trustedIssueRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey)
+      : null
+    const repository = reference.tracker === 'gitlab' ? gitLabRepository
+      : (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(repositoryKey)
     if (!repository) return finish('changed')
     const trusted = () => {
       const current = state.workspaces.get(repository.workspace.id)
       return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === repository.workspace.path)
     }
-    const key = reference.repository + '#' + reference.number
+    const key = repositoryKey + '#' + reference.number
     if (kind === 'state' && changingStatus.has(key)) return finish('busy')
     if (kind === 'state') changingStatus.add(key)
     try {
+      const fingerprint = hash(['issue-metadata-write', reviewed, selected])
+      if (gitLabRepository?.tracker === 'gitlab') {
+        const credential = await gitLabIssueCredential(gitLabRepository, signal)
+        const read = () => readGitLabIssueText(gitLabRepository, reference.number, signal, credential)
+        const authority = await read()
+        if (!authority?.status) return finish('unavailable')
+        if (!trusted() || gitLabStatusRevision(authority.statusScope, form) !== reviewed) return finish('changed')
+        return finish(await saveIssueStatus(authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
+          const after = await read()
+          return after?.statusScope === authority.statusScope ? after.status : null
+        }, choice => writeGitLabIssueStatus(gitLabRepository, reference.number, choice.state, signal, credential)))
+      }
       const credential = await repositoryGitHubCredential(repository.path, signal)
       const context = { repository, number: reference.number, credential, signal }
       const authority = await readIssueMetadataAuthority(context)
       if (!authority) return finish('unavailable')
       if (!trusted() || revision(context, authority, form) !== reviewed) return finish('changed')
-      const fingerprint = hash(['issue-metadata-write', reviewed, selected])
       if (kind === 'state') {
         if (!authority.status) return finish('unavailable')
-        return finish(await saveIssueStatus({ ...context, path: repository.path, name: repository.name, issueId: authority.issueId },
-          authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
-            const after = await readIssueMetadataAuthority(context)
-            return after && revision(context, after, form) === reviewed ? after.status : null
-          }))
+        return finish(await saveIssueStatus(authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
+          const after = await readIssueMetadataAuthority(context)
+          return after && revision(context, after, form) === reviewed ? after.status : null
+        }, choice => writeGitHubIssueStatus({ ...context, path: repository.path, name: repository.name, issueId: authority.issueId }, choice, intent)))
       }
       if (!authority.canEdit) return finish('denied')
       if (operation === 'search') {

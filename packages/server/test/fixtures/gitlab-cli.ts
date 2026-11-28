@@ -38,8 +38,9 @@ if (path === '/graphql') {
   const { query, variables } = await new Response(Bun.stdin.stream()).json()
   const currentUser = { id: 'gid://gitlab/User/' + viewer }
   const issue = () => ({ id: 'gid://gitlab/Issue/2000', iid: String(gitlab.issue.iid), webUrl: gitlab.issue.web_url,
-    title: gitlab.issue.title, description: gitlab.issue.description ?? null, discussionLocked: gitlab.locked === true,
-    userPermissions: { updateIssue: gitlab.canEditText === true, createNote: gitlab.canComment === true && !gitlab.locked } })
+    title: gitlab.issue.title, description: gitlab.issue.description ?? null, state: gitlab.issue.state, discussionLocked: gitlab.locked === true,
+    userPermissions: { updateIssue: gitlab.canEditText === true, createNote: gitlab.canComment === true && !gitlab.locked,
+      reopenIssue: gitlab.canEditText === true && !gitlab.denyReopen } })
   const note = item => ({ id: 'gid://gitlab/Note/' + item.id, body: item.body, noteableId: 2000, noteableType: 'Issue',
     system: item.system === true, internal: item.internal === true, author: { id: 'gid://gitlab/User/' + item.author.id } })
   if (query.includes('query HarnessGitLabIssueText')) {
@@ -89,6 +90,25 @@ if (path === '/graphql') {
     ] : authored
     const pageInfo = { hasPreviousPage: Boolean(decoy && !variables.before), startCursor: 'fixture-page-2' }
     respond(200, { data: { currentUser, project: { issue: { id: issue().id, notes: { nodes, pageInfo } } } } })
+  }
+  if (query.includes('mutation HarnessGitLabIssueStatus')) {
+    if (!pinned || !gitlab.canEditText || gitlab.archived) respond(403, {})
+    const input = variables.input
+    if (input.projectPath !== gitlab.repository || input.iid !== String(gitlab.issue.iid) || !['CLOSE', 'REOPEN'].includes(input.stateEvent))
+      respond(400, {})
+    if (input.stateEvent === 'REOPEN' && gitlab.denyReopen) respond(403, {})
+    if (gitlab.refuseStatus) respond(200, { data: { updateIssue: { issue: null, errors: ['Fixture rejected this status change'] } } })
+    gitlab.issue.state = input.stateEvent === 'CLOSE' ? 'closed' : 'opened'
+    gitlab.statusWrites ??= []
+    gitlab.statusWrites.push([gitlab.issue.state, viewer])
+    if (gitlab.dropStatusReply) {
+      delete gitlab.dropStatusReply
+      gitlab.failTextRead = true
+      writeFileSync(statePath, JSON.stringify(state))
+      respond(502, {})
+    }
+    writeFileSync(statePath, JSON.stringify(state))
+    respond(200, { data: { updateIssue: { issue: issue(), errors: [] } } })
   }
   if (query.includes('mutation HarnessGitLabEditIssue')) {
     if (!pinned || !gitlab.canEditText || gitlab.archived) respond(403, {})

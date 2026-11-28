@@ -29,9 +29,9 @@
     @endif
     <div data-issue-metadata-editor-actions>
       <a href="{{ metadataHref }}#issue-title" data-issue-button>@if(statusDraft)Return to issue@else Cancel@endif</a>
-      <button type="submit" data-issue-button data-issue-primary>@if(statusDraft)Check GitHub@else Save status@endif</button>
+      <button type="submit" data-issue-button data-issue-primary>@if(statusDraft)Check {{ textForge }}@else Save status@endif</button>
     </div>
   </form>
 @elseif(statusUnavailable)
-  <p role="status" data-issue-metadata-message>GitHub could not open the status editor. Check your access and try again.</p>
+  <p role="status" data-issue-metadata-message>{{ textForge }} could not open the status editor. Check your access and try again.</p>
 @endif

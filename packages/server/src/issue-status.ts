@@ -65,12 +65,44 @@ export function issueStatusPlan(issue: RawIssueStatus, planning: RawPlanningStat
   return { current, choices, all, matches, scope, allowed }
 }
 
-type Plan = NonNullable<ReturnType<typeof issueStatusPlan>>
+export type IssueStatusPlan = NonNullable<ReturnType<typeof issueStatusPlan>>
 type Context = { path: string, name: string, number: number, issueId: string, credential: string, signal: AbortSignal }
 type Result = 'updated' | 'confirmed' | 'pending' | 'changed' | 'denied' | 'refused'
 
-export async function saveIssueStatus(context: Context, plan: Plan, target: string, scope: string, intent: string, fingerprint: string,
-  receipts: PullRequestReplyReceipts, trusted: () => boolean, readUpdated: () => Promise<Plan | null>): Promise<Result> {
+const openAndClosed: Destination[] = [
+  { key: 'open', name: 'Open', state: 'open', reason: null },
+  { key: 'closed', name: 'Closed', state: 'closed', reason: null },
+]
+
+export function gitLabIssueStatusPlan(state: unknown, allowed: boolean): IssueStatusPlan | null {
+  const current = openAndClosed.find(choice => state === (choice.state === 'open' ? 'opened' : 'closed'))
+  if (!current) return null
+  const choices = allowed ? openAndClosed.filter(choice => choice !== current) : []
+  return { current: current.name, choices, all: openAndClosed, matches: target => current.state === target.state,
+    scope: JSON.stringify([current.state, choices]), allowed }
+}
+
+export async function writeGitHubIssueStatus(context: Context, chosen: Destination, intent: string) {
+  const { path, name, number, issueId, credential, signal } = context
+  const reply = await (chosen.statusId && chosen.reason !== 'duplicate'
+    ? repositoryGitHubRequest(path, 'graphql', {
+        query: `mutation HarnessIssueStatus($input: SetIssueStatusInput!) {
+          setIssueStatus(input: $input) { clientMutationId }
+        }`, variables: { input: { issueId, statusId: chosen.statusId, clientMutationId: intent } },
+      }, signal, credential)
+    : repositoryGitHubRequest(path, `repos/${name}/issues/${number}`, {
+        state: chosen.state, ...(chosen.reason && { state_reason: chosen.reason }),
+      }, signal, credential, 'PATCH'))
+    .catch((error: unknown) => error instanceof RepositoryPullRequestError && error.status ? { status: error.status, body: null } : null)
+  if (reply?.status === 401 || reply?.status === 403) return 'denied' as const
+  const errors = (reply?.body as { errors?: unknown[] } | null)?.errors
+  if (reply?.status === 404 || reply?.status === 422 || errors?.length) return 'refused' as const
+  return null
+}
+
+export async function saveIssueStatus(plan: IssueStatusPlan, target: string, scope: string, intent: string, fingerprint: string,
+  receipts: PullRequestReplyReceipts, trusted: () => boolean, readUpdated: () => Promise<IssueStatusPlan | null>,
+  write: (choice: Destination) => Promise<'denied' | 'refused' | null>): Promise<Result> {
   const previous = receipts.inspect(intent, fingerprint)
   if (previous === 'confirmed') return 'confirmed'
   if (previous === 'conflict' || !trusted()) return 'changed'
@@ -87,28 +119,17 @@ export async function saveIssueStatus(context: Context, plan: Plan, target: stri
   const claimed = receipts.claim(intent, fingerprint, trusted())
   if (claimed !== 'claimed') return claimed === 'conflict' ? 'changed' : claimed
   try {
-    const { path, name, number, issueId, credential, signal } = context
-    const reply = await (chosen.statusId && chosen.reason !== 'duplicate'
-      ? repositoryGitHubRequest(path, 'graphql', {
-          query: `mutation HarnessIssueStatus($input: SetIssueStatusInput!) {
-            setIssueStatus(input: $input) { clientMutationId }
-          }`, variables: { input: { issueId, statusId: chosen.statusId, clientMutationId: intent } },
-        }, signal, credential)
-      : repositoryGitHubRequest(path, `repos/${name}/issues/${number}`, {
-          state: chosen.state, ...(chosen.reason && { state_reason: chosen.reason }),
-        }, signal, credential, 'PATCH'))
-      .catch((error: unknown) => error instanceof RepositoryPullRequestError && error.status ? { status: error.status, body: null } : null)
-    if (reply?.status === 401 || reply?.status === 403) {
+    const result = await write(chosen)
+    if (result === 'denied') {
       receipts.reject(intent, fingerprint)
       return 'denied'
     }
     const updated = await readUpdated()
-    if (updated?.matches(chosen)) {
+    if (trusted() && updated?.matches(chosen)) {
       receipts.confirm(intent, fingerprint)
       return 'updated'
     }
-    const errors = (reply?.body as { errors?: unknown[] } | null)?.errors
-    if (reply?.status === 404 || reply?.status === 422 || errors?.length) {
+    if (result === 'refused') {
       receipts.reject(intent, fingerprint)
       return 'refused'
     }

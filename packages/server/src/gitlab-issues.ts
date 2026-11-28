@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { issueRepositoryKey, parseIssueUrl } from '@harness/contract'
 import type { IssueActivityItem } from './issue-activity'
 import type { GitLabIssueRepository } from './issue-repositories'
+import { gitLabIssueStatusPlan } from './issue-status'
 import { defaultGitLabIssueHost, gitLabCli } from './issue-repositories'
 import { RepositoryPullRequestError } from './repository-pull-request'
 
@@ -148,7 +149,7 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
       currentUser?: { id?: string }
       project?: { id?: string, fullPath?: string, archived?: boolean, issue?: {
         id?: string, iid?: string, webUrl?: string, title?: string, description?: string | null,
-        discussionLocked?: boolean, userPermissions?: { updateIssue?: boolean, createNote?: boolean },
+        state?: string, discussionLocked?: boolean, userPermissions?: { updateIssue?: boolean, createNote?: boolean, reopenIssue?: boolean },
       } }
     }
     errors?: unknown[]
@@ -157,7 +158,7 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
     currentUser { id }
     project(fullPath: $path) {
       id fullPath archived
-      issue(iid: $iid) { id iid webUrl title description discussionLocked userPermissions { updateIssue createNote } }
+      issue(iid: $iid) { id iid webUrl title description state discussionLocked userPermissions { updateIssue createNote reopenIssue } }
     }
   }`, { path: repository.name, iid: String(number) }, signal, credential) as PermissionResponse | null
   const project = reply?.data?.project
@@ -174,9 +175,26 @@ export async function readGitLabIssueText(repository: GitLabIssueRepository, num
   const commentBlocked = project.archived !== false ? 'This project is archived.'
     : issue.userPermissions?.createNote === true ? ''
       : issue.discussionLocked ? 'This issue is locked.' : 'This GitLab account cannot comment on this issue.'
+  const canEditText = project.archived === false && issue.userPermissions?.updateIssue === true
+  const status = gitLabIssueStatusPlan(issue.state, canEditText && (issue.state !== 'closed' || issue.userPermissions?.reopenIssue === true))
   return { scope: scope('issue-text'), commentScope: scope('issue-comment'), commentBlocked, viewer,
-    issueId: issue.id, canEditText: project.archived === false && issue.userPermissions?.updateIssue === true,
+    statusScope: scope('issue-status'), status, issueId: issue.id, canEditText,
     text: { title: issue.title, body: issue.description ?? '' } }
+}
+
+export async function writeGitLabIssueStatus(repository: GitLabIssueRepository, number: number, state: 'open' | 'closed',
+  signal: AbortSignal, credential: IssueCredential,
+) {
+  const reply = await gitLabGraphQL(repository, `mutation HarnessGitLabIssueStatus($input: UpdateIssueInput!) {
+    updateIssue(input: $input) { issue { id } errors }
+  }`, { input: { projectPath: repository.name, iid: String(number), stateEvent: state === 'closed' ? 'CLOSE' : 'REOPEN' } }, signal, credential)
+    .catch((error: unknown) => {
+      const status = error instanceof RepositoryPullRequestError ? error.status : undefined
+      return status === 401 || status === 403 ? 'denied' : status === 400 || status === 404 || status === 422 ? 'refused' : null
+    })
+  if (reply === 'denied' || reply === 'refused') return reply
+  const result = (reply as { data?: { updateIssue?: { issue?: { id?: string }, errors?: unknown[] } } } | null)?.data?.updateIssue
+  return !result?.issue && result?.errors?.length ? 'refused' as const : null
 }
 
 export async function writeGitLabIssueText(repository: GitLabIssueRepository, number: number, issueId: string,
