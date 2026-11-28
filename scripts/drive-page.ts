@@ -4092,9 +4092,11 @@ try {
   await page.keyboard.type(`"${process.execPath}" --config=/dev/null "${nestedLinkScript}"`)
   await page.keyboard.press('Enter')
   const nestedTerminalFile = terminalHost.locator(`[data-terminal-file="ledger.txt:1:4"][data-terminal-cwd="${nestedMarker}"]`)
-  await nestedTerminalFile.press('Enter')
+  await nestedTerminalFile.evaluate(link => link.dispatchEvent(new PointerEvent('click', {
+    bubbles: true, cancelable: true, pointerType: 'touch', detail: 2,
+  })))
   await filePanel.getByText('Nested ledger source', { exact: true }).waitFor()
-  check('a relative file link opens the directory recorded on its output', await filePanel.getByText('Column 4', { exact: true }).isVisible())
+  check('a touch click with a repeated click count opens the recorded directory', await filePanel.getByText('Column 4', { exact: true }).isVisible())
   await capture('workspace-terminal-directory-file-phone')
   await filePanel.getByRole('button', { name: 'Close workspace files' }).click()
   await filePanel.waitFor({ state: 'hidden' })
