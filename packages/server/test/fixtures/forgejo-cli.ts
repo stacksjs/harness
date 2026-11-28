@@ -25,7 +25,7 @@ const flag = key => args[args.indexOf(key) + 1]
 const url = new URL(args.at(-1))
 const endpoint = forgejo.base + '/api/v1/repos/' + forgejo.repository
 const method = flag('--method')
-if (!['GET', 'POST', 'PATCH', 'PUT'].includes(method) || flag('--login') !== forgejo.selected || flag('--repo') !== forgejo.repository) reply(401, {})
+if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(method) || flag('--login') !== forgejo.selected || flag('--repo') !== forgejo.repository) reply(401, {})
 if (forgejo.unavailable) reply(503, {})
 const viewer = { id: forgejo.viewerId ?? 17, login: forgejo.viewer }
 if (method === 'GET' && url.origin + url.pathname === forgejo.base + '/api/v1/user') reply(200, viewer)
@@ -41,6 +41,44 @@ if (!url.href.startsWith(endpoint + '/')) reply(404, {})
 const path = (url.origin + url.pathname).slice(endpoint.length)
 const page = Math.max(1, Number(url.searchParams.get('page')) || 1)
 const find = url.searchParams
+const reactionTarget = /^\\/issues\\/(comments\\/)?(\\d+)\\/reactions$/.exec(path)
+if (reactionTarget) {
+  const [, comment, id] = reactionTarget
+  const subject = (comment ? 'comment:' : 'issue:') + id
+  const subjectExists = comment ? forgejo.comments.some(row => row.id === Number(id)) : forgejo.issues.some(row => row.number === Number(id))
+  if (!subjectExists) reply(404, {})
+  const rows = forgejo.reactions?.[subject] ?? []
+  if (method === 'GET') {
+    if (forgejo.failReactionRead === subject) {
+      delete forgejo.failReactionRead
+      writeFileSync(statePath, JSON.stringify(state))
+      reply(503, {})
+    }
+    if (comment) reply(200, rows)
+    reply(200, rows.slice(page - 1, page), page < rows.length)
+  }
+  if (!['POST', 'DELETE'].includes(method) || !args.includes('@-')) reply(405, {})
+  if (forgejo.archived || forgejo.denyReaction) reply(403, {})
+  const input = await new Response(Bun.stdin.stream()).json()
+  if (forgejo.refuseReaction || !['+1', '-1', 'laugh', 'hooray', 'confused', 'heart', 'rocket', 'eyes'].includes(input.content)
+    || Object.keys(input).length !== 1) reply(422, {})
+  const already = rows.find(row => row.content === input.content && row.user?.id === viewer.id)
+  const reaction = { content: input.content, user: viewer }
+  forgejo.reactions ??= {}
+  forgejo.reactions[subject] = method === 'POST' ? already ? rows : [...rows, reaction] : rows.filter(row => row !== already)
+  forgejo.reactionWrites ??= []
+  forgejo.reactionWrites.push([subject, viewer.id, method, input.content])
+  if (forgejo.dropReactionReply) {
+    delete forgejo.dropReactionReply
+    forgejo.failReactionRead = subject
+    writeFileSync(statePath, JSON.stringify(state))
+    reply(502, {})
+  }
+  writeFileSync(statePath, JSON.stringify(state))
+  if (method === 'POST') reply(already ? 200 : 201, reaction)
+  console.error('HTTP/1.1 200')
+  process.exit(0)
+}
 function finishTriage(issue, kind, values) {
   forgejo.triageWrites ??= []
   forgejo.triageWrites.push([issue.number, viewer.id, kind, values])

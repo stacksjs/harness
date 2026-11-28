@@ -1852,8 +1852,78 @@ try {
   await saveForgejoAssignees.click()
   await forgejoMetadata.getByText('mobile.review', { exact: true }).waitFor()
   assert.deepEqual(readForge().forgejo.triageWrites.slice(2), [[74, 18, 'labels', [9]], [74, 18, 'assignees', ['mobile.review']]])
+  alterForge(current => {
+    delete current.forgejo.viewerId
+    current.forgejo.reactions = {
+      'issue:73': [{ content: '+1', user: { id: 18, login: 'different-viewer' } }, { content: 'eyes', user: null }],
+      'comment:702': [],
+    }
+    if (!current.forgejo.comments.some(row => row.id === 801)) {
+      current.forgejo.comments.push({ id: 801, body: 'Another issue', issue_url: forgejoBase + '/api/v1/repos/' + forgejoRepository + '/issues/74' })
+    }
+  })
+  await page.goto(forgejoDetail)
+  const forgejoIssueReactions = page.getByRole('form', { name: 'Issue reactions', exact: true })
+  const forgejoCommentReactions = page.getByRole('form', { name: 'Comment 702 reactions', exact: true })
+  const addForgejoThumb = forgejoIssueReactions.getByRole('button', { name: 'Add Thumbs up reaction, 1', exact: true })
+  const removeForgejoThumb = forgejoIssueReactions.getByRole('button', { name: 'Remove Thumbs up reaction, 2', exact: true })
+  await forgejoIssueReactions.getByRole('button', { name: 'Add Eyes reaction, 1', exact: true }).waitFor()
+  const reactionPayload = await readReactionRequest(forgejoIssueReactions, 'add:THUMBS_UP')
+  alterForge(current => { current.forgejo.archived = true })
+  assert.equal((await sendForgejo(reactionPayload)).status, 403)
+  alterForge(current => { current.forgejo.archived = false; current.forgejo.viewerId = 19 })
+  assert.equal((await sendForgejo(reactionPayload)).status, 409)
+  alterForge(current => { delete current.forgejo.viewerId })
+  const wrongComment = new URLSearchParams(reactionPayload.body)
+  wrongComment.set('subject', 'comment:801')
+  assert.equal((await sendForgejo({ ...reactionPayload, body: wrongComment.toString() })).status, 409)
+  await addForgejoThumb.click()
+  await removeForgejoThumb.waitFor()
+  assert.equal(await removeForgejoThumb.getAttribute('aria-pressed'), 'true')
+  await removeForgejoThumb.click()
+  await addForgejoThumb.waitFor()
+  const forgejoPicker = forgejoCommentReactions.getByText('Add reaction', { exact: true })
+  const forgejoHeart = forgejoCommentReactions.getByRole('button', { name: 'Add Heart reaction', exact: true })
+  await forgejoPicker.click()
+  await forgejoHeart.press('Escape')
+  await forgejoHeart.waitFor({ state: 'hidden' })
+  assert.ok(await forgejoPicker.evaluate(node => node === node.ownerDocument.activeElement))
+  await forgejoPicker.click()
+  for (const [width, height] of viewports) {
+    await page.setViewportSize({ width, height })
+    await forgejoHeart.scrollIntoViewIfNeeded()
+    const bounds = await forgejoHeart.boundingBox()
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width)
+    await capture('forgejo-reactions-' + width + 'x' + height)
+  }
+  alterForge(current => { current.forgejo.refuseReaction = true })
+  await forgejoHeart.click()
+  await page.getByText('Forgejo refused the reaction. Reopen the issue to check the current state.', { exact: true }).waitFor()
+  alterForge(current => { delete current.forgejo.refuseReaction; current.forgejo.dropReactionReply = true })
+  await forgejoPicker.click()
+  const sentForgejoHeart = page.waitForRequest(request => request.method() === 'POST'
+    && new URL(request.url()).pathname === '/issues/reactions')
+  await forgejoHeart.click()
+  const heartRequest = await sentForgejoHeart
+  const replayForgejoHeart = { url: heartRequest.url(), body: heartRequest.postData() ?? '' }
+  const checkForgejoReaction = page.getByRole('form', { name: 'Check Forgejo reaction', exact: true }).getByRole('button', { name: 'Check Forgejo', exact: true })
+  await checkForgejoReaction.waitFor()
+  const reactionRecoveryPort = host.server.port
+  host.stop()
+  host = await startHost(reactionRecoveryPort)
+  await checkForgejoReaction.click()
+  const removeForgejoHeart = forgejoCommentReactions.getByRole('button', { name: 'Remove Heart reaction, 1', exact: true })
+  await removeForgejoHeart.waitFor()
+  assert.equal(new URL(page.url()).hash, '#issue-comment-702')
+  assert.equal((await sendForgejo(replayForgejoHeart)).status, 303)
+  await removeForgejoHeart.click()
+  await removeForgejoHeart.waitFor({ state: 'hidden' })
+  assert.deepEqual(readForge().forgejo.reactionWrites, [
+    ['issue:73', 17, 'POST', '+1'], ['issue:73', 17, 'DELETE', '+1'],
+    ['comment:702', 17, 'POST', 'heart'], ['comment:702', 17, 'DELETE', 'heart'],
+  ])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links, timeline events, comments, status, text and triage recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links, timeline events, comments, status, text, triage and reaction recovery')
 }
 catch (error) {
   console.error(error)

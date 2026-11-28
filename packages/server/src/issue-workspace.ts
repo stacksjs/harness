@@ -9,6 +9,7 @@ import type { IssueTextSubmission } from './issue-text'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
 import type { IssueReactionForm } from './issue-reactions'
 import { listForgejoIssues, readForgejoIssue } from './forgejo-issues'
+import { readForgejoIssueReactions } from './forgejo-issue-reactions'
 import { readGitLabIssueReactions } from './gitlab-issue-reactions'
 import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssueText } from './gitlab-issues'
 import type { IssueRepository } from './issue-repositories'
@@ -264,6 +265,12 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
           activity: issue.activity.map(item => ({ ...item, reactions: reactions.comments.get(Number(item.id)) })) }
       })
     : selection.tracker === 'forgejo' ? readForgejoIssue(selection, number, requestedComments, signal, positiveInteger(query.get('commentFocus')))
+      .then(async (issue) => {
+        if (!issue.authority) return issue
+        const reactions = await readForgejoIssueReactions(selection, number, issue.activity, issue.authority, signal)
+        return { ...issue, reactions: reactions.issue,
+          activity: issue.activity.map(item => ({ ...item, reactions: item.kind === 'comment' ? reactions.comments.get(item.id) : undefined })) }
+      })
       : issueDetail(selection, number, requestedComments, activityBefore, activityAfter, signal))
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error, selection.tracker) })) : null
   const editMetadata = issueMetadataKind(query.get('editMetadata'))

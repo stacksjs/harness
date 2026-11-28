@@ -108,6 +108,17 @@ function forgejoIssueEndpoint(repository: ForgejoIssueRepository, number: number
   return repoPath(repository) + '/issues/' + number
 }
 
+export function forgejoReactionEndpoint(repository: ForgejoIssueRepository, number: number, comment: number) {
+  return (comment ? repoPath(repository) + '/issues/comments/' + comment : forgejoIssueEndpoint(repository, number)) + '/reactions'
+}
+
+export async function forgejoIssueHasComment(repository: ForgejoIssueRepository, number: number, comment: number, signal: AbortSignal) {
+  const endpoint = forgejoIssueEndpoint(repository, number)
+  const { body } = await forgejoTeaRequest(repository, endpoint + '/comments', signal)
+  return Array.isArray(body) && body.some(row => numericId(row?.id) === comment && typeof row.body === 'string'
+    && belongsToIssue(repository, endpoint, row))
+}
+
 type ForgejoTriageKind = 'labels' | 'assignees'
 
 function appliedForgejoChoices(issue: RawIssue, kind: ForgejoTriageKind) {
@@ -152,6 +163,7 @@ export async function readForgejoIssueAuthority(repository: ForgejoIssueReposito
   const text = typeof raw.title === 'string' && (raw.body == null || typeof raw.body === 'string')
     ? { title: raw.title, body: raw.body ?? '' } : null
   return { commentScope: scope('forgejo-issue-comment'), commentBlocked, viewer, endpoint,
+    issueId, viewerLogin: username(user ?? undefined), reactionScope: scope('forgejo-issue-reaction'), canReact: repo.archived === false,
     scope: scope('forgejo-issue-text'), canEditText: canEdit, text,
     triageScope: scope('forgejo-issue-triage'), canTriage: repo.archived === false && canPush,
     applied: triage ? appliedForgejoChoices(raw, triage) : null, multipleAssignees: true,

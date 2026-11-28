@@ -61,7 +61,7 @@ export function forgejoTeaTarget(value: string, logins: TeaLogin[]): TeaIssueTar
   return chosen ? { host: chosen.host, name: chosen.name, apiName: chosen.apiName, login: chosen.login, base: chosen.base } : null
 }
 
-export async function forgejoTeaRequest(target: TeaIssueTarget & { path: string }, endpoint: string, signal: AbortSignal, request?: { method: 'POST' | 'PATCH' | 'PUT', body: object }) {
+export async function forgejoTeaRequest(target: TeaIssueTarget & { path: string }, endpoint: string, signal: AbortSignal, request?: { method: 'POST' | 'PATCH' | 'PUT' | 'DELETE', body: object, success?: number[] }) {
   const tea = Bun.which('tea', { PATH: process.env.PATH })
   if (!tea) throw new RepositoryPullRequestError('Install the Gitea CLI on this host to read Forgejo issues.')
   const child = Bun.spawn([tea, 'api', '--include', '--login', target.login, '--repo', target.apiName,
@@ -73,10 +73,11 @@ export async function forgejoTeaRequest(target: TeaIssueTarget & { path: string 
   if (status === 401 || status === 403) throw new RepositoryPullRequestError('The selected Forgejo account cannot complete this request.', status)
   if (status === 404) throw new RepositoryPullRequestError('Forgejo could not find this resource.', status)
   if (status === 429) throw new RepositoryPullRequestError('Forgejo is rate limiting requests. Try again shortly.', status)
-  if (exit !== 0 || status !== (request?.method === 'POST' ? 201 : 200) || stdout.length > 16 * 1024 * 1024)
+  const expected = request?.success ?? [request?.method === 'POST' ? 201 : 200]
+  if (exit !== 0 || !expected.includes(status) || stdout.length > 16 * 1024 * 1024)
     throw new RepositoryPullRequestError('Forgejo could not load this resource. Check the configured CLI login.', status || undefined)
   let response: unknown
-  try { response = JSON.parse(stdout) }
+  try { response = request?.method === 'DELETE' && !stdout.trim() ? null : JSON.parse(stdout) }
   catch { throw new RepositoryPullRequestError('Forgejo returned an unreadable response.') }
   const link = /^link:[^\r\n]*/imu.exec(diagnostics)?.[0]
   return { body: response, more: link ? /;\s*rel="?next"?\b/iu.test(link) : undefined }

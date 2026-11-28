@@ -1,10 +1,10 @@
 <p role="status" data-issue-metadata-message>{{ reactionMessage }}</p>
 @if(reactionDraft)
-  <form method="post" action="{{ reactionAction }}" aria-label="Check GitLab reaction">
+  <form method="post" action="{{ reactionAction }}" aria-label="Check {{ textForge }} reaction">
     <input type="hidden" name="subject" value="{{ reactionDraft.subject }}">
     <input type="hidden" name="scope" value="{{ reactionDraft.scope }}">
     <input type="hidden" name="intent" value="{{ reactionDraft.intent }}">
     <input type="hidden" name="reaction" value="{{ reactionDraft.desired ? 'add' : 'remove' }}:{{ reactionDraft.content }}">
-    <button type="submit" data-issue-button>Check GitLab</button>
+    <button type="submit" data-issue-button>Check {{ textForge }}</button>
   </form>
 @endif
