@@ -343,6 +343,130 @@ describe('GitHub issue workspace', () => {
   }, 45_000)
 })
 
+describe('GitHub issue creation', () => {
+  it.skipIf(process.platform === 'win32')('reads Markdown and YAML templates and reconciles a lost create without a second POST', async () => {
+    const repository = 'fixture/issues'
+    const project = join(dir, 'github-issues')
+    mkdirSync(project)
+    for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', 'https://github.com/' + repository + '.git']])
+      expect(Bun.spawnSync(['git', ...args], { cwd: project }).success).toBe(true)
+    const cli = fixtureGitHubCli(dir, { [repository]: { bare: join(project, '.git') } })
+    const entry = (name: string, text: string) => ({ name, object: { __typename: 'Blob', text, isTruncated: false } })
+    let state = JSON.parse(readFileSync(cli.state, 'utf8'))
+    state.issueCanEditText = true
+    state.issueCreate = {
+      pageSize: 1, push: true, writes: [],
+      templates: {
+        templateDirectory: { __typename: 'Tree', entries: [
+          entry('config.yml', 'blank_issues_enabled: false'),
+          entry('form.yaml', [
+            'name: Incident', 'description: Report an incident', 'title: "[Incident]"', 'labels: "incident, triage"',
+            'assignees: [reviewer]', 'body:', '  - type: markdown', '    attributes:', '      value: Check existing reports.',
+            '  - type: textarea', '    id: report', '    attributes:', '      label: What happened?', '      placeholder: Describe the issue.',
+            '    validations:', '      required: true', '  - type: dropdown', '    attributes:', '      label: Severity',
+            '      multiple: true', '      options: [High, Low]', '      default: [1]',
+          ].join('\n')),
+          entry('invalid.yml', 'name: ['),
+        ] },
+        issueTemplates: [{ filename: '.github/ISSUE_TEMPLATE/bug.md', name: 'Bug report', about: 'Explain a bug',
+          title: '[Bug]', body: '  Preserve indent\n', labels: { nodes: [null, { name: 'bug' }] }, assignees: { nodes: [{ login: 'reviewer' }] } }],
+      },
+    }
+    const save = () => writeFileSync(cli.state, JSON.stringify(state))
+    const load = () => { state = JSON.parse(readFileSync(cli.state, 'utf8')) }
+    save()
+    const cwd = process.cwd()
+    const path = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      const profile = derivedId('gh-create-profile')
+      const workspaceId = derivedId('gh-create-project')
+      const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+        harness.engine.dispatch({ id, at: 1, command })
+      await dispatch('gh-create-profile', { type: 'profile.create', name: 'GitHub issue fixture' })
+      await dispatch('gh-create-project', { type: 'workspace.add', path: realpathSync(project), profileId: profile })
+      await dispatch('gh-create-trust', { type: 'workspace.trust', workspaceId, trusted: true })
+      const origin = 'http://127.0.0.1:' + port
+      const query = new URLSearchParams({ profile: String(profile), workspace: String(workspaceId), repository })
+      const templateRequest = () => fetch(origin + '/issues/templates?' + query)
+      const response = await templateRequest()
+      expect(response.status).toBe(200)
+      const { scope, ...choices } = await response.json()
+      expect(choices).toEqual({
+        canCreate: true, canTriage: true, blankIssuesEnabled: false, templates: [
+          { key: '.github/ISSUE_TEMPLATE/bug.md', name: 'Bug report', about: 'Explain a bug',
+            title: '[Bug]', body: '  Preserve indent\n', labels: ['bug'], assignees: ['reviewer'] },
+          { key: 'form.yaml', name: 'Incident', about: 'Report an incident', title: '[Incident]',
+            labels: ['incident', 'triage'], assignees: ['reviewer'],
+            body: 'Check existing reports.\n\n### What happened?\n\nRequired.\n\nExample:\n> Describe the issue.\n\n### Severity\n\nChoose one or more:\n\n- High\n- Low (default)' },
+        ],
+      })
+      const config = state.issueCreate.templates.templateDirectory.entries[0]
+      config.object.text = 'blank_issues_enabled: ['
+      save()
+      expect((await templateRequest()).status).toBe(503)
+      config.object.text = 'blank_issues_enabled: false'
+      const payload = { title: 'Restore GitHub drafts', body: 'Steps:\n\n    reproduce', labels: ['bug'], assignees: ['reviewer'],
+        scope, intent: crypto.randomUUID() }
+      const send = (value: typeof payload) => fetch(origin + '/issues/create?' + query, {
+        method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify(value),
+      })
+      state.issueCreate.push = false
+      save()
+      expect((await send(payload)).status).toBe(403)
+      expect(await (await templateRequest()).json()).toMatchObject({ canCreate: true, canTriage: false })
+      state.issueCreate.push = true
+      state.issueCreate.viewerId = 42
+      save()
+      expect((await send(payload)).status).toBe(409)
+      state.issueCreate.viewerId = 17
+      state.issueCreate.refuse = true
+      save()
+      const refused = await send(payload)
+      expect(refused.status).toBe(422)
+      expect(await refused.json()).toEqual({ status: 'refused' })
+      load()
+      expect(state.issueCreate.writes).toHaveLength(0)
+      state.issueCreate.refuse = false
+      state.issueCreate.dropReply = true
+      save()
+      const interrupted = await send(payload)
+      expect(interrupted.status).toBe(202)
+      expect(await interrupted.json()).toEqual({ status: 'pending' })
+      load()
+      expect(state.issueCreate.writes).toHaveLength(1)
+      expect(state.issueCreate.writes[0]).toMatchObject({ labels: ['bug'], assignees: ['reviewer'] })
+      const canonical = state.issues[repository][0]
+      state.issues[repository].push({ ...canonical, number: 102, html_url: canonical.html_url.replace(/101$/u, '102'),
+        created_at: '2026-11-28T12:00:00Z', pull_request: {} })
+      save()
+      harness.stop()
+      harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+      const retry = await send(payload)
+      expect(retry.status).toBe(200)
+      const issue = { key: '101', displayKey: '#101', url: 'https://github.com/' + repository + '/issues/101' }
+      expect(await retry.json()).toEqual({ status: 'created', issue, replayed: true })
+      const edit = await fetch(origin + '/issues?' + new URLSearchParams({
+        profile: String(profile), repository, selected: repository, issue: '101', editText: 'body',
+      }))
+      expect(edit.status).toBe(200)
+      const html = await edit.text()
+      expect(html).toContain('data-issue-text-editor')
+      expect(html).toContain(payload.body)
+      expect(html).not.toContain('harness:issue-create:')
+      const plain = await send({ ...payload, intent: crypto.randomUUID(), title: 'Title only', body: '', labels: [], assignees: [] })
+      expect(plain.status).toBe(201)
+      load()
+      expect(state.issueCreate.writes).toHaveLength(2)
+    }
+    finally {
+      process.chdir(cwd)
+      process.env.PATH = path
+    }
+  }, 40_000)
+})
+
 describe('Forgejo issue creation', () => {
   it.skipIf(process.platform === 'win32')('scopes templates and confirms a created issue only once across restarts', async () => {
     const base = 'https://forgejo.fixture.invalid/workbench'

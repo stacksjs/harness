@@ -131,9 +131,14 @@ function commentPage(pull, variables) {
   } }
 }
 
-if (url.pathname === '/user') reply(200, { login: state.actor ?? 'fixture-user' })
+if (url.pathname === '/user') reply(200, { id: state.issueCreate?.viewerId ?? 17, login: state.actor ?? 'fixture-user' })
 if (url.pathname === '/graphql' && method === 'POST') {
   const { query, variables } = JSON.parse(await Bun.stdin.text())
+  if (state.issueCreate && query.includes('query HarnessIssueTemplates')) {
+    const key = variables.owner + '/' + variables.name
+    if (!state.repositories[key] || !process.env.GH_TOKEN) reply(404, {})
+    reply(200, { data: { repository: { nameWithOwner: key, ...state.issueCreate.templates } } })
+  }
   if (query.includes('mutation SetPullRequestFileViewed')) {
     if (!process.env.GH_TOKEN || variables.id !== 'fixture-pull' || variables.path !== 'report.txt') reply(400, {})
     if (state.viewedMode === 'denied') reply(403, { message: 'Private forge diagnostics must not leak' })
@@ -719,7 +724,7 @@ if (method === 'PATCH' && parts[4] === 'issues' && !parts[6]) {
   writeFileSync(stateFile, JSON.stringify(state))
   reply(200, issue)
 }
-if (method === 'GET' && parts[4] === 'issues' && state.issues?.[name] && (!parts[6] || parts[6] === 'comments')) {
+if (method === 'GET' && parts[4] === 'issues' && parts[5] && state.issues?.[name] && (!parts[6] || parts[6] === 'comments')) {
   const issue = state.issues[name].find(issue => issue.number === Number(parts[5]))
   if (!issue) reply(404, {})
   if (!parts[6]) reply(200, { ...issue, comments: issue.comments?.length ?? 0 })
@@ -763,7 +768,48 @@ if (method === 'POST' && parts[4] === 'actions' && parts[5] === 'runs' && parts[
   }
   reply(409, { message: 'This workflow run has already been approved.' })
 }
-if (parts.length === 4) reply(200, { full_name: name, default_branch: 'main', parent: repo.parent && { full_name: repo.parent } })
+if (parts.length === 4) reply(200, { full_name: name, default_branch: 'main', parent: repo.parent && { full_name: repo.parent },
+  id: state.issueCreate?.repositoryId ?? 73, archived: state.issueCreate?.archived === true, has_issues: state.issueCreate?.issuesEnabled !== false,
+  permissions: { push: state.issueCreate?.push === true } })
+if (state.issueCreate && parts[4] === 'issues' && !parts[5]) {
+  const creation = state.issueCreate
+  if (!process.env.GH_TOKEN) reply(401, {})
+  const issues = (state.issues ??= {})[name] ??= []
+  if (method === 'GET') {
+    if (creation.hideList) {
+      delete creation.hideList
+      writeFileSync(stateFile, JSON.stringify(state))
+      reply(503, {})
+    }
+    const page = Number(url.searchParams.get('page')) || 1
+    const size = creation.pageSize ?? 50
+    const rows = [...issues].sort((left, right) => (right.created_at ?? '').localeCompare(left.created_at ?? ''))
+    const next = page * size < rows.length ? 'Link: <https://api.github.com/fixture>; rel="next"\\r\\n' : ''
+    reply(200, rows.slice((page - 1) * size, page * size), next)
+  }
+  if (method !== 'POST') reply(405, {})
+  if (creation.archived || creation.issuesEnabled === false) reply(410, {})
+  const input = JSON.parse(await Bun.stdin.text())
+  if (Object.keys(input).sort().join(',') !== 'assignees,body,labels,title'
+    || typeof input.title !== 'string' || typeof input.body !== 'string'
+    || !Array.isArray(input.labels) || !Array.isArray(input.assignees) || creation.refuse) reply(422, {})
+  if (!creation.push && (input.labels.length || input.assignees.length)) reply(403, {})
+  const number = Math.max(100, ...issues.map(row => row.number)) + 1
+  const user = { id: creation.viewerId ?? 17, login: state.actor ?? 'fixture-user' }
+  const row = { number, node_id: 'FIXTURE_ISSUE_' + number, html_url: 'https://github.com/' + name + '/issues/' + number,
+    title: input.title, body: input.body, user, state: 'open', labels: input.labels.map(name => ({ id: 1, name, color: '112233' })),
+    assignees: input.assignees.map(login => ({ login })), comments: 0, created_at: '2026-11-28T11:00:00Z', updated_at: '2026-11-28T11:00:00Z' }
+  issues.push(row)
+  creation.writes.push({ ...input, number })
+  if (creation.dropReply) {
+    delete creation.dropReply
+    creation.hideList = true
+    writeFileSync(stateFile, JSON.stringify(state))
+    process.exit(1)
+  }
+  writeFileSync(stateFile, JSON.stringify(state))
+  reply(201, row)
+}
 if (parts[4] === 'branches') {
   const sha = head(repo, decodeURIComponent(parts[5]))
   reply(sha ? 200 : 404, sha ? { commit: { sha } } : {})

@@ -27,7 +27,7 @@ import { isWorkspaceGitRoot, reviewWorkspaceDiff, summarizeTurnFiles, workspaceD
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
 import { submitIssueReaction } from './issue-activity'
-import { createForgejoIssue, forgejoIssueTemplates } from './issue-create'
+import { createIssue, issueTemplates } from './issue-create'
 import { submitIssueText } from './issue-text'
 import { submitIssueComment } from './issue-comment'
 import { updateIssueMetadata } from './issue-metadata'
@@ -2322,7 +2322,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             return new Response(null, { status: 405, headers: { ...jsonHeaders, allow: method } })
           srv.timeout(request, 70)
           const signal = AbortSignal.any([request.signal, AbortSignal.timeout(60_000)])
-          if (templates) return forgejoIssueTemplates(engine.current, url.searchParams, signal).then(result =>
+          if (templates) return issueTemplates(engine.current, url.searchParams, signal).then(result =>
             result ? Response.json(result, { headers: jsonHeaders })
               : Response.json({ status: 'changed' }, { status: 404, headers: jsonHeaders }))
             .catch(() => Response.json({ status: 'unavailable' }, { status: 503, headers: jsonHeaders }))
@@ -2332,7 +2332,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             let input: unknown
             try { input = raw === null ? null : JSON.parse(raw) }
             catch { input = null }
-            const result = await createForgejoIssue(engine.current, url.searchParams, input, signal, reviewReplies)
+            const result = await createIssue(engine.current, url.searchParams, input, signal, reviewReplies)
             if (!result) return Response.json({ status: 'invalid' }, { status: 400, headers: jsonHeaders })
             const statuses = { changed: 409, denied: 403, unavailable: 503, 'unknown-label': 422, refused: 422, pending: 202 }
             const status = result.status === 'created' ? result.replayed ? 200 : 201 : statuses[result.status]

@@ -14,6 +14,7 @@ import { readGitLabIssueReactions } from './gitlab-issue-reactions'
 import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue, readGitLabIssueText } from './gitlab-issues'
 import type { IssueRepository } from './issue-repositories'
 import { issueReferenceForSelection, mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
+import { issueCreationMarker } from './issue-creation-marker'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
 import { hostedStatusEditor, issueMetadataKind, readForgejoTriageEditor, readGitLabTriageEditor, readIssueMetadata } from './issue-metadata'
 import { createIssueTextDraft, issueTextField, issueTextLimits } from './issue-text'
@@ -143,7 +144,7 @@ async function issueDetail(repository: GitHubWorkspaceRepository, number: number
 
   const raw = reply.body as GitHubIssue
   const details = { ...issue, dateLabel: issue.created ? dates.format(issue.created) : '',
-    description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '', relatedRequests: [] as IssueRelatedRequest[] }
+    description: typeof raw.body === 'string' ? raw.body.replace(issueCreationMarker, '').slice(0, 65_536) : '', relatedRequests: [] as IssueRelatedRequest[] }
   if (activity) return { ...details, activity: activity.items, reactions: activity.reactions, commentTotal: activity.total,
     activityAvailable: true, activityDegraded: false, olderActivity: activity.older, newerActivity: activity.newer, commentPage: 0, moreComments: false }
   const commentPage = requestedComments === 'latest'

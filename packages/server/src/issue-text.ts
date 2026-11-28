@@ -94,15 +94,16 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
       const authority = await readIssueMetadataAuthority({ repository, number: reference.number, credential, signal, includeText: true })
       if (!authority) return null
       const write = async (value: string) => {
+        const saved = field === 'body' && authority.creationMarker ? authority.creationMarker + '\n\n' + value : value
         const reply = await repositoryGitHubRequest(repository.path, 'graphql', {
           query: `mutation HarnessUpdateIssueText($input: UpdateIssueInput!) {
             updateIssue(input: $input) { issue { id ${field} } }
-          }`, variables: { input: { id: authority.issueId, [field]: value, clientMutationId: intent } },
+          }`, variables: { input: { id: authority.issueId, [field]: saved, clientMutationId: intent } },
         }, signal, credential).catch((error: unknown) =>
           error instanceof RepositoryPullRequestError && error.status ? { status: error.status, body: null } : null)
         const payload = reply?.body as { data?: { updateIssue?: { issue?: { id?: string, title?: string, body?: string } } }, errors?: { type?: string }[] } | null
         const applied = payload?.data?.updateIssue?.issue
-        if (applied?.id === authority.issueId && applied[field] === value) return 'updated' as const
+        if (applied?.id === authority.issueId && applied[field] === saved) return 'updated' as const
         const denied = reply?.status === 401 || reply?.status === 403 || payload?.errors?.some(error => error.type === 'FORBIDDEN')
         if (denied) return 'denied' as const
         if (reply?.status === 422 || payload?.errors?.some(error => error.type === 'UNPROCESSABLE')) return 'refused' as const

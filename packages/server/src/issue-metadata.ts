@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { issueRepositoryKey } from '@harness/contract'
 import { gitLabIssueCredential, gitLabTriageKey, readGitLabIssueText, searchGitLabTriage, writeGitLabIssueStatus, writeGitLabTriage } from './gitlab-issues'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
+import { issueCreationMarker } from './issue-creation-marker'
 import { issueReferenceForSelection, trustedIssueRepositories } from './issue-repositories'
 import { issueStatusPlan, saveIssueStatus, writeGitHubIssueStatus } from './issue-status'
 import { applyPullRequestLabelChanges, parseLabelSelection, readPullRequestLabelEditor } from './pull-request-labels'
@@ -28,7 +29,7 @@ export function issueMetadataKind(value: string | null): IssueMetadataKind | nul
 type Person = { key: string, name: string, description: string }
 type Option = Person & { applied: boolean, checked: boolean, archived?: boolean }
 type Change = Option & { apply: boolean }
-type Authority = { repositoryId: string, issueId: string, viewer: string, canEdit: boolean, canEditText: boolean, text: { title: string, body: string } | null, commentBlocked: string, assignees: Person[], status: ReturnType<typeof issueStatusPlan> }
+type Authority = { repositoryId: string, issueId: string, viewer: string, canEdit: boolean, canEditText: boolean, text: { title: string, body: string } | null, commentBlocked: string, assignees: Person[], status: ReturnType<typeof issueStatusPlan>, creationMarker: string }
 type MetadataContext = { repository: GitHubWorkspaceRepository, number: number, credential?: string, signal: AbortSignal, includeText?: boolean }
 export type IssueMetadataForm = { kind: IssueMetadataKind, intent: string, revision: string, scope: string, checked: string[] }
 export type IssueMetadataEditor = IssueMetadataForm & { options: Option[], search: string, more: boolean, matches: number }
@@ -87,8 +88,9 @@ export async function readIssueMetadataAuthority({ repository, number, credentia
   const commentBlocked = repo.isArchived !== false ? 'This repository is archived.'
     : issue.locked !== false && !canEdit ? 'This issue is locked.' : ''
   const canEditText = repo.isArchived === false && issue.viewerCanUpdate === true
-  const text = typeof issue.title === 'string' && typeof issue.body === 'string' ? { title: issue.title, body: issue.body } : null
-  return { repositoryId: repo.id, issueId: issue.id, viewer, canEdit, canEditText, text, commentBlocked, assignees: assignees.filter(actor => actor !== null),
+  const marker = typeof issue.body === 'string' ? issue.body.match(issueCreationMarker)?.[0] ?? '' : ''
+  const text = typeof issue.title === 'string' && typeof issue.body === 'string' ? { title: issue.title, body: issue.body.slice(marker.length) } : null
+  return { repositoryId: repo.id, issueId: issue.id, viewer, canEdit, canEditText, text, creationMarker: marker.trimEnd(), commentBlocked, assignees: assignees.filter(actor => actor !== null),
     status: issueStatusPlan(issue, repo.planningStatuses, repo.isArchived === false) }
 }
 

@@ -1,13 +1,14 @@
 import type { HarnessState } from '@harness/engine'
-import type { ForgejoIssueRepository } from './issue-repositories'
+import type { ForgejoIssueRepository, GitHubIssueRepository } from './issue-repositories'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
-import { issueRepositoryKey, parseForgejoIssueUrl } from '@harness/contract'
+import { issueRepositoryKey, parseForgejoIssueUrl, parseGitHubIssueUrl } from '@harness/contract'
 import { forgejoLabels, forgejoRepoPath, readForgejoRepositoryAuthority } from './forgejo-issues'
 import { forgejoTeaRequest } from './forgejo-tea'
+import { githubIssueTemplates } from './github-issue-templates'
 import { issueReferenceForSelection, trustedIssueProjects } from './issue-repositories'
 import { issueTextLimits } from './issue-text'
-import { RepositoryPullRequestError } from './repository-pull-request'
+import { repositoryGitHubCredential, repositoryGitHubRequest, RepositoryPullRequestError } from './repository-pull-request'
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
 const digest = /^[a-f0-9]{64}$/u
@@ -16,7 +17,16 @@ const pages = 10
 
 type CreationResult = { key: string, displayKey: string, url: string }
 type RawIssue = { number?: unknown, html_url?: unknown, user?: { id?: unknown }, title?: unknown, body?: unknown, pull_request?: unknown }
-type Authority = NonNullable<Awaited<ReturnType<typeof readForgejoRepositoryAuthority>>>
+type Repository = ForgejoIssueRepository | GitHubIssueRepository
+type Authority = { repoId: number, viewer: number, archived: unknown, issuesEnabled: boolean, canPush: boolean }
+type TemplateList = Awaited<ReturnType<typeof githubIssueTemplates>>
+type Adapter = {
+  readAuthority: () => Promise<Authority | null>
+  templates: () => Promise<TemplateList>
+  resolveLabels: (names: string[]) => Promise<string[] | number[] | null>
+  submit: (payload: { title: string, body: string, labels: string[] | number[], assignees: string[] }) => Promise<unknown>
+  list: (page: number) => Promise<{ body: unknown, more?: boolean }>
+}
 
 function hash(parts: unknown[]) {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex')
@@ -28,10 +38,10 @@ async function destination(state: HarnessState, query: URLSearchParams, signal: 
   const ref = issueReferenceForSelection(query.get('repository'), 1)
   const workspace = state.workspaces.get(workspaceId)
   if (!state.profiles.has(profile) || !workspace?.trusted || workspace.scratch || workspace.profileId !== profile
-    || ref?.tracker !== 'forgejo') return null
+    || !ref || ref.tracker === 'gitlab') return null
   const [project] = await trustedIssueProjects([workspace], profile, signal)
   const repository = project?.repositories.get(issueRepositoryKey(ref))
-  if (repository?.tracker !== 'forgejo') return null
+  if (!repository || repository.tracker === 'gitlab') return null
   const trusted = () => {
     const current = state.workspaces.get(workspaceId)
     return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === workspace.path)
@@ -39,8 +49,9 @@ async function destination(state: HarnessState, query: URLSearchParams, signal: 
   return { repository, trusted }
 }
 
-function scopeFor(repository: ForgejoIssueRepository, authority: Authority) {
-  return hash(['forgejo-issue-create', repository.base, repository.login, repository.key, repository.workspace.profileId,
+function scopeFor(repository: Repository, authority: Authority) {
+  const connection = repository.tracker === 'forgejo' ? [repository.base, repository.login] : ['github.com']
+  return hash([repository.tracker + '-issue-create', ...connection, repository.key, repository.workspace.profileId,
     repository.workspace.id, authority.repoId, authority.viewer])
 }
 
@@ -56,12 +67,7 @@ function strings(value: unknown, maximum: number): string[] | null {
 
 type RawTemplate = { file_name?: unknown, name?: unknown, about?: unknown, title?: unknown, content?: unknown, labels?: unknown, assignees?: unknown }
 
-export async function forgejoIssueTemplates(state: HarnessState, query: URLSearchParams, signal: AbortSignal) {
-  const target = await destination(state, query, signal)
-  if (!target) return null
-  const { repository, trusted } = target
-  const initial = await readForgejoRepositoryAuthority(repository, signal)
-  if (!initial || !trusted() || !initial.issuesEnabled) return null
+async function forgejoTemplateList(repository: ForgejoIssueRepository, signal: AbortSignal): Promise<TemplateList> {
   const path = forgejoRepoPath(repository)
   const [listed, config] = await Promise.all([
     forgejoTeaRequest(repository, path + '/issue_templates', signal),
@@ -85,14 +91,10 @@ export async function forgejoIssueTemplates(state: HarnessState, query: URLSearc
       body: typeof template.content === 'string' ? template.content.slice(0, issueTextLimits.body) : '', labels, assignees,
     })
   }
-  const current = await readForgejoRepositoryAuthority(repository, signal)
-  const scope = scopeFor(repository, initial)
-  if (!trusted() || !current?.issuesEnabled || scopeFor(repository, current) !== scope) return null
-  return { scope, canCreate: current.archived === false, canTriage: current.archived === false && current.canPush,
-    blankIssuesEnabled: settings?.blank_issues_enabled !== false, templates: [...templates.values()] }
+  return { blankIssuesEnabled: settings?.blank_issues_enabled !== false, templates: [...templates.values()] }
 }
 
-async function resolveLabels(repository: ForgejoIssueRepository, names: string[], signal: AbortSignal) {
+async function resolveForgejoLabels(repository: ForgejoIssueRepository, names: string[], signal: AbortSignal) {
   const ids = new Map<string, number>()
   for (let page = 1; page <= pages && ids.size < names.length; page++) {
     const { body, more } = await forgejoTeaRequest(repository, forgejoRepoPath(repository) + '/labels?limit=' + pageSize + '&page=' + page, signal)
@@ -106,15 +108,72 @@ async function resolveLabels(repository: ForgejoIssueRepository, names: string[]
   return ids.size === names.length ? names.map(name => ids.get(name)!) : null
 }
 
-function validateResult(repository: ForgejoIssueRepository, value: unknown): CreationResult | null {
+function positiveId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+async function bindAdapter(repository: Repository, signal: AbortSignal): Promise<Adapter> {
+  if (repository.tracker === 'forgejo') {
+    const endpoint = forgejoRepoPath(repository) + '/issues'
+    return {
+      readAuthority: () => readForgejoRepositoryAuthority(repository, signal),
+      templates: () => forgejoTemplateList(repository, signal),
+      resolveLabels: names => resolveForgejoLabels(repository, names, signal),
+      submit: async payload => (await forgejoTeaRequest(repository, endpoint, signal, { method: 'POST', body: payload })).body,
+      list: page => forgejoTeaRequest(repository, endpoint + '?state=all&sort=latest&limit=' + pageSize + '&page=' + page, signal),
+    }
+  }
+  const credential = await repositoryGitHubCredential(repository.path, signal)
+  const repoPath = 'repos/' + repository.name
+  const endpoint = repoPath + '/issues'
+  const request = async (path: string, payload?: object) => {
+    const reply = await repositoryGitHubRequest(repository.path, path, payload, signal, credential)
+    if (reply.status !== (payload ? 201 : 200))
+      throw new RepositoryPullRequestError('GitHub could not complete the issue request.', reply.status)
+    return reply
+  }
+  return {
+    async readAuthority() {
+      const [repoReply, userReply] = await Promise.all([request(repoPath), request('user')])
+      const repo = repoReply.body as { id?: unknown, full_name?: string, archived?: boolean, has_issues?: boolean, permissions?: { push?: boolean } } | null
+      const user = userReply.body as { id?: unknown } | null
+      if (!positiveId(repo?.id) || !positiveId(user?.id) || typeof repo.full_name !== 'string'
+        || repo.full_name.toLowerCase() !== repository.name.toLowerCase()) return null
+      return { repoId: repo.id, viewer: user.id, archived: repo.archived, issuesEnabled: repo.has_issues === true, canPush: repo.permissions?.push === true }
+    },
+    templates: () => githubIssueTemplates(repository, credential, signal),
+    resolveLabels: async names => names,
+    submit: async payload => (await request(endpoint, payload)).body,
+    async list(page) {
+      const reply = await request(endpoint + '?state=all&sort=created&direction=desc&per_page=' + pageSize + '&page=' + page)
+      return { body: reply.body, more: reply.hasNextPage }
+    },
+  }
+}
+
+export async function issueTemplates(state: HarnessState, query: URLSearchParams, signal: AbortSignal) {
+  const target = await destination(state, query, signal)
+  if (!target) return null
+  const { repository, trusted } = target
+  const adapter = await bindAdapter(repository, signal)
+  const initial = await adapter.readAuthority()
+  if (!initial || !trusted() || !initial.issuesEnabled) return null
+  const choices = await adapter.templates()
+  const current = await adapter.readAuthority()
+  const scope = scopeFor(repository, initial)
+  if (!trusted() || !current?.issuesEnabled || scopeFor(repository, current) !== scope) return null
+  return { scope, canCreate: current.archived === false, canTriage: current.archived === false && current.canPush, ...choices }
+}
+
+function validateResult(repository: Repository, value: unknown): CreationResult | null {
   const issue = value as { key?: unknown, url?: unknown } | null
   if (typeof issue?.key !== 'string' || typeof issue.url !== 'string') return null
-  const ref = parseForgejoIssueUrl(issue.url)
-  return ref && issueRepositoryKey(ref) === repository.key && issue.key === String(ref.number)
+  const ref = repository.tracker === 'forgejo' ? parseForgejoIssueUrl(issue.url) : parseGitHubIssueUrl(issue.url)
+  return ref?.tracker === repository.tracker && issueRepositoryKey(ref) === repository.key && issue.key === String(ref.number)
     ? { key: issue.key, displayKey: '#' + issue.key, url: issue.url } : null
 }
 
-export async function createForgejoIssue(state: HarnessState, query: URLSearchParams, value: unknown, signal: AbortSignal,
+export async function createIssue(state: HarnessState, query: URLSearchParams, value: unknown, signal: AbortSignal,
   receipts: PullRequestReplyReceipts,
 ) {
   const input = value && typeof value === 'object' ? value as Record<string, unknown> : null
@@ -130,14 +189,15 @@ export async function createForgejoIssue(state: HarnessState, query: URLSearchPa
     const target = await destination(state, query, signal)
     if (!target) return result('changed')
     const { repository, trusted } = target
-    const read = () => readForgejoRepositoryAuthority(repository, signal)
+    const adapter = await bindAdapter(repository, signal)
+    const read = adapter.readAuthority
     const authority = await read()
     const scope = input.scope
     const sameAccount = (current: Authority | null) => Boolean(current && trusted() && scopeFor(repository, current) === scope)
     if (!sameAccount(authority) || !authority) return result('changed')
     const title = input.title.trim()
     const body = input.body.replace(/\r\n?/gu, '\n')
-    const intent = hash(['forgejo-issue-create', input.intent])
+    const intent = hash([repository.tracker + '-issue-create', input.intent])
     const fingerprint = hash([scope, title, body, [...labels].sort(), [...assignees].sort()])
     const prior = receipts.inspect(intent, fingerprint)
     if (prior === 'conflict') return result('changed')
@@ -158,12 +218,11 @@ export async function createForgejoIssue(state: HarnessState, query: URLSearchPa
       receipts.confirm(intent, fingerprint, JSON.stringify(issue))
       return { status: 'created' as const, issue, replayed }
     }
-    const endpoint = forgejoRepoPath(repository) + '/issues'
     if (!prior) {
       const allowed = (current: Authority) => current.issuesEnabled && current.archived === false && (current.canPush || (!labels.length && !assignees.length))
       if (!allowed(authority)) return result('denied')
-      const ids = await resolveLabels(repository, labels, signal)
-      if (!ids) return result('unknown-label')
+      const resolved = await adapter.resolveLabels(labels)
+      if (!resolved) return result('unknown-label')
       const current = await read()
       if (!current || !sameAccount(current)) return result('changed')
       if (!allowed(current)) return result('denied')
@@ -174,22 +233,20 @@ export async function createForgejoIssue(state: HarnessState, query: URLSearchPa
       }
       attempted = true
       try {
-        const reply = await forgejoTeaRequest(repository, endpoint, signal, {
-          method: 'POST', body: { title, body: marker + '\n\n' + body, labels: ids, assignees },
-        })
-        const issue = matches(reply.body as RawIssue | null)
+        const reply = await adapter.submit({ title, body: marker + '\n\n' + body, labels: resolved, assignees })
+        const issue = matches(reply as RawIssue | null)
         if (issue) return await accept(issue, false)
       }
       catch (error) {
         const status = error instanceof RepositoryPullRequestError ? error.status : undefined
-        if (status === 401 || status === 403 || status === 400 || status === 404 || status === 422) {
+        if (status === 401 || status === 403 || status === 400 || status === 404 || status === 410 || status === 422) {
           receipts.reject(intent, fingerprint)
           return result(status === 401 || status === 403 ? 'denied' : 'refused')
         }
       }
     }
     for (let page = 1; page <= pages; page++) {
-      const reply = await forgejoTeaRequest(repository, endpoint + '?state=all&sort=latest&limit=' + pageSize + '&page=' + page, signal)
+      const reply = await adapter.list(page)
       if (!Array.isArray(reply.body)) break
       const issue = reply.body.map(matches).find(candidate => candidate !== null)
       if (issue) return await accept(issue, true)

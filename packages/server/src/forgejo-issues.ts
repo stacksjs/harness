@@ -4,6 +4,7 @@ import type { IssueActivityItem } from './issue-activity'
 import type { ForgejoIssueRepository } from './issue-repositories'
 import type { IssueRelatedRequest, IssueScope } from './issue-workspace'
 import { forgejoTeaRequest } from './forgejo-tea'
+import { issueCreationMarker } from './issue-creation-marker'
 import { openClosedIssueStatusPlan } from './issue-status'
 import { pullRequestLabels } from './pull-request-labels'
 import { RepositoryPullRequestError } from './repository-pull-request'
@@ -35,8 +36,6 @@ function username(value?: User) {
 function stamp(value: unknown) {
   return typeof value === 'string' ? Date.parse(value) || 0 : 0
 }
-
-const issueCreationMarker = /^<!-- harness:issue-create:[a-f0-9]{64} -->(?:\n\n|$)/u
 
 export function forgejoRepoPath(repository: ForgejoIssueRepository) {
   return 'repos/' + repository.apiName.split('/').map(encodeURIComponent).join('/')
