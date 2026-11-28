@@ -70,9 +70,11 @@ export async function respondWorkflowWebhook(runner: WorkflowRunner | null, requ
   if (!allowed) return json({ error: 'blocked_by_policy' }, 403)
   if (!methods.includes(request.method)) return json({ error: 'method_not_allowed' }, 405, { allow: methods.join(', ') })
   const length = Number(request.headers.get('content-length') ?? 0)
-  if (!Number.isFinite(length) || length > limit) return json({ error: 'body_too_large' }, 413)
+  // A response can precede the last body byte. Close the connection before it is reused.
+  if (!Number.isFinite(length) || length > limit)
+    return json({ error: 'body_too_large' }, 413, { connection: 'close' })
   const body = request.body ? await readRepositoryBody(request, limit) : ''
-  if (body === null) return json({ error: 'body_too_large_or_unreadable' }, 413)
+  if (body === null) return json({ error: 'body_too_large_or_unreadable' }, 413, { connection: 'close' })
 
   const fields = Object.fromEntries([...request.headers].filter(([name]) => !privateHeaders.has(name)))
   const delivered = deliver({ method: request.method, headers: fields, query: url.search.slice(1), body })

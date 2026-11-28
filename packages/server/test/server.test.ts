@@ -2,6 +2,7 @@ import type { HarnessServer } from '../src/server'
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
 import { hostname, tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -1008,14 +1009,23 @@ describe('workflow webhooks', () => {
     expect(head.status).toBe(405)
     expect(head.headers.get('allow')).toBe('GET, POST, PUT, PATCH')
     expect((await deliver(intake.path, { method: 'POST', body: 'x'.repeat(1_048_577) })).status).toBe(413)
-    const stream = new ReadableStream({
-      start(controller) {
-        const chunk = new Uint8Array(65_536)
-        for (let i = 0; i < 17; i++) controller.enqueue(chunk)
-        controller.close()
-      },
+    const streamed = await new Promise<{ status?: number, response: string }>((resolve, reject) => {
+      const request = httpRequest('http://127.0.0.1:' + port + intake.path, {
+        method: 'POST', agent: false, headers: { 'transfer-encoding': 'chunked' },
+      }, (response) => {
+        response.setEncoding('utf8')
+        let body = ''
+        response.on('data', chunk => { body += chunk })
+        response.once('error', reject)
+        response.once('end', () => resolve({ status: response.statusCode, response: body }))
+      })
+      request.once('error', reject)
+      const chunk = Buffer.alloc(65_536, 97)
+      for (let i = 0; i < 17; i++) request.write(chunk)
+      request.end()
     })
-    expect((await deliver(intake.path, { method: 'POST', body: stream })).status).toBe(413)
+    expect(streamed.status).toBe(413)
+    expect(JSON.parse(streamed.response)).toEqual({ error: 'body_too_large_or_unreadable' })
 
     const request = () => deliver(intake.path + '?kind=build%20report&kind=done', { method: 'PUT',
       headers: { 'X-GitHub-Delivery': 'run-with-retry', authorization: 'Bearer synthetic', cookie: 'secret=fixture',
