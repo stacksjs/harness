@@ -20,6 +20,11 @@ type RawIssue = {
   user?: User, assignees?: User[], labels?: unknown, comments?: unknown, pull_request?: unknown,
 }
 type RawComment = { id?: unknown, body?: unknown, created_at?: unknown, user?: User, issue_url?: unknown }
+type RawTimelineEntry = {
+  id?: unknown, type?: unknown, body?: unknown, user?: User, created_at?: unknown, assignee?: User,
+  removed_assignee?: unknown, new_title?: unknown, label?: { name?: unknown }, ref_issue?: { number?: unknown },
+}
+type TimedActivity = IssueActivityItem & { id: number, created: number }
 
 function username(value?: User) {
   return typeof value?.login === 'string' && /^[a-z\d._-]{1,100}$/iu.test(value.login) ? value.login : ''
@@ -168,6 +173,54 @@ export async function writeForgejoIssueStatus(repository: ForgejoIssueRepository
   return null
 }
 
+// Forgejo also puts prose comments on the timeline. The dedicated comments
+// endpoint supplies their bodies, stable anchors and comment pagination.
+function timelineEvent(entry: RawTimelineEntry | null): TimedActivity | null {
+  const id = numericId(entry?.id)
+  if (!id || !entry) return null
+  const created = stamp(entry.created_at)
+  const event = (label: string, detail?: unknown): TimedActivity => ({
+    kind: 'event', id, created, dateLabel: created ? dates.format(created) : '', author: username(entry.user),
+    label: typeof detail === 'string' && detail ? label + ' ' + detail.slice(0, 512) : label,
+  })
+  switch (entry.type) {
+    case 'close': return event('closed the issue')
+    case 'reopen': return event('reopened the issue')
+    case 'assignees': return event(entry.removed_assignee === true ? 'unassigned' : 'assigned', username(entry.assignee))
+    case 'change_title': return event('renamed the issue to', entry.new_title)
+    case 'label': return event(entry.body === '1' ? 'added label' : 'removed label', entry.label?.name)
+    case 'issue_ref':
+    case 'commit_ref':
+    case 'comment_ref':
+    case 'pull_ref': {
+      const number = numericId(entry.ref_issue?.number)
+      return event('referenced', number ? '#' + number : undefined)
+    }
+    default: return null
+  }
+}
+
+async function readForgejoTimeline(repository: ForgejoIssueRepository, endpoint: string, signal: AbortSignal) {
+  const events = new Map<number, TimedActivity>()
+  let available = false
+  for (let page = 1; page <= requestLimit; page++) {
+    const reply = await forgejoTeaRequest(repository, endpoint + '/timeline?limit=' + sourcePageSize + '&page=' + page, signal).catch(() => null)
+    if (!reply || !(reply.body === null || Array.isArray(reply.body))) break
+    available = true
+    const rows = (reply.body ?? []) as RawTimelineEntry[]
+    for (const entry of rows.slice(0, sourcePageSize)) {
+      const event = timelineEvent(entry)
+      if (event) events.set(event.id, event)
+    }
+    if (!rows.length || reply.more === false) return { events: [...events.values()], available, partial: false }
+  }
+  return { events: [...events.values()], available, partial: true }
+}
+
+function byActivityTime(left: { id: number, created: number }, right: { id: number, created: number }) {
+  return left.created - right.created || left.id - right.id
+}
+
 export async function readForgejoIssue(repository: ForgejoIssueRepository, number: number, requestedPage: number | 'latest' | null, signal: AbortSignal, commentFocus = 0) {
   const endpoint = forgejoIssueEndpoint(repository, number)
   const reply = await forgejoTeaRequest(repository, endpoint, signal)
@@ -175,25 +228,33 @@ export async function readForgejoIssue(repository: ForgejoIssueRepository, numbe
   const row = issueRow(repository, raw)
   if (!row || !raw || row.number !== number) throw new RepositoryPullRequestError('Forgejo could not verify this issue.')
   const commentTotal = typeof raw.comments === 'number' && Number.isSafeInteger(raw.comments) ? Math.max(0, raw.comments) : 0
-  const [replyComments, authority] = await Promise.all([
+  const [replyComments, authority, timeline] = await Promise.all([
     forgejoTeaRequest(repository, endpoint + '/comments', signal).catch(() => null),
     readForgejoIssueAuthority(repository, number, signal, raw).catch(() => null),
+    readForgejoTimeline(repository, endpoint, signal),
   ])
-  const comments = Array.isArray(replyComments?.body)
-    ? replyComments.body.filter(comment => numericId(comment?.id) && typeof comment.body === 'string' && belongsToIssue(repository, endpoint, comment))
-    : null
+  const comments = Array.isArray(replyComments?.body) ? replyComments.body.flatMap<TimedActivity>(comment => {
+    const id = numericId(comment?.id)
+    if (!id || typeof comment.body !== 'string' || !belongsToIssue(repository, endpoint, comment)) return []
+    const created = stamp(comment.created_at)
+    return [{ kind: 'comment', id, created, body: comment.body.slice(0, 32_768), author: username(comment.user),
+      dateLabel: created ? dates.format(created) : '', url: row.url + '#issuecomment-' + id }]
+  }).sort(byActivityTime) : replyComments?.body === null ? [] : null
   const focusedIndex = commentFocus ? comments?.findIndex(comment => comment.id === commentFocus) ?? -1 : -1
   const page = typeof requestedPage === 'number' ? requestedPage : requestedPage === 'latest'
     ? Math.max(1, Math.ceil((focusedIndex >= 0 ? focusedIndex + 1 : comments?.length ?? commentTotal) / pageSize)) : 1
-  const activity = (comments ?? []).slice((page - 1) * pageSize, page * pageSize).map<IssueActivityItem>((comment) => {
-    const id = comment.id
-    const date = stamp(comment.created_at)
-    return { kind: 'comment', id, body: comment.body.slice(0, 32_768), author: username(comment.user),
-      dateLabel: date ? dates.format(date) : '', url: row.url + '#issuecomment-' + id }
-  })
+  const start = (page - 1) * pageSize
+  const end = page * pageSize
+  // Use the next page's first comment as the boundary so intervening
+  // events stay visible exactly once when a reader follows Older/Newer.
+  const first = start ? comments?.[start] : undefined
+  const next = comments?.[end]
+  const events = timeline.events.filter(event => (!start || (first && byActivityTime(event, first) >= 0))
+    && (!next || byActivityTime(event, next) < 0))
+  const activity = [...(comments ?? []).slice(start, end), ...events].sort(byActivityTime)
   return { ...row, description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
     dateLabel: row.created ? dates.format(row.created) : '', activity, reactions: null, commentTotal,
-    authority, activityAvailable: Boolean(comments), activityDegraded: false, olderActivity: '', newerActivity: '',
+    authority, activityAvailable: Boolean(comments) || timeline.available, activityDegraded: timeline.partial || !comments, olderActivity: '', newerActivity: '',
     commentPage: page, moreComments: Boolean(comments && comments.length > page * pageSize), relatedRequests: [] as { href: string, label: string }[],
   }
 }

@@ -574,8 +574,12 @@ function closeIssueFilters(event) {
             @if(reactionMessage && reactionComment)
               @include('../partials/harness-issue-reaction-result')
             @endif
-            @if(selected.activityDegraded)
-              <p role="status">GitHub could only load comments. Refresh for issue events.</p>
+            @if(selected.activityDegraded && selected.activityAvailable)
+              @if(selected.tracker === 'forgejo')
+                <p role="status">Some Forgejo activity could not load. Refresh to try again.</p>
+              @else
+                <p role="status">GitHub could only load comments. Refresh for issue events.</p>
+              @endif
             @endif
             @if(!selected.activityAvailable)
               <p role="status">{{ textForge }} could not load activity. Refresh to try again.</p>

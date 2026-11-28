@@ -1417,6 +1417,16 @@ try {
       labels: [{ id: 9, name: 'Forgejo triage', color: '#5577aa', description: 'Review stale issue drafts' }],
       assignees: forgejoIssue.assignees,
       comments: [{ id: 702, body: 'Review the **saved draft**.', user: { login: 'fixture-user' }, created_at: '2026-11-27T15:00:00Z' }],
+      timeline: [
+        { id: 699, type: 'label', label: { name: 'offline' }, body: '1', user: { login: 'maintainer' }, created_at: '2026-11-27T14:00:00Z' },
+        { id: 701, type: 'assignees', assignee: { login: 'reviewer' }, user: { login: 'maintainer' }, created_at: '2026-11-27T14:30:00Z' },
+        { id: 702, type: 'comment', body: 'Unfiltered timeline comment', created_at: '2026-11-27T15:00:00Z' },
+        { id: 706, type: 'close', user: { login: 'maintainer' }, created_at: '2026-11-27T16:00:00Z' },
+        { id: 706, type: 'close', user: { login: 'maintainer' }, created_at: '2026-11-27T16:00:00Z' },
+        { id: 707, type: 'reopen', user: { login: 'maintainer' }, created_at: '2026-11-27T16:30:00Z' },
+        { id: 708, type: 'change_title', new_title: forgejoTitle, user: { login: 'maintainer' }, created_at: '2026-11-27T16:40:00Z' },
+        { id: 709, type: 'issue_ref', ref_issue: { number: 74 }, user: { login: 'maintainer' }, created_at: '2026-11-27T16:50:00Z' },
+      ],
     }
   })
   await host.engine.dispatch({ id: 'register-forgejo-project', at: now, command: { type: 'workspace.register', path: forgejoPath, trusted: true } })
@@ -1438,7 +1448,22 @@ try {
   await page.getByRole('heading', { name: forgejoTitle, exact: true }).waitFor()
   const openForgejo = page.getByRole('link', { name: 'View on Forgejo', exact: true })
   assert.equal(await openForgejo.getAttribute('href'), forgejoUrl)
-  await page.getByText('saved draft', { exact: true }).waitFor()
+  const forgejoActivity = page.locator('[data-issue-comments]')
+  await forgejoActivity.getByText('saved draft', { exact: true }).waitFor()
+  assert.deepEqual(await forgejoActivity.locator('[data-issue-event] span:first-of-type, article [data-issue-markdown]').allTextContents().then(rows => rows.map(text => text.trim())), [
+    'added label offline', 'assigned reviewer', 'Review the saved draft.', 'closed the issue', 'reopened the issue',
+    'renamed the issue to ' + forgejoTitle, 'referenced #74',
+  ])
+  assert.equal(await forgejoActivity.getByText('Unfiltered timeline comment', { exact: true }).count(), 0)
+  alterForge(current => { current.forgejo.failTimelinePage = 2 })
+  await page.reload()
+  await forgejoActivity.getByText('Some Forgejo activity could not load. Refresh to try again.', { exact: true }).waitFor()
+  await forgejoActivity.getByText('saved draft', { exact: true }).waitFor()
+  await forgejoActivity.getByText('closed the issue', { exact: true }).waitFor()
+  assert.equal(await forgejoActivity.getByText('reopened the issue', { exact: true }).count(), 0)
+  alterForge(current => { delete current.forgejo.failTimelinePage })
+  await page.reload()
+  await forgejoActivity.getByText('reopened the issue', { exact: true }).waitFor()
   const capturedHostLink = page.getByRole('link', { name: 'Open as draft', exact: true })
   const forgejoDraft = new URL((await capturedHostLink.getAttribute('href')) ?? '', base)
   assert.equal(forgejoDraft.searchParams.get('repo'), forgejoKey)
@@ -1535,13 +1560,18 @@ try {
   await firstForgejoNote.getByText('First Forgejo comment', { exact: true }).waitFor()
   await firstForgejoNote.getByText('a preserved code line', { exact: true }).waitFor()
 
-  await forgejoComment.fill('**Recovered Forgejo comment**')
-  const lostForgejo = await readForgejoForm()
+  const recoveredForgejoText = '**Recovered Forgejo comment**'
+  await forgejoComment.fill(recoveredForgejoText)
   alterForge(current => { current.forgejo.dropCommentReply = true })
+  const submittedForgejo = page.waitForRequest(request => request.method() === 'POST'
+    && new URL(request.url()).pathname === '/issues/comments')
   await postForgejo.click()
+  const actualForgejo = await submittedForgejo
+  const lostForgejo = { url: actualForgejo.url(), body: actualForgejo.postData() ?? '' }
+  assert.equal(new URLSearchParams(lostForgejo.body).get('body'), recoveredForgejoText)
   const checkForgejo = forgejoComposer.getByRole('button', { name: 'Check Forgejo', exact: true })
   await checkForgejo.waitFor()
-  assert.equal(await forgejoComment.inputValue(), '**Recovered Forgejo comment**')
+  assert.equal(await forgejoComment.inputValue(), recoveredForgejoText)
   await capture('forgejo-comment-recovery-360x800')
   alterForge(current => {
     const saved = current.forgejo.comments.at(-1)
@@ -1560,6 +1590,16 @@ try {
   assert.equal((await sendForgejo(lostForgejo)).status, 303)
   assert.deepEqual(readForge().forgejo.commentWrites, [[73, 17, 703], [73, 17, 704]])
   const forgejoDetail = forge({ selected: forgejoKey, issue: '73', repository: forgejoKey, state: 'all' })
+  alterForge(current => {
+    current.forgejo.timeline.push({ id: 838, type: 'label', label: { name: 'pending review' },
+      user: { login: 'maintainer' }, created_at: '2026-11-27T17:00:00Z' })
+  })
+  await page.goto(forgejoDetail)
+  await forgejoActivity.getByText('renamed the issue to ' + forgejoTitle, { exact: true }).waitFor()
+  assert.equal(await forgejoActivity.getByText('removed label pending review', { exact: true }).count(), 0)
+  await forgejoActivity.getByRole('link', { name: 'Newer comments', exact: true }).click()
+  await forgejoActivity.getByText('removed label pending review', { exact: true }).waitFor()
+  assert.equal(await forgejoActivity.getByText('renamed the issue to ' + forgejoTitle, { exact: true }).count(), 0)
   const forgejoStatus = page.locator('#issue-status')
   const statusControlForForgejo = (state: 'Open' | 'Closed') => page.locator('[data-issue-status-menu] summary').and(page.getByLabel('Change issue status, ' + state, { exact: true }))
   const forgejoStatusForm = page.getByRole('form', { name: 'New issue status', exact: true })
@@ -1627,7 +1667,7 @@ try {
   await statusControlForForgejo('Open').waitFor()
   assert.deepEqual(readForge().forgejo.statusWrites, [[73, 17, 'closed'], [73, 18, 'open']])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links, comments and status recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links, timeline events, comments and status recovery')
 }
 catch (error) {
   console.error(error)

@@ -97,9 +97,15 @@ if (path === '/issues') {
   reply(200, rows.slice((page - 1) * size, page * size), rows.length > page * size)
 }
 if (path === '/labels' || path === '/assignees') reply(200, page === 1 ? forgejo[path.slice(1)] : [])
-const individual = /^\\/issues\\/(\\d+)(\\/comments)?$/.exec(path)
+const individual = /^\\/issues\\/(\\d+)(\\/(?:comments|timeline))?$/.exec(path)
 const issue = individual && forgejo.issues.find(row => row.number === Number(individual[1]))
 if (!issue) reply(404, {})
+if (individual[2] === '/timeline') {
+  if (forgejo.failTimelinePage === page) reply(503, {})
+  const rows = issue.number === 73 ? forgejo.timeline ?? [] : []
+  const size = 4
+  reply(200, rows.slice((page - 1) * size, page * size), rows.length > page * size)
+}
 if (!individual[2]) {
   if (forgejo.failIssueRead) {
     delete forgejo.failIssueRead
