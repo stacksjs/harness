@@ -112,6 +112,7 @@ export const initialSessionModel = activeSession?.model || ''
 export const activeCodex = Boolean(activeSessionId && sessionDriver === 'codex')
 export const initialFork = activeSession?.fork || null
 export const sessionPullRequest = activeSession?.pullRequest || null
+export const initialLinkedPullRequests = activeSession?.linkedPullRequests || []
 export const pullRequestProfile = $props.pullRequestProfile || 0
 export const initialCodexSelection = activeCodex && activeSession.model
   ? { model: activeSession.model, ...activeSession.codexTurnOptions } : null
@@ -2656,8 +2657,8 @@ export const initialRewindCheckpoints = Object.fromEntries(turns.filter(turn => 
   const repositoryPullRequestLoading = state(false)
   const repositoryPullRequestBusy = state(false)
   const repositoryPullRequestResult = state(null)
-  const linkedRepositoryPullRequests = state(@json(activeSession?.linkedPullRequests || []))
-  const pullRequestCheckout = @json(activeSession?.pullRequest?.reference || null)
+  const linkedRepositoryPullRequests = state(initialLinkedPullRequests)
+  const pullRequestCheckout = sessionPullRequest?.reference || null
   const selectedRepositoryPullRequest = derived(() => linkedRepositoryPullRequests().findLast(link => link.repositoryKey === diffRepository())
     || (pullRequestCheckout?.repositoryKey === diffRepository() ? pullRequestCheckout : null))
   const repositoryChecksOpen = state(false)
