@@ -886,6 +886,84 @@ describe('durable workflow signals', () => {
     }
     finally { clock.mockRestore() }
   }, 22_000)
+
+  it('validates live and early signals using the schema saved with each wait', async () => {
+    const file = await setup(`
+      export default [{ name: 'typed-intake', version: 1, async run(input, { wait }) {
+        if (input.held) await wait('release')
+        return await wait('permit', {
+          channel: input.channel,
+          returns: input.text ? { type: 'string' } : {
+            $defs: { change: { type: 'integer', minimum: 1 } },
+            type: 'object', required: ['change'], additionalProperties: false,
+            properties: { change: { $ref: '#/$defs/change' } },
+          },
+        })
+      } }]
+    `)
+    const begin = async (key: string, payload: object) => {
+      const response = await post('start', { workflow: 'typed-intake', key, payload })
+      expect(response.status).toBe(202)
+      return (await response.json()).run.runId as string
+    }
+    const channel = { workflow: 'typed-intake', channel: 'intake' }
+    const early = { ...channel, key: 'early-text', value: 'for a later run' }
+    const permit = { ...channel, key: 'early-permit', value: { change: 7 } }
+    expect((await post('signal', early)).status).toBe(202)
+    expect((await post('signal', permit)).status).toBe(202)
+    const first = await begin('first', { channel: 'intake' })
+    expect((await status(first, 'completed')).run.result).toEqual(permit.value)
+    expect(await (await post('signal', early)).json()).toEqual({ status: 'buffered', replayed: true })
+    expect(await (await post('signal', permit)).json()).toEqual({ status: 'delivered', replayed: true })
+    const later = await begin('later', { channel: 'intake', text: true })
+    expect((await status(later, 'completed')).run.result).toBe(early.value)
+
+    const active = await begin('active', { channel: 'live' })
+    await status(active, 'waiting')
+    await restart(file)
+    const send = { runId: active, wait: 'permit', key: 'live-permit' }
+    for (const value of [{}, { change: 0 }, { change: '1' }, { change: 1, extra: true }, null]) {
+      const response = await post('signal', { ...send, value })
+      expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({ error: 'invalid', detail: 'The value does not match the JSON Schema for permit.' })
+    }
+    expect((await post('signal', { ...channel, channel: 'live', key: 'wrong-live', value: 'too early' })).status).toBe(400)
+    expect((await details(active)).run.status).toBe('waiting')
+    expect((await post('signal', { ...send, value: { change: 1 } })).status).toBe(200)
+    expect((await status(active, 'completed')).run.result).toEqual({ change: 1 })
+
+    const held = await begin('held', { held: true })
+    await status(held, 'waiting')
+    const invalid = { runId: held, wait: 'permit', key: 'invalid-early', value: 7 }
+    expect((await post('signal', invalid)).status).toBe(202)
+    expect((await post('signal', { ...invalid, key: 'valid-early', value: { change: 8 } })).status).toBe(202)
+    expect((await post('signal', { runId: held, wait: 'release', value: null })).status).toBe(200)
+    expect((await status(held, 'completed')).run.result).toEqual({ change: 8 })
+    expect((await post('signal', invalid)).status).toBe(409)
+  })
+
+  it('reopens an untyped wait from the old database and pauses on invalid schemas', async () => {
+    const file = await setup(`
+      export default [
+        { name: 'legacy', version: 1, run(input, { wait }) { return wait('payload') } },
+        { name: 'broken', version: 1, run(input, { wait }) {
+          return wait('payload', { returns: { $ref: '#/$defs/missing' } })
+        } },
+      ]
+    `)
+    const legacy = await start('legacy', 'legacy')
+    await status(legacy, 'waiting')
+    harness.stop()
+    using previous = new Database(join(dir, 'test.sqlite'))
+    previous.exec('ALTER TABLE harness_workflow_waits DROP COLUMN returns_schema')
+    await restart(file)
+    const value = ['mixed', 1, null]
+    expect((await post('signal', { runId: legacy, wait: 'payload', value })).status).toBe(200)
+    expect((await status(legacy, 'completed')).run.result).toEqual(value)
+    const broken = await status(await start('broken', 'broken'), 'paused')
+    expect(broken.run.detail).toBe('The wait needs a valid, synchronous JSON Schema (Draft 2020-12).')
+    expect(broken.steps).toEqual([])
+  })
 })
 
 describe('manual workflows', () => {

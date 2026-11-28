@@ -1,4 +1,4 @@
-import type { WaitOutcome, WorkflowAnswer, WorkflowJson, WorkflowQuestionOptions } from './signals'
+import type { WaitOutcome, WorkflowAnswer, WorkflowJson, WorkflowQuestionOptions, WorkflowWaitOptions } from './signals'
 import type { HarnessState } from '@harness/engine'
 import type { LoadedWorkflow, WorkflowContext, WorkflowIssueInput } from './definitions'
 import type { WorkflowSchedule } from './schedules'
@@ -329,15 +329,17 @@ export class WorkflowRunner {
       wakes.clear()
     }, { once: true })
     this.waitChecks.set(id, check)
-    const wait = async (name: string, options: { channel?: string, request?: string, timeoutMs?: number }) => {
+    const wait = async (name: string, options: WorkflowWaitOptions & { request?: string }) => {
       alive()
       if (stepExecution.getStore() === id) throw new WorkflowProblem('Call ask or wait from the workflow body, outside code steps.')
       if (!waitName(name) || used.has(name) || !validWaitTimeout(options.timeoutMs)
         || (options.channel !== undefined && !waitName(options.channel)))
         throw new WorkflowProblem('Each wait needs a unique name, a valid channel, and a positive timeout if supplied.')
       used.add(name)
-      const opened = this.store.waits.open(profile, definition!.name, id, this.owner, name, options, Date.now())
+      const schema = options.returns === undefined ? undefined : json(options.returns)
+      const opened = this.store.waits.open(profile, definition!.name, id, this.owner, name, { ...options, schema }, Date.now())
       if (!opened) throw new WorkflowProblem('This run lost its lease.')
+      if ('error' in opened) throw new WorkflowProblem('The wait needs a valid, synchronous JSON Schema (Draft 2020-12).')
       if (opened.outcome) return valueOf(opened.outcome)
       const outcome = Promise.withResolvers<WorkflowJson | undefined>()
       wakes.set(name, outcome)

@@ -1,5 +1,6 @@
 export type WorkflowJson = null | boolean | number | string | WorkflowJson[] | { [key: string]: WorkflowJson }
-export type WorkflowWaitOptions = { channel?: string, timeoutMs?: number }
+export type WorkflowSignalSchema = boolean | { [key: string]: WorkflowJson }
+export type WorkflowWaitOptions = { channel?: string, timeoutMs?: number, returns?: WorkflowSignalSchema }
 export type WorkflowQuestionOptions = { title: string, choices: readonly string[], data?: WorkflowJson, timeoutMs?: number }
 export type WorkflowAnswer<Choice extends string = string> = { choice: Choice, reason?: string }
 export type SignalAddress = { runId: string, wait: string } | { workflow: string, channel: string }

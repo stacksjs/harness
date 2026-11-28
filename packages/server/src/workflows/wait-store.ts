@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import type { QuestionRequest, SignalAddress, WaitOutcome } from './signals'
+import { signalValidator } from './signal-schema'
 import { validAnswer, workflowSignalTtl } from './signals'
 
 type WaitRow = {
@@ -7,6 +8,7 @@ type WaitRow = {
   name: string
   channel: string | null
   request: string | null
+  returns_schema: string | null
   outcome: string | null
   opened_at: number
   deadline: number | null
@@ -22,7 +24,8 @@ type SignalRow = {
   state: 'buffered' | 'delivered' | 'discarded'
 }
 
-type SignalResult = { status: 'buffered' | 'delivered', replayed: boolean } | { error: 'missing' | 'conflict' | 'invalid' }
+type SignalResult = { status: 'buffered' | 'delivered', replayed: boolean }
+  | { error: 'missing' | 'conflict' | 'invalid', detail?: string }
 
 const expired: WaitOutcome = { expired: true }
 
@@ -30,7 +33,7 @@ export class WorkflowWaitStore {
   constructor(private readonly db: Database, private readonly owns: (id: string, owner: string, now: number) => boolean) {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS harness_workflow_waits (
-        run_id TEXT NOT NULL, name TEXT NOT NULL, channel TEXT, request TEXT, outcome TEXT,
+        run_id TEXT NOT NULL, name TEXT NOT NULL, channel TEXT, request TEXT, outcome TEXT, returns_schema TEXT,
         opened_at INTEGER NOT NULL, deadline INTEGER, resolved_at INTEGER,
         PRIMARY KEY (run_id, name)
       );
@@ -45,6 +48,10 @@ export class WorkflowWaitStore {
         ON harness_workflow_signals (profile, target, name, run) WHERE state = 'buffered';
       CREATE INDEX IF NOT EXISTS harness_workflow_signal_expiry ON harness_workflow_signals (expires_at);
     `)
+    this.db.transaction(() => {
+      const existing = this.db.query("SELECT name FROM pragma_table_info('harness_workflow_waits') WHERE name = 'returns_schema'").get()
+      if (!existing) this.db.exec('ALTER TABLE harness_workflow_waits ADD COLUMN returns_schema TEXT')
+    }).immediate()
   }
 
   private lookup(id: string, name: string) {
@@ -64,7 +71,7 @@ export class WorkflowWaitStore {
   }
 
   open(profile: number, workflow: string, id: string, owner: string, name: string,
-    options: { channel?: string, request?: string, timeoutMs?: number }, now: number,
+    options: { channel?: string, request?: string, timeoutMs?: number, schema?: string }, now: number,
   ) {
     return this.db.transaction(() => {
       if (!this.owns(id, owner, now)) return null
@@ -76,9 +83,12 @@ export class WorkflowWaitStore {
         }
         return { outcome: prior.outcome === null ? null : JSON.parse(prior.outcome) as WaitOutcome }
       }
-      const { channel, request, timeoutMs } = options
-      this.db.query(`INSERT INTO harness_workflow_waits (run_id, name, channel, request, opened_at, deadline)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(id, name, channel ?? null, request ?? null, now, timeoutMs === undefined ? null : now + timeoutMs)
+      const { channel, request, timeoutMs, schema } = options
+      let validate
+      try { validate = schema === undefined ? undefined : signalValidator(schema) }
+      catch { return { error: 'schema' } as const }
+      this.db.query(`INSERT INTO harness_workflow_waits (run_id, name, channel, request, returns_schema, opened_at, deadline)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, name, channel ?? null, request ?? null, schema ?? null, now, timeoutMs === undefined ? null : now + timeoutMs)
       const signals = this.db.query<SignalRow, [number, number, string, string, string, string | null]>(
         `SELECT * FROM harness_workflow_signals WHERE profile = ? AND state = 'buffered' AND expires_at > ?
           AND ((run = 1 AND target = ? AND name = ?) OR (run = 0 AND target = ? AND name = ?)) ORDER BY rowid`,
@@ -86,8 +96,10 @@ export class WorkflowWaitStore {
       const question = request === undefined ? null : JSON.parse(request) as QuestionRequest
       for (const signal of signals) {
         const value = JSON.parse(signal.value)
-        if (question && !validAnswer(question, value)) {
-          this.db.query(`UPDATE harness_workflow_signals SET state = 'discarded' WHERE profile = ? AND id = ?`).run(profile, signal.id)
+        if ((question && !validAnswer(question, value)) || (validate && !validate(value))) {
+          // Incompatible channel mail can still fit another run. Direct mail has only this recipient.
+          if (signal.run)
+            this.db.query(`UPDATE harness_workflow_signals SET state = 'discarded' WHERE profile = ? AND id = ?`).run(profile, signal.id)
           continue
         }
         this.db.query(`UPDATE harness_workflow_signals SET state = 'delivered' WHERE profile = ? AND id = ?`).run(profile, signal.id)
@@ -141,6 +153,8 @@ export class WorkflowWaitStore {
 
       const value = JSON.parse(serialized)
       if (wait?.request && !validAnswer(JSON.parse(wait.request), value)) return { error: 'invalid' }
+      if (wait?.returns_schema && !signalValidator(wait.returns_schema)(value))
+        return { error: 'invalid', detail: 'The value does not match the JSON Schema for ' + wait.name + '.' }
       const status = wait ? 'delivered' : 'buffered'
       this.db.query(`INSERT INTO harness_workflow_signals (profile, id, target, name, run, value, state, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(profile, key, target, name, Number(direct), serialized, status, now + workflowSignalTtl)
