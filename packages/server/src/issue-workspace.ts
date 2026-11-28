@@ -7,7 +7,7 @@ import type { IssueActivityItem } from './issue-activity'
 import type { IssueCommentSubmission } from './issue-comment'
 import type { IssueTextSubmission } from './issue-text'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
-import { listGitLabIssues, readGitLabIssue } from './gitlab-issues'
+import { gitLabIssueUsername, listGitLabIssues, readGitLabIssue } from './gitlab-issues'
 import { mergeIssueRepositories, trustedIssueProjects, trustedIssueRepositories } from './issue-repositories'
 import { issueActivityCursor, readIssueActivity } from './issue-activity'
 import { issueMetadataKind, readIssueMetadata } from './issue-metadata'
@@ -84,6 +84,7 @@ function issueError(error: unknown, tracker: 'github' | 'gitlab'): string {
 }
 
 async function repositoryIssues(repository: GitHubWorkspaceRepository, scope: IssueScope, signal: AbortSignal) {
+  if (scope.assignee && scope.assignee !== '@me' && !login(scope.assignee)) return { rows: [], partial: false }
   const end = Math.min(searchLimit, scope.page * pageSize + 1)
   const issues = new Map<number, NonNullable<ReturnType<typeof issueRow>>>()
   let partial = false
@@ -219,6 +220,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const involvement = query.get('involvement')
   const findAssignee = query.has('findAssignees') ? (query.get('assignee') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim() : ''
   const assignee = (query.get('pickAssignee') ?? (findAssignee ? query.get('shownAssignee') : query.get('assignee')) ?? '').trim().toLowerCase()
+  const username = assignee.replace(/^@/u, '')
   const labels = new Map<string, string>()
   for (const value of query.getAll('label').slice(0, 100)) {
     const label = value.trim()
@@ -232,7 +234,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     sort: query.get('sort') === 'created' ? 'created' : 'updated',
     search: (query.get('q') || '').slice(0, 160).replace(/["\\\p{Cc}]/gu, ' ').trim(),
     involvement: involvement === 'assigned' || involvement === 'authored' || involvement === 'mentioned' ? involvement : '',
-    assignee: assignee === '@me' ? assignee : login(assignee.replace(/^@/u, '')),
+    assignee: assignee === '@me' ? assignee : (login(username) || gitLabIssueUsername(username)),
     labels: [...labels.values()],
     page: Math.min(positiveInteger(query.get('page')) || 1, searchLimit / pageSize),
   }
@@ -264,9 +266,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const targets = [...includedRepositories].flatMap(([key, repo]) =>
     !hidden.has(key) && (!repository || key === repository.key) ? [repo] : [])
   const findLabel = (query.get('findLabel') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim()
-  const githubTargets = targets.filter(item => item.tracker === 'github')
-  const lookup = findAssignee ? readRepositoryFilterChoices(githubTargets, { kind: 'assignees', search: findAssignee }, signal)
-    : query.has('findLabels') && findLabel ? readRepositoryFilterChoices(githubTargets, { kind: 'labels', search: findLabel }, signal) : null
+  const lookup = findAssignee ? readRepositoryFilterChoices(targets, { kind: 'assignees', search: findAssignee }, signal)
+    : query.has('findLabels') && findLabel ? readRepositoryFilterChoices(targets, { kind: 'labels', search: findLabel }, signal) : null
   const rows: (NonNullable<ReturnType<typeof issueRow>> | Awaited<ReturnType<typeof listGitLabIssues>>['rows'][number])[] = []
   const failures: { repository: string, reason: string }[] = []
   let partial = false

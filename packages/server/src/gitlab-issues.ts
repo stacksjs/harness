@@ -19,8 +19,12 @@ type GitLabIssue = {
 }
 
 function stamp(value?: string) { return Date.parse(value ?? '') || 0 }
+export function gitLabIssueUsername(value: unknown) {
+  return typeof value === 'string' && /^[a-z\d._-]{1,255}$/iu.test(value) ? value : ''
+}
+
 function account(user?: User) {
-  return user?.username && /^[a-z\d._-]{1,255}$/iu.test(user.username) ? user.username : ''
+  return gitLabIssueUsername(user?.username)
 }
 
 function issueRow(repository: GitLabIssueRepository, issue?: GitLabIssue | null) {
@@ -69,7 +73,30 @@ async function api(repository: GitLabIssueRepository, endpoint: string, signal: 
   return { body, more: next ? Boolean(next[1]) : link ? /;\s*rel="next"/u.test(link) : undefined }
 }
 
-const projectIssues = (repository: GitLabIssueRepository) => 'projects/' + encodeURIComponent(repository.name) + '/issues'
+function projectPath(repository: GitLabIssueRepository) {
+  return 'projects/' + encodeURIComponent(repository.name)
+}
+
+export async function searchGitLabIssueChoices(repository: GitLabIssueRepository, kind: 'labels' | 'assignees', search: string, signal: AbortSignal) {
+  const labels = kind === 'labels'
+  const limit = 50
+  const query = new URLSearchParams({ [labels ? 'search' : 'query']: search, per_page: String(limit) })
+  if (labels) query.set('include_ancestor_groups', 'true')
+  const reply = await api(repository, projectPath(repository) + (labels ? '/labels?' : '/members/all?') + query, signal)
+  if (!Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitLab returned unreadable filter choices.')
+  const options = reply.body.slice(0, limit).flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return []
+    if (!labels) {
+      const value = account(entry)
+      return value ? [{ value, description: typeof entry.name === 'string' ? entry.name.slice(0, 160) : '' }] : []
+    }
+    const value = typeof entry.name === 'string' ? entry.name.trim() : ''
+    if (!value || value.length > 100 || /\p{Cc}/u.test(value)) return []
+    const color = typeof entry.color === 'string' && /^#[a-f\d]{6}$/iu.test(entry.color) ? entry.color.slice(1) : undefined
+    return [{ value, color, description: typeof entry.description === 'string' ? entry.description.slice(0, 160) : '' }]
+  })
+  return { options, more: reply.more ?? reply.body.length >= limit }
+}
 
 export async function listGitLabIssues(repository: GitLabIssueRepository, scope: ListScope, signal: AbortSignal) {
   if (scope.involvement === 'mentioned') throw new RepositoryPullRequestError('GitLab does not offer a mentions filter.')
@@ -90,7 +117,7 @@ export async function listGitLabIssues(repository: GitLabIssueRepository, scope:
   let partial = false
   for (let page = 1; (page - 1) * size < searchLimit && rows.size < end; page++) {
     filters.set('page', String(page))
-    const reply = await api(repository, projectIssues(repository) + '?' + filters, signal)
+    const reply = await api(repository, projectPath(repository) + '/issues?' + filters, signal)
     if (!Array.isArray(reply.body)) throw new RepositoryPullRequestError('GitLab returned an unreadable issue list.')
     for (const item of reply.body.slice(0, size)) {
       const row = issueRow(repository, item as GitLabIssue)
@@ -106,7 +133,7 @@ export async function listGitLabIssues(repository: GitLabIssueRepository, scope:
 }
 
 export async function readGitLabIssue(repository: GitLabIssueRepository, number: number, requestedPage: number | 'latest' | null, signal: AbortSignal) {
-  const endpoint = projectIssues(repository) + '/' + number
+  const endpoint = projectPath(repository) + '/issues/' + number
   const raw = (await api(repository, endpoint, signal)).body as GitLabIssue
   const row = issueRow(repository, raw)
   if (!row || row.number !== number) throw new RepositoryPullRequestError('GitLab could not verify this issue.')

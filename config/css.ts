@@ -549,12 +549,16 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-sort] { min-inline-size: 0; }
 [data-issue-filter-fields] {
   position: absolute; inset-block-start: calc(100% + 4px); inset-inline-end: 0; z-index: 2;
-  display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start;
-  inline-size: min(100%, 29rem); max-block-size: min(27rem, 53dvh); overflow: auto; padding: 12px;
+  display: grid; grid-template-rows: minmax(0, 1fr) auto;
+  inline-size: min(100%, 29rem); max-block-size: min(27rem, 53dvh); overflow: hidden;
   border: 1px solid var(--workspace-line); border-radius: 8px; background: var(--workspace-surface);
   box-shadow: 0 8px 24px rgb(0 0 0 / .16);
 }
-[data-issue-filter-fields] > label { display: grid; gap: 4px; min-width: 0; font-size: 13px; }
+[data-issue-filter-body] {
+  display: grid; align-content: start; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-block-size: 0; overflow: auto; overscroll-behavior: contain; padding: 12px; scroll-padding-block: 12px;
+}
+[data-issue-filter-body] > label { display: grid; gap: 4px; min-width: 0; font-size: 13px; }
 [data-issue-filters] :where(input:not([type=checkbox]), select), [data-issue-button] {
   min-height: 38px; border: 1px solid var(--workspace-line); border-radius: 7px;
   background: var(--workspace-surface); color: inherit; padding-inline: 10px;
@@ -570,7 +574,7 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
   content: ''; pointer-events: none; position: absolute; inset-inline-end: 11px; inset-block-end: 16px;
   width: 6px; height: 6px; border-inline-end: 1px solid; border-block-end: 1px solid; transform: rotate(45deg);
 }
-[data-issue-filter-fields] fieldset, [data-issue-project-filter], [data-issue-filter-actions] { min-width: 0; grid-column: 1 / -1; }
+[data-issue-filter-body] fieldset, [data-issue-project-filter] { min-width: 0; grid-column: 1 / -1; }
 [data-issue-project-filter] { border-block: 1px solid var(--workspace-line); }
 [data-issue-project-filter] > summary {
   display: flex; align-items: center; gap: 8px; min-height: 38px; cursor: pointer; font-size: 13px;
@@ -594,8 +598,8 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-label-search] { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
 [data-issue-filter-feedback] { margin-block: 4px; font-size: 12px; }
 [data-issue-filter-actions] {
-  position: sticky; inset-block-end: -12px; justify-self: stretch; display: flex; justify-content: end;
-  padding-block: 8px 12px; background: var(--workspace-surface); border-block-start: 1px solid var(--workspace-line);
+  display: flex; justify-content: end; margin-inline: 12px;
+  padding-block: 8px 12px; border-block-start: 1px solid var(--workspace-line);
 }
 [data-issue-button] { width: fit-content; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; }
 [data-issue-button]:hover { background: var(--workspace-hover); }

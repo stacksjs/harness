@@ -1,3 +1,5 @@
+import { searchGitLabIssueChoices } from './gitlab-issues'
+import type { GitLabIssueRepository } from './issue-repositories'
 import { searchRepositoryLabels } from './pull-request-labels'
 import { applyPullRequestDraftFilterChange, parsePullRequestQuery } from './pull-request-query'
 import { RepositoryPullRequestError, repositoryGitHubCredential, repositoryGitHubRequest } from './repository-pull-request'
@@ -113,6 +115,12 @@ export function readFilterLookup(query: URLSearchParams) {
 }
 
 type LookupRepository = { path: string, name: string }
+type FilterRepository = LookupRepository | GitLabIssueRepository
+
+function isGitLabRepository(repository: FilterRepository): repository is GitLabIssueRepository {
+  return 'tracker' in repository && repository.tracker === 'gitlab'
+}
+
 type FilterChoice = { value: string, description: string, color?: string }
 type ChoicePage = { options: FilterChoice[], more: boolean }
 
@@ -146,17 +154,19 @@ async function searchRepositoryUsers({ path, name }: LookupRepository, search: s
   }
 }
 
-export async function readRepositoryFilterChoices(repositories: LookupRepository[], lookup: FilterLookup, signal: AbortSignal) {
+export async function readRepositoryFilterChoices(repositories: FilterRepository[], lookup: FilterLookup, signal: AbortSignal) {
   const options = new Map<string, FilterChoice>()
   let more = false
   let failed = 0
   const { kind, search } = lookup
-  const credential = repositories[0] && await repositoryGitHubCredential(repositories[0].path, signal).catch(() => null)
-  if (!credential) return { ...lookup, options: [], more, failed: repositories.length }
+  const github = repositories.find(repository => !isGitLabRepository(repository))
+  const credential = github && await repositoryGitHubCredential(github.path, signal).catch(() => null)
   for (let index = 0; index < repositories.length; index += 4) {
     signal.throwIfAborted()
     const batch = repositories.slice(index, index + 4)
     const pages = await Promise.allSettled(batch.map(async (repo): Promise<ChoicePage> => {
+      if (isGitLabRepository(repo) && kind !== 'authors') return searchGitLabIssueChoices(repo, kind, search, signal)
+      if (!credential) throw new RepositoryPullRequestError('GitHub filter choices are unavailable.')
       if (kind !== 'labels') return searchRepositoryUsers(repo, search, signal, credential, kind)
       const result = await searchRepositoryLabels({ path: repo.path, repository: repo.name, credential, signal }, search)
       if (!result) throw new RepositoryPullRequestError('GitHub could not search this repository for labels.')

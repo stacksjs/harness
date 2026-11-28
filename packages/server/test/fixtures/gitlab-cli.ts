@@ -21,7 +21,19 @@ if (process.env.GITLAB_TOKEN || process.env.GITLAB_ACCESS_TOKEN || process.env.O
   respond(412, {})
 const address = new URL(endpoint, 'https://fixture.invalid/')
 const path = decodeURIComponent(address.pathname)
-const root = '/projects/' + gitlab.repository + '/issues'
+const project = '/projects/' + gitlab.repository
+const root = project + '/issues'
+if (path === project + '/labels' || path === project + '/members/all') {
+  if (gitlab.catalogUnavailable) respond(403, {})
+  const labels = path.endsWith('/labels')
+  const query = address.searchParams
+  if (labels && query.get('include_ancestor_groups') !== 'true') respond(400, {})
+  const search = query.get(labels ? 'search' : 'query').toLowerCase()
+  const entries = labels ? gitlab.labels : gitlab.members
+  const matches = entries.filter(entry => [entry.name, entry.username].some(value => value?.toLowerCase().includes(search)))
+  const size = Number(query.get('per_page'))
+  respond(200, matches.slice(0, size), matches.length > size ? '2' : '')
+}
 if (path === '/user') respond(200, { username: 'fixture-reviewer' })
 if (path === root) {
   if (gitlab.listUnavailable) respond(401, {})

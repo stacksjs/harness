@@ -174,13 +174,13 @@ try {
   await filters.click()
   await page.getByLabel('Repository').selectOption('fixture/notebook')
   await page.getByLabel('Involvement', { exact: true }).selectOption('assigned')
-  await page.getByLabel('GitHub username', { exact: true }).fill('Review Team')
-  await page.getByLabel('GitHub username', { exact: true }).press('Enter')
+  await page.getByLabel('Assignee username', { exact: true }).fill('Review Team')
+  await page.getByLabel('Assignee username', { exact: true }).press('Enter')
   await page.getByRole('button', { name: /fixture-reviewer/ }).click()
   await page.waitForURL(url => url.searchParams.get('pickAssignee') === 'fixture-reviewer')
   await issue.waitFor()
   await filters.click()
-  assert.equal(await page.getByLabel('GitHub username', { exact: true }).inputValue(), 'fixture-reviewer')
+  assert.equal(await page.getByLabel('Assignee username', { exact: true }).inputValue(), 'fixture-reviewer')
   await page.getByRole('checkbox', { name: 'bug', exact: true }).check()
   await page.getByRole('checkbox', { name: 'offline', exact: true }).check()
   await page.getByRole('checkbox', { name: 'fixture/atlas', exact: true }).check()
@@ -827,10 +827,17 @@ try {
     description: 'Keep **GitLab draft attachments** after reconnect.', author: { username: 'fixture-reviewer' },
     assignees: [{ username: 'fixture-reviewer' }], labels: ['offline'], user_notes_count: 20,
   }
+  const catalogMember = { username: 'mobile.review', name: 'Review Team' }
+  const catalogLabel = { name: 'Mobile triage', color: '#cc7733', description: 'Inherited group label' }
   alterForge(current => {
     current.gitlab = {
       host: gitlabHost, repository: gitlabRepo, issue: gitlabIssue,
-      otherIssues: [{ ...gitlabIssue, iid: 25, web_url: gitlabUrl.replace(/24$/u, '25'), title: 'Completed background scheduling', state: 'closed' }],
+      otherIssues: [{
+        ...gitlabIssue, iid: 25, web_url: gitlabUrl.replace(/24$/u, '25'), title: 'Completed background scheduling', state: 'closed',
+        labels: [...gitlabIssue.labels, catalogLabel.name], assignees: [...gitlabIssue.assignees, catalogMember],
+      }],
+      labels: [catalogLabel, { name: 'needs triage' }, { name: null }],
+      members: [catalogMember, { username: 'fixture-reviewer', name: 'Review Team' }, { username: 'unsafe username', name: 'Review Team' }],
       notes: Array.from({ length: 21 }, (_, index) => ({
         id: index + 1, author: gitlabIssue.author, created_at: new Date(now + index * 60_000).toISOString(),
         ...(index === 10 ? { system: true, body: 'changed the milestone' } : { body: 'GitLab note **' + (index + 1) + '**' }),
@@ -885,6 +892,61 @@ try {
     await page.goto(gitlabFilter.href)
     await page.getByRole('link', { name: /Completed background scheduling/ }).waitFor()
     assert.equal(await issueRows.count(), 1)
+
+    const catalogScope = new URL(mixed)
+    catalogScope.searchParams.set('label', 'offline')
+    await page.goto(catalogScope.href)
+    await filters.click()
+    const peopleSearch = page.getByLabel('Assignee username', { exact: true })
+    await peopleSearch.fill('Review Team')
+    await peopleSearch.press('Enter')
+    const choices = page.getByLabel('Issue assignee choices')
+    await choices.getByRole('button', { name: /mobile.review/ }).waitFor()
+    assert.equal(await choices.getByRole('button', { name: /fixture-reviewer/ }).count(), 1)
+    assert.equal(await choices.getByRole('button', { name: /unsafe username/ }).count(), 0)
+    const hitTest = (selector: string) => page.waitForFunction((target) => {
+      const button = document.querySelector(target)
+      const bounds = button?.getBoundingClientRect()
+      return Boolean(bounds && button?.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)))
+    }, selector)
+    await hitTest('button[name="pickAssignee"][value="mobile.review"]')
+    await capture('gitlab-assignee-search-360x800')
+    await choices.getByRole('button', { name: /mobile.review/ }).click()
+    await page.waitForURL(url => url.searchParams.get('pickAssignee') === 'mobile.review')
+    assert.equal(await gitlabRow.count(), 0)
+    await filters.click()
+    assert.equal(await peopleSearch.inputValue(), 'mobile.review')
+    await page.keyboard.press('Escape')
+    const search = page.getByLabel('Search issues')
+    await search.fill('scheduling')
+    await search.press('Enter')
+    await page.getByRole('link', { name: /Completed background scheduling/ }).waitFor()
+
+    await page.goto(catalogScope.href)
+    await filters.click()
+    const labelSearch = page.getByRole('searchbox', { name: 'Find labels', exact: true })
+    await labelSearch.fill('triage')
+    await labelSearch.press('Enter')
+    const inherited = page.getByRole('checkbox', { name: catalogLabel.name, exact: true })
+    await hitTest('input[name="label"][value="Mobile triage"]')
+    assert.equal(await page.getByRole('checkbox', { name: /^needs triage$/i }).count(), 1)
+    assert.ok(await page.getByRole('checkbox', { name: 'offline', exact: true }).isChecked())
+    await capture('gitlab-label-search-360x800')
+    await inherited.check()
+    await applyFilters.click()
+    await page.waitForURL(url => url.searchParams.getAll('label').includes(catalogLabel.name))
+    assert.equal(await gitlabRow.count(), 0)
+
+    const catalogFailure = new URL(catalogScope)
+    catalogFailure.searchParams.set('findLabels', '1')
+    catalogFailure.searchParams.set('findLabel', 'triage')
+    alterForge(current => { current.gitlab.catalogUnavailable = true })
+    await page.goto(catalogFailure.href)
+    await page.getByText('Some label results are unavailable.', { exact: false }).waitFor()
+    assert.equal(await page.getByRole('checkbox', { name: /^needs triage$/i }).count(), 1)
+    assert.equal(await inherited.count(), 0)
+    assert.equal(await gitlabRow.count(), 1)
+    alterForge(current => { delete current.gitlab.catalogUnavailable })
 
     await page.goto(gitlabSelection.href)
     await page.getByRole('heading', { name: gitlabTitle }).waitFor()
@@ -957,7 +1019,7 @@ try {
     else process.env.GITLAB_TOKEN = previousGitLabToken
   }
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers and GitLab draft persistence')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup and GitLab draft persistence')
 }
 catch (error) {
   console.error(error)
