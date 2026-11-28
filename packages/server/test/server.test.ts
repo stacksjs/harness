@@ -3290,7 +3290,8 @@ describe('harness serve — HTTP', () => {
     const originalPath = process.env.PATH
     process.env.PATH = [dir, originalPath].filter(Boolean).join(delimiter)
     try {
-      const request = (path: string, line = '2', editor = 'vscode', headers?: HeadersInit, column = '0') => fetch(`${editorRoute}?${new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path, line, editor, column })}`, { method: 'POST', headers })
+      const request = (path: string, line = '2', editor = 'vscode', headers?: HeadersInit, column = '0', kind?: string) =>
+        fetch(`${editorRoute}?${new URLSearchParams({ session: String(sessionId), workspace: String(workspaceId), path, line, editor, column, ...(kind && { kind }) })}`, { method: 'POST', headers })
       const editorArguments = join(worktree, '.editor-args')
       async function receiveEditorArguments(expected: string): Promise<string> {
         const deadline = Date.now() + 2_000
@@ -3324,6 +3325,14 @@ describe('harness serve — HTTP', () => {
       expect((await request('', '0')).status).toBe(204)
       const openFolder = `--new-window\n${realpathSync(worktree)}\n`
       expect(await receiveEditorArguments(openFolder)).toBe(openFolder)
+      const folder = 'nested [folder]'
+      mkdirSync(join(worktree, folder))
+      expect((await request(folder, '0')).status).toBe(404)
+      expect((await request(folder, '1', 'vscode', undefined, '0', 'directory')).status).toBe(400)
+      expect((await request(filename, '0', 'vscode', undefined, '0', 'directory')).status).toBe(404)
+      expect((await request(folder, '0', 'vscode', undefined, '0', 'directory')).status).toBe(204)
+      const openNestedFolder = `--new-window\n${join(realpathSync(worktree), folder)}\n`
+      expect(await receiveEditorArguments(openNestedFolder)).toBe(openNestedFolder)
     }
     finally {
       if (originalPath === undefined) delete process.env.PATH

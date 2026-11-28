@@ -105,16 +105,18 @@ export async function respondWorkspaceEditor(workspace: string, url: URL, method
   if (method === 'GET') return Response.json({ choices: installed.map(({ id, label }) => ({ id, label })) }, { headers })
 
   const path = url.searchParams.get('path') ?? ''
+  const kind = url.searchParams.get('kind') ?? (path ? 'file' : 'directory')
   const requestedLine = url.searchParams.get('line') ?? '0'
   const requestedColumn = url.searchParams.get('column') ?? '0'
   const line = Number(requestedLine)
   const column = Number(requestedColumn)
   const validPosition = (value: string, n: number) => /^\d{1,10}$/u.test(value) && n <= 2147483647
-  if (path.length > 4096 || !validPosition(requestedLine, line) || !validPosition(requestedColumn, column) || (!path && line) || (!line && column))
+  if (path.length > 4096 || (kind !== 'file' && kind !== 'directory') || (kind === 'file' && !path)
+    || !validPosition(requestedLine, line) || !validPosition(requestedColumn, column) || (kind === 'directory' && line) || (!line && column))
     return failure('Choose a valid workspace file and position.', 400)
   const target = path ? await resolveWorkspaceEntry(root, path) : root
   const info = target && await stat(target).catch(() => null)
-  if (!target || !info || (path ? !info.isFile() : !info.isDirectory())) return failure('The workspace file is unavailable.', 404)
+  if (!target || !info || (kind === 'file' ? !info.isFile() : !info.isDirectory())) return failure('The workspace file or folder is unavailable.', 404)
   const launcher = installed.find(item => item.id === url.searchParams.get('editor'))
   if (!launcher) return failure('This editor is unavailable on the Harness host.', 404)
   try {
