@@ -2328,8 +2328,10 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             if (submission.result === 'updated' || submission.result === 'confirmed') {
               const params = new URLSearchParams(url.searchParams)
               params.delete('editMetadata')
-              params.set('metadataResult', 'updated')
-              return new Response(null, { status: 303, headers: { ...headers, location: '/issues?' + params + '#issue-metadata' } })
+              const stateChange = submission.kind === 'state'
+              params.set('metadataResult', stateChange ? 'state' : 'updated')
+              return new Response(null, { status: 303, headers: { ...headers, location: '/issues?' + params
+                + (stateChange ? '#issue-title' : '#issue-metadata') } })
             }
             return render(submission)
           }).catch(unavailable)

@@ -617,6 +617,11 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-state="closed"] { color: var(--workspace-accent); }
 [data-issue-state]::before { content: ''; width: 7px; height: 7px; border: 1px solid currentColor; border-radius: 100%; }
 [data-issue-state="closed"]::before { background: currentColor; }
+[data-issue-detail-heading] #issue-title { scroll-margin-block-start: 2rem; }
+[data-issue-status-control] { min-height: 30px; gap: 5px; padding: 3px 7px; }
+[data-issue-status-control] > [data-issue-state] { min-width: 0; }
+[data-issue-status-control] > :last-child { flex-shrink: 0; }
+#issue-status:has(> form), #issue-status:has(> p) { margin-block-end: 12px; }
 [data-issue-detail-heading] { display: grid; gap: 7px; margin-block: 12px 18px; }
 [data-issue-detail-heading] h2, [data-issue-detail] > h2 { font-size: clamp(19px, 2vw, 25px); font-weight: 650; line-height: 1.3; }
 [data-issue-detail-heading] > p, [data-issue-meta], [data-issue-metadata] { font-size: 13px; }
@@ -635,6 +640,7 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 [data-issue-metadata-message] { font-size: 13px; margin-block: 8px; }
 @media (max-width: 767px) {
   [data-issue-metadata-editor] input[type=search] { min-block-size: 44px; font-size: 16px; }
+  #issue-status [data-issue-filter-choices] label { min-height: 44px; }
 }
 [data-issue-meta], [data-issue-actions], [data-issue-pages] { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 [data-issue-actions], [data-issue-pages] { margin-block: 14px; }

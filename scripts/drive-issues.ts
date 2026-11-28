@@ -350,6 +350,8 @@ try {
   const changeAssignees = issuePage.getByRole('link', { name: 'Change assignees', exact: true })
   assert.equal(await changeLabels.count(), 0)
   assert.equal(await changeAssignees.count(), 0)
+  const changeStatus = issuePage.getByRole('link', { name: /^Change issue status,/ })
+  assert.equal(await changeStatus.count(), 0)
   function alterForge(update: (current: typeof fixture) => void) {
     const current = JSON.parse(readFileSync(cli.state, 'utf8'))
     update(current)
@@ -444,8 +446,94 @@ try {
   assert.deepEqual(JSON.parse(readFileSync(cli.state, 'utf8')).assigneeWrites, [
     [24, false, 'PERSON_fixture-reviewer'], [24, true, 'PERSON_fixture-helper'],
   ])
+  const editStatus = issuePage.getByRole('form', { name: 'Change issue status', exact: true })
+  const saveStatus = editStatus.getByRole('button', { name: 'Save status', exact: true })
+  const statusUpdated = issuePage.getByText('Issue status updated on GitHub.', { exact: true })
+  const readForge = () => JSON.parse(readFileSync(cli.state, 'utf8'))
+  // An issue author can close their issue even without repository triage.
+  alterForge(current => {
+    current.issuePermission = 'READ'
+    current.issueAuthorCanChange = true
+    current.issueUnsupportedPlanning = true
+  })
+  await issuePage.goto(detailUrl)
+  assert.equal(await changeLabels.count(), 0)
+  await changeStatus.focus()
+  await issuePage.keyboard.press('Enter')
+  await editStatus.getByRole('radio', { name: 'Not planned', exact: true }).check()
+  await captureEditor('edit-status', saveStatus)
+  const statusPost = await editStatus.evaluate(form => {
+    const values = new URLSearchParams()
+    new FormData(form as HTMLFormElement).forEach((value, key) => {
+      if (typeof value === 'string') values.append(key, value)
+    })
+    return { url: (form as HTMLFormElement).action, body: values.toString() }
+  })
+  const submitStatus = () => fetch(statusPost.url, {
+    method: 'POST', body: statusPost.body, redirect: 'manual',
+    headers: { origin: base, 'content-type': 'application/x-www-form-urlencoded' },
+  })
+  alterForge(current => { current.issueAuthorCanChange = false })
+  assert.equal((await submitStatus()).status, 403)
+  alterForge(current => {
+    current.issueAuthorCanChange = true
+    const item = current.issues['fixture/notebook'][0]
+    item.state = 'closed'
+    item.state_reason = 'completed'
+  })
+  assert.equal((await submitStatus()).status, 409)
+  assert.equal(readForge().issueStateWrites, undefined)
+  alterForge(current => {
+    const item = current.issues['fixture/notebook'][0]
+    item.state = 'open'
+    item.state_reason = null
+    current.issueStateDropResponse = true
+  })
+  await saveStatus.click()
+  const recoverStatus = issuePage.getByRole('form', { name: 'Check issue status', exact: true })
+  await recoverStatus.waitFor()
+  const statusPort = host.server.port
+  host.stop()
+  host = await startHost(statusPort)
+  await recoverStatus.getByRole('button', { name: 'Check GitHub', exact: true }).click()
+  await statusUpdated.waitFor()
+  assert.equal(await changeStatus.getAttribute('aria-label'), 'Change issue status, Not planned')
+  assert.equal((await submitStatus()).status, 303)
+  await changeStatus.click()
+  await editStatus.getByRole('radio', { name: 'Open', exact: true }).check()
+  await saveStatus.click()
+  await statusUpdated.waitFor()
+  assert.equal(await changeStatus.getAttribute('aria-label'), 'Change issue status, Open')
+
+  alterForge(current => {
+    delete current.issueUnsupportedPlanning
+    current.issuePermission = 'TRIAGE'
+    current.planningStatuses = [
+      { id: 'STATUS_OPEN', name: 'Backlog', category: { state: 'OPEN', stateReason: null } },
+      { id: 'STATUS_ACTIVE', name: 'In progress', category: { state: 'OPEN', stateReason: null } },
+      { id: 'STATUS_DONE', name: 'Done', category: { state: 'CLOSED', stateReason: 'COMPLETED' } },
+      { id: 'STATUS_DUPLICATE', name: 'Duplicate', category: { state: 'CLOSED', stateReason: 'DUPLICATE' } },
+    ]
+    current.issues['fixture/notebook'][0].status_id = 'STATUS_OPEN'
+  })
+  await issuePage.goto(detailUrl)
+  assert.equal(await changeStatus.getAttribute('aria-label'), 'Change issue status, Backlog')
+  await changeStatus.click()
+  await editStatus.getByRole('radio', { name: 'In progress', exact: true }).check()
+  await captureEditor('edit-planning-status', saveStatus)
+  await saveStatus.click()
+  await statusUpdated.waitFor()
+  assert.equal(await changeStatus.getAttribute('aria-label'), 'Change issue status, In progress')
+  await changeStatus.click()
+  await editStatus.getByRole('radio', { name: 'Duplicate', exact: true }).check()
+  await saveStatus.click()
+  await statusUpdated.waitFor()
+  assert.equal(await changeStatus.getAttribute('aria-label'), 'Change issue status, Duplicate')
+  assert.deepEqual(readForge().issueStateWrites, [
+    [24, 'closed', 'not_planned'], [24, 'open', 'reopened'], [24, 'STATUS_ACTIVE'], [24, 'closed', 'duplicate'],
+  ])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated edits and recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata and status edits and recovery')
 }
 catch (error) {
   console.error(error)

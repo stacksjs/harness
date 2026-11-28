@@ -3,7 +3,7 @@ import type { InternalCommand } from '@harness/contract'
 import { githubIssueReference, sameGitHubIssue } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
-import type { IssueMetadataEditor, IssueMetadataForm } from './issue-metadata'
+import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
 import { mergeGitHubProjectRepositories, trustedGitHubProjectRepositories, trustedGitHubRepositories } from './github-workspace-repositories'
 import { issueMetadataKind, readIssueMetadata } from './issue-metadata'
 import { newThreadLink, parsePullRequest } from './prompt-links'
@@ -163,7 +163,7 @@ export async function issueThreadUpdate(
 }
 
 export async function issueWorkspace(state: HarnessState, query: URLSearchParams, signal: AbortSignal,
-  metadataSubmission?: { message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }) {
+  metadataSubmission?: { kind: IssueMetadataKind, message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }) {
   const profiles = [...state.profiles.values()].map(({ id, name }) => ({ id, name }))
   const requestedProfile = positiveInteger(query.get('profile'))
   const profile = profiles.some(item => item.id === requestedProfile) ? requestedProfile : profiles[0]?.id || 0
@@ -262,8 +262,11 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const metadataFields = selected ? Object.fromEntries(savedViewDetail) : {}
   const metadataHref = selected ? href(metadataFields) : ''
   const metadataEditor = metadataSubmission ? metadataSubmission.editor : metadata?.editor
+  const statusEdit = editMetadata === 'state' || metadataSubmission?.kind === 'state'
   const metadataMessage = metadataSubmission?.message
     ?? (selected && query.get('metadataResult') === 'updated' ? 'Issue updated on GitHub.' : '')
+  const statusMessage = statusEdit ? metadataMessage
+    : selected && query.get('metadataResult') === 'state' ? 'Issue status updated on GitHub.' : ''
   const pageEnd = scope.page * pageSize
   const reference = selected && githubIssueReference({ tracker: 'github', repository: selected.repository, number: selected.number })
   const linkedThreads = []
@@ -328,10 +331,17 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     listSelectionFields: selected ? [...savedViewDetail, ['selectionProfile', String(profile)]] : [],
     linkedThreads, threadChoices, pullRequests: [...pullRequests.values()],
     canEditMetadata: Boolean(selected && metadata?.canEdit),
-    metadataEditor: selected ? metadataEditor : null,
-    metadataDraft: selected ? metadataSubmission?.draft : null,
-    metadataMessage,
-    metadataUnavailable: Boolean(selected && editMetadata && !metadataSubmission && !metadataEditor),
+    metadataEditor: selected && !statusEdit ? metadataEditor : null,
+    metadataDraft: selected && !statusEdit ? metadataSubmission?.draft : null,
+    metadataMessage: statusEdit ? '' : metadataMessage,
+    metadataUnavailable: Boolean(selected && editMetadata && !statusEdit && !metadataSubmission && !metadataEditor),
+    issueStatus: metadata?.status ?? (selected?.state === 'closed' ? 'Closed' : 'Open'),
+    canChangeIssueStatus: Boolean(selected && metadata?.canChangeStatus),
+    statusEditor: selected && statusEdit ? metadataEditor : null,
+    statusDraft: selected && statusEdit ? metadataSubmission?.draft : null,
+    statusMessage,
+    statusUnavailable: Boolean(selected && editMetadata === 'state' && !metadataSubmission && !metadataEditor),
+    statusHref: selected ? href({ ...metadataFields, editMetadata: 'state' }) : '',
     metadataHref,
     metadataLabelsHref: selected ? href({ ...metadataFields, editMetadata: 'labels' }) : '',
     metadataAssigneesHref: selected ? href({ ...metadataFields, editMetadata: 'assignees' }) : '',

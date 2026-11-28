@@ -324,19 +324,27 @@ if (url.pathname === '/graphql' && method === 'POST') {
   }
   const issueActor = actor => ({ id: actor.id ?? 'PERSON_' + actor.login, login: actor.login, name: actor.name ?? '' })
   const issueNodeId = (repo, issue) => 'ISSUE_' + repo.replace('/', '_') + '_' + issue.number
+  const canChangeIssueState = !state.issueArchived && (state.issuePermission === 'TRIAGE' || state.issueAuthorCanChange === true)
   if (query.includes('query HarnessIssueMetadataAuthority')) {
     const repo = variables.owner + '/' + variables.name
     const issue = state.issues?.[repo]?.find(issue => issue.number === variables.number)
-    const unavailable = state.assigneeHiddenRead
-    if (unavailable) {
+    if (state.issueUnsupportedPlanning && query.includes('planningStatuses(first'))
+      reply(200, { errors: [{ extensions: { type: 'undefinedField', fieldName: 'planningStatuses' } }] })
+    if (state.assigneeHiddenRead || state.issueStateHiddenRead) {
       delete state.assigneeHiddenRead
+      delete state.issueStateHiddenRead
       writeFileSync(stateFile, JSON.stringify(state))
       process.exit(1)
     }
     reply(200, { data: { viewer: { id: 'VIEWER_' + (state.actor ?? 'fixture-user') },
       repository: state.repositories[repo] && { id: 'REPO_' + repo.replace('/', '_'), nameWithOwner: repo,
         viewerPermission: state.issuePermission ?? 'READ', isArchived: Boolean(state.issueArchived),
+        ...(state.planningStatuses && { planningStatuses: { nodes: state.planningStatuses, pageInfo: { hasNextPage: false } } }),
         issue: issue && !issue.pull_request ? { id: issueNodeId(repo, issue), number: issue.number,
+          state: issue.state.toUpperCase(), stateReason: issue.state_reason?.toUpperCase() ?? null,
+          viewerCanClose: canChangeIssueState, viewerCanReopen: canChangeIssueState,
+          viewerCanSetStatus: canChangeIssueState && state.issuePermission === 'TRIAGE',
+          status: state.planningStatuses?.find(item => item.id === issue.status_id) ?? null,
           assignees: { nodes: (issue.assignees ?? []).map(issueActor), pageInfo: { hasNextPage: false } } } : null } } })
   }
   if (query.includes('query HarnessIssueAssignablePeople')) {
@@ -346,6 +354,19 @@ if (url.pathname === '/graphql' && method === 'POST') {
     const users = (state.filterAssignees ?? []).filter(user => (user.login + ' ' + user.name).toLowerCase().includes(needle))
     reply(200, { data: { repository: { nameWithOwner: repo,
       assignableUsers: { nodes: users.slice(0, 50).map(issueActor), pageInfo: { hasNextPage: users.length > 50 } } } } })
+  }
+  if (query.includes('mutation HarnessIssueStatus')) {
+    if (!process.env.GH_TOKEN || state.issuePermission !== 'TRIAGE' || !canChangeIssueState) reply(403, {})
+    const issue = Object.entries(state.issues ?? {}).flatMap(([repo, rows]) =>
+      rows.filter(issue => issueNodeId(repo, issue) === variables.input.issueId))[0]
+    const status = state.planningStatuses?.find(item => item.id === variables.input.statusId)
+    if (!issue || issue.pull_request || !status) reply(200, { errors: [{ message: 'Unknown fixture status' }] })
+    issue.status_id = status.id
+    issue.state = status.category.state.toLowerCase()
+    issue.state_reason = status.category.stateReason?.toLowerCase() ?? null
+    state.issueStateWrites = [...(state.issueStateWrites ?? []), [issue.number, status.id]]
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(200, { data: { setIssueStatus: { clientMutationId: variables.input.clientMutationId } } })
   }
   if (query.includes('mutation HarnessIssueAssignee')) {
     if (!process.env.GH_TOKEN || state.issuePermission !== 'TRIAGE') reply(403, { message: 'Private issue diagnostics' })
@@ -557,6 +578,28 @@ if (url.pathname === '/search/issues') {
     incomplete_results: state.filterListIncomplete === selected }, more)
 }
 if (!repo) reply(404, {})
+if (method === 'PATCH' && parts[4] === 'issues' && !parts[6]) {
+  if (!process.env.GH_TOKEN || state.issueArchived || (state.issuePermission !== 'TRIAGE' && !state.issueAuthorCanChange))
+    reply(403, {})
+  const issue = state.issues?.[name]?.find(issue => issue.number === Number(parts[5]) && !issue.pull_request)
+  if (!issue) reply(404, {})
+  const next = JSON.parse(await Bun.stdin.text())
+  if (!['open', 'closed'].includes(next.state) || next.state === issue.state
+    || (next.state === 'closed' && !['completed', 'not_planned', 'duplicate'].includes(next.state_reason))) reply(422, {})
+  issue.state = next.state
+  issue.state_reason = next.state_reason ?? 'reopened'
+  const status = state.planningStatuses?.find(item => item.category.stateReason?.toLowerCase() === next.state_reason)
+  issue.status_id = status?.id ?? null
+  state.issueStateWrites = [...(state.issueStateWrites ?? []), [issue.number, next.state, issue.state_reason]]
+  if (state.issueStateDropResponse) {
+    delete state.issueStateDropResponse
+    state.issueStateHiddenRead = true
+    writeFileSync(stateFile, JSON.stringify(state))
+    process.exit(1)
+  }
+  writeFileSync(stateFile, JSON.stringify(state))
+  reply(200, issue)
+}
 if (method === 'GET' && parts[4] === 'issues' && state.issues?.[name] && (!parts[6] || parts[6] === 'comments')) {
   const issue = state.issues[name].find(issue => issue.number === Number(parts[5]))
   if (!issue) reply(404, {})

@@ -1,26 +1,29 @@
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
+import type { RawIssueStatus, RawPlanningStatuses } from './issue-status'
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { githubIssueReference } from '@harness/contract'
 import { trustedGitHubRepositories } from './github-workspace-repositories'
+import { issueStatusPlan, saveIssueStatus } from './issue-status'
 import { applyPullRequestLabelChanges, parseLabelSelection, readPullRequestLabelEditor } from './pull-request-labels'
 import { repositoryGitHubCredential, repositoryGitHubRequest, RepositoryPullRequestError } from './repository-pull-request'
 
 const maxAssigneeOptions = 150
+const changingStatus = new Set<string>()
 const triage = new Set(['TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN'])
 const nodeId = /^[A-Za-z0-9_+\/=:.-]{1,256}$/u
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
 
-export type IssueMetadataKind = 'labels' | 'assignees'
+export type IssueMetadataKind = 'labels' | 'assignees' | 'state'
 export function issueMetadataKind(value: string | null): IssueMetadataKind | null {
-  return value === 'labels' || value === 'assignees' ? value : null
+  return value === 'labels' || value === 'assignees' || value === 'state' ? value : null
 }
 
 type Person = { key: string, name: string, description: string }
 type Option = Person & { applied: boolean, checked: boolean, archived?: boolean }
 type Change = Option & { apply: boolean }
-type Authority = { repositoryId: string, issueId: string, viewer: string, canEdit: boolean, assignees: Person[] }
+type Authority = { repositoryId: string, issueId: string, viewer: string, canEdit: boolean, assignees: Person[], status: ReturnType<typeof issueStatusPlan> }
 type MetadataContext = { repository: GitHubWorkspaceRepository, number: number, credential?: string, signal: AbortSignal }
 export type IssueMetadataForm = { kind: IssueMetadataKind, intent: string, revision: string, scope: string, checked: string[] }
 export type IssueMetadataEditor = IssueMetadataForm & { options: Option[], search: string, more: boolean, matches: number }
@@ -36,21 +39,35 @@ function person(value: { id?: unknown, login?: unknown, name?: unknown } | null)
 
 async function readAuthority({ repository, number, credential, signal }: MetadataContext): Promise<Authority | null> {
   const [owner, name] = repository.name.split('/')
-  const reply = await repositoryGitHubRequest(repository.path, 'graphql', {
+  type AuthorityResponse = {
+    errors?: { extensions?: { type?: string, fieldName?: string } }[], data?: { viewer?: { id?: unknown }, repository?: {
+      id?: unknown, nameWithOwner?: string, isArchived?: boolean, viewerPermission?: string,
+      planningStatuses?: RawPlanningStatuses,
+      issue?: RawIssueStatus & { id?: unknown, number?: number, assignees?: { nodes?: (Parameters<typeof person>[0])[], pageInfo?: { hasNextPage?: boolean } } },
+    } },
+  }
+  const fields = 'id name category { state stateReason }'
+  const request = (planning: boolean) => repositoryGitHubRequest(repository.path, 'graphql', {
     query: `query HarnessIssueMetadataAuthority($owner: String!, $name: String!, $number: Int!) {
       viewer { id }
       repository(owner: $owner, name: $name) {
         id nameWithOwner viewerPermission isArchived
-        issue(number: $number) { id number assignees(first: 100) { nodes { id login name } pageInfo { hasNextPage } } }
+        ${planning ? `planningStatuses(first: 50) { nodes { ${fields} } pageInfo { hasNextPage } }` : ''}
+        issue(number: $number) {
+          id number state stateReason viewerCanClose viewerCanReopen
+          ${planning ? `viewerCanSetStatus status { ${fields} }` : ''}
+          assignees(first: 100) { nodes { id login name } pageInfo { hasNextPage } }
+        }
       }
     }`, variables: { owner, name, number },
   }, signal, credential)
-  const response = reply.body as {
-    errors?: unknown[], data?: { viewer?: { id?: unknown }, repository?: {
-      id?: unknown, nameWithOwner?: string, isArchived?: boolean, viewerPermission?: string,
-      issue?: { id?: unknown, number?: number, assignees?: { nodes?: (Parameters<typeof person>[0])[], pageInfo?: { hasNextPage?: boolean } } },
-    } },
-  } | null
+  let reply = await request(true)
+  let response = reply.body as AuthorityResponse | null
+  if (response?.errors?.length && response.errors.every(({ extensions }) =>
+    extensions?.type === 'undefinedField' && ['planningStatuses', 'viewerCanSetStatus', 'status'].includes(extensions.fieldName ?? ''))) {
+    reply = await request(false)
+    response = reply.body as AuthorityResponse | null
+  }
   const repo = response?.data?.repository
   const issue = repo?.issue
   const viewer = response?.data?.viewer?.id
@@ -60,7 +77,8 @@ async function readAuthority({ repository, number, credential, signal }: Metadat
     || issue.assignees?.pageInfo?.hasNextPage !== false || !Array.isArray(nodes)) return null
   const assignees = nodes.map(person)
   if (assignees.some(actor => !actor)) return null
-  return { repositoryId: repo.id, issueId: issue.id, viewer, canEdit: repo.isArchived === false && triage.has(repo.viewerPermission ?? ''), assignees: assignees.filter(actor => actor !== null) }
+  return { repositoryId: repo.id, issueId: issue.id, viewer, canEdit: repo.isArchived === false && triage.has(repo.viewerPermission ?? ''), assignees: assignees.filter(actor => actor !== null),
+    status: issueStatusPlan(issue, repo.planningStatuses, repo.isArchived === false) }
 }
 
 async function searchAssignees({ repository, credential, signal }: MetadataContext, search: string) {
@@ -128,6 +146,15 @@ function assigneeOptions(authority: Authority, catalog: Person[], staged: Change
 type LabelChanges = NonNullable<ReturnType<typeof parseLabelSelection>>['changes']
 async function makeEditor(context: MetadataContext & { credential: string }, authority: Authority, kind: IssueMetadataKind,
   search = '', intent: string = crypto.randomUUID(), labels: LabelChanges = [], assignees: Change[] = []): Promise<IssueMetadataEditor | null> {
+  if (kind === 'state') {
+    const status = authority.status
+    if (!status?.choices.length) return null
+    const form = { kind, intent, scope: status.scope }
+    return { ...form, revision: revision(context, authority, form), checked: [], search: '', more: false,
+      matches: status.choices.length, options: status.choices.map(option => ({
+        key: option.key, name: option.name, description: '', applied: false, checked: false,
+      })) }
+  }
   let options: Option[], scope: string, more: boolean, matches: number
   if (kind === 'labels') {
     const editor = await readPullRequestLabelEditor({ path: context.repository.path, repository: context.repository.name,
@@ -155,10 +182,11 @@ async function makeEditor(context: MetadataContext & { credential: string }, aut
 export async function readIssueMetadata(context: MetadataContext, kind: IssueMetadataKind | null) {
   const credential = kind ? await repositoryGitHubCredential(context.repository.path, context.signal).catch(() => undefined) : undefined
   const authority = await readAuthority({ ...context, credential }).catch(() => null)
-  const editor = authority?.canEdit && kind && credential
+  const editor = authority && kind && credential && (kind === 'state' || authority.canEdit)
     ? await makeEditor({ ...context, credential }, authority, kind).catch(() => null)
     : null
-  return { canEdit: Boolean(authority?.canEdit), editor }
+  return { canEdit: Boolean(authority?.canEdit), editor, status: authority?.status?.current,
+    canChangeStatus: Boolean(authority?.status?.choices.length) }
 }
 
 async function saveAssignees(context: MetadataContext & { credential: string }, authority: Authority, changes: Change[],
@@ -236,6 +264,7 @@ const messages = {
   unavailable: 'Could not load issue editing from GitHub. Try again.',
   refused: 'GitHub refused a reviewed change. Reopen the editor to check the current issue.',
   pending: 'GitHub has yet to confirm every change.',
+  busy: 'An issue status change is in progress. Reopen the issue to check the result.',
   limit: 'GitHub allows up to 10 assignees per issue.',
 }
 type Result = keyof typeof messages
@@ -254,10 +283,12 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
     || !scope.startsWith('[') || scope.length > 950_000 || !['save', 'search'].includes(operation)) return null
   const labels = kind === 'labels' ? parseLabelSelection(scope, selected) : null
   const assignees = kind === 'assignees' ? parseAssignees(scope, selected) : null
-  if (!labels && !assignees) return null
+  if (kind === 'state' ? operation !== 'save' || selected.length !== 1 || !id(selected[0]) || scope.length > 40_000
+    : !labels && !assignees) return null
   const form: IssueMetadataForm = { kind, scope, intent, revision: reviewed, checked: selected }
   const finish = (result: Result, editor?: IssueMetadataEditor | null) => ({
-    result, message: messages[result], editor, draft: result === 'pending' ? form : null,
+    result, kind, message: kind === 'state' && result === 'denied' ? 'GitHub does not allow this issue status change.'
+      : messages[result], editor, draft: result === 'pending' ? form : null,
   })
   try {
     const repository = (await trustedGitHubRepositories(state.workspaces.values(), profile, signal)).get(reference.repository)
@@ -266,22 +297,36 @@ export async function updateIssueMetadata(state: HarnessState, query: URLSearchP
       const current = state.workspaces.get(repository.workspace.id)
       return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === repository.workspace.path)
     }
-    const credential = await repositoryGitHubCredential(repository.path, signal)
-    const context = { repository, number: reference.number, credential, signal }
-    const authority = await readAuthority(context)
-    if (!authority) return finish('unavailable')
-    if (!trusted() || revision(context, authority, form) !== reviewed) return finish('changed')
-    if (!authority.canEdit) return finish('denied')
-    const fingerprint = hash(['issue-metadata-write', reviewed, selected])
-    if (operation === 'search') {
-      if (receipts.inspect(intent, fingerprint)) return finish('changed')
-      const search = (values.get('query') ?? '').slice(0, 120).replace(/\p{Cc}/gu, '').trim()
-      const editor = await makeEditor(context, authority, kind, search, intent, labels?.changes, assignees?.changes).catch(() => null)
-      return editor ? finish('search', editor) : finish('unavailable', { ...form, options: labels?.labels ?? assignees?.options ?? [], search, more: false, matches: -1 })
+    const key = reference.repository + '#' + reference.number
+    if (kind === 'state' && changingStatus.has(key)) return finish('busy')
+    if (kind === 'state') changingStatus.add(key)
+    try {
+      const credential = await repositoryGitHubCredential(repository.path, signal)
+      const context = { repository, number: reference.number, credential, signal }
+      const authority = await readAuthority(context)
+      if (!authority) return finish('unavailable')
+      if (!trusted() || revision(context, authority, form) !== reviewed) return finish('changed')
+      const fingerprint = hash(['issue-metadata-write', reviewed, selected])
+      if (kind === 'state') {
+        if (!authority.status) return finish('unavailable')
+        return finish(await saveIssueStatus({ ...context, path: repository.path, name: repository.name, issueId: authority.issueId },
+          authority.status, selected[0]!, scope, intent, fingerprint, receipts, trusted, async () => {
+            const after = await readAuthority(context)
+            return after && revision(context, after, form) === reviewed ? after.status : null
+          }))
+      }
+      if (!authority.canEdit) return finish('denied')
+      if (operation === 'search') {
+        if (receipts.inspect(intent, fingerprint)) return finish('changed')
+        const search = (values.get('query') ?? '').slice(0, 120).replace(/\p{Cc}/gu, '').trim()
+        const editor = await makeEditor(context, authority, kind, search, intent, labels?.changes, assignees?.changes).catch(() => null)
+        return editor ? finish('search', editor) : finish('unavailable', { ...form, options: labels?.labels ?? assignees?.options ?? [], search, more: false, matches: -1 })
+      }
+      if (labels) return finish(await applyPullRequestLabelChanges({ path: repository.path, repository: repository.name,
+        number: reference.number, credential, signal, receipts, trusted }, labels.changes, intent, fingerprint))
+      return finish(await saveAssignees(context, authority, assignees!.changes, receipts, form, fingerprint, trusted))
     }
-    if (labels) return finish(await applyPullRequestLabelChanges({ path: repository.path, repository: repository.name,
-      number: reference.number, credential, signal, receipts, trusted }, labels.changes, intent, fingerprint))
-    return finish(await saveAssignees(context, authority, assignees!.changes, receipts, form, fingerprint, trusted))
+    finally { if (kind === 'state') changingStatus.delete(key) }
   }
   catch { return finish('unavailable') }
 }

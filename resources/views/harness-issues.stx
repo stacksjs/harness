@@ -39,6 +39,13 @@ export const lookupLimited = $props.lookupLimited
 export const findAssignee = $props.findAssignee
 export const assigneeChoices = $props.assigneeChoices
 export const canEditMetadata = $props.canEditMetadata
+export const issueStatus = $props.issueStatus
+export const canChangeIssueStatus = $props.canChangeIssueStatus
+export const statusEditor = $props.statusEditor
+export const statusDraft = $props.statusDraft
+export const statusMessage = $props.statusMessage
+export const statusUnavailable = $props.statusUnavailable
+export const statusHref = $props.statusHref
 export const metadataEditor = $props.metadataEditor
 export const metadataDraft = $props.metadataDraft
 export const metadataMessage = $props.metadataMessage
@@ -327,13 +334,23 @@ function closeIssueFilters(event) {
         @if(selected)
           <header data-issue-detail-heading>
             <p>{{ selected.repository }} #{{ selected.number }}</p>
-            <h2 id="issue-title">{{ selected.title }}</h2>
+            <h2 id="issue-title" tabindex="-1">{{ selected.title }}</h2>
             <div data-issue-meta>
-              <span data-issue-state="{{ selected.state }}">@if(selected.state === 'open')Open@else Closed@endif</span>
+              @if(canChangeIssueStatus && !statusEditor && !statusDraft)
+                <a href="{{ statusHref }}#issue-title" data-issue-status-control data-issue-button aria-label="Change issue status, {{ issueStatus }}">
+                  <span data-issue-state="{{ selected.state }}">{{ issueStatus }}</span>
+                  <span class="inline-block size-4 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+                </a>
+              @else
+                <span data-issue-state="{{ selected.state }}">{{ issueStatus }}</span>
+              @endif
               @if(selected.author)<span>{{ selected.author }}</span>@endif
               @if(selected.dateLabel)<span>{{ selected.dateLabel }}</span>@endif
             </div>
           </header>
+          <div id="issue-status">
+            @include('../partials/harness-issue-status-editor')
+          </div>
           <div data-issue-actions>
             <a data-issue-button data-issue-primary href="{{ draftHref }}">Open as draft</a>
             <a data-issue-button href="{{ selected.url }}" rel="noreferrer" target="_blank">View on GitHub</a>

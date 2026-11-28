@@ -1,0 +1,37 @@
+@if(statusMessage)
+  <p role="status" data-issue-metadata-message>{{ statusMessage }}</p>
+@endif
+@if(statusDraft || statusEditor)
+  <form method="post" action="{{ metadataAction }}#issue-status" aria-labelledby="issue-status-title" data-issue-metadata-editor>
+    <h3 id="issue-status-title">@if(statusDraft)Check issue status@else Change issue status@endif</h3>
+    @if(statusDraft)
+      <input type="hidden" name="kind" value="{{ statusDraft.kind }}">
+      <input type="hidden" name="scope" value="{{ statusDraft.scope }}">
+      <input type="hidden" name="revision" value="{{ statusDraft.revision }}">
+      <input type="hidden" name="intent" value="{{ statusDraft.intent }}">
+      @foreach(statusDraft.checked as key)
+        <input type="hidden" name="choice" value="{{ key }}">
+      @endforeach
+    @else
+      <input type="hidden" name="kind" value="{{ statusEditor.kind }}">
+      <input type="hidden" name="scope" value="{{ statusEditor.scope }}">
+      <input type="hidden" name="revision" value="{{ statusEditor.revision }}">
+      <input type="hidden" name="intent" value="{{ statusEditor.intent }}">
+      <fieldset data-issue-filter-choices>
+        <legend class="sr-only">New status</legend>
+        @foreach(statusEditor.options as option)
+          <label>
+            <input type="radio" name="choice" value="{{ option.key }}" required>
+            <span>{{ option.name }}</span>
+          </label>
+        @endforeach
+      </fieldset>
+    @endif
+    <div data-issue-metadata-editor-actions>
+      <a href="{{ metadataHref }}#issue-title" data-issue-button>@if(statusDraft)Return to issue@else Cancel@endif</a>
+      <button type="submit" data-issue-button data-issue-primary>@if(statusDraft)Check GitHub@else Save status@endif</button>
+    </div>
+  </form>
+@elseif(statusUnavailable)
+  <p role="status" data-issue-metadata-message>GitHub could not open the status editor. Check your access and try again.</p>
+@endif
