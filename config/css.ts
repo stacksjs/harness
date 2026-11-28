@@ -704,6 +704,19 @@ html:has(> body > :is([data-pr-workspace], [data-issue-workspace])), body:has(> 
 }
 
 [data-issue-comments] { margin-block-end: 16px; }
+[data-issue-event] {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 8px; padding-block: 7px;
+  color: var(--workspace-muted); font-size: 13px;
+}
+[data-issue-event] strong { color: inherit; }
+[data-issue-event] a, [data-issue-comments] article header a { color: var(--workspace-accent); }
+[data-issue-reactions] { display: flex; flex-wrap: wrap; align-items: start; gap: 5px; margin-block-start: 8px; }
+[data-issue-reactions] summary { cursor: pointer; list-style: none; }
+[data-issue-reactions] summary::-webkit-details-marker { display: none; }
+[data-issue-reactions] [aria-pressed="true"] { border-color: var(--workspace-accent); background: var(--workspace-hover); }
+[data-issue-reaction-options] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-block-start: 6px; }
+[data-issue-reaction-options] button { justify-self: stretch; width: auto; min-inline-size: 34px; }
+[data-issue-event] a:focus-visible, [data-issue-reactions] summary:focus-visible { outline-offset: 2px; }
 [data-issue-comments] h3 { font-size: 14px; font-weight: 650; }
 [data-issue-comments] article { padding-block: 10px; border-block-end: 1px solid var(--workspace-line); }
 [data-issue-comments] article header { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }

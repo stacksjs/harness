@@ -325,6 +325,68 @@ if (url.pathname === '/graphql' && method === 'POST') {
   const issueActor = actor => ({ id: actor.id ?? 'PERSON_' + actor.login, login: actor.login, name: actor.name ?? '' })
   const issueNodeId = (repo, issue) => 'ISSUE_' + repo.replace('/', '_') + '_' + issue.number
   const canChangeIssueState = !state.issueArchived && (state.issuePermission === 'TRIAGE' || state.issueAuthorCanChange === true)
+  if (['HarnessIssueActivity', 'HarnessIssueReactionTarget', 'HarnessChangeIssueReaction'].some(prefix => query.includes(prefix))) {
+    const repo = variables.owner + '/' + variables.name
+    const issue = state.issues?.[repo]?.find(issue => issue.number === variables.number && !issue.pull_request)
+    const currentViewer = { id: 'VIEWER_' + (state.actor ?? 'fixture-user') }
+    const id = issue && issueNodeId(repo, issue)
+    const reactionFields = subject => ({
+      id: subject, viewerCanReact: !state.issueLocked && !state.issueArchived && state.issueCannotReact !== true,
+      reactionGroups: ['THUMBS_UP', 'THUMBS_DOWN', 'LAUGH', 'HOORAY', 'CONFUSED', 'HEART', 'ROCKET', 'EYES'].map(content => {
+        const users = state.issueReactions?.[subject]?.[content] ?? []
+        return { content, viewerHasReacted: users.includes(currentViewer.id), reactors: { totalCount: users.length } }
+      }),
+    })
+    const issueSubject = (repo, issue) => ({ __typename: 'Issue', ...reactionFields(issueNodeId(repo, issue)) })
+    const commentNode = (repo, issue, comment) => {
+      const id = issueNodeId(repo, issue)
+      return { __typename: 'IssueComment', fullDatabaseId: String(comment.id), author: comment.user, body: comment.body,
+        issue: { id }, url: issue.html_url + '#issuecomment-' + comment.id, createdAt: comment.created_at,
+        ...reactionFields(id + '_COMMENT_' + comment.id) }
+    }
+    const subjects = Object.entries(state.issues ?? {}).flatMap(([name, issues]) => issues.filter(issue => !issue.pull_request)
+      .flatMap(issue => [issueSubject(name, issue), ...(issue.comments ?? []).map(comment => commentNode(name, issue, comment))]))
+    const find = id => subjects.find(subject => subject.id === id) ?? null
+    const repository = state.repositories[repo] && { id: 'REPO_' + repo.replace('/', '_'), nameWithOwner: repo,
+      isArchived: Boolean(state.issueArchived), issue: issue && { ...issueSubject(repo, issue), number: issue.number, locked: Boolean(state.issueLocked) } }
+    if (query.includes('HarnessIssueActivity')) {
+      if (state.issueActivityUnavailable && !variables.legacy) reply(503, {})
+      if (!issue) reply(200, { data: { viewer: currentViewer, repository } })
+      const comments = (issue.comments ?? []).map(comment => commentNode(repo, issue, comment))
+      const events = state.issueEvents?.[id] ?? []
+      const nodes = [...events, ...comments].sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? ''))
+      const start = variables.after ? Number(variables.after) + 1 : Math.max(0, (variables.before ? Number(variables.before) : nodes.length) - variables.last)
+      const end = variables.after ? Math.min(start + variables.first, nodes.length) : variables.before ? Number(variables.before) : nodes.length
+      repository.issue.comments = { totalCount: comments.length }
+      if (!variables.legacy) repository.issue.timelineItems = { nodes: nodes.slice(start, end),
+        pageInfo: { startCursor: String(start), endCursor: String(end - 1), hasPreviousPage: start > 0, hasNextPage: end < nodes.length } }
+      reply(200, { data: { viewer: currentViewer, repository, nodes: variables.legacy ? variables.ids.map(find) : undefined } })
+    }
+    if (query.includes('HarnessIssueReactionTarget')) {
+      if (state.issueReactionHideRead) {
+        delete state.issueReactionHideRead
+        writeFileSync(stateFile, JSON.stringify(state))
+        process.exit(1)
+      }
+      reply(200, { data: { viewer: currentViewer, repository, subject: find(variables.subject) } })
+    }
+    const input = variables.input
+    const target = find(input.subjectId)
+    if (!process.env.GH_TOKEN || !target?.viewerCanReact) reply(403, {})
+    const add = query.includes(' addReaction(')
+    const group = (state.issueReactions ??= {})[input.subjectId] ??= {}
+    const previous = group[input.content] ?? []
+    group[input.content] = add ? [...new Set([...previous, currentViewer.id])] : previous.filter(viewer => viewer !== currentViewer.id)
+    state.issueReactionWrites = [...(state.issueReactionWrites ?? []), [input.subjectId, input.content, add]]
+    if (state.issueDropReaction) {
+      delete state.issueDropReaction
+      state.issueReactionHideRead = true
+      writeFileSync(stateFile, JSON.stringify(state))
+      process.exit(1)
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+    reply(200, { data: { [add ? 'addReaction' : 'removeReaction']: { subject: reactionFields(input.subjectId) } } })
+  }
   if (query.includes('query HarnessIssueMetadataAuthority')) {
     const repo = variables.owner + '/' + variables.name
     const issue = state.issues?.[repo]?.find(issue => issue.number === variables.number)
@@ -665,7 +727,9 @@ if (method === 'GET' && parts[4] === 'issues' && state.issues?.[name] && (!parts
   const size = Number(url.searchParams.get('per_page') || 20)
   const page = Number(url.searchParams.get('page') || 1)
   const link = comments.length > page * size ? 'link: <' + endpoint + '>; rel="next"\\r\\n' : ''
-  reply(200, comments.slice((page - 1) * size, page * size), link)
+  reply(200, comments.slice((page - 1) * size, page * size).map(comment => ({
+    ...comment, node_id: 'ISSUE_' + name.replace('/', '_') + '_' + issue.number + '_COMMENT_' + comment.id,
+  })), link)
 }
 if (method === 'GET' && parts[4] === 'actions' && parts[5] === 'runs') {
   if (!parts[6]) reply(200, { workflow_runs: state.workflowRuns ?? [] })

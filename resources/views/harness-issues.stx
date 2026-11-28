@@ -76,6 +76,13 @@ export const textMessageField = $props.textMessageField
 export const textAction = $props.textAction
 export const titleEditHref = $props.titleEditHref
 export const bodyEditHref = $props.bodyEditHref
+export const activityRows = $props.activityRows
+export const issueReactions = $props.issueReactions
+export const reactionMessage = $props.reactionMessage
+export const reactionComment = $props.reactionComment
+export const reactionAction = $props.reactionAction
+export const olderActivityHref = $props.olderActivityHref
+export const newerActivityHref = $props.newerActivityHref
 export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name: 'Closed' }, { value: 'all', name: 'All states' }]
 </script>
 <script client>
@@ -119,6 +126,15 @@ useEventListener('pointerdown', event => {
   const filters = issueFilters.current
   if (filters?.open && !filters.contains(event.target)) filters.open = false
 })
+
+function closeIssueReactions(event) {
+  const details = event.currentTarget
+  if (event.key !== 'Escape' || !details?.open || event.defaultPrevented || event.isComposing) return
+  event.preventDefault()
+  event.stopPropagation()
+  details.open = false
+  details.querySelector('summary')?.focus()
+}
 
 function issueTextShortcut(event) {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat) return
@@ -456,6 +472,12 @@ function closeIssueFilters(event) {
               @endif
               <div data-issue-markdown="description" class="transcript-markdown">@if(!selected.description)No description.@endif</div>
             @endif
+            @if(reactionMessage && !reactionComment)
+              <p role="status" data-issue-metadata-message>{{ reactionMessage }}</p>
+            @endif
+            @if(issueReactions)
+              @include('../partials/harness-issue-reactions', { bar: issueReactions, barLabel: 'Issue reactions' })
+            @endif
           </section>
           @if(linkedThreads.length || threadChoices.length)
             <section data-issue-relations aria-labelledby="issue-threads">
@@ -503,22 +525,51 @@ function closeIssueFilters(event) {
             </section>
           @endif
           <section data-issue-comments aria-labelledby="issue-comments">
-            <h3 id="issue-comments">Comments</h3>
-            @if(!selected.commentsAvailable)
-              <p role="status">GitHub could not load comments. Refresh to try again.</p>
-            @elseif(!selected.comments.length)
-              <p>No comments on this page.</p>
+            <h3 id="issue-comments" tabindex="-1">Activity@if(selected.commentTotal) ({{ selected.commentTotal }})@endif</h3>
+            @if(olderActivityHref || olderCommentsHref)
+              <nav data-issue-pages aria-label="Earlier activity">
+                @if(olderActivityHref)<a data-issue-button href="{{ olderActivityHref }}">Older activity</a>@endif
+                @if(olderCommentsHref)<a data-issue-button href="{{ olderCommentsHref }}">Older comments</a>@endif
+              </nav>
+            @endif
+            @if(reactionMessage && reactionComment)
+              <p role="status" data-issue-metadata-message>{{ reactionMessage }}</p>
+            @endif
+            @if(selected.activityDegraded)
+              <p role="status">GitHub could only load comments. Refresh for issue events.</p>
+            @endif
+            @if(!selected.activityAvailable)
+              <p role="status">GitHub could not load activity. Refresh to try again.</p>
+            @elseif(!activityRows.length)
+              <p>No activity on this page.</p>
             @else
-              @foreach(selected.comments as comment)
-                <article id="issue-comment-{{ comment.id }}">
-                  <header><strong>{{ comment.author || 'GitHub user' }}</strong><span>{{ comment.dateLabel }}</span></header>
-                  <div data-issue-markdown="{{ comment.id }}" class="transcript-markdown"></div>
-                </article>
+              @foreach(activityRows as item)
+                @if(item.kind === 'comment')
+                  <article id="issue-comment-{{ item.id }}" tabindex="-1">
+                    <header>
+                      <strong>{{ item.author || 'GitHub user' }}</strong>
+                      <a href="{{ item.url }}" target="_blank" rel="noreferrer" aria-label="View comment {{ item.id }} on GitHub">{{ item.dateLabel || 'View on GitHub' }}</a>
+                    </header>
+                    <div data-issue-markdown="{{ item.id }}" class="transcript-markdown"></div>
+                    @if(item.reactions)
+                      @include('../partials/harness-issue-reactions', { bar: item.reactions, barLabel: 'Comment ' + item.id + ' reactions' })
+                    @endif
+                  </article>
+                @else
+                  <div data-issue-event>
+                    @if(item.author)<strong>{{ item.author }}</strong>@endif
+                    <span>{{ item.label }}</span>
+                    @if(item.href)
+                      <a href="{{ item.href }}" @if(item.external)target="_blank" rel="noreferrer"@endif>{{ item.linkLabel }}</a>
+                    @endif
+                    <span>{{ item.dateLabel }}</span>
+                  </div>
+                @endif
               @endforeach
             @endif
-            @if(olderCommentsHref || newerCommentsHref)
-              <nav data-issue-pages aria-label="Comment pages">
-                @if(olderCommentsHref)<a data-issue-button href="{{ olderCommentsHref }}">Older comments</a>@endif
+            @if(newerActivityHref || newerCommentsHref)
+              <nav data-issue-pages aria-label="Later activity">
+                @if(newerActivityHref)<a data-issue-button href="{{ newerActivityHref }}">Newer activity</a>@endif
                 @if(newerCommentsHref)<a data-issue-button href="{{ newerCommentsHref }}">Newer comments</a>@endif
               </nav>
             @endif

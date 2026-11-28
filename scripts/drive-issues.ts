@@ -54,8 +54,23 @@ fixture.issues = {
     })),
   }, ...Array.from({ length: 21 }, (_, index) => row('fixture/notebook', 25 + index,
     'Notebook issue ' + (index + 25), new Date(Date.UTC(2026, 10, index + 1)).toISOString()))],
-  'fixture/atlas': [row('fixture/atlas', 51, 'Newest fixture issue', '2026-11-26T12:00:00Z')],
+  'fixture/atlas': [{ ...row('fixture/atlas', 51, 'Newest fixture issue', '2026-11-26T12:00:00Z'),
+    comments: [{ id: 501, issue_url: 'https://api.github.com/repos/fixture/atlas/issues/51', user: { login: 'fixture-user' },
+      created_at: '2026-11-27T12:30:00Z', body: 'A comment on a different issue.' }],
+  }],
 }
+const fixtureIssueNode = 'ISSUE_fixture_notebook_24'
+fixture.issueEvents = {
+  [fixtureIssueNode]: [
+    { __typename: 'LabeledEvent', id: 'event-label', createdAt: '2026-11-27T11:00:00Z', actor: { login: 'fixture-reviewer' }, label: { name: 'offline' } },
+    { __typename: 'AssignedEvent', id: 'event-assignment', createdAt: '2026-11-27T11:05:00Z', actor: { login: 'fixture-reviewer' }, assignee: { login: 'fixture-user' } },
+    { __typename: 'ReopenedEvent', id: 'event-reopen', createdAt: '2026-11-27T11:06:00Z', actor: { login: 'fixture-reviewer' } },
+    { __typename: 'CrossReferencedEvent', id: 'event-reference', createdAt: '2026-11-27T13:01:00Z', actor: { login: 'fixture-reviewer' },
+      source: { __typename: 'Issue', number: 51, url: 'https://github.com/fixture/atlas/issues/51', repository: { nameWithOwner: 'fixture/atlas' } } },
+    { __typename: 'RenamedTitleEvent', id: 'event-rename', createdAt: '2026-11-27T13:02:00Z', actor: { login: 'fixture-reviewer' }, currentTitle: longTitle },
+  ],
+}
+fixture.issueReactions = { [fixtureIssueNode]: { THUMBS_UP: ['another-viewer'] } }
 fixture.filterAssignees = [{ login: 'fixture-reviewer', name: 'Review Team' }, { login: 'fixture-helper', name: 'Helper' }]
 const triageLabel = { id: 42, name: 'Needs triage', color: '8794a1', description: 'Fixture label for new reports' }
 fixture.labelCatalog = [...fixture.issues['fixture/notebook'][0].labels, triageLabel]
@@ -225,12 +240,24 @@ try {
     assert.equal(await page.locator('[data-issue-list]').isVisible(), width >= 768)
     await capture('detail-' + width + 'x' + height)
   }
-  await page.getByRole('link', { name: 'Newer comments' }).click()
+  const detailUrl = page.url()
+  await page.locator('[data-issue-markdown="21"]').waitFor()
+  assert.equal(await page.locator('[data-issue-markdown="1"]').count(), 0)
+  const crossReference = page.getByRole('link', { name: 'fixture/atlas #51', exact: true })
+  assert.equal(new URL(await crossReference.getAttribute('href') ?? '', base).searchParams.get('selected'), 'fixture/atlas')
+  await page.getByRole('link', { name: 'Older activity' }).click()
+  await page.locator('[data-issue-markdown="1"]').waitFor()
+  await page.getByText('added label offline', { exact: true }).waitFor()
+  await page.getByText('assigned fixture-user', { exact: true }).waitFor()
+  assert.equal(await page.locator('[data-issue-markdown="21"]').count(), 0)
+  await page.getByRole('link', { name: 'Newer activity' }).click()
+  await page.locator('[data-issue-markdown="21"]').waitFor()
+  await page.goto(detailUrl + '&comments=2')
   await page.locator('[data-issue-markdown="21"]').waitFor()
   assert.equal(await page.locator('[data-issue-markdown="20"]').count(), 0)
   await page.getByRole('link', { name: 'Older comments' }).click()
   await page.locator('[data-issue-markdown="1"]').waitFor()
-  const detailUrl = page.url()
+  await page.goto(detailUrl)
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.getByLabel('Order').selectOption('updated')
   await page.waitForURL(url => url.searchParams.get('sort') === 'updated')
@@ -719,8 +746,72 @@ try {
   await savedText.waitFor()
   await issuePage.getByText('No description.', { exact: true }).waitFor()
   assert.equal(readForge().issues['fixture/notebook'][0].title, proposed)
+  await issuePage.goto(detailUrl)
+  const issueReactions = issuePage.getByRole('form', { name: 'Issue reactions', exact: true })
+  const commentReactions = issuePage.getByRole('form', { name: 'Comment 21 reactions', exact: true })
+  const readReactionRequest = (form: ReturnType<typeof issuePage.getByRole>, reaction: string) => form.evaluate((element, reaction) => {
+    const values = new URLSearchParams(Array.from(new FormData(element as HTMLFormElement), ([key, value]) => [key, String(value)]))
+    values.set('reaction', reaction)
+    return { url: (element as HTMLFormElement).action, body: values.toString() }
+  }, reaction)
+  const addIssueReaction = issueReactions.getByRole('button', { name: 'Add Thumbs up reaction, 1', exact: true })
+  const intent = await readReactionRequest(issueReactions, 'add:THUMBS_UP')
+  const react = (request: typeof intent, origin = base) => fetch(request.url, { method: 'POST', body: request.body, redirect: 'manual',
+    headers: { origin, 'content-type': 'application/x-www-form-urlencoded' } })
+  assert.equal((await react(intent, 'https://outside.invalid')).status, 403)
+  alterForge(current => { current.actor = 'different-reaction-account' })
+  assert.equal((await react(intent)).status, 409)
+  alterForge(current => { delete current.actor; current.issueLocked = true })
+  assert.equal((await react(intent)).status, 403)
+  alterForge(current => { delete current.issueLocked })
+  const crossTarget = new URLSearchParams(intent.body)
+  crossTarget.set('subject', 'ISSUE_fixture_notebook_25')
+  assert.equal((await react({ ...intent, body: crossTarget.toString() })).status, 409)
+  await addIssueReaction.click()
+  const removeIssueReaction = issueReactions.getByRole('button', { name: 'Remove Thumbs up reaction, 2', exact: true })
+  await removeIssueReaction.waitFor()
+  assert.equal(await removeIssueReaction.getAttribute('aria-pressed'), 'true')
+  await removeIssueReaction.click()
+  await addIssueReaction.waitFor()
+  assert.equal((await react(intent)).status, 303)
+  await issuePage.reload()
+  await addIssueReaction.waitFor()
+  const openReactionPicker = commentReactions.getByText('Add reaction', { exact: true })
+  await openReactionPicker.click()
+  const heart = commentReactions.getByRole('button', { name: 'Add Heart reaction', exact: true })
+  await heart.press('Escape')
+  await heart.waitFor({ state: 'hidden' })
+  assert.equal(await openReactionPicker.evaluate(node => node === node.ownerDocument.activeElement), true)
+  await openReactionPicker.click()
+  await captureEditor('comment-reaction', heart)
+  const heartIntent = await readReactionRequest(commentReactions, 'add:HEART')
+  const foreignComment = new URLSearchParams(heartIntent.body)
+  foreignComment.set('subject', 'ISSUE_fixture_atlas_51_COMMENT_501')
+  assert.equal((await react({ ...heartIntent, body: foreignComment.toString() })).status, 409)
+  const badComment = new URL(heartIntent.url)
+  badComment.searchParams.set('issue', '25')
+  assert.equal((await react({ ...heartIntent, url: badComment.href })).status, 409)
+  alterForge(current => { current.issueDropReaction = true })
+  assert.equal((await react(heartIntent)).status, 202)
+  const reactionPort = host.server.port
+  host.stop()
+  host = await startHost(reactionPort)
+  assert.equal((await react(heartIntent)).status, 303)
+  await issuePage.reload()
+  const removeHeart = commentReactions.getByRole('button', { name: 'Remove Heart reaction, 1', exact: true })
+  await removeHeart.click()
+  await commentReactions.getByRole('button', { name: 'Remove Heart reaction, 1', exact: true }).waitFor({ state: 'hidden' })
+  assert.deepEqual(readForge().issueReactionWrites, [
+    [fixtureIssueNode, 'THUMBS_UP', true], [fixtureIssueNode, 'THUMBS_UP', false],
+    [fixtureIssueNode + '_COMMENT_21', 'HEART', true], [fixtureIssueNode + '_COMMENT_21', 'HEART', false],
+  ])
+  alterForge(current => { current.issueActivityUnavailable = true })
+  await issuePage.goto(detailUrl)
+  await issuePage.getByText('GitHub could only load comments. Refresh for issue events.', { exact: true }).waitFor()
+  await issuePage.locator('[data-issue-markdown="1"]').waitFor()
+  assert.equal(await issuePage.locator('[data-issue-markdown="21"]').count(), 0)
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text editing and recovery')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions and recovery')
 }
 catch (error) {
   console.error(error)

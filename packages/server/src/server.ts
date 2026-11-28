@@ -26,6 +26,7 @@ import type { WorkspaceReviewTurn } from './diff'
 import { isWorkspaceGitRoot, reviewWorkspaceDiff, summarizeTurnFiles, workspaceDiff, workspaceDiffContext, workspaceDiffRevision, workspaceReviewOptions } from './diff'
 import { AttachmentError, QuestionAttachments } from './question-attachments'
 import { openCombinedRepository } from './combined-worktree'
+import { submitIssueReaction } from './issue-activity'
 import { submitIssueText } from './issue-text'
 import { submitIssueComment } from './issue-comment'
 import { updateIssueMetadata } from './issue-metadata'
@@ -2285,7 +2286,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
         return promptLinkProjects(engine.current, url.searchParams, request.signal)
       }
 
-      if (['/issues', '/issues/threads', '/issues/metadata', '/issues/comments', '/issues/text'].includes(url.pathname)) {
+      if (['/issues', '/issues/threads', '/issues/metadata', '/issues/comments', '/issues/text', '/issues/reactions'].includes(url.pathname)) {
         const headers = { 'cache-control': 'private, no-store', 'content-type': 'text/html; charset=utf-8',
           'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin' }
         const site = request.headers.get('sec-fetch-site')
@@ -2322,6 +2323,17 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
           return new Response(renderIssueMarkdown(html, view), { status, headers })
         }
         const unavailable = () => new Response('Issues could not be loaded. Return to the workspace and try again.', { status: 503, headers })
+        if (url.pathname === '/issues/reactions') {
+          if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
+            return new Response(null, { status: 415, headers })
+          return readRepositoryBody(request, 4_096).then(async (raw) => {
+            const reaction = raw === null ? null : await submitIssueReaction(engine.current, url.searchParams, new URLSearchParams(raw), signal, reviewReplies)
+            if (!reaction) return new Response('Invalid issue reaction form.', { status: 400, headers })
+            if (reaction.result !== 'updated') return render({ reaction }, reaction.result)
+            const anchor = reaction.comment ? '#issue-comment-' + reaction.comment : '#issue-description'
+            return new Response(null, { status: 303, headers: { ...headers, location: '/issues?' + url.searchParams + anchor } })
+          }).catch(unavailable)
+        }
         if (url.pathname === '/issues/text') {
           if (request.headers.get('content-type')?.split(';')[0] !== 'application/x-www-form-urlencoded')
             return new Response(null, { status: 415, headers })
@@ -2345,6 +2357,8 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             if (comment.result !== 'posted') return render({ comment }, comment.result)
             const params = new URLSearchParams(url.searchParams)
             params.delete('editMetadata')
+            params.delete('activityBefore')
+            params.delete('activityAfter')
             params.set('comments', 'latest')
             params.set('commentResult', 'posted')
             const anchor = comment.id ? '#issue-comment-' + comment.id : '#issue-comments'

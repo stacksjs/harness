@@ -256,7 +256,7 @@ describe('GitHub issue workspace', () => {
       expect(authored).not.toContain(notebook.title)
 
       const picked = address + '&selected=fixture%2Fnotebook&issue=24'
-      const issue = await (await fetch(picked)).text()
+      const issue = await (await fetch(picked + '&comments=1')).text()
       expect(issue).toContain('<strong>offline behavior</strong>')
       expect(issue).toContain('fixture-assignee')
       expect(issue).toContain('<strong>20</strong>')

@@ -3,10 +3,12 @@ import type { InternalCommand } from '@harness/contract'
 import { githubIssueReference, sameGitHubIssue } from '@harness/contract'
 import type { HarnessState } from '@harness/engine'
 import type { GitHubWorkspaceRepository } from './github-workspace-repositories'
+import type { IssueActivityItem } from './issue-activity'
 import type { IssueCommentSubmission } from './issue-comment'
 import type { IssueTextSubmission } from './issue-text'
 import type { IssueMetadataEditor, IssueMetadataForm, IssueMetadataKind } from './issue-metadata'
 import { mergeGitHubProjectRepositories, trustedGitHubProjectRepositories, trustedGitHubRepositories } from './github-workspace-repositories'
+import { issueActivityCursor, readIssueActivity } from './issue-activity'
 import { issueMetadataKind, readIssueMetadata } from './issue-metadata'
 import { createIssueTextDraft, issueTextField, issueTextLimits } from './issue-text'
 import { newThreadLink, parsePullRequest } from './prompt-links'
@@ -119,34 +121,45 @@ async function repositoryIssues(repository: GitHubWorkspaceRepository, scope: Is
   return { rows: [...issues.values()], partial }
 }
 
-async function issueDetail(repository: GitHubWorkspaceRepository, number: number, requestedComments: number | 'latest', signal: AbortSignal) {
+async function issueDetail(repository: GitHubWorkspaceRepository, number: number, requestedComments: number | 'latest' | null, before: string, after: string, signal: AbortSignal) {
   const endpoint = 'repos/' + repository.name + '/issues/' + number
-  const reply = await repositoryGitHubRequest(repository.path, endpoint, undefined, signal)
+  const [reply, activity] = await Promise.all([
+    repositoryGitHubRequest(repository.path, endpoint, undefined, signal),
+    typeof requestedComments === 'number' ? null : readIssueActivity(repository, number, { before: before || undefined, after: after || undefined }, signal).catch(() => null),
+  ])
   const issue = reply.status === 200 ? issueRow(reply.body, repository.name) : null
   if (!issue || issue.number !== number) throw new RepositoryPullRequestError('This issue is unavailable to the GitHub account on this host.')
 
   const raw = reply.body as GitHubIssue
+  const details = { ...issue, dateLabel: issue.created ? dates.format(issue.created) : '',
+    description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '' }
+  if (activity) return { ...details, activity: activity.items, reactions: activity.reactions, commentTotal: activity.total,
+    activityAvailable: true, activityDegraded: false, olderActivity: activity.older, newerActivity: activity.newer, commentPage: 0, moreComments: false }
   const commentPage = requestedComments === 'latest'
-    ? Math.max(1, Math.ceil(positiveInteger(raw.comments) / pageSize)) : requestedComments
+    ? Math.max(1, Math.ceil(positiveInteger(raw.comments) / pageSize)) : requestedComments ?? 1
   const commentReply = await repositoryGitHubRequest(repository.path, endpoint + '/comments?' + new URLSearchParams({
     per_page: String(pageSize), page: String(commentPage),
   }), undefined, signal).catch(() => null)
   const commentsAvailable = commentReply?.status === 200 && Array.isArray(commentReply.body)
   const comments = commentsAvailable ? (commentReply.body as {
-    id?: unknown, issue_url?: unknown, user?: { login?: unknown }, created_at?: unknown, body?: unknown,
+    id?: unknown, node_id?: string, issue_url?: unknown, user?: { login?: unknown }, created_at?: unknown, body?: unknown,
   }[]).slice(0, pageSize).flatMap((comment) => {
     const id = positiveInteger(comment?.id)
     if (!id || typeof comment.issue_url !== 'string' || comment.issue_url.toLowerCase() !== ('https://api.github.com/' + endpoint).toLowerCase()
       || typeof comment.body !== 'string') return []
     const timestamp = date(comment.created_at)
-    return [{ id, author: login(comment.user?.login), dateLabel: timestamp ? dates.format(timestamp) : '', body: comment.body.slice(0, 32_768) }]
+    return [{ id, node: comment.node_id, author: login(comment.user?.login), dateLabel: timestamp ? dates.format(timestamp) : '',
+      body: comment.body.slice(0, 32_768), url: issue.url + '#issuecomment-' + id }]
   }) : []
 
-  return {
-    ...issue, dateLabel: issue.created ? dates.format(issue.created) : '',
-    description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
-    comments, commentPage, commentsAvailable, moreComments: Boolean(commentsAvailable && commentReply.hasNextPage),
-  }
+  const legacy = await readIssueActivity(repository, number, {
+    ids: comments.flatMap(comment => comment.node ? [comment.node] : []),
+  }, signal).catch(() => null)
+  const bars = new Map(legacy?.items.map(item => [item.id, item.reactions]))
+  const items: IssueActivityItem[] = comments.map(({ node: _node, ...comment }) =>
+    ({ ...comment, kind: 'comment', reactions: bars.get(comment.id) }))
+  return { ...details, activity: items, reactions: legacy?.reactions, commentTotal: positiveInteger(raw.comments),
+    activityAvailable: commentsAvailable, activityDegraded: commentsAvailable && typeof requestedComments !== 'number', olderActivity: '', newerActivity: '', commentPage, moreComments: Boolean(commentsAvailable && commentReply.hasNextPage) }
 }
 
 export async function issueThreadUpdate(
@@ -173,6 +186,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadata?: { kind: IssueMetadataKind, message: string, editor?: IssueMetadataEditor | null, draft?: IssueMetadataForm | null }
     comment?: IssueCommentSubmission
     text?: IssueTextSubmission
+    reaction?: { message: string, comment: number }
   } = {}) {
   const { metadata: metadataSubmission, comment: commentSubmission, text: textSubmission } = writes
   const profiles = [...state.profiles.values()].map(({ id, name }) => ({ id, name }))
@@ -192,7 +206,9 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const selection = repositories.get(selectionName.toLowerCase())
   const number = preserveSelection ? positiveInteger(query.get('issue')) : 0
   const requestedComments = query.get('comments') === 'latest' ? 'latest'
-    : Math.min(positiveInteger(query.get('comments')) || 1, 10_000)
+    : Math.min(positiveInteger(query.get('comments')), 10_000) || null
+  const activityBefore = issueActivityCursor(query.get('activityBefore'))
+  const activityAfter = activityBefore ? '' : issueActivityCursor(query.get('activityAfter'))
   const filter = query.get('state')
   const involvement = query.get('involvement')
   const findAssignee = query.has('findAssignees') ? (query.get('assignee') ?? '').slice(0, 100).replace(/\p{Cc}/gu, '').trim() : ''
@@ -229,7 +245,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     for (const [key, value] of Object.entries(overrides)) next.set(key, String(value))
     return '/issues?' + next
   }
-  const detail = selection && number ? issueDetail(selection, number, requestedComments, signal)
+  const detail = selection && number ? issueDetail(selection, number, requestedComments, activityBefore, activityAfter, signal)
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error) })) : null
   const editMetadata = issueMetadataKind(query.get('editMetadata'))
   const editText = issueTextField(query.get('editText'))
@@ -274,7 +290,9 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   if (selected) {
     savedViewDetail.set('selected', selected.repository)
     savedViewDetail.set('issue', String(selected.number))
-    if (commentPage > 1) savedViewDetail.set('comments', String(commentPage))
+    if (commentPage > 0 && requestedComments !== null) savedViewDetail.set('comments', String(commentPage))
+    if (activityBefore) savedViewDetail.set('activityBefore', activityBefore)
+    if (activityAfter) savedViewDetail.set('activityAfter', activityAfter)
   }
   const metadataFields = selected ? Object.fromEntries(savedViewDetail) : {}
   const metadataHref = selected ? href(metadataFields) : ''
@@ -340,6 +358,13 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
       hidden: hiddenProjects.has(workspace.id),
     }
   }).sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path))
+  const activityRows = (selected?.activity ?? []).map(item => {
+    if (item.kind !== 'event' || !item.url) return { ...item, href: '', external: false }
+    const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/(issues|pull)\/(\d+)$/u.exec(item.url)
+    if (!match || !repositories.has(match[1]!.toLowerCase())) return { ...item, href: item.url, external: true }
+    return { ...item, external: false, href: match[2] === 'issues' ? href({ selected: match[1]!, issue: match[3]! })
+      : '/pull-requests?' + new URLSearchParams({ profile: String(profile), selectedUrl: item.url }) }
+  })
   return {
     profiles, profile, repositories: [...repositories.values()].map(item => item.name).sort(),
     repository: repository?.name || '', scope, failures, partial, error, selected, draftHref,
@@ -391,6 +416,13 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     textAction: metadataHref.replace('/issues?', '/issues/text?') + '#issue-text-editor',
     titleEditHref: selected ? href({ ...metadataFields, editText: 'title' }) + '#issue-title' : '',
     bodyEditHref: selected ? href({ ...metadataFields, editText: 'body' }) + '#issue-description' : '',
+    reactionAction: metadataHref.replace('/issues?', '/issues/reactions?'),
+    reactionMessage: writes.reaction?.message ?? '',
+    reactionComment: writes.reaction?.comment ?? 0,
+    activityRows,
+    issueReactions: selected?.reactions ?? null,
+    olderActivityHref: selected?.olderActivity ? href({ ...selectedScope, activityBefore: selected.olderActivity }) + '#issue-comments' : '',
+    newerActivityHref: selected?.newerActivity ? href({ ...selectedScope, activityAfter: selected.newerActivity }) + '#issue-comments' : '',
     issueThreadAction: selected ? href(selectedScope).replace('/issues?', '/issues/threads?') : '',
     retryHref: href(selectedScope), datePurpose: scope.sort === 'created' ? 'Created' : 'Last updated',
     backHref: '/?' + new URLSearchParams({ profile: String(profile) }), listHref: href(),
@@ -408,7 +440,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
 
 export function renderIssueMarkdown(html: string, view: Awaited<ReturnType<typeof issueWorkspace>>) {
   if (!view.selected) return html
-  const bodies = new Map(view.selected.comments.map(comment => [String(comment.id), comment.body]))
+  const bodies = new Map(view.selected.activity.flatMap(item => item.kind === 'comment' && item.body ? [[String(item.id), item.body]] : []))
   bodies.set('description', view.selected.description)
   if (view.textPreview && view.textDraft?.text.trim()) bodies.set('preview', view.textDraft.text)
   return new HTMLRewriter().on('[data-issue-markdown]', { element(element) {

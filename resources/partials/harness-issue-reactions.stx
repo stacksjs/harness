@@ -1,0 +1,33 @@
+@if(bar.allowed || bar.items.some(item => item.count > 0))
+  <form method="post" action="{{ reactionAction }}@if(bar.comment)#issue-comment-{{ bar.comment }}@else#issue-description@endif"
+    aria-label="{{ barLabel }}" data-issue-reactions>
+    <input type="hidden" name="subject" value="{{ bar.subject }}">
+    <input type="hidden" name="scope" value="{{ bar.scope }}">
+    <input type="hidden" name="intent" value="{{ bar.intent }}">
+    @foreach(bar.items as item)
+      @if(item.count)
+        @if(bar.allowed)
+          <button type="submit" name="reaction" value="{{ item.desired }}:{{ item.content }}"
+            aria-label="{{ item.actionLabel }}, {{ item.count }}" aria-pressed="{{ item.active }}" data-issue-button>
+            <span aria-hidden="true">{{ item.glyph }} {{ item.count }}</span>
+          </button>
+        @else
+          <span aria-label="{{ item.label }}, {{ item.count }}">{{ item.glyph }} {{ item.count }}</span>
+        @endif
+      @endif
+    @endforeach
+    @if(bar.allowed)
+      <details @keydown="closeIssueReactions">
+        <summary data-issue-button>Add reaction</summary>
+        <div data-issue-reaction-options>
+          @foreach(bar.items as item)
+            <button type="submit" name="reaction" value="{{ item.desired }}:{{ item.content }}"
+              aria-label="{{ item.actionLabel }}" aria-pressed="{{ item.active }}" title="{{ item.label }}" data-issue-button>
+              <span aria-hidden="true">{{ item.glyph }}</span>
+            </button>
+          @endforeach
+        </div>
+      </details>
+    @endif
+  </form>
+@endif

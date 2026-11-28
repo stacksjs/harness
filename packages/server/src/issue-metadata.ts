@@ -185,7 +185,7 @@ async function makeEditor(context: MetadataContext & { credential: string }, aut
     checked: options.filter(option => option.checked).map(option => option.key), options, search, more, matches }
 }
 
-export function issueWriteScope(repository: GitHubWorkspaceRepository, authority: Authority, operation: 'issue-comment' | 'issue-text') {
+export function issueWriteScope(repository: GitHubWorkspaceRepository, authority: Pick<Authority, 'repositoryId' | 'issueId' | 'viewer'>, operation: 'issue-comment' | 'issue-text' | 'issue-reaction') {
   return hash([operation, repository.workspace.profileId, repository.workspace.id, authority.repositoryId, authority.issueId, authority.viewer])
 }
 
