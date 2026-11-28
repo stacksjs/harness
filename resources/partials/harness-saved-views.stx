@@ -1,0 +1,27 @@
+<details ref="savedViewMenuRef" data-list-views @if(savedViewSurface === 'pr')data-pr-views@endif hidden
+  :hidden="!savedViewState().ready" @keydown="listViews.keydown($event)">
+  <summary ref="savedViewTrigger" data-list-view-trigger aria-label="{{ savedViewLabel }}"
+    :aria-describedby="savedViewState().modified ? 'list-active-view-name list-active-view-state' : 'list-active-view-name'"
+    :title="savedViewState().active?.name" @click="listViews.toggle()">
+    <span class="inline-block shrink-0 size-4 i-hugeicons-bookmark-01" aria-hidden="true"></span>
+    <span id="list-active-view-name" data-list-view-name :text="savedViewState().active?.name || 'Views'">Views</span>
+    <span id="list-active-view-state" data-list-view-modified :hidden="!savedViewState().modified" title="Modified view">
+      <span data-list-view-modified-mark aria-hidden="true">*</span>
+      <span data-list-view-modified-label>Modified</span>
+    </span>
+    <span class="inline-block shrink-0 size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
+  </summary>
+  <div data-list-view-panel>
+    <button :for="view in savedViewState().views" :key="view.id" type="button" data-list-view-choice
+      :aria-current="view.id === savedViewState().active?.id && !savedViewState().modified ? 'true' : null" @click="listViews.apply(view.id)">
+      <span class="inline-block shrink-0 size-4 i-hugeicons-tick-02" aria-hidden="true"></span>
+      <span :text="view.name"></span>
+    </button>
+    <div data-list-view-commands>
+      <button type="button" @click="listViews.openEditor(false)">Save current view…</button>
+      <button type="button" :hidden="!savedViewState().modified" @click="listViews.change(false)">Update saved view</button>
+      <button type="button" :hidden="!savedViewState().active" @click="listViews.openEditor(true)">Rename view…</button>
+      <button type="button" data-list-view-remove :hidden="!savedViewState().active" @click="listViews.change(true)">Delete view</button>
+    </div>
+  </div>
+</details>

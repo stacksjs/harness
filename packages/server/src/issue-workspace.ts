@@ -146,9 +146,11 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const profile = profiles.some(item => item.id === requestedProfile) ? requestedProfile : profiles[0]?.id || 0
   const repositories = await trustedGitHubRepositories(state.workspaces.values(), profile, signal)
   const repository = repositories.get((query.get('repository') || '').toLowerCase())
-  const selectionName = query.get('selected') || ''
+  const selectionProfile = positiveInteger(query.get('selectionProfile'))
+  const preserveSelection = !selectionProfile || selectionProfile === profile
+  const selectionName = preserveSelection ? query.get('selected') || '' : ''
   const selection = repositories.get(selectionName.toLowerCase())
-  const number = positiveInteger(query.get('issue'))
+  const number = preserveSelection ? positiveInteger(query.get('issue')) : 0
   const commentPage = Math.min(positiveInteger(query.get('comments')) || 1, 100)
   const filter = query.get('state')
   const scope: IssueScope = {
@@ -160,6 +162,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const params = new URLSearchParams({ profile: String(profile), state: scope.state, sort: scope.sort })
   if (repository) params.set('repository', repository.name)
   if (scope.search) params.set('q', scope.search)
+  const savedViewScope = params.toString()
   if (scope.page > 1) params.set('page', String(scope.page))
   const href = (overrides: Record<string, string | number> = {}) => {
     const next = new URLSearchParams(params)
@@ -187,6 +190,12 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   const { selected, error } = await detail ?? { selected: null, error: selectionName || number ? 'This issue is outside the selected profile.' : '' }
   signal.throwIfAborted()
   const selectedScope: Record<string, string | number> = selected ? { selected: selected.repository, issue: selected.number } : {}
+  const savedViewDetail = new URLSearchParams()
+  if (selected) {
+    savedViewDetail.set('selected', selected.repository)
+    savedViewDetail.set('issue', String(selected.number))
+    if (commentPage > 1) savedViewDetail.set('comments', String(commentPage))
+  }
   const pageEnd = scope.page * pageSize
   const reference = selected && githubIssueReference({ tracker: 'github', repository: selected.repository, number: selected.number })
   const linkedThreads = []
@@ -224,6 +233,8 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   return {
     profiles, profile, repositories: [...repositories.values()].map(item => item.name).sort(),
     repository: repository?.name || '', scope, failures, partial, error, selected, draftHref,
+    savedViewScope, savedViewDetail: savedViewDetail.toString(),
+    listSelectionFields: selected ? [...savedViewDetail, ['selectionProfile', String(profile)]] : [],
     linkedThreads, threadChoices, pullRequests: [...pullRequests.values()],
     issueThreadAction: selected ? href(selectedScope).replace('/issues?', '/issues/threads?') : '',
     retryHref: href(selectedScope), datePurpose: scope.sort === 'created' ? 'Created' : 'Last updated',

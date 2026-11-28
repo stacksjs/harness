@@ -1,0 +1,16 @@
+<p role="status" data-list-view-status :text="savedViewState().status"></p>
+<dialog ref="savedViewDialog" data-list-view-dialog aria-labelledby="list-view-dialog-title" aria-describedby="list-view-description"
+  @cancel.prevent="listViews.closeEditor()">
+  <form @submit.prevent="listViews.saveName()">
+    <h2 id="list-view-dialog-title" :text="(savedViewState().editing ? 'Rename ' : 'Save ') + savedViewTitle">Save view</h2>
+    <p id="list-view-description">Save your search, filters, and sort order on this device.</p>
+    <label for="list-view-name">Name</label>
+    <input id="list-view-name" ref="savedViewNameInput" type="text" maxlength="80" autocomplete="off" :value="savedViewState().name"
+      :aria-invalid="savedViewState().error ? 'true' : null" aria-describedby="list-view-error" @input="listViews.editName($event)">
+    <p id="list-view-error" role="alert" :text="savedViewState().error"></p>
+    <div data-list-view-dialog-actions>
+      <button type="button" data-list-view-button @click="listViews.closeEditor()">Cancel</button>
+      <button type="submit" data-list-view-button data-list-view-save>Save view</button>
+    </div>
+  </form>
+</dialog>

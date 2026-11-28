@@ -23,7 +23,37 @@ export const pullRequests = $props.pullRequests
 export const issueThreadAction = $props.issueThreadAction
 export const olderCommentsHref = $props.olderCommentsHref
 export const newerCommentsHref = $props.newerCommentsHref
+export const savedViewScope = $props.savedViewScope
+export const savedViewDetail = $props.savedViewDetail
+export const listSelectionFields = $props.listSelectionFields
 export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name: 'Closed' }, { value: 'all', name: 'All states' }]
+</script>
+<script client>
+import { initialSavedViews, issueViews, savedViewsMenu } from '../client/saved-views'
+
+const issueScope = @json(savedViewScope)
+const savedViewTitle = 'issue view'
+const savedViewMenuRef = useRef('savedViewMenuRef')
+const savedViewTrigger = useRef('savedViewTrigger')
+const savedViewDialog = useRef('savedViewDialog')
+const savedViewNameInput = useRef('savedViewNameInput')
+const savedViewState = state(initialSavedViews())
+const listViews = savedViewsMenu({
+  kind: issueViews,
+  scope: () => issueScope,
+  detail: @json(savedViewDetail),
+  profiles: @json(profiles.map(item => String(item.id))),
+  repositories: @json(repositories.map(item => item.toLowerCase())),
+  elements: () => ({ menu: savedViewMenuRef.current, trigger: savedViewTrigger.current,
+    dialog: savedViewDialog.current, nameInput: savedViewNameInput.current }),
+  publish: value => savedViewState.set(value),
+  nextTick,
+})
+
+onMount(listViews.mount)
+useEventListener('storage', listViews.storageChanged)
+useEventListener('pageshow', listViews.refresh)
+useEventListener('pointerdown', listViews.dismissOutside)
 </script>
 <main data-harness-shell data-issue-workspace class="text-neutral-900 dark:text-neutral-100">
   <header data-issue-header>
@@ -35,14 +65,17 @@ export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name:
   <div data-issue-columns data-detail="{{ hasDetail }}">
     <section data-issue-list aria-label="GitHub issues">
       <form action="/issues" method="get" data-issue-filters aria-label="Issue filters">
+        @foreach(listSelectionFields as field)
+          <input type="hidden" name="{{ field[0] }}" value="{{ field[1] }}">
+        @endforeach
         <label data-issue-search>
           <span>Search issues</span>
           <input type="search" name="q" maxlength="160" value="{{ scope.search }}" placeholder="Search titles and descriptions" enterkeyhint="search">
         </label>
         <div data-issue-filter-fields>
           <label>
-            <span>Profile</span>
-            <select name="profile">
+            <span id="issue-filter-profile">Profile</span>
+            <select name="profile" aria-labelledby="issue-filter-profile">
               @if(!profiles.length)<option value="0">No profiles</option>@endif
               @foreach(profiles as item)
                 <option value="{{ item.id }}" @if(item.id === profile)selected@endif>{{ item.name }}</option>
@@ -50,8 +83,8 @@ export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name:
             </select>
           </label>
           <label>
-            <span>Repository</span>
-            <select name="repository">
+            <span id="issue-filter-repository">Repository</span>
+            <select name="repository" aria-labelledby="issue-filter-repository">
               <option value="">All repositories</option>
               @foreach(repositories as item)
                 <option value="{{ item }}" @if(item === repository)selected@endif>{{ item }}</option>
@@ -59,23 +92,27 @@ export const states = [{ value: 'open', name: 'Open' }, { value: 'closed', name:
             </select>
           </label>
           <label>
-            <span>Status</span>
-            <select name="state">
+            <span id="issue-filter-state">Status</span>
+            <select name="state" aria-labelledby="issue-filter-state">
               @foreach(states as item)
                 <option value="{{ item.value }}" @if(item.value === scope.state)selected@endif>{{ item.name }}</option>
               @endforeach
             </select>
           </label>
           <label>
-            <span>Order</span>
-            <select name="sort">
+            <span id="issue-filter-sort">Order</span>
+            <select name="sort" aria-labelledby="issue-filter-sort">
               <option value="updated" @if(scope.sort === 'updated')selected@endif>Recently updated</option>
               <option value="created" @if(scope.sort === 'created')selected@endif>Newest</option>
             </select>
           </label>
         </div>
-        <button type="submit" data-issue-button>Apply filters</button>
+        <div data-issue-filter-toolbar>
+          <button type="submit" data-issue-button>Apply filters</button>
+          @include('../partials/harness-saved-views', { savedViewSurface: 'issue', savedViewLabel: 'Saved issue views' })
+        </div>
       </form>
+      @include('../partials/harness-saved-view-dialog')
       @if(failures.length || partial)
         <div data-issue-notice role="status">
           @if(partial)<p>GitHub limited results for this search.</p>@endif

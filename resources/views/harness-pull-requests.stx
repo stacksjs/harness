@@ -796,15 +796,15 @@ const matchingLabelIds = derived(() => {
 @endif
 <script client>
 import { pullRequestLiveSearch } from '../client/pull-request-live-search'
-import { PULL_REQUEST_VIEWS_KEY, pullRequestViewHref, pullRequestViewMatches, pullRequestViewNameError, pullRequestViewStore } from '../client/pull-request-saved-views'
+import { initialSavedViews, pullRequestViews, savedViewsMenu } from '../client/saved-views'
 
 const currentSavedPrScope = state(@json(savedViewScope))
-const currentSavedPrDetail = @json(savedViewDetail)
-const availableSavedPrProfiles = @json(profiles.map(profile => String(profile.id)))
-const currentSavedPrRepositories = @json(repositories.map(repository => repository.name.toLowerCase()))
-const suggestedSavedPrName = @json(filters.involvement === 'reviewing' ? 'PRs requesting my review' : '')
-const savedPrViewsMenu = useRef('savedPrViewsMenu')
-const savedPrViewsTrigger = useRef('savedPrViewsTrigger')
+const savedViewTitle = 'PR view'
+const savedViewMenuRef = useRef('savedViewMenuRef')
+const savedViewTrigger = useRef('savedViewTrigger')
+const savedViewDialog = useRef('savedViewDialog')
+const savedViewNameInput = useRef('savedViewNameInput')
+const savedViewState = state(initialSavedViews())
 const prSearchInput = useRef('prSearchInput')
 const prListResults = useRef('prListResults')
 const prDraftChoice = useRef('prDraftChoice')
@@ -816,74 +816,50 @@ const prFiltersName = derived(() => prFilterCount() ? 'Filters (' + prFilterCoun
 let livePrSearch
 const prFiltersMenu = useRef('prFiltersMenu')
 const prFiltersTrigger = useRef('prFiltersTrigger')
-const savedPrViewDialog = useRef('savedPrViewDialog')
-const savedPrNameInput = useRef('savedPrNameInput')
-const savedPrViewsReady = state(false)
-const savedPrViews = state([])
-const savedPrActiveId = state('')
-const savedPrEditingId = state('')
-const savedPrName = state('')
-const savedPrError = state('')
-const savedPrStatus = state('')
-let savedPrStore
-
-const activeSavedPrView = derived(() => savedPrViews().find(view => view.id === savedPrActiveId()))
-const savedPrViewModified = derived(() => {
-  const view = activeSavedPrView()
-  return Boolean(view && !pullRequestViewMatches(view.scope, currentSavedPrScope()))
+const listViews = savedViewsMenu({
+  kind: pullRequestViews,
+  scope: currentSavedPrScope,
+  detail: @json(savedViewDetail),
+  profiles: @json(profiles.map(profile => String(profile.id))),
+  repositories: @json(repositories.map(repository => repository.name.toLowerCase())),
+  suggestedName: @json(filters.involvement === 'reviewing' ? 'PRs requesting my review' : ''),
+  elements: () => ({ menu: savedViewMenuRef.current, trigger: savedViewTrigger.current,
+    dialog: savedViewDialog.current, nameInput: savedViewNameInput.current }),
+  publish: value => savedViewState.set(value),
+  nextTick,
+  closeSibling: () => {
+    if (prFiltersMenu.current) prFiltersMenu.current.open = false
+  },
 })
 
-function refreshSavedPrViews() {
-  if (!savedPrStore) return
-  const views = savedPrStore.read()
-  const storedId = savedPrStore.active()
-  const matchingId = views.find(view => view.id === storedId)?.id
-    ?? views.find(view => pullRequestViewMatches(view.scope, currentSavedPrScope()))?.id ?? ''
-  savedPrViews.set(views)
-  savedPrActiveId.set(matchingId)
-  if (matchingId !== storedId) savedPrStore.select(matchingId)
-}
-
 onMount(() => {
-  const browser = savedPrViewsTrigger.current?.ownerDocument.defaultView
-  if (!browser) return
   if (prSearchInput.current && prListResults.current) {
     livePrSearch = pullRequestLiveSearch(prSearchInput.current, prListResults.current, currentSavedPrScope, result => {
       currentSavedPrScope.set(result.scope)
       prFilterCount.set(result.filterCount)
-      savedPrStatus.set('')
       const choice = prDraftChoice.current
       const shown = prShownDraft.current
       if (shown && choice) {
         if (choice.value === shown.value) choice.value = result.draft
         shown.value = result.draft
       }
-      refreshSavedPrViews()
+      listViews.scopeChanged()
     }, value => prSearchPending.set(value), message => prSearchStatus.set(message), @json({ page, through }))
   }
-  savedPrStore = pullRequestViewStore(browser)
-  refreshSavedPrViews()
-  savedPrViewsReady.set(true)
+  listViews.mount()
 })
 
-useEventListener('storage', event => {
-  if (event.key === PULL_REQUEST_VIEWS_KEY || event.key === null) refreshSavedPrViews()
-})
-useEventListener('pageshow', refreshSavedPrViews)
+useEventListener('storage', listViews.storageChanged)
+useEventListener('pageshow', listViews.refresh)
 useEventListener('pagehide', () => {
   livePrSearch?.savePosition()
   livePrSearch?.cancel()
 })
 useEventListener('pointerdown', event => {
-  for (const menu of [savedPrViewsMenu.current, prFiltersMenu.current]) {
-    if (menu?.open && !menu.contains(event.target)) menu.open = false
-  }
+  listViews.dismissOutside(event)
+  const menu = prFiltersMenu.current
+  if (menu?.open && !menu.contains(event.target)) menu.open = false
 })
-
-function closePrToolbarSibling(isViews) {
-  const other = isViews ? prFiltersMenu.current : savedPrViewsMenu.current
-  if (other) other.open = false
-}
 
 function prFiltersKeydown(event) {
   const menu = prFiltersMenu.current
@@ -892,128 +868,6 @@ function prFiltersKeydown(event) {
   event.stopPropagation()
   menu.open = false
   prFiltersTrigger.current?.focus()
-}
-
-function closeSavedPrViews(restoreFocus = true) {
-  if (savedPrViewsMenu.current) savedPrViewsMenu.current.open = false
-  if (restoreFocus) savedPrViewsTrigger.current?.focus()
-}
-
-function savedPrMenuKeydown(event) {
-  const menu = savedPrViewsMenu.current
-  if (!menu) return
-  if (event.key === 'Escape' && menu.open) {
-    event.preventDefault()
-    event.stopPropagation()
-    closeSavedPrViews()
-  }
-  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
-  if (!menu.open && (event.key === 'Home' || event.key === 'End')) return
-  event.preventDefault()
-  closePrToolbarSibling(true)
-  menu.open = true
-  const buttons = [...menu.querySelectorAll('button:not([hidden])')]
-  if (!buttons.length) return
-  const index = buttons.indexOf(menu.ownerDocument.activeElement)
-  const last = buttons.length - 1
-  if (event.key === 'Home' || (event.key === 'ArrowDown' && index === last)) buttons[0].focus()
-  else if (event.key === 'End' || (event.key === 'ArrowUp' && index <= 0)) buttons[last].focus()
-  else buttons[index + (event.key === 'ArrowDown' ? 1 : -1)].focus()
-}
-
-function applySavedPrView(id) {
-  const view = savedPrStore?.read().find(item => item.id === id)
-  if (!view) {
-    refreshSavedPrViews()
-    closeSavedPrViews()
-    savedPrStatus.set('This saved view was removed.')
-    return
-  }
-  const scope = new URLSearchParams(view.scope)
-  const profile = scope.get('profile')
-  const repository = scope.get('repository')?.toLowerCase()
-  if (!availableSavedPrProfiles.includes(profile)
-    || (profile === new URLSearchParams(currentSavedPrScope()).get('profile') && repository && !currentSavedPrRepositories.includes(repository))) {
-    closeSavedPrViews()
-    savedPrStatus.set('The profile or repository for this view is unavailable.')
-    return
-  }
-  savedPrStore.select(id)
-  savedPrStore.navigate(pullRequestViewHref(view.scope, currentSavedPrScope(), currentSavedPrDetail))
-}
-
-function openSavedPrEditor(rename) {
-  const view = rename ? activeSavedPrView() : null
-  savedPrEditingId.set(view?.id || '')
-  savedPrName.set(view?.name || (rename ? '' : suggestedSavedPrName))
-  savedPrError.set('')
-  savedPrStatus.set('')
-  closeSavedPrViews(false)
-  savedPrViewDialog.current?.showModal()
-  void nextTick(() => {
-    savedPrNameInput.current?.focus()
-    savedPrNameInput.current?.select()
-  })
-}
-
-function editSavedPrName(event) {
-  savedPrName.set(event.target.value)
-  savedPrError.set('')
-}
-
-function savePrViewName() {
-  if (!savedPrStore) return
-  const current = savedPrStore.read()
-  const editing = savedPrEditingId()
-  const name = savedPrNameInput.current?.value.trim() || ''
-  if (editing && !current.some(view => view.id === editing)) {
-    savedPrEditingId.set('')
-    savedPrError.set('This view was removed. Save it as a new view or cancel.')
-    return
-  }
-  const error = pullRequestViewNameError(name, current, editing || null)
-  if (error) {
-    savedPrError.set(error)
-    savedPrNameInput.current?.focus()
-    return
-  }
-  const id = editing || savedPrStore.id()
-  const next = editing ? current.map(view => view.id === id ? { ...view, name } : view)
-    : [...current, { id, name, scope: currentSavedPrScope() }]
-  if (!savedPrStore.write(next)) {
-    savedPrError.set('Could not save views on this device. Check browser storage and try again.')
-    return
-  }
-  savedPrStore.select(id)
-  refreshSavedPrViews()
-  closeSavedPrEditor()
-  savedPrStatus.set(editing ? 'View renamed.' : 'View saved.')
-}
-
-function changeSavedPrView(remove) {
-  const active = activeSavedPrView()
-  if (!active || !savedPrStore) return
-  const current = savedPrStore.read()
-  closeSavedPrViews()
-  if (!current.some(view => view.id === active.id)) {
-    refreshSavedPrViews()
-    savedPrStatus.set('This saved view was removed.')
-    return
-  }
-  const next = remove ? current.filter(view => view.id !== active.id)
-    : current.map(view => view.id === active.id ? { ...view, scope: currentSavedPrScope() } : view)
-  if (!savedPrStore.write(next)) {
-    savedPrStatus.set('Could not save views on this device. Check browser storage and try again.')
-    return
-  }
-  savedPrStore.select(remove ? '' : active.id)
-  refreshSavedPrViews()
-  savedPrStatus.set(remove ? 'View deleted.' : 'Saved view updated.')
-}
-
-function closeSavedPrEditor() {
-  savedPrViewDialog.current?.close()
-  savedPrViewsTrigger.current?.focus()
 }
 </script>
 <main data-harness-shell data-pr-workspace class="h-[100dvh] w-full text-neutral-900 dark:text-neutral-100" @click="livePrSearch?.rememberNavigation($event)">
@@ -1053,7 +907,7 @@ function closeSavedPrEditor() {
             </select>
           </label>
           <details ref="prFiltersMenu" data-pr-additional-filters @if(filterChoices) open @endif @keydown="prFiltersKeydown">
-            <summary ref="prFiltersTrigger" data-pr-button aria-label="{{ additionalFiltersLabel }}" :aria-label="prFiltersName()" @click="closePrToolbarSibling(false)">
+            <summary ref="prFiltersTrigger" data-pr-button aria-label="{{ additionalFiltersLabel }}" :aria-label="prFiltersName()" @click="listViews.closeMenu(false)">
               <span class="inline-block size-4 i-hugeicons-filter" aria-hidden="true"></span>
               Filters
               <span data-pr-filter-count aria-hidden="true" @if(!activeFilterCount) hidden @endif
@@ -1177,49 +1031,10 @@ function closeSavedPrEditor() {
               </div>
             </div>
           </details>
-          <details ref="savedPrViewsMenu" data-pr-views hidden :hidden="!savedPrViewsReady()" @keydown="savedPrMenuKeydown">
-            <summary ref="savedPrViewsTrigger" data-pr-button aria-label="Saved pull request views" aria-describedby="pr-active-view-name"
-              :aria-describedby="savedPrViewModified() ? 'pr-active-view-name pr-active-view-state' : 'pr-active-view-name'"
-              :title="activeSavedPrView()?.name || 'Saved pull request views'" @click="closePrToolbarSibling(true)">
-              <span class="inline-block shrink-0 size-4 i-hugeicons-bookmark-01" aria-hidden="true"></span>
-              <span id="pr-active-view-name" data-pr-view-name :text="activeSavedPrView()?.name || 'Views'">Views</span>
-              <span id="pr-active-view-state" data-pr-view-modified :hidden="!savedPrViewModified()" title="Modified view">
-                <span data-pr-view-modified-mark aria-hidden="true">*</span>
-                <span data-pr-view-modified-label>Modified</span>
-              </span>
-              <span class="inline-block shrink-0 size-3 i-hugeicons-arrow-down-01" aria-hidden="true"></span>
-            </summary>
-            <div data-pr-view-panel>
-              <button :for="view in savedPrViews()" :key="view.id" type="button" data-pr-view-choice
-                :aria-current="view.id === activeSavedPrView()?.id && !savedPrViewModified() ? 'true' : null" @click="applySavedPrView(view.id)">
-                <span class="inline-block shrink-0 size-4 i-hugeicons-tick-02" aria-hidden="true"></span>
-                <span :text="view.name"></span>
-              </button>
-              <div data-pr-view-commands>
-                <button type="button" @click="openSavedPrEditor(false)">Save current view…</button>
-                <button type="button" :hidden="!savedPrViewModified()" @click="changeSavedPrView(false)">Update saved view</button>
-                <button type="button" :hidden="!activeSavedPrView()" @click="openSavedPrEditor(true)">Rename view…</button>
-                <button type="button" data-pr-view-remove :hidden="!activeSavedPrView()" @click="changeSavedPrView(true)">Delete view</button>
-              </div>
-            </div>
-          </details>
+          @include('../partials/harness-saved-views', { savedViewSurface: 'pr', savedViewLabel: 'Saved pull request views' })
         </div>
       </form>
-      <p role="status" data-pr-view-status :text="savedPrStatus()"></p>
-      <dialog ref="savedPrViewDialog" data-pr-view-dialog aria-labelledby="pr-view-dialog-title" aria-describedby="pr-view-description" @cancel.prevent="closeSavedPrEditor">
-        <form @submit.prevent="savePrViewName">
-          <h2 id="pr-view-dialog-title" :text="savedPrEditingId() ? 'Rename PR view' : 'Save PR view'">Save PR view</h2>
-          <p id="pr-view-description">Save your search, filters, and sort order on this device.</p>
-          <label for="pr-view-name">Name</label>
-          <input id="pr-view-name" ref="savedPrNameInput" type="text" maxlength="80" autocomplete="off" :value="savedPrName()"
-            :aria-invalid="savedPrError() ? 'true' : null" aria-describedby="pr-view-error" @input="editSavedPrName">
-          <p id="pr-view-error" role="alert" :text="savedPrError()"></p>
-          <div data-pr-view-dialog-actions>
-            <button type="button" data-pr-button @click="closeSavedPrEditor">Cancel</button>
-            <button type="submit" data-pr-button data-pr-view-save>Save view</button>
-          </div>
-        </form>
-      </dialog>
+      @include('../partials/harness-saved-view-dialog')
       <p role="status" data-pr-search-status :class="{ 'sr-only': !prSearchStatus().startsWith('Could not') }"
         :text="prSearchPending() === 'page' ? 'Loading more pull requests…' : prSearchPending() ? 'Searching pull requests…' : prSearchStatus()"></p>
       <div ref="prListResults" :aria-busy="prSearchPending() ? 'true' : null" @click="livePrSearch?.next($event)">
