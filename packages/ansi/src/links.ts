@@ -43,6 +43,7 @@ export function terminalLinkUrl(value: string): string | null {
   catch { return null }
 }
 
+const pathLikeLine = /[\\/"'\x60]|:\d+:\d+|\(\d+,\d+\):/u
 const locationSuffix = /(?::\d+){1,2}$/u
 const typeScriptLocation = /\((\d+),(\d+)\)$/u
 const absolutePath = /^(?:[A-Za-z]:[\\/]|[\\/]|~[\\/]|\.\.?[\\/])/u
@@ -66,7 +67,7 @@ function trimPathToken(value: string): string {
 export function terminalPathRanges(line: string): TerminalPathRange[] {
   // Paths are bounded by the resolver as well. Avoid scanning unusually long
   // generated lines (for example long base64 or minified tool output).
-  if (line.length > MAX_TERMINAL_URL * 4 || !/[\\/"'\x60]|:\d+:\d+|\(\d+,\d+\):/u.test(line)) return []
+  if (line.length > MAX_TERMINAL_URL * 4 || !pathLikeLine.test(line)) return []
   const excluded = Array.from(line.matchAll(nonPaths), match => ({ start: match.index, end: match.index + match[0].length }))
   const remoteTails = Array.from(line.matchAll(scpRemote), match => ({
     start: match.index + match[0].indexOf(':') + 1, end: match.index + match[0].length,

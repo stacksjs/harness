@@ -156,16 +156,16 @@ async function issueDetail(repository: GitHubWorkspaceRepository, number: number
     if (!id || typeof comment.issue_url !== 'string' || comment.issue_url.toLowerCase() !== ('https://api.github.com/' + endpoint).toLowerCase()
       || typeof comment.body !== 'string') return []
     const timestamp = date(comment.created_at)
-    return [{ id, node: comment.node_id, author: login(comment.user?.login), dateLabel: timestamp ? dates.format(timestamp) : '',
-      body: comment.body.slice(0, 32_768), url: issue.url + '#issuecomment-' + id }]
+    return [{ node: comment.node_id, item: { id, author: login(comment.user?.login), dateLabel: timestamp ? dates.format(timestamp) : '',
+      body: comment.body.slice(0, 32_768), url: issue.url + '#issuecomment-' + id } }]
   }) : []
 
   const legacy = await readIssueActivity(repository, number, {
     ids: comments.flatMap(comment => comment.node ? [comment.node] : []),
   }, signal).catch(() => null)
   const bars = new Map(legacy?.items.map(item => [item.id, item.reactions]))
-  const items: IssueActivityItem[] = comments.map(({ node: _node, ...comment }) =>
-    ({ ...comment, kind: 'comment', reactions: bars.get(comment.id) }))
+  const items: IssueActivityItem[] = comments.map(({ item }) =>
+    ({ ...item, kind: 'comment', reactions: bars.get(item.id) }))
   return { ...details, activity: items, reactions: legacy?.reactions, commentTotal: positiveInteger(raw.comments),
     activityAvailable: commentsAvailable, activityDegraded: commentsAvailable && typeof requestedComments !== 'number', olderActivity: '', newerActivity: '', commentPage, moreComments: Boolean(commentsAvailable && commentReply.hasNextPage) }
 }
