@@ -66,7 +66,14 @@ writeFileSync(definition, `
       return step('Inspect draft', () => tick)
     },
   }
-  export default [review, delayed, scheduled]
+  const webhook = {
+    name: 'receive-draft', version: 1, webhooks: [{ name: 'draft-intake', profile: ${profile} }],
+    async run(request, { title, step }) {
+      title('Inspect draft delivery')
+      return step('Record arrival', () => ({ accepted: request.method === 'POST' }))
+    },
+  }
+  export default [review, delayed, scheduled, webhook]
 `)
 {
   using db = new Database(databasePath)
@@ -231,6 +238,22 @@ try {
     await page.setViewportSize({ width, height })
     await noOverflow()
     if (width === 1440 || width === 390) await capture('scheduled')
+  }
+
+  const { hooks } = await fetch(base + '/workflows/hooks?' + query()).then(response => response.json())
+  assert.equal(hooks.length, 1)
+  const delivery = await fetch(new URL(hooks[0].path, base), { method: 'POST', headers: { 'x-github-delivery': 'draft-fixture' } })
+  assert.equal(delivery.status, 202)
+  const { runId: webhookRun } = await delivery.json()
+  await wait(webhookRun, 'completed')
+  await page.goto(base + '/workflows?' + query({ view: 'workspace', run: webhookRun }))
+  await page.getByRole('heading', { name: 'Inspect draft delivery', exact: true }).waitFor()
+  await page.locator('[data-workflow-webhook]').getByText('draft-intake', { exact: true }).waitFor()
+  assert.ok(!(await page.content()).includes(hooks[0].path))
+  for (const [width, height] of dimensions) {
+    await page.setViewportSize({ width, height })
+    await noOverflow()
+    await capture('webhook')
   }
 
   const writes = JSON.parse(readFileSync(cli.state, 'utf8')).issueCreate.writes

@@ -255,6 +255,9 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
                   Schedule <strong :text="workflowView().detail?.schedule?.id"></strong>
                   <span>Due <time :datetime="workflowView().detail?.schedule?.scheduledAt" :text="workflowView().detail?.scheduled"></time></span>
                 </p>
+                <p data-workflow-webhook :if="workflowView().detail?.webhook">
+                  Webhook <strong :text="workflowView().detail?.webhook?.name"></strong>
+                </p>
               </div>
               <div data-workflow-run-actions>
                 <form :if="workflowView().detail?.canResume" action="{{ action }}" method="post">
@@ -486,9 +489,9 @@ if (workflowCanPoll) useTimeout(tickWorkflowView, workflowView().pending ? 1000 
 [data-workflow-definitions] > li, [data-workflow-problems] > li { padding: 10px 0; border-bottom: 1px solid var(--flow-border); }
 [data-workflow-schedules] { list-style: none; margin-top: 8px; padding: 0; }
 [data-workflow-schedules] > li { display: flex; flex-wrap: wrap; column-gap: 12px; row-gap: 2px; padding: 3px 0; }
-[data-workflow-schedules] strong, [data-workflow-scheduled] strong { color: var(--flow-ink); overflow-wrap: anywhere; }
-[data-workflow-schedules], [data-workflow-scheduled] { color: var(--flow-muted); font-size: 13px; }
-[data-workflow-scheduled] { display: flex; gap: 5px 8px; flex-wrap: wrap; margin: 5px 0 0; }
+[data-workflow-schedules] strong, [data-workflow-scheduled] strong, [data-workflow-webhook] strong { color: var(--flow-ink); overflow-wrap: anywhere; }
+[data-workflow-schedules], [data-workflow-scheduled], [data-workflow-webhook] { color: var(--flow-muted); font-size: 13px; }
+[data-workflow-scheduled], [data-workflow-webhook] { display: flex; gap: 5px 8px; flex-wrap: wrap; margin: 5px 0 0; }
 [data-workflow-dialog] {
   max-width: min(27rem, calc(100vw - 24px));
   padding: 18px;
