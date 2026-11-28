@@ -1,10 +1,12 @@
 import type { HarnessState } from '@harness/engine'
 import type { LoadedWorkflow, WorkflowContext, WorkflowIssueInput } from './definitions'
+import type { WorkflowSchedule } from './schedules'
 import { basename } from 'node:path'
 import { createIssue, issueCreationScope } from '../issue-create'
 import { trustedIssueProjects } from '../issue-repositories'
 import { PullRequestReplyReceipts } from '../pull-request-reply-receipts'
 import { loadWorkflowDefinitions, workflowName } from './definitions'
+import { scheduleKey } from './schedules'
 import { presentRun, WorkflowStore } from './store'
 
 const leaseMs = 30_000
@@ -35,6 +37,8 @@ export class WorkflowRunner {
   private readonly active = new Map<string, AbortController>()
   private readonly store: WorkflowStore
   private readonly receipts: PullRequestReplyReceipts
+  private readonly schedules: { key: string, definition: LoadedWorkflow, schedule: WorkflowSchedule }[]
+  private readonly zone = Intl.DateTimeFormat().resolvedOptions().timeZone
   private readonly timer: ReturnType<typeof setInterval>
   private stopped = false
 
@@ -42,6 +46,15 @@ export class WorkflowRunner {
     private readonly loaded: Awaited<ReturnType<typeof loadWorkflowDefinitions>>,
   ) {
     this.store = new WorkflowStore(databasePath)
+    this.schedules = [...loaded.definitions.values()].flatMap(versions => {
+      const definition = this.latest(versions)
+      return definition.schedules.filter(schedule => schedule.enabled !== false).map(schedule => ({
+        key: scheduleKey(definition.name, schedule, this.zone), definition, schedule,
+      }))
+    })
+    // A read error can hide an existing definition. Keep its cursor until a file loads or is removed.
+    const loadedNames = loaded.problems.length ? [...loaded.definitions.keys()] : undefined
+    this.store.keepSchedules(this.schedules.map(item => item.key), loadedNames)
     this.receipts = new PullRequestReplyReceipts(databasePath)
     this.timer = setInterval(() => this.wake(), 2_000)
     this.timer.unref()
@@ -59,7 +72,16 @@ export class WorkflowRunner {
     return {
       workflows: [...this.loaded.definitions.values()].map(versions => {
         const current = this.latest(versions)
-        return { name: current.name, version: current.version, triggers: [] }
+        const triggers = current.schedules.filter(schedule => schedule.profile === profile).map(schedule => {
+          const { id, everyMs, timeOfDay, weekdays } = schedule
+          const enabled = schedule.enabled !== false
+          const due = enabled ? this.store.scheduleDue(scheduleKey(current.name, schedule, this.zone)) : undefined
+          return {
+            id, enabled, everyMs, timeOfDay, weekdays, timeZone: timeOfDay ? this.zone : undefined,
+            nextAt: due === undefined ? null : new Date(due).toISOString(),
+          }
+        })
+        return { name: current.name, version: current.version, triggers }
       }),
       runs: this.store.list(profile).map(presentRun),
       problems: this.loaded.problems,
@@ -83,7 +105,7 @@ export class WorkflowRunner {
     try { payload = json(input.payload) }
     catch { return { error: 'invalid' as const } }
     const definition = this.latest(versions)
-    const started = this.store.start(profile, input.workflow, definition.version, definition.revision, input.key, payload, Date.now())
+    const started = this.store.start(profile, definition, input.key, payload, Date.now())
     queueMicrotask(() => this.wake())
     return { run: presentRun(started.row), replayed: started.replayed }
   }
@@ -111,6 +133,12 @@ export class WorkflowRunner {
       const now = Date.now()
       for (const [id, controller] of this.active)
         if (!this.store.renew(id, this.owner, now, now + leaseMs)) controller.abort()
+      if (this.schedules.length) {
+        const { profiles } = this.state()
+        for (const { key, definition, schedule } of this.schedules) {
+          if (profiles.has(schedule.profile)) this.store.scanSchedule(key, definition, schedule, now)
+        }
+      }
       const remaining = concurrency - this.active.size
       if (remaining < 1) return
       for (const row of this.store.eligible(now, remaining)) {

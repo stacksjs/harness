@@ -1,5 +1,7 @@
-import type { WorkflowIssue } from './definitions'
+import type { LoadedWorkflow, WorkflowIssue } from './definitions'
+import type { WorkflowSchedule } from './schedules'
 import { Database } from 'bun:sqlite'
+import { nextScheduleAt, shouldFireSchedule } from './schedules'
 
 export type WorkflowStatus = 'running' | 'paused' | 'completed' | 'cancelled'
 
@@ -10,6 +12,7 @@ type RunRow = {
   version: number
   revision: string
   title: string
+  start_key: string
   payload: string
   status: WorkflowStatus
   detail: string | null
@@ -29,9 +32,13 @@ type StepRow = {
   ended_at: number | null
 }
 
+type RunDefinition = Pick<LoadedWorkflow, 'name' | 'version' | 'revision'>
+
 type IssueIntent = { target: string, scope: string, intent: string }
 export function presentRun(row: RunRow) {
+  const schedule = /^\nscheduled:([^:]+):/u.exec(row.start_key)
   return {
+    ...(schedule && { schedule: { id: schedule[1]!, ...(JSON.parse(row.payload) as { scheduledAt: string }) } }),
     runId: row.id, workflow: row.name, version: row.version, title: row.title, status: row.status, detail: row.detail,
     result: row.result === null ? null : JSON.parse(row.result) as unknown,
     startedAt: new Date(row.started_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(),
@@ -54,6 +61,9 @@ export class WorkflowStore {
         UNIQUE (profile, name, start_key)
       );
       CREATE INDEX IF NOT EXISTS harness_workflow_run_status ON harness_workflow_runs (status, lease_until);
+      CREATE TABLE IF NOT EXISTS harness_workflow_schedule_cursors (
+        key TEXT PRIMARY KEY, name TEXT NOT NULL, due_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS harness_workflow_steps (
         run_id TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL,
         result TEXT, detail TEXT, started_at INTEGER NOT NULL, ended_at INTEGER,
@@ -73,15 +83,53 @@ export class WorkflowStore {
     ).get(profile, name, key)
   }
 
-  start(profile: number, name: string, version: number, revision: string, key: string, payload: string, now: number) {
+  private insertRun(profile: number, definition: RunDefinition, key: string, payload: string, now: number) {
+    const id = crypto.randomUUID()
+    const { name, version, revision } = definition
+    this.db.query(`INSERT INTO harness_workflow_runs
+      (id, profile, name, version, revision, start_key, payload, title, status, started_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`).run(id, profile, name, version, revision, key, payload, name, now, now)
+    return id
+  }
+
+  start(profile: number, definition: RunDefinition, key: string, payload: string, now: number) {
     return this.db.transaction(() => {
-      const existing = this.findStart(profile, name, key)
+      const existing = this.findStart(profile, definition.name, key)
       if (existing) return { row: existing, replayed: true }
-      const id = crypto.randomUUID()
-      this.db.query(`INSERT INTO harness_workflow_runs
-        (id, profile, name, version, revision, start_key, payload, title, status, started_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`).run(id, profile, name, version, revision, key, payload, name, now, now)
+      const id = this.insertRun(profile, definition, key, payload, now)
       return { row: this.run(profile, id)!, replayed: false }
+    }).immediate()
+  }
+
+  keepSchedules(keys: string[], loadedNames?: string[]) {
+    const scope = loadedNames ? JSON.stringify(loadedNames) : null
+    this.db.query(`DELETE FROM harness_workflow_schedule_cursors
+      WHERE key NOT IN (SELECT value FROM json_each(?))
+        AND (? IS NULL OR name IN (SELECT value FROM json_each(?)))`).run(JSON.stringify(keys), scope, scope)
+  }
+
+  scheduleDue(key: string) {
+    return this.db.query<{ due_at: number }, [string]>('SELECT due_at FROM harness_workflow_schedule_cursors WHERE key = ?')
+      .get(key)?.due_at
+  }
+
+  scanSchedule(key: string, definition: RunDefinition, schedule: WorkflowSchedule, now: number) {
+    const due = this.scheduleDue(key)
+    if (due !== undefined && due > now) return
+    this.db.transaction(() => {
+      const next = nextScheduleAt(schedule, now)
+      if (due === undefined) {
+        this.db.query(`INSERT INTO harness_workflow_schedule_cursors (key, name, due_at)
+          VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING`)
+          .run(key, definition.name, next)
+        return
+      }
+      const advanced = this.db.query('UPDATE harness_workflow_schedule_cursors SET due_at = ? WHERE key = ? AND due_at = ?')
+        .run(next, key, due).changes
+      if (!advanced || !shouldFireSchedule(schedule, due, now)) return
+      // Manual requests reject control characters, so their keys cannot collide.
+      const startKey = '\nscheduled:' + schedule.id + ':' + crypto.randomUUID()
+      this.insertRun(schedule.profile, definition, startKey, JSON.stringify({ scheduledAt: new Date(due).toISOString() }), now)
     }).immediate()
   }
 

@@ -1,7 +1,9 @@
+import type { WorkflowSchedule } from './schedules'
 import { createHash } from 'node:crypto'
 import { readdir, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { readSchedules } from './schedules'
 
 export const workflowName = /^(?:[a-z\d][a-z\d._-]{0,79})$/iu
 
@@ -30,10 +32,11 @@ export interface WorkflowContext {
 export interface WorkflowDefinition {
   name: string
   version: number
+  schedules?: WorkflowSchedule[]
   run: (input: unknown, context: WorkflowContext) => unknown
 }
 
-export type LoadedWorkflow = WorkflowDefinition & { revision: string }
+export type LoadedWorkflow = WorkflowDefinition & { revision: string, schedules: WorkflowSchedule[] }
 
 class DefinitionProblem extends Error {}
 
@@ -68,6 +71,7 @@ export async function loadWorkflowDefinitions(location: string) {
       const loaded = (await readWorkflowModule(path)).default as unknown
       const exported = Array.isArray(loaded) ? loaded : [loaded]
       const byName = new Map<string, Set<number>>()
+      const validated: LoadedWorkflow[] = []
       for (const candidate of exported) {
         const definition = candidate as Partial<WorkflowDefinition> | null
         if (!definition || typeof definition.name !== 'string' || !workflowName.test(definition.name)
@@ -78,11 +82,15 @@ export async function loadWorkflowDefinitions(location: string) {
           throw new DefinitionProblem('A workflow name and version can only be defined once.')
         seen.add(definition.version)
         byName.set(definition.name, seen)
-      }
-      for (const definition of exported as WorkflowDefinition[]) {
-        const versions = definitions.get(definition.name) ?? new Map<number, LoadedWorkflow>()
+        let schedules: WorkflowSchedule[]
+        try { schedules = readSchedules(definition.schedules) }
+        catch (error) { throw new DefinitionProblem((error as Error).message) }
         const revision = createHash('sha256').update(definition.run.toString()).digest('hex')
-        versions.set(definition.version, { ...definition, revision })
+        validated.push({ ...definition as WorkflowDefinition, revision, schedules })
+      }
+      for (const definition of validated) {
+        const versions = definitions.get(definition.name) ?? new Map<number, LoadedWorkflow>()
+        versions.set(definition.version, definition)
         definitions.set(definition.name, versions)
       }
     }
