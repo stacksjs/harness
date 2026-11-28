@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { issueRepositoryKey, parseForgejoIssueUrl } from '@harness/contract'
 import type { IssueActivityItem } from './issue-activity'
 import type { ForgejoIssueRepository } from './issue-repositories'
@@ -12,9 +13,9 @@ const sourcePageSize = 50
 const requestLimit = 10
 const dates = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
 
-type User = { login?: unknown, full_name?: unknown }
+type User = { id?: unknown, login?: unknown, full_name?: unknown }
 type RawIssue = {
-  number?: unknown, html_url?: unknown, title?: unknown, body?: unknown, state?: unknown, created_at?: unknown, updated_at?: unknown,
+  id?: unknown, is_locked?: unknown, number?: unknown, html_url?: unknown, title?: unknown, body?: unknown, state?: unknown, created_at?: unknown, updated_at?: unknown,
   user?: User, assignees?: User[], labels?: unknown, comments?: unknown, pull_request?: unknown,
 }
 type RawComment = { id?: unknown, body?: unknown, created_at?: unknown, user?: User, issue_url?: unknown }
@@ -84,28 +85,99 @@ export async function listForgejoIssues(repository: ForgejoIssueRepository, scop
   return { rows: [...rows.values()], partial }
 }
 
-export async function readForgejoIssue(repository: ForgejoIssueRepository, number: number, requestedPage: number | 'latest' | null, signal: AbortSignal) {
-  const endpoint = repoPath(repository) + '/issues/' + number
+type RawRepository = { id?: unknown, full_name?: unknown, archived?: unknown, permissions?: { push?: boolean } }
+
+function numericId(value: unknown) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+function belongsToIssue(repository: ForgejoIssueRepository, endpoint: string, comment: RawComment) {
+  return comment.issue_url == null
+    || (typeof comment.issue_url === 'string' && comment.issue_url.toLowerCase() === (repository.base + '/api/v1/' + endpoint).toLowerCase())
+}
+
+function forgejoIssueEndpoint(repository: ForgejoIssueRepository, number: number) {
+  return repoPath(repository) + '/issues/' + number
+}
+
+export async function readForgejoCommentAccess(repository: ForgejoIssueRepository, number: number, signal: AbortSignal, issue?: RawIssue) {
+  const endpoint = forgejoIssueEndpoint(repository, number)
+  const [raw, repoReply, userReply] = await Promise.all([
+    issue ?? forgejoTeaRequest(repository, endpoint, signal).then(reply => reply.body as RawIssue | null),
+    forgejoTeaRequest(repository, repoPath(repository), signal),
+    forgejoTeaRequest(repository, 'user', signal),
+  ])
+  const repo = repoReply.body as RawRepository | null
+  const user = userReply.body as User | null
+  const issueId = numericId(raw?.id)
+  const repoId = numericId(repo?.id)
+  const viewer = numericId(user?.id)
+  if (!raw || !issueRow(repository, raw) || raw.number !== number || !issueId || !repoId || !viewer
+    || typeof repo?.full_name !== 'string' || repo.full_name.toLowerCase() !== repository.apiName.toLowerCase()) return null
+  const scope = createHash('sha256').update(JSON.stringify([
+    'forgejo-issue-comment', repository.base, repository.login, repository.key,
+    repository.workspace.profileId, repository.workspace.id, repoId, issueId, viewer,
+  ])).digest('hex')
+  const blocked = repo.archived === true ? 'This Forgejo repository is archived.'
+    : raw.is_locked === true && !repo.permissions?.push ? 'This Forgejo issue is locked.'
+      : typeof repo.archived !== 'boolean' || typeof raw.is_locked !== 'boolean' ? 'Forgejo could not check commenting access.' : ''
+  return { scope, blocked, viewer, endpoint }
+}
+
+export async function forgejoIssueCommentWriter(repository: ForgejoIssueRepository, number: number, signal: AbortSignal) {
+  const access = await readForgejoCommentAccess(repository, number, signal)
+  if (!access) return null
+  const { scope, blocked, viewer, endpoint } = access
+  const matches = (comment: RawComment | null, body: string) => comment?.body === body
+    && numericId(comment.user?.id) === viewer && belongsToIssue(repository, endpoint, comment) ? numericId(comment.id) : null
+  const current = async () => (await readForgejoCommentAccess(repository, number, signal))?.scope === scope
+  return {
+    scope, blocked,
+    async post(body: string) {
+      const reply = await forgejoTeaRequest(repository, endpoint + '/comments', signal, { body }).catch((error: unknown) => {
+        if (error instanceof RepositoryPullRequestError && error.status) return error.status
+        return null
+      })
+      if (reply === 401 || reply === 403) return 'denied' as const
+      if (reply === 400 || reply === 404 || reply === 422) return 'refused' as const
+      const id = reply && typeof reply === 'object' ? matches(reply.body as RawComment | null, body) : null
+      return id && await current() ? id : null
+    },
+    async find(body: string, trusted: () => boolean) {
+      const reply = await forgejoTeaRequest(repository, endpoint + '/comments', signal)
+      if (!trusted() || !Array.isArray(reply.body)) return null
+      const id = reply.body.map(comment => matches(comment, body)).find(id => id !== null)
+      return id && await current() && trusted() ? id : null
+    },
+  }
+}
+
+export async function readForgejoIssue(repository: ForgejoIssueRepository, number: number, requestedPage: number | 'latest' | null, signal: AbortSignal, commentFocus = 0) {
+  const endpoint = forgejoIssueEndpoint(repository, number)
   const reply = await forgejoTeaRequest(repository, endpoint, signal)
   const raw = reply.body as RawIssue | null
   const row = issueRow(repository, raw)
   if (!row || !raw || row.number !== number) throw new RepositoryPullRequestError('Forgejo could not verify this issue.')
   const commentTotal = typeof raw.comments === 'number' && Number.isSafeInteger(raw.comments) ? Math.max(0, raw.comments) : 0
-  const replyComments = await forgejoTeaRequest(repository, endpoint + '/comments', signal).catch(() => null)
-  const comments = Array.isArray(replyComments?.body) ? replyComments.body : null
+  const [replyComments, commentAccess] = await Promise.all([
+    forgejoTeaRequest(repository, endpoint + '/comments', signal).catch(() => null),
+    readForgejoCommentAccess(repository, number, signal, raw).catch(() => null),
+  ])
+  const comments = Array.isArray(replyComments?.body)
+    ? replyComments.body.filter(comment => numericId(comment?.id) && typeof comment.body === 'string' && belongsToIssue(repository, endpoint, comment))
+    : null
+  const focusedIndex = commentFocus ? comments?.findIndex(comment => comment.id === commentFocus) ?? -1 : -1
   const page = typeof requestedPage === 'number' ? requestedPage : requestedPage === 'latest'
-    ? Math.max(1, Math.ceil((comments?.length ?? commentTotal) / pageSize)) : 1
-  const activity = (comments ?? []).slice((page - 1) * pageSize, page * pageSize).flatMap<IssueActivityItem>((comment: RawComment | null) => {
-    const id = comment?.id
-    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1 || typeof comment?.body !== 'string') return []
-    if (typeof comment.issue_url === 'string' && comment.issue_url.toLowerCase() !== (repository.base + '/api/v1/' + endpoint).toLowerCase()) return []
+    ? Math.max(1, Math.ceil((focusedIndex >= 0 ? focusedIndex + 1 : comments?.length ?? commentTotal) / pageSize)) : 1
+  const activity = (comments ?? []).slice((page - 1) * pageSize, page * pageSize).map<IssueActivityItem>((comment) => {
+    const id = comment.id
     const date = stamp(comment.created_at)
-    return [{ kind: 'comment', id, body: comment.body.slice(0, 32_768), author: username(comment.user),
-      dateLabel: date ? dates.format(date) : '', url: row.url + '#issuecomment-' + id }]
+    return { kind: 'comment', id, body: comment.body.slice(0, 32_768), author: username(comment.user),
+      dateLabel: date ? dates.format(date) : '', url: row.url + '#issuecomment-' + id }
   })
   return { ...row, description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
     dateLabel: row.created ? dates.format(row.created) : '', activity, reactions: null, commentTotal,
-    activityAvailable: Boolean(comments), activityDegraded: false, olderActivity: '', newerActivity: '',
+    commentAccess, activityAvailable: Boolean(comments), activityDegraded: false, olderActivity: '', newerActivity: '',
     commentPage: page, moreComments: Boolean(comments && comments.length > page * pageSize), relatedRequests: [] as { href: string, label: string }[],
   }
 }

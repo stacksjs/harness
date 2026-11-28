@@ -2364,6 +2364,7 @@ export async function serve(options: ServeOptions = {}): Promise<HarnessServer> 
             params.delete('activityAfter')
             params.set('comments', 'latest')
             params.set('commentResult', 'posted')
+            if (comment.id && params.get('selected')?.startsWith('forgejo:')) params.set('commentFocus', String(comment.id))
             const anchor = comment.id ? '#issue-comment-' + comment.id : '#issue-comments'
             return new Response(null, { status: 303, headers: { ...headers, location: '/issues?' + params + anchor } })
           }).catch(unavailable)

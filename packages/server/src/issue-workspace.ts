@@ -261,7 +261,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
         return { ...issue, reactions: reactions.issue,
           activity: issue.activity.map(item => ({ ...item, reactions: reactions.comments.get(Number(item.id)) })) }
       })
-    : selection.tracker === 'forgejo' ? readForgejoIssue(selection, number, requestedComments, signal)
+    : selection.tracker === 'forgejo' ? readForgejoIssue(selection, number, requestedComments, signal, positiveInteger(query.get('commentFocus')))
       : issueDetail(selection, number, requestedComments, activityBefore, activityAfter, signal))
     .then(selected => ({ selected, error: '' }), error => ({ selected: null, error: issueError(error, selection.tracker) })) : null
   const editMetadata = issueMetadataKind(query.get('editMetadata'))
@@ -302,6 +302,7 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
   }
   const { selected, error } = await detail ?? { selected: null, error: selectionName || number ? 'This issue is outside the selected profile.' : '' }
   const [choices, metadata, gitLabText, gitLabTriage] = await Promise.all([lookup, metadataRead, gitLabTextRead, gitLabTriageRead])
+  const forgejoComment = selected?.tracker === 'forgejo' ? selected.commentAccess : null
   const labelChoices = choices?.kind === 'labels' ? choices : null
   const people = choices?.kind === 'assignees' ? choices : null
   signal.throwIfAborted()
@@ -427,10 +428,10 @@ export async function issueWorkspace(state: HarnessState, query: URLSearchParams
     metadataHref,
     commentAction: metadataHref.replace('/issues?', '/issues/comments?') + '#issue-comment-composer',
     commentText: commentSubmission?.text ?? '',
-    commentScope: commentSubmission?.result === 'pending' ? commentSubmission.scope : gitLabText?.commentScope ?? metadata?.commentScope ?? '',
+    commentScope: commentSubmission?.result === 'pending' ? commentSubmission.scope : forgejoComment?.scope ?? gitLabText?.commentScope ?? metadata?.commentScope ?? '',
     commentIntent: commentSubmission?.result === 'pending' ? commentSubmission.intent : crypto.randomUUID(),
     commentPending: commentSubmission?.result === 'pending',
-    commentBlocked: gitLabText?.commentBlocked ?? metadata?.commentBlocked ?? textForge + ' could not check commenting access.',
+    commentBlocked: forgejoComment?.blocked ?? gitLabText?.commentBlocked ?? metadata?.commentBlocked ?? textForge + ' could not check commenting access.',
     commentMessage: commentSubmission?.message
       ?? (selected && query.get('commentResult') === 'posted' ? 'Comment posted to ' + textForge + '.' : ''),
     metadataLabelsHref: selected ? href({ ...metadataFields, editMetadata: 'labels' }) : '',

@@ -1396,11 +1396,11 @@ try {
   const forgejoTitle = 'Verify offline drafts on Forgejo after reconnect'
   const forgejoPath = localProject('forgejo project', 'git@issue-ssh.fixture.invalid:' + forgejoRepository + '.git')
   const forgejoIssue = {
-    ...row(forgejoRepository, 73, forgejoTitle, '2026-11-02T00:00:00Z', '2026-11-27T16:00:00Z'),
+    id: 300, is_locked: false, ...row(forgejoRepository, 73, forgejoTitle, '2026-11-02T00:00:00Z', '2026-11-27T16:00:00Z'),
     html_url: forgejoUrl, body: 'Keep **Forgejo drafts** available for @fixture-user.',
     assignees: [{ login: 'fixture-user', full_name: 'Fixture review team' }], labels: [{ id: 7, name: 'offline', color: '#5577aa' }], comments: 1,
   }
-  const otherForgejoIssue = { ...forgejoIssue, number: 74, html_url: forgejoUrl.replace(/73$/u, '74'),
+  const otherForgejoIssue = { ...forgejoIssue, id: 301, number: 74, html_url: forgejoUrl.replace(/73$/u, '74'),
     title: 'Newer Forgejo issue', created_at: '2026-11-27T13:00:00Z', updated_at: '2026-11-27T13:00:00Z', labels: [] }
   alterForge(current => {
     current.forgejo = {
@@ -1438,8 +1438,6 @@ try {
   await page.getByRole('heading', { name: forgejoTitle, exact: true }).waitFor()
   const openForgejo = page.getByRole('link', { name: 'View on Forgejo', exact: true })
   assert.equal(await openForgejo.getAttribute('href'), forgejoUrl)
-  assert.equal(await page.getByRole('link', { name: 'Comment on Forgejo', exact: true }).getAttribute('href'), forgejoUrl + '#comment-form')
-  assert.equal(await page.getByRole('button', { name: 'Post comment', exact: true }).count(), 0)
   await page.getByText('saved draft', { exact: true }).waitFor()
   const capturedHostLink = page.getByRole('link', { name: 'Open as draft', exact: true })
   const forgejoDraft = new URL((await capturedHostLink.getAttribute('href')) ?? '', base)
@@ -1487,8 +1485,82 @@ try {
   await page.goto(mixedForgejoUrl)
   await retainedIssue.waitFor()
   assert.equal(await forgejoRow.count(), 0)
+  alterForge(current => { current.forgejo.logins[0].default = 'false' })
+  await page.goto(forge({ selected: forgejoKey, issue: '73', repository: forgejoKey }))
+  const forgejoComposer = page.getByRole('form', { name: 'Issue comment', exact: true })
+  const forgejoComment = forgejoComposer.getByRole('textbox', { name: 'Add a comment', exact: true })
+  const postForgejo = forgejoComposer.getByRole('button', { name: 'Post comment', exact: true })
+  const readForgejoForm = () => forgejoComposer.evaluate((form: HTMLFormElement) => ({
+    url: form.action, body: new URLSearchParams(Array.from(new FormData(form), ([key, value]) => [key, String(value)])).toString(),
+  }))
+  const sendForgejo = (submission: { url: string, body: string }, origin = base) => fetch(submission.url, {
+    method: 'POST', body: submission.body, redirect: 'manual',
+    headers: { origin, 'content-type': 'application/x-www-form-urlencoded' },
+  })
+  const firstForgejoText = '    a preserved code line\n\n**First Forgejo comment**'
+  await forgejoComment.fill(firstForgejoText)
+  const firstForgejo = await readForgejoForm()
+  for (const [width, height] of viewports) {
+    await page.setViewportSize({ width, height })
+    assert.deepEqual(await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]), [width, width])
+    const button = await postForgejo.boundingBox()
+    assert.ok(button && button.x + button.width <= width && button.y + button.height <= height)
+    await capture('forgejo-comment-' + width + 'x' + height)
+  }
+  assert.equal((await sendForgejo(firstForgejo, 'https://outside.invalid')).status, 403)
+  const otherIssueForm = new URL(firstForgejo.url)
+  otherIssueForm.searchParams.set('issue', '74')
+  assert.equal((await sendForgejo({ ...firstForgejo, url: otherIssueForm.href })).status, 409)
+  alterForge(current => { current.forgejo.viewerId = 18 })
+  assert.equal((await sendForgejo(firstForgejo)).status, 409)
+  alterForge(current => { delete current.forgejo.viewerId; current.forgejo.archived = true })
+  assert.equal((await sendForgejo(firstForgejo)).status, 403)
+  alterForge(current => { current.forgejo.archived = false; current.forgejo.issues[0].is_locked = true })
+  assert.equal((await sendForgejo(firstForgejo)).status, 403)
+  await page.reload()
+  await forgejoComposer.getByText('This Forgejo issue is locked.', { exact: true }).waitFor()
+  assert.equal(await postForgejo.isDisabled(), true)
+  alterForge(current => { current.forgejo.push = true; current.forgejo.refuseComment = true })
+  await page.reload()
+  await forgejoComment.fill(firstForgejoText)
+  await postForgejo.click()
+  await forgejoComposer.getByText('Forgejo rejected the comment. Review your draft and try again.', { exact: true }).waitFor()
+  assert.equal(await forgejoComment.inputValue(), firstForgejoText)
+  assert.equal(readForge().forgejo.commentWrites, undefined)
+  alterForge(current => { delete current.forgejo.refuseComment })
+  await forgejoComment.press('Control+Enter')
+  await page.getByText('Comment posted to Forgejo.', { exact: true }).waitFor()
+  assert.equal(new URL(page.url()).hash, '#issue-comment-703')
+  const firstForgejoNote = page.locator('#issue-comment-703')
+  await firstForgejoNote.getByText('First Forgejo comment', { exact: true }).waitFor()
+  await firstForgejoNote.getByText('a preserved code line', { exact: true }).waitFor()
+
+  await forgejoComment.fill('**Recovered Forgejo comment**')
+  const lostForgejo = await readForgejoForm()
+  alterForge(current => { current.forgejo.dropCommentReply = true })
+  await postForgejo.click()
+  const checkForgejo = forgejoComposer.getByRole('button', { name: 'Check Forgejo', exact: true })
+  await checkForgejo.waitFor()
+  assert.equal(await forgejoComment.inputValue(), '**Recovered Forgejo comment**')
+  await capture('forgejo-comment-recovery-360x800')
+  alterForge(current => {
+    const saved = current.forgejo.comments.at(-1)
+    current.forgejo.comments.unshift({ ...saved, id: 800, user: { ...saved.user, id: 180 } },
+      { ...saved, id: 801, issue_url: saved.issue_url.replace(/73$/u, '74') })
+    current.forgejo.comments.push(...Array.from({ length: 22 }, (_, index) => ({ ...saved, id: 820 + index, body: 'Follow-up ' + index })))
+    current.forgejo.issues[0].comments = current.forgejo.comments.length
+  })
+  const recoveryPort = host.server.port
+  host.stop()
+  host = await startHost(recoveryPort)
+  await checkForgejo.click()
+  await page.locator('#issue-comment-704').getByText('Recovered Forgejo comment', { exact: true }).waitFor()
+  assert.equal(new URL(page.url()).hash, '#issue-comment-704')
+  assert.equal(await forgejoComment.inputValue(), '')
+  assert.equal((await sendForgejo(lostForgejo)).status, 303)
+  assert.deepEqual(readForge().forgejo.commentWrites, [[73, 17, 703], [73, 17, 704]])
   assert.deepEqual(errors, [])
-  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing and draft links')
+  console.log('PASS', label, 'six sizes, filters, saved views, project visibility, draft and send, permission-gated metadata, status, comments, text, activity, reactions, recovery, mixed trackers, catalog lookup, and GitLab draft, text, comments, status, triage and reactions, and Forgejo browsing, draft links and comment recovery')
 }
 catch (error) {
   console.error(error)

@@ -3,6 +3,7 @@ import type { GitHubIssueRepository, GitLabIssueRepository } from './issue-repos
 import type { PullRequestReplyReceipts } from './pull-request-reply-receipts'
 import { createHash } from 'node:crypto'
 import { issueRepositoryKey } from '@harness/contract'
+import { forgejoIssueCommentWriter } from './forgejo-issues'
 import { findGitLabIssueComment, gitLabIssueCredential, postGitLabIssueComment, readGitLabIssueText } from './gitlab-issues'
 import { issueReferenceForSelection, trustedIssueRepositories } from './issue-repositories'
 import { issueWriteScope, readIssueMetadataAuthority } from './issue-metadata'
@@ -107,8 +108,8 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
   const intent = values.get('intent') ?? ''
   const scope = values.get('scope') ?? ''
   const draft = (values.get('body') ?? '').replace(/\r\n?/gu, '\n')
-  if (!reference || reference.tracker === 'forgejo' || !state.profiles.has(profile) || !tokenPattern.test(intent) || !/^[a-f0-9]{64}$/u.test(scope)) return null
-  const forge = reference.tracker === 'gitlab' ? 'GitLab' : 'GitHub'
+  if (!reference || !state.profiles.has(profile) || !tokenPattern.test(intent) || !/^[a-f0-9]{64}$/u.test(scope)) return null
+  const forge = { github: 'GitHub', gitlab: 'GitLab', forgejo: 'Forgejo' }[reference.tracker]
   const finish = (result: keyof typeof messages, id: number | null = null) =>
     ({ result, id, text: draft.slice(0, maxCommentBytes), intent, scope, message: messages[result].replaceAll('GitHub', forge) })
   if (!draft.trim() || Buffer.byteLength(draft) > maxCommentBytes || draft.includes('\0')) return finish('invalid')
@@ -116,13 +117,14 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
   let confirmed = false
   try {
     const repository = (await trustedIssueRepositories(state.workspaces.values(), profile, signal)).get(issueRepositoryKey(reference))
-    if (!repository || repository.tracker === 'forgejo') return finish('changed')
+    if (!repository || repository.tracker !== reference.tracker) return finish('changed')
     const trusted = () => {
       const current = state.workspaces.get(repository.workspace.id)
       return Boolean(current?.trusted && !current.scratch && current.profileId === profile && current.path === repository.workspace.path)
     }
     const access = repository.tracker === 'gitlab' ? await gitLabCommentAccess(repository, reference.number, signal)
-      : await githubCommentAccess(repository, reference.number, signal)
+      : repository.tracker === 'forgejo' ? await forgejoIssueCommentWriter(repository, reference.number, signal)
+        : await githubCommentAccess(repository, reference.number, signal)
     if (!access) return finish('unavailable')
     if (!trusted() || access.scope !== scope) return finish('changed')
     const fingerprintOf = (text: string) => createHash('sha256').update(JSON.stringify([scope, text])).digest('hex')
@@ -147,7 +149,7 @@ export async function submitIssueComment(state: HarnessState, query: URLSearchPa
     const body = '<!-- harness:issue-comment:' + intent + ' -->\n\n' + text
     if (receipt === 'claimed') {
       const sent = await access.post(body, intent)
-      if (typeof sent === 'number') {
+      if (typeof sent === 'number' && trusted()) {
         receipts.confirm(intent, fingerprint)
         return finish('posted', sent)
       }
