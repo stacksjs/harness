@@ -15,6 +15,7 @@ import { repositoryGitHubRequest } from '../src/repository-pull-request'
 import { planRepositoryBranch, startRepositoryBranch } from '../src/repository-feature-branch'
 import { serve } from '../src/server'
 import { openReserved, plan } from '../src/worktree'
+import { fixtureForgejoCli } from './fixtures/forgejo-cli'
 import { fixtureGitHubCli } from './fixtures/github-cli'
 import { fixtureGitRepository, fixturePullRequest, serveFixtureGit } from './fixtures/git-http'
 
@@ -340,6 +341,147 @@ describe('GitHub issue workspace', () => {
       else process.env.PATH = path
     }
   }, 45_000)
+})
+
+describe('Forgejo issue creation', () => {
+  it.skipIf(process.platform === 'win32')('scopes templates and confirms a created issue only once across restarts', async () => {
+    const base = 'https://forgejo.fixture.invalid/workbench'
+    const repository = 'fixture/notes'
+    const repositoryKey = 'forgejo:forgejo.fixture.invalid/workbench/' + repository
+    const project = join(dir, 'forgejo-notes')
+    mkdirSync(project)
+    for (const args of [['init', '-qb', 'main'], ['remote', 'add', 'origin', base + '/' + repository + '.git']])
+      expect(Bun.spawnSync(['git', ...args], { cwd: project }).success).toBe(true)
+    const cli = fixtureGitHubCli(dir, {})
+    fixtureForgejoCli(cli.bin)
+    const fixture = {
+      base, repository, viewer: 'fixture-user', viewerId: 17, selected: 'fixture-default', push: true, archived: false,
+      issuesEnabled: true, issueConfigMissing: false, blankIssuesEnabled: false, issuePageSize: 1,
+      logins: [{ name: 'fixture-default', url: base, user: 'fixture-user', default: 'true' }],
+      issues: [] as Array<Record<string, unknown>>, createWrites: [] as Array<Record<string, unknown>>,
+      dropCreateReply: false, refuseCreate: false,
+      labels: [{ id: 7, name: 'needs review', color: '#5577aa' }], assignees: [{ id: 19, login: 'fixture-reviewer' }],
+      templates: [
+        { file_name: ' report.MD ', name: ' Bug report ', about: 'Report a bug', title: '[Bug]', content: '  keep this indentation\n',
+          labels: ['needs review'], assignees: ['fixture-reviewer'] },
+        { file_name: 'form.yaml', name: 'Structured form' },
+      ],
+    }
+    const read = (): typeof fixture => JSON.parse(readFileSync(cli.state, 'utf8')).forgejo
+    const save = (forgejo: typeof fixture) => writeFileSync(cli.state, JSON.stringify({ forgejo }))
+    save(fixture)
+    const cwd = process.cwd()
+    const path = process.env.PATH
+    process.env.PATH = cli.bin + delimiter + path
+    try {
+      process.chdir(join(import.meta.dir, '../../..'))
+      const profile = derivedId('create-profile')
+      const workspaceId = derivedId('create-project')
+      const dispatch = (id: string, command: Parameters<typeof harness.engine.dispatch>[0]['command']) =>
+        harness.engine.dispatch({ id, at: 1, command })
+      await dispatch('create-profile', { type: 'profile.create', name: 'Issue creation fixture' })
+      await dispatch('create-project', { type: 'workspace.add', profileId: profile, path: realpathSync(project) })
+      const origin = 'http://127.0.0.1:' + port
+      const endpoint = (path: string, workspace = workspaceId) => origin + '/issues/' + path + '?' + new URLSearchParams({
+        profile: String(profile), workspace: String(workspace), repository: repositoryKey,
+      })
+      const templates = () => fetch(endpoint('templates'))
+      expect((await templates()).status).toBe(404)
+      await dispatch('trust-create-project', { type: 'workspace.trust', workspaceId, trusted: true })
+      expect((await fetch(endpoint('templates', workspaceId + 1))).status).toBe(404)
+      const list = await templates()
+      expect(list.status).toBe(200)
+      const { scope, ...choices } = await list.json()
+      expect(scope).toMatch(/^[a-f0-9]{64}$/u)
+      expect(choices).toEqual({
+        canCreate: true, canTriage: true, blankIssuesEnabled: false, templates: [{
+          key: 'report.MD', name: 'Bug report', about: 'Report a bug', title: '[Bug]', body: '  keep this indentation\n',
+          labels: ['needs review'], assignees: ['fixture-reviewer'],
+        }],
+      })
+      save({ ...read(), issueConfigMissing: true })
+      expect(await (await templates()).json()).toMatchObject({ blankIssuesEnabled: true })
+      const request = { intent: crypto.randomUUID(), scope, title: 'Reset the draft', body: 'Steps:\n\n- Reopen **Notes**.',
+        labels: ['needs review'], assignees: ['fixture-reviewer'] }
+      const create = (value: typeof request, headers = { 'content-type': 'application/json', origin }) =>
+        fetch(endpoint('create'), { method: 'POST', headers, body: JSON.stringify(value) })
+      expect((await fetch(endpoint('create'))).status).toBe(405)
+      expect((await create(request, { 'content-type': 'text/plain', origin })).status).toBe(415)
+      expect((await create(request, { 'content-type': 'application/json', origin: 'https://outside.invalid' })).status).toBe(403)
+      expect((await create({ ...request, title: '' })).status).toBe(400)
+      const rejected = await create({ ...request, labels: ['missing'] })
+      expect(rejected.status).toBe(422)
+      expect(await rejected.json()).toEqual({ status: 'unknown-label' })
+      save({ ...read(), viewerId: 29 })
+      expect((await create(request)).status).toBe(409)
+      save({ ...read(), viewerId: 17, push: false })
+      expect((await create(request)).status).toBe(403)
+      expect(await (await templates()).json()).toMatchObject({ canCreate: true, canTriage: false })
+      save({ ...read(), push: true, refuseCreate: true })
+      const refused = await create(request)
+      expect(refused.status).toBe(422)
+      expect(await refused.json()).toEqual({ status: 'refused' })
+      expect(read().createWrites).toEqual([])
+      save({ ...read(), refuseCreate: false })
+      const result = (number: number, replayed: boolean) => ({
+        status: 'created', issue: { key: String(number), displayKey: '#' + number, url: base + '/' + repository + '/issues/' + number }, replayed,
+      })
+      const concurrent = await Promise.all([create(request), create(request)])
+      expect(concurrent.filter(response => response.status === 201)).toHaveLength(1)
+      expect([200, 201, 202]).toContain(concurrent[0]!.status)
+      expect([200, 201, 202]).toContain(concurrent[1]!.status)
+      expect(await concurrent.find(response => response.status === 201)!.json()).toEqual(result(101, false))
+      expect((await create({ ...request, title: 'Changed on retry' })).status).toBe(409)
+      const writes = read().createWrites
+      expect(writes).toHaveLength(1)
+      expect(writes[0]).toMatchObject({ number: 101, title: request.title, labels: [7], assignees: ['fixture-reviewer'] })
+      expect(String(writes[0]?.body).split('\n\n').slice(1).join('\n\n')).toBe(request.body)
+      const detailUrl = origin + '/issues?' + new URLSearchParams({
+        profile: String(profile), selected: repositoryKey, repository: repositoryKey, issue: '101',
+      })
+      const detail = await fetch(detailUrl + '&editText=body')
+      expect(detail.status).toBe(200)
+      const html = await detail.text()
+      expect(html).toContain(request.title)
+      expect(html).toContain('data-issue-text-editor')
+      expect(html).toContain(request.body)
+      expect(html).not.toContain('harness:issue-create:')
+      const restart = async () => {
+        harness.stop()
+        harness = await serve({ port, databasePath: join(dir, 'test.sqlite') })
+      }
+      const edited = read()
+      edited.issues[0]!.body = 'Edited externally'
+      save({ ...edited, archived: true })
+      await restart()
+      const replay = await create(request)
+      expect(replay.status).toBe(200)
+      expect(await replay.json()).toEqual(result(101, true))
+      expect(await (await templates()).json()).toMatchObject({ canCreate: false, canTriage: false })
+      save({ ...read(), archived: false, dropCreateReply: true, push: false })
+      const sparse = { intent: crypto.randomUUID(), scope, title: 'Issue with only a title', body: '', labels: [], assignees: [] }
+      const lost = await create(sparse)
+      expect(lost.status).toBe(202)
+      expect(await lost.json()).toEqual({ status: 'pending' })
+      const decoy = read()
+      decoy.issues.push({ ...decoy.issues[1], number: 103, html_url: base + '/' + repository + '/issues/103',
+        user: { id: 33, login: 'different-viewer' }, created_at: '2026-11-27T18:00:00Z' })
+      save(decoy)
+      await restart()
+      const recovered = await create(sparse)
+      expect(recovered.status).toBe(200)
+      expect(await recovered.json()).toEqual(result(102, true))
+      expect(read().createWrites).toHaveLength(2)
+      save({ ...read(), issuesEnabled: false })
+      expect((await templates()).status).toBe(404)
+      expect((await create({ ...sparse, intent: crypto.randomUUID() })).status).toBe(403)
+      expect(read().createWrites).toHaveLength(2)
+    }
+    finally {
+      process.chdir(cwd)
+      process.env.PATH = path
+    }
+  }, 40_000)
 })
 
 describe('repository cloning', () => {

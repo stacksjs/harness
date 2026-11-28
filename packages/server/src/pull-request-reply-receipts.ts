@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite'
 
-/** Claimed GitHub review writes can be confirmed after a disconnect without repeating the write. */
+/** Claimed forge writes can be confirmed after a disconnect without repeating the write. */
 export class PullRequestReplyReceipts {
   constructor(private readonly databasePath: string) {}
 
@@ -47,9 +47,37 @@ export class PullRequestReplyReceipts {
     ).run(token, fingerprint))
   }
 
-  confirm(token: string, fingerprint: string): void {
-    this.access(db => db.query(
-      'UPDATE harness_pull_request_reply_receipts SET confirmed = 1 WHERE token = ? AND fingerprint = ?',
-    ).run(token, fingerprint))
+  private resultTable(db: Database): void {
+    db.exec(`CREATE TABLE IF NOT EXISTS harness_external_write_results (
+      token TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`)
+  }
+
+  confirmedResult(token: string, fingerprint: string): string | null {
+    return this.access(db => {
+      this.resultTable(db)
+      return db.query<{ value: string }, [string, string]>(`
+        SELECT result.value FROM harness_external_write_results AS result
+        JOIN harness_pull_request_reply_receipts AS receipt ON receipt.token = result.token
+        WHERE receipt.token = ? AND receipt.fingerprint = ? AND receipt.confirmed = 1
+      `).get(token, fingerprint)?.value ?? null
+    })
+  }
+
+  confirm(token: string, fingerprint: string, value?: string): void {
+    this.access(db => {
+      const update = db.query('UPDATE harness_pull_request_reply_receipts SET confirmed = 1 WHERE token = ? AND fingerprint = ? AND confirmed = 0')
+      if (value === undefined) {
+        update.run(token, fingerprint)
+        return
+      }
+      db.transaction(() => {
+        this.resultTable(db)
+        if (update.run(token, fingerprint).changes) {
+          db.query('INSERT INTO harness_external_write_results (token, value) VALUES (?, ?)').run(token, value)
+        }
+      }).immediate()
+    })
   }
 }

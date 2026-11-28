@@ -36,11 +36,13 @@ function stamp(value: unknown) {
   return typeof value === 'string' ? Date.parse(value) || 0 : 0
 }
 
-function repoPath(repository: ForgejoIssueRepository) {
+const issueCreationMarker = /^<!-- harness:issue-create:[a-f0-9]{64} -->(?:\n\n|$)/u
+
+export function forgejoRepoPath(repository: ForgejoIssueRepository) {
   return 'repos/' + repository.apiName.split('/').map(encodeURIComponent).join('/')
 }
 
-function forgejoLabels(value: unknown) {
+export function forgejoLabels(value: unknown) {
   return pullRequestLabels(Array.isArray(value) ? value.map(label => label && typeof label.color === 'string'
     ? { ...label, color: label.color.replace(/^#/u, '') } : label) : value)
 }
@@ -77,7 +79,7 @@ export async function listForgejoIssues(repository: ForgejoIssueRepository, scop
   let partial = false
   for (let page = 1; page <= requestLimit && rows.size < end; page++) {
     request.set('page', String(page))
-    const result = await forgejoTeaRequest(repository, repoPath(repository) + '/issues?' + request, signal)
+    const result = await forgejoTeaRequest(repository, forgejoRepoPath(repository) + '/issues?' + request, signal)
     if (!Array.isArray(result.body)) throw new RepositoryPullRequestError('Forgejo returned an unreadable issue list.')
     for (const item of result.body.slice(0, sourcePageSize)) {
       const row = issueRow(repository, item)
@@ -93,7 +95,7 @@ export async function listForgejoIssues(repository: ForgejoIssueRepository, scop
   return { rows: [...rows.values()], partial }
 }
 
-type RawRepository = { id?: unknown, full_name?: unknown, archived?: unknown, permissions?: { push?: boolean } }
+type RawRepository = { id?: unknown, full_name?: unknown, archived?: unknown, has_issues?: unknown, permissions?: { push?: boolean } }
 
 function numericId(value: unknown) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
@@ -105,11 +107,11 @@ function belongsToIssue(repository: ForgejoIssueRepository, endpoint: string, co
 }
 
 function forgejoIssueEndpoint(repository: ForgejoIssueRepository, number: number) {
-  return repoPath(repository) + '/issues/' + number
+  return forgejoRepoPath(repository) + '/issues/' + number
 }
 
 export function forgejoReactionEndpoint(repository: ForgejoIssueRepository, number: number, comment: number) {
-  return (comment ? repoPath(repository) + '/issues/comments/' + comment : forgejoIssueEndpoint(repository, number)) + '/reactions'
+  return (comment ? forgejoRepoPath(repository) + '/issues/comments/' + comment : forgejoIssueEndpoint(repository, number)) + '/reactions'
 }
 
 export async function forgejoIssueHasComment(repository: ForgejoIssueRepository, number: number, comment: number, signal: AbortSignal) {
@@ -137,35 +139,44 @@ function appliedForgejoChoices(issue: RawIssue, kind: ForgejoTriageKind) {
   return [...people.values()]
 }
 
-export async function readForgejoIssueAuthority(repository: ForgejoIssueRepository, number: number, signal: AbortSignal,
-  issue?: RawIssue, triage?: ForgejoTriageKind) {
-  const endpoint = forgejoIssueEndpoint(repository, number)
-  const [raw, repoReply, userReply] = await Promise.all([
-    issue ?? forgejoTeaRequest(repository, endpoint, signal).then(reply => reply.body as RawIssue | null),
-    forgejoTeaRequest(repository, repoPath(repository), signal),
+export async function readForgejoRepositoryAuthority(repository: ForgejoIssueRepository, signal: AbortSignal) {
+  const [repoReply, userReply] = await Promise.all([
+    forgejoTeaRequest(repository, forgejoRepoPath(repository), signal),
     forgejoTeaRequest(repository, 'user', signal),
   ])
   const repo = repoReply.body as RawRepository | null
   const user = userReply.body as User | null
-  const issueId = numericId(raw?.id)
   const repoId = numericId(repo?.id)
   const viewer = numericId(user?.id)
-  if (!raw || !issueRow(repository, raw) || raw.number !== number || !issueId || !repoId || !viewer
-    || typeof repo?.full_name !== 'string' || repo.full_name.toLowerCase() !== repository.apiName.toLowerCase()) return null
+  if (!repoId || !viewer || typeof repo?.full_name !== 'string' || repo.full_name.toLowerCase() !== repository.apiName.toLowerCase()) return null
+  return { repoId, viewer, viewerLogin: username(user ?? undefined), archived: repo.archived,
+    issuesEnabled: repo.has_issues !== false, canPush: repo.permissions?.push === true }
+}
+
+export async function readForgejoIssueAuthority(repository: ForgejoIssueRepository, number: number, signal: AbortSignal,
+  issue?: RawIssue, triage?: ForgejoTriageKind) {
+  const endpoint = forgejoIssueEndpoint(repository, number)
+  const [raw, project] = await Promise.all([
+    issue ?? forgejoTeaRequest(repository, endpoint, signal).then(reply => reply.body as RawIssue | null),
+    readForgejoRepositoryAuthority(repository, signal),
+  ])
+  const issueId = numericId(raw?.id)
+  if (!raw || !issueRow(repository, raw) || raw.number !== number || !issueId || !project) return null
+  const { repoId, viewer, viewerLogin, archived, canPush } = project
   const identity = [repository.base, repository.login, repository.key, repository.workspace.profileId,
     repository.workspace.id, repoId, issueId, viewer]
   const scope = (operation: string) => createHash('sha256').update(JSON.stringify([operation, ...identity])).digest('hex')
-  const canPush = repo.permissions?.push === true
-  const canEdit = repo.archived === false && (canPush || numericId(raw.user?.id) === viewer)
-  const commentBlocked = repo.archived === true ? 'This Forgejo repository is archived.'
+  const canEdit = archived === false && (canPush || numericId(raw.user?.id) === viewer)
+  const commentBlocked = archived === true ? 'This Forgejo repository is archived.'
     : raw.is_locked === true && !canPush ? 'This Forgejo issue is locked.'
-      : typeof repo.archived !== 'boolean' || typeof raw.is_locked !== 'boolean' ? 'Forgejo could not check commenting access.' : ''
+      : typeof archived !== 'boolean' || typeof raw.is_locked !== 'boolean' ? 'Forgejo could not check commenting access.' : ''
+  const marker = typeof raw.body === 'string' ? raw.body.match(issueCreationMarker)?.[0] ?? '' : ''
   const text = typeof raw.title === 'string' && (raw.body == null || typeof raw.body === 'string')
-    ? { title: raw.title, body: raw.body ?? '' } : null
+    ? { title: raw.title, body: raw.body?.slice(marker.length) ?? '' } : null
   return { commentScope: scope('forgejo-issue-comment'), commentBlocked, viewer, endpoint,
-    issueId, viewerLogin: username(user ?? undefined), reactionScope: scope('forgejo-issue-reaction'), canReact: repo.archived === false,
+    issueId, viewerLogin, creationMarker: marker.trimEnd(), reactionScope: scope('forgejo-issue-reaction'), canReact: archived === false,
     scope: scope('forgejo-issue-text'), canEditText: canEdit, text,
-    triageScope: scope('forgejo-issue-triage'), canTriage: repo.archived === false && canPush,
+    triageScope: scope('forgejo-issue-triage'), canTriage: archived === false && canPush,
     applied: triage ? appliedForgejoChoices(raw, triage) : null, multipleAssignees: true,
     status: openClosedIssueStatusPlan(raw.state, canEdit), statusScope: scope('forgejo-issue-status') }
 }
@@ -351,7 +362,7 @@ export async function readForgejoIssue(repository: ForgejoIssueRepository, numbe
     && (!next || byActivityTime(event, next) < 0))
   const activity = [...(comments ?? []).slice(start, end), ...events].sort(byActivityTime)
   const related = await readForgejoRelatedPulls(repository, timeline.cited.values(), signal)
-  return { ...row, description: typeof raw.body === 'string' ? raw.body.slice(0, 65_536) : '',
+  return { ...row, description: typeof raw.body === 'string' ? raw.body.replace(issueCreationMarker, '').slice(0, 65_536) : '',
     dateLabel: row.created ? dates.format(row.created) : '', activity, reactions: null, commentTotal,
     authority, activityAvailable: Boolean(comments) || timeline.available, activityDegraded: timeline.partial || !comments, olderActivity: '', newerActivity: '',
     commentPage: page, moreComments: Boolean(comments && comments.length > page * pageSize),
@@ -363,7 +374,7 @@ export async function searchForgejoIssueChoices(repository: ForgejoIssueReposito
   const options = new Map<string, { value: string, key: string | null, description: string, color?: string }>()
   const query = search.toLowerCase()
   for (let page = 1; page <= requestLimit; page++) {
-    const result = await forgejoTeaRequest(repository, repoPath(repository) + '/' + kind + '?limit=50&page=' + page, signal)
+    const result = await forgejoTeaRequest(repository, forgejoRepoPath(repository) + '/' + kind + '?limit=50&page=' + page, signal)
     if (!Array.isArray(result.body)) throw new RepositoryPullRequestError('Forgejo returned unreadable filter choices.')
     const rows = kind === 'labels' ? (forgejoLabels(result.body) ?? []).map(label => ({ value: label.name, key: String(label.id), description: label.description, color: label.color }))
       : result.body.map(user => ({ value: username(user), key: numericId(user?.id) ? String(user.id) : null,

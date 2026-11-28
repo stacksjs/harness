@@ -86,8 +86,10 @@ export async function submitIssueText(state: HarnessState, query: URLSearchParam
       if (repository.tracker === 'forgejo') {
         const authority = await readForgejoIssueAuthority(repository, reference.number, signal)
         // The Forgejo receipt is confirmed against the field read through the same account.
-        return authority && { ...authority, write: async (value: string) =>
-          await patchForgejoIssue(repository, reference.number, field === 'title' ? { title: value } : { body: value }, signal) ?? 'pending' as const }
+        return authority && { ...authority, write: async (value: string) => {
+          const body = authority.creationMarker ? authority.creationMarker + '\n\n' + value : value
+          return await patchForgejoIssue(repository, reference.number, field === 'title' ? { title: value } : { body }, signal) ?? 'pending' as const
+        } }
       }
       const authority = await readIssueMetadataAuthority({ repository, number: reference.number, credential, signal, includeText: true })
       if (!authority) return null

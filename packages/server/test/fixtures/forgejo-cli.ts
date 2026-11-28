@@ -30,7 +30,7 @@ if (forgejo.unavailable) reply(503, {})
 const viewer = { id: forgejo.viewerId ?? 17, login: forgejo.viewer }
 if (method === 'GET' && url.origin + url.pathname === forgejo.base + '/api/v1/user') reply(200, viewer)
 if (method === 'GET' && url.origin + url.pathname === endpoint)
-  reply(200, { id: 50, full_name: forgejo.repository, archived: forgejo.archived === true, permissions: { push: forgejo.push === true } })
+  reply(200, { id: 50, full_name: forgejo.repository, archived: forgejo.archived === true, has_issues: forgejo.issuesEnabled !== false, permissions: { push: forgejo.push === true } })
 const pullPath = url.origin + url.pathname
 if (method === 'GET' && pullPath.startsWith(forgejo.base + '/api/v1/repos/') && /\\/pulls\\/\\d+$/.test(pullPath)) {
   const request = forgejo.pulls?.[pullPath.slice((forgejo.base + '/api/v1/repos/').length)]
@@ -147,6 +147,37 @@ if (method === 'PATCH') {
   writeFileSync(statePath, JSON.stringify(state))
   reply(200, issue)
 }
+if (path === '/issue_templates' && method === 'GET') reply(200, forgejo.templates ?? [])
+if (path === '/issue_config' && method === 'GET') {
+  if (forgejo.issueConfigMissing) reply(404, {})
+  reply(200, { blank_issues_enabled: forgejo.blankIssuesEnabled !== false })
+}
+if (path === '/issues' && method === 'POST') {
+  if (forgejo.archived || forgejo.issuesEnabled === false || !args.includes('@-')) reply(403, {})
+  const input = await new Response(Bun.stdin.stream()).json()
+  if (forgejo.refuseCreate || Object.keys(input).sort().join(',') !== 'assignees,body,labels,title'
+    || typeof input.title !== 'string' || typeof input.body !== 'string'
+    || !Array.isArray(input.labels) || !Array.isArray(input.assignees)) reply(422, {})
+  if (!forgejo.push && (input.labels.length || input.assignees.length)) reply(403, {})
+  const labels = input.labels.map(id => forgejo.labels.find(label => label.id === id))
+  const assignees = input.assignees.map(login => forgejo.assignees.find(person => person.login === login))
+  if (labels.some(label => !label) || assignees.some(person => !person)) reply(422, {})
+  const number = Math.max(100, ...forgejo.issues.map(row => row.number)) + 1
+  const issue = { number, id: 1000 + number, title: input.title, body: input.body, user: viewer, state: 'open',
+    html_url: forgejo.base + '/' + forgejo.repository + '/issues/' + number, labels, assignees,
+    created_at: '2026-11-27T17:00:00Z', updated_at: '2026-11-27T17:00:00Z', comments: 0 }
+  forgejo.issues.push(issue)
+  forgejo.createWrites ??= []
+  forgejo.createWrites.push({ number, actor: viewer.id, ...input })
+  if (forgejo.dropCreateReply) {
+    delete forgejo.dropCreateReply
+    forgejo.failCreateScan = true
+    writeFileSync(statePath, JSON.stringify(state))
+    reply(502, {})
+  }
+  writeFileSync(statePath, JSON.stringify(state))
+  reply(201, issue)
+}
 if (method === 'POST') {
   const match = /^\\/issues\\/(\\d+)\\/comments$/.exec(path)
   const issue = match && forgejo.issues.find(row => row.number === Number(match[1]))
@@ -171,6 +202,11 @@ if (method === 'POST') {
   reply(201, comment)
 }
 if (path === '/issues') {
+  if (forgejo.failCreateScan) {
+    delete forgejo.failCreateScan
+    writeFileSync(statePath, JSON.stringify(state))
+    reply(503, {})
+  }
   const rows = forgejo.issues.filter(row => {
     if (find.get('state') !== 'all' && row.state !== find.get('state')) return false
     const text = find.get('q')
@@ -185,7 +221,7 @@ if (path === '/issues') {
     const sort = find.get('sort') === 'latest' ? 'created_at' : 'updated_at'
     return Date.parse(b[sort]) - Date.parse(a[sort])
   })
-  const size = 10
+  const size = forgejo.issuePageSize ?? 10
   reply(200, rows.slice((page - 1) * size, page * size), rows.length > page * size)
 }
 if (path === '/labels' || path === '/assignees') reply(200, page === 1 ? forgejo[path.slice(1)] : [])
